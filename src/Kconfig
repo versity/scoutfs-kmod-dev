@@ -1,0 +1,10 @@
+config SCOUTFS_FS
+	tristate "scoutfs filesystem"
+	help
+	  scoutfs is a clustered file system that stores data in large
+	  blocks in shared block storage.
+
+	  To compile this file system support as a module, choose M here. The
+	  module will be called scoutfs.
+
+	  If unsure, say N.

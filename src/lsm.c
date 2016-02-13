@@ -236,7 +236,7 @@ static struct scoutfs_item *dirty_block_pages(struct super_block *sb,
 		trace_printk("item %p key "CKF"\n", item, CKA(&item->key));
 
 		ihdr.key = item->key;
-		ihdr.val_len = cpu_to_le16(item->val_len);
+		ihdr.len = cpu_to_le16(item->val_len);
 		ret = copy_to_pages(&pgs, &ihdr, sizeof(ihdr));
 		if (ret > 0)
 		      ret = copy_to_pages(&pgs, item->val, item->val_len);

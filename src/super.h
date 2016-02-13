@@ -2,8 +2,11 @@
 #define _SCOUTFS_SUPER_H_
 
 #include <linux/rbtree.h>
+#include "format.h"
 
 struct scoutfs_sb_info {
+	struct scoutfs_super super;
+
 	atomic64_t next_ino;
 	atomic64_t next_blkno;
 

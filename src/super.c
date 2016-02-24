@@ -33,33 +33,33 @@ static const struct super_operations scoutfs_super_ops = {
 static int read_supers(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super;
 	struct buffer_head *bh = NULL;
-	struct scoutfs_super *super;
 	int found = -1;
 	u32 crc;
 	int i;
 
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < SCOUTFS_SUPER_NR; i++) {
 		if (bh)
 			brelse(bh);
-		bh = sb_bread(sb, SCOUTFS_SUPER_BRICK + i);
+		bh = sb_bread(sb, SCOUTFS_SUPER_BLKNO + i);
 		if (!bh) {
-			scoutfs_warn(sb, "couldn't read super brick %u", i);
+			scoutfs_warn(sb, "couldn't read super block %u", i);
 			continue;
 		}
 
 		super = (void *)bh->b_data;
 
 		if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
-			scoutfs_warn(sb, "super brick %u has invalid id %llx",
+			scoutfs_warn(sb, "super block %u has invalid id %llx",
 				     i, le64_to_cpu(super->id));
 			continue;
 		}
 
 		crc = crc32c(~0, (char *)&super->hdr.crc + sizeof(crc),
-			     SCOUTFS_BRICK_SIZE - sizeof(crc));
+			     SCOUTFS_BLOCK_SIZE - sizeof(crc));
 		if (crc != le32_to_cpu(super->hdr.crc)) {
-			scoutfs_warn(sb, "super brick %u has bad crc %x (expected %x)",
+			scoutfs_warn(sb, "super block %u has bad crc %x (expected %x)",
 				     i, crc, le32_to_cpu(super->hdr.crc));
 			continue;
 		}
@@ -67,7 +67,7 @@ static int read_supers(struct super_block *sb)
 		if (found < 0 || (le64_to_cpu(super->hdr.seq) >
 				le64_to_cpu(sbi->super.hdr.seq))) {
 			memcpy(&sbi->super, super,
-			       sizeof(struct scoutfs_super));
+			       sizeof(struct scoutfs_super_block));
 			found = i;
 		}
 	}
@@ -76,7 +76,7 @@ static int read_supers(struct super_block *sb)
 		brelse(bh);
 
 	if (found < 0) {
-		scoutfs_err(sb, "unable to read valid super brick");
+		scoutfs_err(sb, "unable to read valid super block");
 		return -EINVAL;
 	}
 
@@ -88,11 +88,6 @@ static int read_supers(struct super_block *sb)
 	 */
 	atomic64_set(&sbi->next_ino, SCOUTFS_ROOT_INO + 1);
 	atomic64_set(&sbi->next_blkno, 2);
-
-	for (i = 0; i < ARRAY_SIZE(sbi->bloom_hash_keys); i++) {
-		get_random_bytes(&sbi->bloom_hash_keys[i],
-				 sizeof(sbi->bloom_hash_keys[i]));
-	}
 
 	return 0;
 }
@@ -116,7 +111,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->item_root = RB_ROOT;
 	sbi->dirty_item_root = RB_ROOT;
 
-	if (!sb_set_blocksize(sb, SCOUTFS_BRICK_SIZE)) {
+	if (!sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE)) {
 		printk(KERN_ERR "couldn't set blocksize\n");
 		return -EINVAL;
 	}

@@ -23,13 +23,11 @@
 #include "format.h"
 #include "inode.h"
 #include "dir.h"
-#include "lsm.h"
 #include "msg.h"
 
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
 	.destroy_inode = scoutfs_destroy_inode,
-	.sync_fs = scoutfs_sync_fs,
 };
 
 static int read_supers(struct super_block *sb)

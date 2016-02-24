@@ -16,7 +16,6 @@
 #include <linux/slab.h>
 #include <linux/magic.h>
 #include <linux/buffer_head.h>
-#include <linux/crc32c.h>
 #include <linux/random.h>
 
 #include "super.h"
@@ -24,6 +23,7 @@
 #include "inode.h"
 #include "dir.h"
 #include "msg.h"
+#include "block.h"
 
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
@@ -36,13 +36,12 @@ static int read_supers(struct super_block *sb)
 	struct scoutfs_super_block *super;
 	struct buffer_head *bh = NULL;
 	int found = -1;
-	u32 crc;
 	int i;
 
 	for (i = 0; i < SCOUTFS_SUPER_NR; i++) {
 		if (bh)
 			brelse(bh);
-		bh = sb_bread(sb, SCOUTFS_SUPER_BLKNO + i);
+		bh = scoutfs_read_block(sb, SCOUTFS_SUPER_BLKNO + i);
 		if (!bh) {
 			scoutfs_warn(sb, "couldn't read super block %u", i);
 			continue;
@@ -53,14 +52,6 @@ static int read_supers(struct super_block *sb)
 		if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
 			scoutfs_warn(sb, "super block %u has invalid id %llx",
 				     i, le64_to_cpu(super->id));
-			continue;
-		}
-
-		crc = crc32c(~0, (char *)&super->hdr.crc + sizeof(crc),
-			     SCOUTFS_BLOCK_SIZE - sizeof(crc));
-		if (crc != le32_to_cpu(super->hdr.crc)) {
-			scoutfs_warn(sb, "super block %u has bad crc %x (expected %x)",
-				     i, crc, le32_to_cpu(super->hdr.crc));
 			continue;
 		}
 

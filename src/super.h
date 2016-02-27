@@ -4,6 +4,8 @@
 #include <linux/rbtree.h>
 #include "format.h"
 
+struct scoutfs_manifest;
+
 struct scoutfs_sb_info {
 	struct scoutfs_super_block super;
 
@@ -13,6 +15,10 @@ struct scoutfs_sb_info {
 	spinlock_t item_lock;
 	struct rb_root item_root;
 	struct rb_root dirty_item_root;
+
+	struct scoutfs_manifest *mani;
+
+	__le64 *chunk_alloc_bits;
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)

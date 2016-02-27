@@ -24,6 +24,8 @@
 #include "dir.h"
 #include "msg.h"
 #include "block.h"
+#include "manifest.h"
+#include "ring.h"
 
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
@@ -35,6 +37,7 @@ static int read_supers(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
 	struct buffer_head *bh = NULL;
+	unsigned long bytes;
 	int found = -1;
 	int i;
 
@@ -80,6 +83,16 @@ static int read_supers(struct super_block *sb)
 	atomic64_set(&sbi->next_ino, SCOUTFS_ROOT_INO + 1);
 	atomic64_set(&sbi->next_blkno, 2);
 
+	/* Initialize all the sb info fields which depends on the supers. */
+
+	bytes = DIV_ROUND_UP(sbi->super.total_chunks, 64) * sizeof(u64);
+	sbi->chunk_alloc_bits = vmalloc(bytes);
+	if (!sbi->chunk_alloc_bits)
+		return -ENOMEM;
+
+	/* the alloc bits default to all free then ring entries update them */
+	memset(sbi->chunk_alloc_bits, 0xff, bytes);
+
 	return 0;
 }
 
@@ -111,6 +124,14 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (ret)
 		return ret;
 
+	ret = scoutfs_setup_manifest(sb);
+	if (ret)
+		return ret;
+
+	ret = scoutfs_replay_ring(sb);
+	if (ret)
+		return ret;
+
 	inode = scoutfs_iget(sb, SCOUTFS_ROOT_INO);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
@@ -130,6 +151,7 @@ static struct dentry *scoutfs_mount(struct file_system_type *fs_type, int flags,
 
 static void scoutfs_kill_sb(struct super_block *sb)
 {
+	scoutfs_destroy_manifest(sb);
 	kill_block_super(sb);
 	kfree(sb->s_fs_info);
 }

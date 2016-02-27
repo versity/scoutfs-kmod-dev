@@ -24,6 +24,7 @@
 #define SCOUTFS_CHUNK_SHIFT 22
 #define SCOUTFS_CHUNK_SIZE (1 << SCOUTFS_CHUNK_SHIFT)
 #define SCOUTFS_CHUNK_BLOCK_SHIFT (SCOUTFS_CHUNK_SHIFT - SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_CHUNK_BLOCK_MASK ((1 << SCOUTFS_CHUNK_BLOCK_SHIFT) - 1)
 #define SCOUTFS_BLOCKS_PER_CHUNK (1 << SCOUTFS_CHUNK_BLOCK_SHIFT)
 
 /*
@@ -93,6 +94,10 @@ struct scoutfs_ring_map_block {
 	__le64 blknos[0];
 } __packed;
 
+#define SCOUTFS_RING_MAP_BLOCKS \
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_ring_map_block)) / \
+		sizeof(__le64))
+
 struct scoutfs_ring_entry {
 	u8 type;
 	__le16 len;
@@ -112,14 +117,10 @@ struct scoutfs_ring_block {
 } __packed;
 
 enum {
-	SCOUTFS_RING_REMOVE_MANIFEST = 0,
-	SCOUTFS_RING_ADD_MANIFEST,
+	SCOUTFS_RING_ADD_MANIFEST = 0,
+	SCOUTFS_RING_DEL_MANIFEST,
 	SCOUTFS_RING_BITMAP,
 };
-
-struct scoutfs_ring_remove_manifest {
-	__le64 blkno;
-} __packed;
 
 /*
  * Including both keys might make the manifest too large.  It might be
@@ -128,13 +129,20 @@ struct scoutfs_ring_remove_manifest {
  * isn't unused key space between blocks in a level.  We might search
  * blocks when we didn't need to.
  */
-struct scoutfs_ring_add_manifest {
+struct scoutfs_ring_manifest_entry {
 	__le64 blkno;
 	__le64 seq;
 	__u8 level;
 	struct scoutfs_key first;
 	struct scoutfs_key last;
 } __packed;
+
+struct scoutfs_ring_del_manifest {
+	__le64 blkno;
+} __packed;
+
+/* 2^22 * 10^13 > 2^64 */
+#define SCOUTFS_MAX_LEVEL 13
 
 struct scoutfs_ring_bitmap {
 	__le32 offset;

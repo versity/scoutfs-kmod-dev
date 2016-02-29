@@ -31,6 +31,27 @@ static inline int scoutfs_key_cmp(struct scoutfs_key *a, struct scoutfs_key *b)
 	       le64_cmp(a->offset, b->offset);
 }
 
+/*
+ * return -ve, 0, +ve if the key is less than, contained within, or greater
+ * than the given range of keys.
+ */
+static inline int scoutfs_key_cmp_range(struct scoutfs_key *key,
+					struct scoutfs_key *first,
+					struct scoutfs_key *last)
+{
+	int cmp;
+
+	WARN_ON_ONCE(scoutfs_key_cmp(first, last) > 0);
+
+	cmp = scoutfs_key_cmp(key, first);
+	if (cmp > 0) {
+		cmp = scoutfs_key_cmp(key, last);
+		if (cmp < 0)
+			cmp = 0;
+	}
+	return cmp;
+}
+
 	
 static inline void scoutfs_set_key(struct scoutfs_key *key, u64 inode, u8 type,
 				   u64 offset)

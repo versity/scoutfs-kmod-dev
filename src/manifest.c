@@ -74,6 +74,29 @@ static void insert_mnode(struct rb_root *root,
 	rb_insert_color(&ins->node, root);
 }
 
+static struct scoutfs_manifest_node *find_mnode(struct rb_root *root,
+						struct scoutfs_key *key)
+{
+	struct rb_node *node = root->rb_node;
+	struct scoutfs_manifest_node *mnode;
+	int cmp;
+
+	while (node) {
+		mnode = rb_entry(node, struct scoutfs_manifest_node, node);
+
+		cmp = scoutfs_key_cmp_range(key, &mnode->ment.first,
+					    &mnode->ment.last);
+		if (cmp < 0)
+			node = node->rb_left;
+		else if (cmp > 0)
+			node = node->rb_right;
+		else
+			return mnode;
+	}
+
+	return NULL;
+}
+
 static struct scoutfs_manifest_node *delete_mnode(struct scoutfs_manifest *mani,
 						  u64 blkno)
 
@@ -149,6 +172,69 @@ int scoutfs_add_manifest(struct super_block *sb,
 	spin_unlock(&mani->lock);
 
 	return 0;
+}
+
+/*
+ * Fill the caller's ment with the next log segment in the manifest that
+ * might contain the given key.  The ment is initialized to 0 to return
+ * the first entry.
+ *
+ * This can return multiple log segments from level 0 in decreasing age.
+ * Then it can return at most one log segment in each level that
+ * intersects with the given key.
+ */
+bool scoutfs_next_manifest_segment(struct super_block *sb,
+				   struct scoutfs_key *key,
+				   struct scoutfs_ring_manifest_entry *ment)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_manifest *mani = sbi->mani;
+	struct scoutfs_manifest_node *mnode;
+	bool found = false;
+	int i;
+
+	if (ment->level >= SCOUTFS_MAX_LEVEL)
+		return false;
+
+	spin_lock(&mani->lock);
+
+	if (ment->level == 0) {
+		if (ment->blkno) {
+			mnode = radix_tree_lookup(&mani->blkno_radix,
+						  le64_to_cpu(ment->blkno));
+			mnode = list_next_entry(mnode, head);
+		} else {
+			mnode = list_first_entry(&mani->level_zero,
+						 struct scoutfs_manifest_node,
+						 head);
+		}
+
+		list_for_each_entry_from(mnode, &mani->level_zero, head) {
+			if (scoutfs_key_cmp_range(key, &mnode->ment.first,
+						  &mnode->ment.last) == 0) {
+				*ment = mnode->ment;
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (!found) {
+		for (i = ment->level + 1; i <= SCOUTFS_MAX_LEVEL; i++) {
+			mnode = find_mnode(&mani->levels[i].root, key);
+			if (mnode) {
+				*ment = mnode->ment;
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			ment->level = SCOUTFS_MAX_LEVEL;
+	}
+
+	spin_unlock(&mani->lock);
+
+	return found;
 }
 
 int scoutfs_setup_manifest(struct super_block *sb)

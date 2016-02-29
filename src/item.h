@@ -19,6 +19,9 @@ struct scoutfs_item {
 struct scoutfs_item *scoutfs_item_create(struct super_block *sb,
 					 struct scoutfs_key *key,
 					 unsigned int val_len);
+struct scoutfs_item *scoutfs_clean_item(struct super_block *sb,
+				        struct scoutfs_key *key,
+				        unsigned int val_len);
 struct scoutfs_item *scoutfs_item_lookup(struct super_block *sb,
 					 struct scoutfs_key *key);
 struct scoutfs_item *scoutfs_item_next(struct super_block *sb,

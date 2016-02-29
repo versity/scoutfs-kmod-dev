@@ -19,6 +19,7 @@
 #include "super.h"
 #include "key.h"
 #include "item.h"
+#include "segment.h"
 
 /*
  * describe:
@@ -159,15 +160,9 @@ static struct scoutfs_item *alloc_item(struct scoutfs_key *key,
 	return item;
 }
 
-/*
- * Create a new item stored at the given key.  Return it with a reference.
- * return an ERR_PTR with ENOMEM or EEXIST.
- *
- * The caller is responsible for initializing the item's value.
- */
-struct scoutfs_item *scoutfs_item_create(struct super_block *sb,
-					 struct scoutfs_key *key,
-					 unsigned int val_len)
+static struct scoutfs_item *create_item(struct super_block *sb,
+					struct scoutfs_key *key,
+					unsigned int val_len, bool dirty)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_item *existing;
@@ -183,8 +178,12 @@ struct scoutfs_item *scoutfs_item_create(struct super_block *sb,
 	existing = find_item(sb, &sbi->item_root, key, 0);
 	if (!existing) {
 		insert_item(sb, &sbi->item_root, item);
-		insert_item(sb, &sbi->dirty_item_root, item);
-		atomic_add(2, &item->refcount);
+		atomic_inc(&item->refcount);
+		if (dirty) {
+			insert_item(sb, &sbi->dirty_item_root, item);
+			atomic_inc(&item->refcount);
+		}
+
 	}
 	spin_unlock_irqrestore(&sbi->item_lock, flags);
 
@@ -196,6 +195,30 @@ struct scoutfs_item *scoutfs_item_create(struct super_block *sb,
 	trace_printk("item %p key "CKF" val_len %d\n", item, CKA(key), val_len);
 
 	return item;
+}
+
+/*
+ * Create a new item stored at the given key.  Return it with a reference.
+ * return an ERR_PTR with ENOMEM or EEXIST.
+ *
+ * The caller is responsible for initializing the item's value.
+ */
+struct scoutfs_item *scoutfs_item_create(struct super_block *sb,
+					 struct scoutfs_key *key,
+					 unsigned int val_len)
+{
+	return create_item(sb, key, val_len, true);
+}
+
+/*
+ * Allocate a new clean item in the cache for the caller to fill.  If the
+ * item already exists then -EEXIST is returned.
+ */
+struct scoutfs_item *scoutfs_clean_item(struct super_block *sb,
+				        struct scoutfs_key *key,
+				        unsigned int val_len)
+{
+	return create_item(sb, key, val_len, false);
 }
 
 /*
@@ -230,6 +253,10 @@ void scoutfs_item_delete(struct super_block *sb, struct scoutfs_item *item)
 	spin_unlock_irqrestore(&sbi->item_lock, flags);
 }
 
+/*
+ * Find an item in the cache.  If it isn't present then we try to read
+ * it from log segements.
+ */
 static struct scoutfs_item *item_lookup(struct super_block *sb,
 					struct scoutfs_key *key, int np)
 {
@@ -237,15 +264,17 @@ static struct scoutfs_item *item_lookup(struct super_block *sb,
 	struct scoutfs_item *item;
 	unsigned long flags;
 
-	spin_lock_irqsave(&sbi->item_lock, flags);
+	do {
+		spin_lock_irqsave(&sbi->item_lock, flags);
 
-	item = find_item(sb, &sbi->item_root, key, np);
-	if (item)
-		atomic_inc(&item->refcount);
-	else
-		item = ERR_PTR(-ENOENT);
+		item = find_item(sb, &sbi->item_root, key, np);
+		if (item)
+			atomic_inc(&item->refcount);
 
-	spin_unlock_irqrestore(&sbi->item_lock, flags);
+		spin_unlock_irqrestore(&sbi->item_lock, flags);
+		if (!item)
+			item = scoutfs_read_segment_item(sb, key);
+	} while (item == ERR_PTR(-EEXIST));
 
 	return item;
 }

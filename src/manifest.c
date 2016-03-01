@@ -97,7 +97,12 @@ static struct scoutfs_manifest_node *find_mnode(struct rb_root *root,
 	return NULL;
 }
 
-static struct scoutfs_manifest_node *delete_mnode(struct scoutfs_manifest *mani,
+/*
+ * Find a manifest node at the given block number and return it after
+ * removing it from either the level 0 list or level rb trees.  It's
+ * left in the blkno radix.
+ */
+static struct scoutfs_manifest_node *unlink_mnode(struct scoutfs_manifest *mani,
 						  u64 blkno)
 
 {
@@ -129,7 +134,9 @@ void scoutfs_delete_manifest(struct super_block *sb, u64 blkno)
 	struct scoutfs_manifest_node *mnode;
 
 	spin_lock(&mani->lock);
-	mnode = delete_mnode(mani, blkno);
+	mnode = unlink_mnode(mani, blkno);
+	if (mnode)
+		radix_tree_delete(&mani->blkno_radix, blkno);
 	spin_unlock(&mani->lock);
 	if (mnode)
 		kfree(mnode);
@@ -147,10 +154,13 @@ int scoutfs_add_manifest(struct super_block *sb,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_manifest *mani = sbi->mani;
 	struct scoutfs_manifest_node *mnode;
+	u64 blkno = le64_to_cpu(ment->blkno);
+	bool preloaded = false;
+	int ret;
 
 	spin_lock(&mani->lock);
 
-	mnode = delete_mnode(mani, le64_to_cpu(ment->blkno));
+	mnode = unlink_mnode(mani, blkno);
 	if (!mnode) {
 		spin_unlock(&mani->lock);
 		mnode = kmalloc(sizeof(struct scoutfs_manifest_node),
@@ -158,9 +168,18 @@ int scoutfs_add_manifest(struct super_block *sb,
 		if (!mnode)
 			return -ENOMEM; /* XXX hmm, fatal?  prealloc?*/
 
+		ret = radix_tree_preload(GFP_NOFS & ~__GFP_HIGHMEM);
+		if (ret) {
+			kfree(mnode);
+			return ret;
+		}
+		preloaded = true;
+
 		INIT_LIST_HEAD(&mnode->head);
 		RB_CLEAR_NODE(&mnode->node);
 		spin_lock(&mani->lock);
+		/* preloading should guarantee this succeeds */
+		radix_tree_insert(&mani->blkno_radix, blkno, mnode);
 	}
 
 	mnode->ment = *ment;
@@ -170,6 +189,8 @@ int scoutfs_add_manifest(struct super_block *sb,
 		list_add(&mnode->head, &mani->level_zero);
 
 	spin_unlock(&mani->lock);
+	if (preloaded)
+		radix_tree_preload_end();
 
 	return 0;
 }

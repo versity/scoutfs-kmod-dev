@@ -240,13 +240,13 @@ static int dir_emit_dots(struct file *file, void *dirent, filldir_t filldir)
 	struct inode *parent = dentry->d_parent->d_inode;
 
 	if (file->f_pos == 0) {
-		if (!filldir(dirent, ".", 1, 1, scoutfs_ino(inode), DT_DIR))
+		if (filldir(dirent, ".", 1, 1, scoutfs_ino(inode), DT_DIR))
 			return 0;
 		file->f_pos = 1;
 	}
 
 	if (file->f_pos == 1) {
-		if (!filldir(dirent, "..", 2, 1, scoutfs_ino(parent), DT_DIR))
+		if (filldir(dirent, "..", 2, 1, scoutfs_ino(parent), DT_DIR))
 			return 0;
 		file->f_pos = 2;
 	}
@@ -309,8 +309,8 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 			if (dent->coll_nr < nr)
 				continue;
 
-			if (!filldir(dirent, dent->name, dent->name_len, pos,
-				     le64_to_cpu(dent->ino), dent->type))
+			if (filldir(dirent, dent->name, dent->name_len, pos,
+				    le64_to_cpu(dent->ino), dent->type))
 				break;
 
 			file->f_pos = (pos | dent->coll_nr) + 1;

@@ -67,7 +67,6 @@ static unsigned int mode_to_type(umode_t mode)
 #undef S_SHIFT
 }
 
-#if 0
 static unsigned int dentry_type(unsigned int type)
 {
 	static unsigned char types[] = {
@@ -86,7 +85,6 @@ static unsigned int dentry_type(unsigned int type)
 
 	return DT_UNKNOWN;
 }
-#endif
 
 static int names_equal(const char *name_a, int len_a, const char *name_b,
 		       int len_b)
@@ -310,7 +308,8 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 				continue;
 
 			if (filldir(dirent, dent->name, dent->name_len, pos,
-				    le64_to_cpu(dent->ino), dent->type))
+				    le64_to_cpu(dent->ino),
+				    dentry_type(dent->type)))
 				break;
 
 			file->f_pos = (pos | dent->coll_nr) + 1;

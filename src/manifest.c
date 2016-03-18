@@ -18,6 +18,7 @@
 #include "format.h"
 #include "manifest.h"
 #include "key.h"
+#include "ring.h"
 
 /*
  * The manifest organizes log segment blocks into a tree structure.
@@ -193,6 +194,21 @@ int scoutfs_add_manifest(struct super_block *sb,
 		radix_tree_preload_end();
 
 	return 0;
+}
+
+/*
+ * The caller is writing a new log segment.  We add it to the in-memory
+ * manifest and write it to dirty ring blocks.
+ *
+ * XXX we'd also need to add stale manifest entry's to the ring
+ * XXX In the future we'd send it to the leader
+ */
+int scoutfs_new_manifest(struct super_block *sb,
+			 struct scoutfs_ring_manifest_entry *ment)
+{
+	return scoutfs_add_manifest(sb, ment) ?:
+	       scoutfs_dirty_ring_entry(sb, SCOUTFS_RING_ADD_MANIFEST,
+					ment, sizeof(*ment));
 }
 
 /*

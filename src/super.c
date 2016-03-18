@@ -26,11 +26,66 @@
 #include "block.h"
 #include "manifest.h"
 #include "ring.h"
+#include "segment.h"
+
+static int scoutfs_sync_fs(struct super_block *sb, int wait)
+{
+	/* XXX always waiting */
+	return scoutfs_write_dirty_items(sb);
+}
 
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
 	.destroy_inode = scoutfs_destroy_inode,
+	.sync_fs = scoutfs_sync_fs,
 };
+
+/*
+ * The caller advances the block number and sequence number in the super
+ * every time it wants to dirty it and eventually write it to reference
+ * dirty data that's been written.
+ */
+void scoutfs_advance_dirty_super(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	u64 blkno;
+
+	blkno = le64_to_cpu(super->hdr.blkno) - SCOUTFS_SUPER_BLKNO;
+	if (++blkno == SCOUTFS_SUPER_NR)
+		blkno = 0;
+	super->hdr.blkno = cpu_to_le64(SCOUTFS_SUPER_BLKNO + blkno);
+
+	le64_add_cpu(&super->hdr.seq, 1);
+}
+
+/*
+ * We've been modifying the super copy in the info as we made changes.
+ * Write the super to finalize.
+ */
+int scoutfs_write_dirty_super(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct buffer_head *bh;
+	size_t sz;
+	int ret;
+
+	bh = scoutfs_dirty_block(sb, le64_to_cpu(super->hdr.blkno));
+	if (!bh)
+		return -ENOMEM;
+
+	sz = sizeof(struct scoutfs_super_block);
+	memcpy(bh->b_data, super, sz);
+	memset(bh->b_data + sz, 0, SCOUTFS_BLOCK_SIZE - sz);
+	scoutfs_calc_hdr_crc(bh);
+
+	unlock_buffer(bh);
+	ret = sync_dirty_buffer(bh);
+	brelse(bh);
+
+	return ret;
+}
 
 static int read_supers(struct super_block *sb)
 {
@@ -114,6 +169,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->item_lock);
 	sbi->item_root = RB_ROOT;
 	sbi->dirty_item_root = RB_ROOT;
+	spin_lock_init(&sbi->chunk_alloc_lock);
 
 	if (!sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE)) {
 		printk(KERN_ERR "couldn't set blocksize\n");
@@ -140,6 +196,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sb->s_root)
 		return -ENOMEM;
 
+	scoutfs_advance_dirty_super(sb);
+
 	return 0;
 }
 
@@ -151,8 +209,8 @@ static struct dentry *scoutfs_mount(struct file_system_type *fs_type, int flags,
 
 static void scoutfs_kill_sb(struct super_block *sb)
 {
-	scoutfs_destroy_manifest(sb);
 	kill_block_super(sb);
+	scoutfs_destroy_manifest(sb);
 	kfree(sb->s_fs_info);
 }
 

@@ -58,3 +58,54 @@ struct buffer_head *scoutfs_read_block(struct super_block *sb, u64 blkno)
 	brelse(bh);
 	return NULL;
 }
+
+/*
+ * Return a locked dirty buffer with undefined contents.  The caller is
+ * responsible for initializing the entire block.  Callers can try and
+ * read from these dirty blocks so we mark them verified so that they
+ * don't try to check uninitialized crcs.
+ */
+struct buffer_head *scoutfs_dirty_bh(struct super_block *sb, u64 blkno)
+{
+	struct buffer_head *bh;
+
+	bh = sb_getblk(sb, blkno);
+	if (bh) {
+		lock_buffer(bh);
+		set_buffer_uptodate(bh);
+		mark_buffer_dirty(bh);
+		set_buffer_private_verified(bh);
+	}
+
+	return bh;
+}
+
+/*
+ * Return a locked dirty buffer with a partially initialized block
+ * header.  The caller has to calculate the header crc before unlocking
+ * the block.  The header will have the sequence number of the dirty super
+ * by default.
+ */
+struct buffer_head *scoutfs_dirty_block(struct super_block *sb, u64 blkno)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_block_header *hdr;
+	struct buffer_head *bh;
+
+	bh = scoutfs_dirty_bh(sb, blkno);
+	if (bh) {
+		hdr = (void *)bh->b_data;
+		*hdr = super->hdr;
+		hdr->blkno = cpu_to_le64(blkno);
+	}
+
+	return bh;
+}
+
+void scoutfs_calc_hdr_crc(struct buffer_head *bh)
+{
+	struct scoutfs_block_header *hdr = (void *)bh->b_data;
+
+	hdr->crc = cpu_to_le32(scoutfs_crc_block(hdr));
+}

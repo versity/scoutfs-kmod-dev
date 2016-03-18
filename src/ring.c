@@ -23,6 +23,7 @@
 #include "manifest.h"
 #include "chunk.h"
 #include "block.h"
+#include "ring.h"
 
 static int replay_ring_block(struct super_block *sb, struct buffer_head *bh)
 {
@@ -62,11 +63,11 @@ static int replay_ring_block(struct super_block *sb, struct buffer_head *bh)
 }
 
 /*
- * Read a given logical ring block.
- *
- * Each ring map block entry maps a chunk's worth of ring blocks.
+ * Return the block number of the block that contains the given logical
+ * block in the ring.  We look up ring block chunks in the map blocks
+ * in the chunk described by the super.
  */
-static struct buffer_head *read_ring_block(struct super_block *sb, u64 block)
+static u64 map_ring_block(struct super_block *sb, u64 block)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
@@ -85,7 +86,7 @@ static struct buffer_head *read_ring_block(struct super_block *sb, u64 block)
 
 	bh = scoutfs_read_block(sb, le64_to_cpu(super->ring_map_blkno) + div);
 	if (!bh)
-		return NULL;
+		return 0;
 
 	/* XXX verify map block */
 
@@ -93,7 +94,33 @@ static struct buffer_head *read_ring_block(struct super_block *sb, u64 block)
 	blkno = le64_to_cpu(map->blknos[rem]) + ring_block;
 	brelse(bh);
 
+	return blkno;
+}
+
+/*
+ * Read a given logical ring block.
+ */
+static struct buffer_head *read_ring_block(struct super_block *sb, u64 block)
+{
+	u64 blkno = map_ring_block(sb, block);
+
+	if (!blkno)
+		return NULL;
+
 	return scoutfs_read_block(sb, blkno);
+}
+
+/*
+ * Return a dirty locked logical ring block.
+ */
+static struct buffer_head *dirty_ring_block(struct super_block *sb, u64 block)
+{
+	u64 blkno = map_ring_block(sb, block);
+
+	if (!blkno)
+		return NULL;
+
+	return scoutfs_dirty_block(sb, blkno);
 }
 
 int scoutfs_replay_ring(struct super_block *sb)
@@ -125,4 +152,100 @@ int scoutfs_replay_ring(struct super_block *sb)
 	}
 
 	return ret;
+}
+
+/*
+ * The caller is generating ring entries for manifest and allocator
+ * bitmap as they write items to blocks.  We pin the block that we're
+ * working on so that it isn't written out until we fill it and
+ * calculate its checksum.
+ */
+int scoutfs_dirty_ring_entry(struct super_block *sb, u8 type, void *data,
+			     u16 len)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_ring_block *ring;
+	struct scoutfs_ring_entry *ent;
+	struct buffer_head *bh;
+	unsigned int avail;
+	u64 block;
+	int ret = 0;
+
+	bh = sbi->dirty_ring_bh;
+	ent = sbi->dirty_ring_ent;
+	avail = sbi->dirty_ring_ent_avail;
+
+	if (bh && len > avail) {
+		scoutfs_finish_dirty_ring(sb);
+		bh = NULL;
+	}
+	if (!bh) {
+		block = le64_to_cpu(super->ring_first_block) +
+			le64_to_cpu(super->ring_active_blocks);
+		if (block >= le64_to_cpu(super->ring_total_blocks))
+			block -= le64_to_cpu(super->ring_total_blocks);
+
+		bh = dirty_ring_block(sb, block);
+		if (!bh) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		ring = (void *)bh->b_data;
+		ring->nr_entries = 0;
+		ent = (void *)(ring + 1);
+		/* assuming len fits in new empty block */
+	}
+
+	ring = (void *)bh->b_data;
+
+	ent->type = type;
+	ent->len = cpu_to_le16(len);
+	memcpy(ent + 1, data, len);
+	le16_add_cpu(&ring->nr_entries, 1);
+
+	ent = (void *)(ent + 1) + le16_to_cpu(ent->len);
+	avail = SCOUTFS_BLOCK_SIZE - ((char *)(ent + 1) - (char *)ring);
+out:
+	sbi->dirty_ring_bh = bh;
+	sbi->dirty_ring_ent = ent;
+	sbi->dirty_ring_ent_avail = avail;
+
+	return ret;
+}
+
+/*
+ * The super might have a pinned partial dirty ring block.  This is
+ * called as we finish the block or when the commit is done.  We
+ * calculate the checksum and unlock it so it can be written.
+ *
+ * XXX This is about to write a partial block.  We might as well fill
+ * that space with more old entries from the manifest and ring before
+ * we write it.
+ */
+int scoutfs_finish_dirty_ring(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct buffer_head *bh;
+
+	bh = sbi->dirty_ring_bh;
+	if (!bh)
+		return 0;
+
+	sbi->dirty_ring_bh = NULL;
+
+	/*
+	 * XXX we're not zeroing the tail of the block here.  We will
+	 * when we change the item block format to let us append to
+	 * the block without walking all the items.
+	 */
+	scoutfs_calc_hdr_crc(bh);
+	unlock_buffer(bh);
+	brelse(bh);
+
+	le64_add_cpu(&super->ring_active_blocks, 1);
+
+	return 0;
 }

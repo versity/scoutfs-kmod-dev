@@ -18,12 +18,22 @@ struct scoutfs_sb_info {
 
 	struct scoutfs_manifest *mani;
 
+	spinlock_t chunk_alloc_lock;
 	__le64 *chunk_alloc_bits;
+
+	/* pinned dirty ring block during commit */
+	struct buffer_head *dirty_ring_bh;
+	struct scoutfs_ring_entry *dirty_ring_ent;
+	unsigned int dirty_ring_ent_avail;
+
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)
 {
 	return sb->s_fs_info;
 }
+
+void scoutfs_advance_dirty_super(struct super_block *sb);
+int scoutfs_write_dirty_super(struct super_block *sb);
 
 #endif

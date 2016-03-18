@@ -418,8 +418,8 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		inc_nlink(dir);
 	}
 
-	mark_inode_dirty(inode);
-	mark_inode_dirty(dir);
+	scoutfs_update_inode_item(inode);
+	scoutfs_update_inode_item(dir);
 
 	insert_inode_hash(inode);
 	d_instantiate(dentry, inode);
@@ -510,8 +510,8 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		drop_nlink(dir);
 		drop_nlink(inode);
 	}
-	mark_inode_dirty(inode);
-	mark_inode_dirty(dir);
+	scoutfs_update_inode_item(inode);
+	scoutfs_update_inode_item(dir);
 
 out:
 	return ret;

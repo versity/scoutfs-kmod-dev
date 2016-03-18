@@ -22,7 +22,7 @@ struct inode *scoutfs_alloc_inode(struct super_block *sb);
 void scoutfs_destroy_inode(struct inode *inode);
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
-int scoutfs_inode_update(struct inode *inode);
+void scoutfs_update_inode_item(struct inode *inode);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev);
 

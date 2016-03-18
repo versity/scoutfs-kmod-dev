@@ -192,8 +192,12 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
  * Every time we modify the inode in memory we copy it to its inode
  * item.  This lets us write out blocks of items without having to track
  * down dirty vfs inodes and safely copy them into items before writing.
+ *
+ * The caller makes sure that the item is dirty and pinned so they don't
+ * have to deal with errors and unwinding after they've modified the
+ * vfs inode and get here.
  */
-int scoutfs_inode_update(struct inode *inode)
+void scoutfs_update_inode_item(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_item *item;
@@ -202,13 +206,10 @@ int scoutfs_inode_update(struct inode *inode)
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
 	item = scoutfs_item_lookup(sb, &key);
-	if (IS_ERR(item))
-		return PTR_ERR(item);
+	BUG_ON(IS_ERR(item));
 
 	store_inode(item->val, inode);
 	scoutfs_item_put(item);
-
-	return 0;
 }
 
 /*

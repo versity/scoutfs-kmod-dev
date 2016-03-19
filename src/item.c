@@ -263,6 +263,8 @@ static struct scoutfs_item *item_lookup(struct super_block *sb,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_item *item;
 	unsigned long flags;
+	unsigned retried = 0;
+	int ret;
 
 	do {
 		spin_lock_irqsave(&sbi->item_lock, flags);
@@ -272,9 +274,18 @@ static struct scoutfs_item *item_lookup(struct super_block *sb,
 			atomic_inc(&item->refcount);
 
 		spin_unlock_irqrestore(&sbi->item_lock, flags);
-		if (!item)
-			item = scoutfs_read_segment_item(sb, key);
-	} while (item == ERR_PTR(-EEXIST));
+		if (!item) {
+			if (np == FI_NEXT)
+				ret = scoutfs_read_next_item(sb, key);
+			else
+				ret = scoutfs_read_item(sb, key);
+			if (ret)
+				item = ERR_PTR(ret);
+		}
+	} while (!item && !retried++);
+
+	if (!item)
+		item = ERR_PTR(-ENOENT);
 
 	return item;
 }

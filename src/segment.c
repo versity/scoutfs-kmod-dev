@@ -33,32 +33,30 @@ static struct scoutfs_item_header *next_ihdr(struct scoutfs_item_header *ihdr)
 
 /*
  * Use the manifest to search log segments for the most recent version
- * of the item with the given key.  Return a reference to the item after
- * it's been added to the item cache.
+ * of the item with the given key.  This only returns an error if it
+ * fails to determine if the item exists or not.  It's up to the caller
+ * to retry the lookup after success.
  */
-struct scoutfs_item *scoutfs_read_segment_item(struct super_block *sb,
-					       struct scoutfs_key *key)
+int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key)
 {
 	struct scoutfs_ring_manifest_entry ment;
 	struct scoutfs_item_header *ihdr;
 	struct scoutfs_item_block *iblk;
-	struct scoutfs_item *item;
+	struct scoutfs_item *item = NULL;
 	struct buffer_head *bh;
+	int ret = 0;
 	int cmp;
-	int err;
 	int i;
 
 	/* XXX hold manifest */
 
 	memset(&ment, 0, sizeof(struct scoutfs_ring_manifest_entry));
 
-	item = NULL;
-	err = -ENOENT;
 	while (scoutfs_next_manifest_segment(sb, key, &ment)) {
 
 		bh = scoutfs_read_block(sb, le64_to_cpu(ment.blkno));
 		if (!bh) {
-			err = -EIO;
+			ret = -EIO;
 			break;
 		}
 
@@ -82,11 +80,10 @@ struct scoutfs_item *scoutfs_read_segment_item(struct super_block *sb,
 			item = scoutfs_clean_item(sb, key,
 						  le16_to_cpu(ihdr->len));
 			if (IS_ERR(item)) {
-				err = PTR_ERR(item);
+				ret = PTR_ERR(item);
 			} else {
 				memcpy(item->val, (void *)(ihdr + 1),
 				       item->val_len);
-				err = 0;
 			}
 			break;
 		}
@@ -98,10 +95,147 @@ struct scoutfs_item *scoutfs_read_segment_item(struct super_block *sb,
 
 	/* XXX release manifest */
 
-	if (err)
-		item = ERR_PTR(err);
+	scoutfs_item_put(item);
+	return ret;
+}
 
-	return item;
+/*
+ * Reading the next item is more expensive than looking up a specific
+ * item.  We can't use the bloom filters because we don't know what key
+ * is next.  We have to search blocks at all levels because the next
+ * item could be in any of them.
+ *
+ * After having gone to the trouble to establish next item positions in
+ * all the blocks we take the opportunity to amortize that cost and
+ * insert multiple items.
+ *
+ * This only returns an error if it was unsure if there's a next item
+ * or not.  It will return success if there were no next items.  The caller
+ * is responsible for retrying the lookup after reading.
+ */
+struct item_block_cursor {
+	struct list_head list;
+
+	struct buffer_head *bh;
+	struct scoutfs_item_header *ihdr;
+	unsigned int i;
+};
+int scoutfs_read_next_item(struct super_block *sb,
+			   struct scoutfs_key *first_key)
+{
+	struct scoutfs_ring_manifest_entry ment;
+	struct scoutfs_item_header *least;
+	struct scoutfs_item_header *ihdr;
+	struct scoutfs_item_block *iblk;
+	struct item_block_cursor *curs;
+	struct item_block_cursor *tmp;
+	struct scoutfs_item *item;
+	struct scoutfs_key key;
+	struct buffer_head *bh;
+	LIST_HEAD(cursors);
+	int ret = 0;
+	int pass;
+	int i;
+
+	/* XXX hold manifest */
+
+	memset(&ment, 0, sizeof(struct scoutfs_ring_manifest_entry));
+
+	/* find all the log segments that contain our key */
+	key = *first_key;
+	while (scoutfs_next_manifest_segment(sb, &key, &ment)) {
+
+		curs = kmalloc(sizeof(struct item_block_cursor), GFP_NOFS);
+		if (!curs) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		bh = scoutfs_read_block(sb, le64_to_cpu(ment.blkno));
+		if (!bh) {
+			ret = -EIO;
+			goto out;
+		}
+
+		/* XXX verify */
+		iblk = (void *)bh->b_data;
+
+		curs->bh = bh;
+		curs->i = 0;
+		curs->ihdr = (void *)(iblk + 1);
+		list_add_tail(&curs->list, &cursors);
+	}
+
+	/* there can be no segments that contain the item */
+	if (list_empty(&cursors)) {
+		ret = 0;
+		goto out;
+	}
+
+	/* XXX arbitrary number of next items to insert */
+	for (pass = 0; pass < 16; pass++) {
+
+		least = NULL;
+		list_for_each_entry(curs, &cursors, list) {
+			iblk = (void *)curs->bh->b_data;
+			ihdr = curs->ihdr;
+			i = curs->i;
+
+			/* Find the next item past the search key. */
+			for (; i < le32_to_cpu(iblk->nr_items); i++) {
+				if (scoutfs_key_cmp(&key, &ihdr->key) <= 0)
+					break;
+
+				ihdr = next_ihdr(ihdr);
+			}
+
+			/*
+			 * If we fall off a block then we can't know if
+			 * we have the least key without checking the
+			 * next block at that level.  It could have an
+			 * item less than the least in our other blocks.
+			 */
+			if (WARN_ON_ONCE(i == le32_to_cpu(iblk->nr_items))) {
+				ret = -EIO;
+				goto out;
+			}
+
+			/*
+			 * Remember the newest least key in the blocks that's
+			 * past the search key.
+			 */
+			if (!least ||
+			    scoutfs_key_cmp(&ihdr->key, &least->key) < 0)
+				least = ihdr;
+
+			curs->ihdr = ihdr;
+			curs->i = i;
+		}
+
+		/* start the next search past the next key */
+		key = least->key;
+		scoutfs_inc_key(&key);
+
+		/* insert the next item (XXX if it's not deleted) */
+		item = scoutfs_clean_item(sb, &least->key,
+					  le16_to_cpu(least->len));
+		if (IS_ERR(item)) {
+			ret = PTR_ERR(item);
+			if (ret == -EEXIST)
+				continue;
+			break;
+		}
+
+		memcpy(item->val, (void *)(least + 1), item->val_len);
+		scoutfs_item_put(item);
+	}
+out:
+	list_for_each_entry_safe(curs, tmp, &cursors, list) {
+		brelse(curs->bh);
+		list_del_init(&curs->list);
+		kfree(curs);
+	}
+	return ret;
 }
 
 static int finish_item_block(struct super_block *sb, struct buffer_head *bh,

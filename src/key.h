@@ -61,4 +61,13 @@ static inline void scoutfs_set_key(struct scoutfs_key *key, u64 inode, u8 type,
 	key->offset = cpu_to_le64(offset);
 }
 
+static inline void scoutfs_inc_key(struct scoutfs_key *key)
+{
+	le64_add_cpu(&key->offset, 1);
+	if (!key->offset) {
+		if (++key->type == 0)
+			le64_add_cpu(&key->inode, 1);
+	}
+}
+
 #endif

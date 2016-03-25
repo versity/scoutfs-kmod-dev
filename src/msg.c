@@ -1,6 +1,8 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 
+#include "msg.h"
+
 void scoutfs_msg(struct super_block *sb, const char *prefix, const char *str,
 		 const char *fmt, ...)
 {

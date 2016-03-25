@@ -155,7 +155,8 @@ static int read_supers(struct super_block *sb)
 
 	/* Initialize all the sb info fields which depends on the supers. */
 
-	bytes = DIV_ROUND_UP(sbi->super.total_chunks, 64) * sizeof(u64);
+	bytes = DIV_ROUND_UP(le64_to_cpu(sbi->super.total_chunks), 64) *
+			     sizeof(u64);
 	sbi->chunk_alloc_bits = vmalloc(bytes);
 	if (!sbi->chunk_alloc_bits)
 		return -ENOMEM;

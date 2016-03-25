@@ -25,12 +25,13 @@
 #include "msg.h"
 #include "block.h"
 #include "ring.h"
+#include "chunk.h"
 
 void scoutfs_set_chunk_alloc_bits(struct super_block *sb,
 				  struct scoutfs_ring_bitmap *bm)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	u64 off = le64_to_cpu(bm->offset) * ARRAY_SIZE(bm->bits);
+	u64 off = le32_to_cpu(bm->offset) * ARRAY_SIZE(bm->bits);
 
 	/* XXX check for corruption */
 
@@ -66,7 +67,7 @@ int scoutfs_alloc_chunk(struct super_block *sb, u64 *blkno)
 		clear_bit_le(bit, sbi->chunk_alloc_bits);
 
 		off = round_down(bit, sizeof(bm.bits) * 8);
-		bm.offset = le32_to_cpu(off);
+		bm.offset = cpu_to_le32(off);
 
 		off *= ARRAY_SIZE(bm.bits);
 		bm.bits[0] = sbi->chunk_alloc_bits[off];

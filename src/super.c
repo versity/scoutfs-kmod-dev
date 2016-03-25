@@ -28,10 +28,23 @@
 #include "ring.h"
 #include "segment.h"
 
+/*
+ * We've been dirtying log segment blocks and ring blocks as items were
+ * modified.  sync makes sure that they're all persistent and updates
+ * the super.
+ *
+ * XXX need to synchronize with transactions
+ * XXX is state clean after errors?
+ */
 static int scoutfs_sync_fs(struct super_block *sb, int wait)
 {
-	/* XXX always waiting */
-	return scoutfs_write_dirty_items(sb);
+	struct address_space *mapping = sb->s_bdev->bd_inode->i_mapping;
+
+	return scoutfs_finish_dirty_segment(sb) ?:
+	       scoutfs_finish_dirty_ring(sb) ?:
+	       filemap_write_and_wait(mapping) ?:
+	       scoutfs_write_dirty_super(sb) ?:
+	       scoutfs_advance_dirty_super(sb);
 }
 
 static const struct super_operations scoutfs_super_ops = {
@@ -45,7 +58,7 @@ static const struct super_operations scoutfs_super_ops = {
  * every time it wants to dirty it and eventually write it to reference
  * dirty data that's been written.
  */
-void scoutfs_advance_dirty_super(struct super_block *sb)
+int scoutfs_advance_dirty_super(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
@@ -57,6 +70,8 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 	super->hdr.blkno = cpu_to_le64(SCOUTFS_SUPER_BLKNO + blkno);
 
 	le64_add_cpu(&super->hdr.seq, 1);
+
+	return 0;
 }
 
 /*
@@ -71,16 +86,16 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 	size_t sz;
 	int ret;
 
-	bh = scoutfs_dirty_block(sb, le64_to_cpu(super->hdr.blkno));
+	bh = scoutfs_new_block(sb, le64_to_cpu(super->hdr.blkno));
 	if (!bh)
 		return -ENOMEM;
 
 	sz = sizeof(struct scoutfs_super_block);
 	memcpy(bh->b_data, super, sz);
 	memset(bh->b_data + sz, 0, SCOUTFS_BLOCK_SIZE - sz);
-	scoutfs_calc_hdr_crc(bh);
 
-	unlock_buffer(bh);
+	scoutfs_calc_hdr_crc(bh);
+	mark_buffer_dirty(bh);
 	ret = sync_dirty_buffer(bh);
 	brelse(bh);
 
@@ -170,6 +185,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->item_root = RB_ROOT;
 	sbi->dirty_item_root = RB_ROOT;
 	spin_lock_init(&sbi->chunk_alloc_lock);
+	mutex_init(&sbi->dirty_mutex);
 
 	if (!sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE)) {
 		printk(KERN_ERR "couldn't set blocksize\n");
@@ -209,9 +225,15 @@ static struct dentry *scoutfs_mount(struct file_system_type *fs_type, int flags,
 
 static void scoutfs_kill_sb(struct super_block *sb)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
 	kill_block_super(sb);
-	scoutfs_destroy_manifest(sb);
-	kfree(sb->s_fs_info);
+	if (sbi) {
+		/* kill block super should have synced */
+		WARN_ON_ONCE(sbi->dirty_blkno);
+		scoutfs_destroy_manifest(sb);
+		kfree(sbi);
+	}
 }
 
 static struct file_system_type scoutfs_fs_type = {

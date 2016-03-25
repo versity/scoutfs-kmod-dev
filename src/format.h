@@ -13,6 +13,7 @@
  */
 #define SCOUTFS_BLOCK_SHIFT 12
 #define SCOUTFS_BLOCK_SIZE (1 << SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_BLOCK_MASK (SCOUTFS_BLOCK_SIZE - 1)
 
 /*
  * The allocator works on larger chunks.  Smaller metadata structures
@@ -33,6 +34,19 @@
  */
 #define SCOUTFS_SUPER_BLKNO ((64 * 1024) >> SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_SUPER_NR 2
+
+/*
+ *  7 bits in a ~76k bloom filter gives ~1% false positive for our max
+ *  of 64k items.
+ *
+ *  n = 65,536, p = 0.01 (1 in 100) → m = 628,167 (76.68KB), k = 7
+ */
+#define SCOUTFS_BLOOM_BITS 7
+#define SCOUTFS_BLOOM_BIT_WIDTH 20 /* 2^20 > m */
+#define SCOUTFS_BLOOM_BIT_MASK ((1 << SCOUTFS_BLOOM_BIT_WIDTH) - 1)
+#define SCOUTFS_BLOOM_BLOCKS ((76 * 1024) / SCOUTFS_BLOCK_SIZE)
+#define SCOUTFS_BLOOM_SALTS \
+	DIV_ROUND_UP(SCOUTFS_BLOOM_BITS * SCOUTFS_BLOOM_BIT_WIDTH, 32)
 
 /*
  * This header is found at the start of every block so that we can
@@ -64,6 +78,7 @@ struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
+	__le32 bloom_salts[SCOUTFS_BLOOM_SALTS];
 	__le64 total_chunks;
 	__le64 ring_map_blkno;
 	__le64 ring_map_seq;
@@ -149,22 +164,43 @@ struct scoutfs_ring_bitmap {
 	__le64 bits[2];
 } __packed;
 
+
+struct scoutfs_bloom_block {
+	struct scoutfs_block_header hdr;
+	__le64 bits[0];
+} __packed;
+
+#define SCOUTFS_BLOOM_BITS_PER_BLOCK \
+	(((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_block_header)) / 8) * 64)
+
 /*
- * To start the log segments are a trivial single item block.  We'll
- * flesh this out into larger blocks once the rest of the architecture
- * is in place.
+ * Items in log segments are sorted in a skip list by their key.  We
+ * have a rough limit of 64k items.
+ */
+#define SCOUTFS_SKIP_HEIGHT 16
+struct scoutfs_skip_root {
+	__le32 next[SCOUTFS_SKIP_HEIGHT];
+} __packed;
+
+/*
+ * An item block follows the bloom filter blocks at the start of a log
+ * segment.  Its skip root references the item structs which then
+ * reference the item values in the rest of the block.  The references
+ * are byte offsets from the start of the chunk.
  */
 struct scoutfs_item_block {
 	struct scoutfs_block_header hdr;
 	struct scoutfs_key first;
 	struct scoutfs_key last;
-	__le32 nr_items;
-	/* struct scoutfs_item_header items[0] .. */
+	struct scoutfs_skip_root skip_root;
 } __packed;
 
-struct scoutfs_item_header {
+struct scoutfs_item {
 	struct scoutfs_key key;
+	__le32 offset;
 	__le16 len;
+	u8 skip_height;
+	__le32 skip_next[0];
 } __packed;
 
 struct scoutfs_timespec {

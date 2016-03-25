@@ -18,7 +18,6 @@
 #include "dir.h"
 #include "inode.h"
 #include "key.h"
-#include "item.h"
 #include "super.h"
 #include "manifest.h"
 #include "chunk.h"
@@ -113,14 +112,14 @@ static struct buffer_head *read_ring_block(struct super_block *sb, u64 block)
 /*
  * Return a dirty locked logical ring block.
  */
-static struct buffer_head *dirty_ring_block(struct super_block *sb, u64 block)
+static struct buffer_head *new_ring_block(struct super_block *sb, u64 block)
 {
 	u64 blkno = map_ring_block(sb, block);
 
 	if (!blkno)
 		return NULL;
 
-	return scoutfs_dirty_block(sb, blkno);
+	return scoutfs_new_block(sb, blkno);
 }
 
 int scoutfs_replay_ring(struct super_block *sb)
@@ -186,7 +185,7 @@ int scoutfs_dirty_ring_entry(struct super_block *sb, u8 type, void *data,
 		if (block >= le64_to_cpu(super->ring_total_blocks))
 			block -= le64_to_cpu(super->ring_total_blocks);
 
-		bh = dirty_ring_block(sb, block);
+		bh = new_ring_block(sb, block);
 		if (!bh) {
 			ret = -ENOMEM;
 			goto out;
@@ -242,6 +241,7 @@ int scoutfs_finish_dirty_ring(struct super_block *sb)
 	 * the block without walking all the items.
 	 */
 	scoutfs_calc_hdr_crc(bh);
+	mark_buffer_dirty(bh);
 	unlock_buffer(bh);
 	brelse(bh);
 

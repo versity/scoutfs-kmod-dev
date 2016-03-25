@@ -21,25 +21,13 @@
 
 BUFFER_FNS(Private_Verified, private_verified)
 
-
-/*
- * A quick metadata read wrapper which knows how to validate the
- * block header.
- */
-struct buffer_head *scoutfs_read_block(struct super_block *sb, u64 blkno)
+static void verify_block_header(struct super_block *sb, struct buffer_head *bh)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_block_header *hdr;
-	struct buffer_head *bh;
-	u32 crc;
-
-	bh = sb_bread(sb, blkno);
-	if (!bh || buffer_private_verified(bh))
-		return bh;
-
-	hdr = (void *)bh->b_data;
-	crc = scoutfs_crc_block(hdr);
+	struct scoutfs_block_header *hdr = (void *)bh->b_data;
+	u32 crc = scoutfs_crc_block(hdr);
+	u64 blkno = bh->b_blocknr;
 
 	if (le32_to_cpu(hdr->crc) != crc) {
 		printk("blkno %llu hdr crc %x != calculated %x\n", blkno,
@@ -52,49 +40,67 @@ struct buffer_head *scoutfs_read_block(struct super_block *sb, u64 blkno)
 			le64_to_cpu(hdr->blkno));
 	} else {
 		set_buffer_private_verified(bh);
-		return bh;
 	}
-
-	brelse(bh);
-	return NULL;
 }
 
 /*
- * Return a locked dirty buffer with undefined contents.  The caller is
- * responsible for initializing the entire block.  Callers can try and
- * read from these dirty blocks so we mark them verified so that they
- * don't try to check uninitialized crcs.
+ * Read an existing block from the device and verify its metadata header.
  */
-struct buffer_head *scoutfs_dirty_bh(struct super_block *sb, u64 blkno)
+struct buffer_head *scoutfs_read_block(struct super_block *sb, u64 blkno)
 {
 	struct buffer_head *bh;
 
-	bh = sb_getblk(sb, blkno);
-	if (bh) {
-		lock_buffer(bh);
-		set_buffer_uptodate(bh);
-		mark_buffer_dirty(bh);
-		set_buffer_private_verified(bh);
+	bh = sb_bread(sb, blkno);
+	if (!bh || buffer_private_verified(bh))
+		return bh;
+
+	lock_buffer(bh);
+	if (!buffer_private_verified(bh))
+		verify_block_header(sb, bh);
+	unlock_buffer(bh);
+
+	if (!buffer_private_verified(bh)) {
+		brelse(bh);
+		bh = NULL;
 	}
 
 	return bh;
 }
 
 /*
- * Return a locked dirty buffer with a partially initialized block
- * header.  The caller has to calculate the header crc before unlocking
- * the block.  The header will have the sequence number of the dirty super
- * by default.
+ * Read the block that contains the given byte offset in the given chunk.
  */
-struct buffer_head *scoutfs_dirty_block(struct super_block *sb, u64 blkno)
+struct buffer_head *scoutfs_read_block_off(struct super_block *sb, u64 blkno,
+					   u32 off)
+{
+	if (WARN_ON_ONCE(off >= SCOUTFS_CHUNK_SIZE))
+		return ERR_PTR(-EINVAL);
+
+	return scoutfs_read_block(sb, blkno + (off >> SCOUTFS_BLOCK_SHIFT));
+}
+
+/*
+ * Return a newly allocated metadata block with an updated block header
+ * to match the current dirty super block.  Callers are responsible for
+ * serializing access to the block and for zeroing unwritten block
+ * contents.
+ */
+struct buffer_head *scoutfs_new_block(struct super_block *sb, u64 blkno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_block_header *hdr;
 	struct buffer_head *bh;
 
-	bh = scoutfs_dirty_bh(sb, blkno);
+	bh = sb_getblk(sb, blkno);
 	if (bh) {
+		if (!buffer_uptodate(bh) || buffer_private_verified(bh)) {
+			lock_buffer(bh);
+			set_buffer_uptodate(bh);
+			set_buffer_private_verified(bh);
+			unlock_buffer(bh);
+		}
+
 		hdr = (void *)bh->b_data;
 		*hdr = super->hdr;
 		hdr->blkno = cpu_to_le64(blkno);

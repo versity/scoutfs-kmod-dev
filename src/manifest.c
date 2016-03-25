@@ -85,7 +85,7 @@ static struct scoutfs_manifest_node *find_mnode(struct rb_root *root,
 	while (node) {
 		mnode = rb_entry(node, struct scoutfs_manifest_node, node);
 
-		cmp = scoutfs_key_cmp_range(key, &mnode->ment.first,
+		cmp = scoutfs_cmp_key_range(key, &mnode->ment.first,
 					    &mnode->ment.last);
 		if (cmp < 0)
 			node = node->rb_left;
@@ -213,15 +213,24 @@ int scoutfs_new_manifest(struct super_block *sb,
 
 /*
  * Fill the caller's ment with the next log segment in the manifest that
- * might contain the given key.  The ment is initialized to 0 to return
- * the first entry.
+ * might contain the given range.  The caller initializes the ment to
+ * zeros to find the first log segment.
  *
  * This can return multiple log segments from level 0 in decreasing age.
  * Then it can return at most one log segment in each level that
- * intersects with the given key.
+ * intersects the given range.
+ *
+ * Returns true if an entry was found and is now described in ment,
+ * false when there are no more segments that contain the range.
+ *
+ * XXX could use the l0 seq to walk the list and skipb locks we've
+ * already seen.  I'm not sure that we'll be able to keep manifest
+ * entries pinned while we're away blocking.  We might fail to find the
+ * last entry's block in the radix when we return.
  */
-bool scoutfs_next_manifest_segment(struct super_block *sb,
-				   struct scoutfs_key *key,
+bool scoutfs_foreach_range_segment(struct super_block *sb,
+				   struct scoutfs_key *first,
+				   struct scoutfs_key *last,
 				   struct scoutfs_ring_manifest_entry *ment)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -247,8 +256,9 @@ bool scoutfs_next_manifest_segment(struct super_block *sb,
 		}
 
 		list_for_each_entry_from(mnode, &mani->level_zero, head) {
-			if (scoutfs_key_cmp_range(key, &mnode->ment.first,
-						  &mnode->ment.last) == 0) {
+			if (scoutfs_cmp_key_ranges(first, last,
+						   &mnode->ment.first,
+						   &mnode->ment.last) == 0) {
 				*ment = mnode->ment;
 				found = true;
 				break;
@@ -257,8 +267,15 @@ bool scoutfs_next_manifest_segment(struct super_block *sb,
 	}
 
 	if (!found) {
+		/*
+		 * The log segments in the each level fully cover the
+		 * key range and don't overlap.  So we will always find
+		 * a segment that matches whatever key we look for.  We
+		 * look for the start of the range because iterators are
+		 * walk the keyspace sequentially.
+		 */
 		for (i = ment->level + 1; i <= SCOUTFS_MAX_LEVEL; i++) {
-			mnode = find_mnode(&mani->levels[i].root, key);
+			mnode = find_mnode(&mani->levels[i].root, first);
 			if (mnode) {
 				*ment = mnode->ment;
 				found = true;

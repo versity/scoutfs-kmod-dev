@@ -26,6 +26,11 @@ struct scoutfs_sb_info {
 	struct scoutfs_ring_entry *dirty_ring_ent;
 	unsigned int dirty_ring_ent_avail;
 
+	/* pinned log segment during fs modifications */
+	struct mutex dirty_mutex;
+	u64 dirty_blkno;
+	int dirty_item_off;
+	int dirty_val_off;
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)
@@ -33,7 +38,7 @@ static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
-void scoutfs_advance_dirty_super(struct super_block *sb);
+int scoutfs_advance_dirty_super(struct super_block *sb);
 int scoutfs_write_dirty_super(struct super_block *sb);
 
 #endif

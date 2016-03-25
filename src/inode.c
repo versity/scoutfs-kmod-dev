@@ -19,7 +19,7 @@
 #include "super.h"
 #include "key.h"
 #include "inode.h"
-#include "item.h"
+#include "segment.h"
 #include "dir.h"
 
 /*
@@ -110,17 +110,17 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 static int scoutfs_read_locked_inode(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_item *item;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_key key;
+	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	item = scoutfs_item_lookup(sb, &key);
-	if (IS_ERR(item))
-		return PTR_ERR(item);
-
-	load_inode(inode, item->val);
-	scoutfs_item_put(item);
+	ret = scoutfs_read_item(sb, &key, &ref);
+	if (!ret) {
+		load_inode(inode, ref.val);
+		scoutfs_put_ref(&ref);
+	}
 
 	return 0;
 }
@@ -200,16 +200,17 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 void scoutfs_update_inode_item(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_item *item;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_key key;
+	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	item = scoutfs_item_lookup(sb, &key);
-	BUG_ON(IS_ERR(item));
+	ret = scoutfs_read_item(sb, &key, &ref);
+	BUG_ON(ret);
 
-	store_inode(item->val, inode);
-	scoutfs_item_put(item);
+	store_inode(ref.val, inode);
+	scoutfs_put_ref(&ref);
 }
 
 /*
@@ -221,9 +222,10 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_inode_info *ci;
-	struct scoutfs_item *item;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_key key;
 	struct inode *inode;
+	int ret;
 
 	inode = new_inode(sb);
 	if (!inode)
@@ -242,12 +244,14 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	item = scoutfs_item_create(inode->i_sb, &key,
-				   sizeof(struct scoutfs_inode));
-	if (IS_ERR(item)) {
+	ret = scoutfs_create_item(inode->i_sb, &key,
+				  sizeof(struct scoutfs_inode), &ref);
+	if (ret) {
 		iput(inode);
-		inode = ERR_CAST(item);
+		return ERR_PTR(ret);
 	}
+
+	scoutfs_put_ref(&ref);
 	return inode;
 }
 

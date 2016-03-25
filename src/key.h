@@ -32,27 +32,28 @@ static inline int scoutfs_key_cmp(struct scoutfs_key *a, struct scoutfs_key *b)
 }
 
 /*
- * return -ve, 0, +ve if the key is less than, contained within, or greater
- * than the given range of keys.
+ * return -ve if the first range is completely before the second, +ve for
+ * completely after, and 0 if they intersect.
  */
-static inline int scoutfs_key_cmp_range(struct scoutfs_key *key,
+static inline int scoutfs_cmp_key_ranges(struct scoutfs_key *a_first,
+					 struct scoutfs_key *a_last,
+					 struct scoutfs_key *b_first,
+					 struct scoutfs_key *b_last)
+{
+	if (scoutfs_key_cmp(a_last, b_first) < 0)
+		return -1;
+	if (scoutfs_key_cmp(a_first, b_last) > 0)
+		return 1;
+	return 0;
+}
+
+static inline int scoutfs_cmp_key_range(struct scoutfs_key *key,
 					struct scoutfs_key *first,
 					struct scoutfs_key *last)
 {
-	int cmp;
-
-	WARN_ON_ONCE(scoutfs_key_cmp(first, last) > 0);
-
-	cmp = scoutfs_key_cmp(key, first);
-	if (cmp > 0) {
-		cmp = scoutfs_key_cmp(key, last);
-		if (cmp < 0)
-			cmp = 0;
-	}
-	return cmp;
+	return scoutfs_cmp_key_ranges(key, key, first, last);
 }
 
-	
 static inline void scoutfs_set_key(struct scoutfs_key *key, u64 inode, u8 type,
 				   u64 offset)
 {

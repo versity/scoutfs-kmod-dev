@@ -20,7 +20,7 @@
 #include "dir.h"
 #include "inode.h"
 #include "key.h"
-#include "item.h"
+#include "segment.h"
 #include "super.h"
 
 /*
@@ -110,26 +110,26 @@ static unsigned int dent_bytes(unsigned int name_len)
 	return sizeof(struct scoutfs_dirent) + name_len;
 }
 
-static unsigned int dent_val_off(struct scoutfs_item *item,
+static unsigned int dent_val_off(struct scoutfs_item_ref *ref,
 				 struct scoutfs_dirent *dent)
 {
-	return (char *)dent - (char *)item->val;
+	return (char *)dent - (char *)ref->val;
 }
 
-static inline struct scoutfs_dirent *next_dent(struct scoutfs_item *item,
+static inline struct scoutfs_dirent *next_dent(struct scoutfs_item_ref *ref,
 					       struct scoutfs_dirent *dent)
 {
 	unsigned int next_off;
 
-	next_off = dent_val_off(item, dent) + dent_bytes(dent->name_len);
-	if (next_off == item->val_len)
+	next_off = dent_val_off(ref, dent) + dent_bytes(dent->name_len);
+	if (next_off == ref->val_len)
 		return NULL;
 
-	return item->val + next_off;
+	return ref->val + next_off;
 }
 
-#define for_each_item_dent(item, dent) \
-	for (dent = item->val; dent; dent = next_dent(item, dent))
+#define for_each_item_dent(ref, dent) \
+	for (dent = (ref)->val; dent; dent = next_dent(ref, dent))
 
 struct dentry_info {
 	/*
@@ -175,10 +175,10 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 {
 	struct super_block *sb = dir->i_sb;
 	struct scoutfs_dirent *dent;
-	struct scoutfs_item *item;
 	struct dentry_info *di;
 	struct scoutfs_key key;
 	struct inode *inode;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
 	u64 ino = 0;
 	u32 h = 0;
 	u32 nr = 0;
@@ -198,14 +198,12 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	h = name_hash(dir, dentry->d_name.name, dentry->d_name.len);
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
 
-	item = scoutfs_item_lookup(sb, &key);
-	if (IS_ERR(item)) {
-		ret = PTR_ERR(item);
+	ret = scoutfs_read_item(sb, &key, &ref);
+	if (ret)
 		goto out;
-	}
 
 	ret = -ENOENT;
-	for_each_item_dent(item, dent) {
+	for_each_item_dent(&ref, dent) {
 		if (names_equal(dentry->d_name.name, dentry->d_name.len,
 				dent->name, dent->name_len)) {
 			ino = le64_to_cpu(dent->ino);
@@ -215,7 +213,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		}
 	}
 
-	scoutfs_item_put(item);
+	scoutfs_put_ref(&ref);
 out:
 	if (ret == -ENOENT) {
 		inode = NULL;
@@ -254,7 +252,7 @@ static int dir_emit_dots(struct file *file, void *dirent, filldir_t filldir)
 
 /*
  * readdir finds the next entry at or past the hash|coll_nr stored in
- * the ctx->pos (f_pos).
+ * the current file position.
  *
  * It will need to be careful not to read past the region of the dirent
  * hash offset keys that it has access to.
@@ -263,65 +261,63 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 {
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_dirent *dent;
-	struct scoutfs_key last_key;
-	struct scoutfs_item *item;
-	struct scoutfs_key key;
-	u32 nr;
-	u32 off;
-	u64 pos;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
+	LIST_HEAD(iter_list);
 	int ret = 0;
+	u32 off;
+	u32 pos;
+	u32 nr;
 
 	if (!dir_emit_dots(file, dirent, filldir))
 		return 0;
 
-	scoutfs_set_key(&last_key, scoutfs_ino(inode), SCOUTFS_DIRENT_KEY,
+	scoutfs_set_key(&first, scoutfs_ino(inode), SCOUTFS_DIRENT_KEY,
+			file->f_pos >> SCOUTFS_DIRENT_COLL_BITS);
+	scoutfs_set_key(&last, scoutfs_ino(inode), SCOUTFS_DIRENT_KEY,
 			SCOUTFS_DIRENT_OFF_MASK);
 
-	do {
-		off = file->f_pos >> SCOUTFS_DIRENT_COLL_BITS;
-		nr = file->f_pos & SCOUTFS_DIRENT_COLL_MASK;
-
-		scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_DIRENT_KEY,
-				off);
-		item = scoutfs_item_next(sb, &key);
-		if (IS_ERR(item)) {
-			ret = PTR_ERR(item);
-			if (ret == -ENOENT)
-				ret = 0;
+	for(;;) {
+		scoutfs_put_ref(&ref);
+		ret = scoutfs_next_item(sb, &first, &last, &iter_list, &ref);
+		if (ret)
 			break;
-		}
 
-		if (scoutfs_key_cmp(&item->key, &last_key) > 0) {
-			scoutfs_item_put(item);
-			break;
-		}
-
-		/* reset nr to 0 if we found the next item */
-		if (scoutfs_key_offset(&item->key) != off)
+		/* start from first collision if we're in a new item */
+		if (scoutfs_key_offset(&first) == scoutfs_key_offset(ref.key))
+			nr = file->f_pos & SCOUTFS_DIRENT_COLL_MASK;
+		else
 			nr = 0;
 
-		pos = scoutfs_key_offset(&item->key)
-			<< SCOUTFS_DIRENT_COLL_BITS;
-		for_each_item_dent(item, dent) {
+		off = scoutfs_key_offset(ref.key) << SCOUTFS_DIRENT_COLL_BITS;
+		for_each_item_dent(&ref, dent) {
 			if (dent->coll_nr < nr)
 				continue;
+
+			pos = off | dent->coll_nr;
 
 			if (filldir(dirent, dent->name, dent->name_len, pos,
 				    le64_to_cpu(dent->ino),
 				    dentry_type(dent->type)))
 				break;
 
-			file->f_pos = (pos | dent->coll_nr) + 1;
+			file->f_pos = pos + 1;
 		}
+		/* done if filldir broke the loop */
+		if (dent)
+			break;
 
-		scoutfs_item_put(item);
+		first = *ref.key;
+		scoutfs_inc_key(&first);
+	}
 
-		/* advance to the next hash value if we finished item */
-		if (dent == NULL)
-			file->f_pos = pos + (1 << SCOUTFS_DIRENT_COLL_BITS);
+	scoutfs_put_ref(&ref);
+	scoutfs_put_iter_list(&iter_list);
 
-	} while (dent == NULL);
+	if (ret == -ENOENT)
+		ret = 0;
 
 	return ret;
 }
@@ -332,12 +328,11 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode = NULL;
 	struct scoutfs_dirent *dent;
-	struct scoutfs_item *item;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct dentry_info *di;
 	struct scoutfs_key key;
 	int bytes;
 	int ret;
-	int off;
 	u64 nr;
 	u64 h;
 
@@ -356,59 +351,31 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
 	bytes = dent_bytes(dentry->d_name.len);
 
-	item = scoutfs_item_lookup(sb, &key);
-	if (item == ERR_PTR(-ENOENT)) {
-		item = scoutfs_item_create(sb, &key, bytes);
-		if (!IS_ERR(item)) {
-			/* mark a newly created item */
-			dent = item->val;
-			dent->name_len = 0;
+	ret = scoutfs_read_item(sb, &key, &ref);
+	if (ret != -ENOENT) {
+		/* XXX implement many hashes, not coll nr */
+		if (WARN_ON_ONCE(!ret)) {
+			scoutfs_put_ref(&ref);
+			ret = -ENOSPC;
 		}
-	}
-	if (IS_ERR(item)) {
-		ret = PTR_ERR(item);
 		goto out;
 	}
 
-	ret = 0;
-	nr = 0;
-	for_each_item_dent(item, dent) {
-		/* the common case of a newly created item */
-		if (!dent->name_len)
-			break;
-
-		/* XXX check for eexist?  can't happen? */
-
-		/* found a free coll nr, insert here */
-		if (nr < dent->coll_nr) {
-			off = dent_val_off(item, dent);
-			ret = scoutfs_item_expand(item, off, bytes);
-			if (!ret)
-				dent = item->val + off;
-			break;
-		}
-
-		/* the item's full */
-		if (nr++ == SCOUTFS_DIRENT_COLL_MASK) {
-			ret = -ENOSPC;
-			break;
-		}
-	}
-
-	if (!ret) {
-		dent->ino = cpu_to_le64(scoutfs_ino(inode));
-		dent->type = mode_to_type(inode->i_mode);
-		dent->coll_nr = nr;
-		dent->name_len = dentry->d_name.len;
-		memcpy(dent->name, dentry->d_name.name, dent->name_len);
-		di->key_offset = h;
-		di->coll_nr = nr;
-	}
-
-	scoutfs_item_put(item);
-
+	ret = scoutfs_create_item(sb, &key, bytes, &ref);
 	if (ret)
 		goto out;
+
+	dent = ref.val;
+	nr = 0;
+	dent->ino = cpu_to_le64(scoutfs_ino(inode));
+	dent->type = mode_to_type(inode->i_mode);
+	dent->coll_nr = nr;
+	dent->name_len = dentry->d_name.len;
+	memcpy(dent->name, dentry->d_name.name, dent->name_len);
+	di->key_offset = h;
+	di->coll_nr = nr;
+
+	scoutfs_put_ref(&ref);
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -452,8 +419,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode = dentry->d_inode;
 	struct timespec ts = current_kernel_time();
-	struct scoutfs_dirent *dent;
-	struct scoutfs_item *item;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct dentry_info *di;
 	struct scoutfs_key key;
 	int ret = 0;
@@ -471,33 +437,12 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY,
 			di->key_offset);
 
-	item = scoutfs_item_lookup(sb, &key);
-	if (IS_ERR(item)) {
-		ret = PTR_ERR(item);
+	ret = scoutfs_read_item(sb, &key, &ref);
+	if (ret)
 		goto out;
-	}
 
-	/* XXX error to not find the coll nr we were looking for? */
-	for_each_item_dent(item, dent) {
-		if (dent->coll_nr != di->coll_nr)
-			continue;
-
-		/* XXX compare names and eio? */
-
-		if (item->val_len == dent_bytes(dent->name_len)) {
-			scoutfs_item_delete(sb, item);
-			ret = 0;
-		} else {
-			ret = scoutfs_item_shrink(item,
-						  dent_val_off(item, dent),
-						  dent_bytes(dent->name_len));
-		}
-		dent = NULL;
-		break;
-	}
-
-	scoutfs_item_put(item);
-
+	ret = scoutfs_delete_item(sb, &ref);
+	scoutfs_put_ref(&ref);
 	if (ret)
 		goto out;
 

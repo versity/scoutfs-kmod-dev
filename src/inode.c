@@ -191,6 +191,41 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 }
 
 /*
+ * Create a pinned dirty inode item so that we can later update the
+ * inode item without risking failure.  We often wouldn't want to have
+ * to unwind inode modifcations (perhaps by shared vfs code!) if our
+ * item update failed.  This is our chance to return errors for enospc
+ * for lack of space for new logged dirty inode items.
+ *
+ * This dirty inode item will be found by lookups in the interim so we
+ * have to update it now with the current inode contents.
+ *
+ * Callers don't delete these dirty items on errors.  They're still
+ * valid and will be merged with the current item eventually.  They can
+ * be found in the dirty block to avoid future dirtying (say repeated
+ * creations in a directory).
+ *
+ * The caller has to prevent sync between dirtying and updating the
+ * inodes.
+ */
+int scoutfs_dirty_inode_item(struct inode *inode)
+{
+	struct super_block *sb = inode->i_sb;
+	DECLARE_SCOUTFS_ITEM_REF(ref);
+	struct scoutfs_key key;
+	int ret;
+
+	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
+
+	ret = scoutfs_dirty_item(sb, &key, sizeof(struct scoutfs_inode), &ref);
+	if (!ret) {
+		store_inode(ref.val, inode);
+		scoutfs_put_ref(&ref);
+	}
+	return ret;
+}
+
+/*
  * Every time we modify the inode in memory we copy it to its inode
  * item.  This lets us write out blocks of items without having to track
  * down dirty vfs inodes and safely copy them into items before writing.

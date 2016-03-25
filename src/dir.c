@@ -324,6 +324,10 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
+	ret = scoutfs_dirty_inode_item(dir);
+	if (ret)
+		return ret;
+
 	inode = scoutfs_new_inode(sb, dir, mode, rdev);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
@@ -407,6 +411,11 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
 		return -ENOTEMPTY;
+
+	ret = scoutfs_dirty_inode_item(dir) ?:
+	      scoutfs_dirty_inode_item(inode);
+	if (ret)
+		return ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, di->hash);
 

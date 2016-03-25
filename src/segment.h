@@ -22,6 +22,8 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 		      struct scoutfs_item_ref *ref);
 int scoutfs_create_item(struct super_block *sb, struct scoutfs_key *key,
 		        unsigned bytes, struct scoutfs_item_ref *ref);
+int scoutfs_dirty_item(struct super_block *sb, struct scoutfs_key *key,
+		       unsigned bytes, struct scoutfs_item_ref *ref);
 int scoutfs_delete_item(struct super_block *sb, struct scoutfs_item_ref *ref);
 int scoutfs_next_item(struct super_block *sb, struct scoutfs_key *first,
 		      struct scoutfs_key *last, struct list_head *iter_list,

@@ -476,6 +476,49 @@ out:
 }
 
 /*
+ * Ensure that there is a dirty item with the given key in the current
+ * dirty segment.
+ *
+ * The caller locks access to the item and prevents sync and made sure
+ * that there's enough free space in the segment for their dirty inodes.
+ *
+ * This is better than getting -EEXIST from create_item because that
+ * will leave the allocated item and val dangling in the block when it
+ * returns the error.
+ */
+int scoutfs_dirty_item(struct super_block *sb, struct scoutfs_key *key,
+		       unsigned bytes, struct scoutfs_item_ref *ref)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_item *item;
+	struct buffer_head *bh;
+	bool create = false;
+	int ret;
+
+	mutex_lock(&sbi->dirty_mutex);
+
+	if (sbi->dirty_blkno) {
+		ret = scoutfs_skip_lookup(sb, sbi->dirty_blkno, key, &bh,
+					  &item);
+		if (ret == -ENOENT)
+			create = true;
+		else if (!ret) {
+			ret = populate_ref(sb, sbi->dirty_blkno, bh, item,
+					   ref);
+			brelse(bh);
+		}
+	} else {
+		create = true;
+	}
+	mutex_unlock(&sbi->dirty_mutex);
+
+	if (create)
+		ret = scoutfs_create_item(sb, key, bytes, ref);
+
+	return ret;
+}
+
+/*
  * This is a really cheesy temporary delete method.  It only works on items
  * that are stored in dirty blocks.  The caller is responsible for dropping
  * the ref.  XXX be less bad.

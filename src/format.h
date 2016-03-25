@@ -225,6 +225,7 @@ struct scoutfs_inode {
 	__le32 mode;
 	__le32 rdev;
 	__le32 salt;
+	__u8   max_dirent_hash_nr;
 	struct scoutfs_timespec atime;
 	struct scoutfs_timespec ctime;
 	struct scoutfs_timespec mtime;
@@ -238,17 +239,17 @@ struct scoutfs_inode {
  */
 struct scoutfs_dirent {
 	__le64 ino;
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-	__u8 type:4,
-	     coll_nr:4;
-#else
-	__u8 coll_nr:4,
-	     type:4;
-#endif
-	__u8 name_len;
+	__u8 type;
 	__u8 name[0];
 } __packed;
 
+/*
+ * The max number of dirent hash values determines the overhead of
+ * lookups in very large directories.  With 31bit offsets the number
+ * of entries stored before enospc tends to plateau around 200 million
+ * entries around 8 functions.  That seems OK for now.
+ */
+#define SCOUTFS_MAX_DENT_HASH_NR 8
 #define SCOUTFS_NAME_LEN 255
 
 /*
@@ -257,14 +258,10 @@ struct scoutfs_dirent {
  * network protocols that have limited readir positions.
  */
 
-#define SCOUTFS_DIRENT_OFF_BITS 27
-#define SCOUTFS_DIRENT_OFF_MASK ((1 << SCOUTFS_DIRENT_OFF_BITS) - 1)
-#define SCOUTFS_DIRENT_COLL_BITS 4
-#define SCOUTFS_DIRENT_COLL_MASK ((1 << SCOUTFS_DIRENT_COLL_BITS) - 1)
-
-/* getdents returns the *next* pos with each entry. so we can't return ~0 */
-#define SCOUTFS_DIRENT_MAX_POS \
-	(((1 << (SCOUTFS_DIRENT_OFF_BITS + SCOUTFS_DIRENT_COLL_BITS)) - 1) - 1)
+#define SCOUTFS_DIRENT_OFF_BITS 31
+#define SCOUTFS_DIRENT_OFF_MASK ((1U << SCOUTFS_DIRENT_OFF_BITS) - 1)
+/* getdents returns next pos with an entry, no entry at (f_pos)~0 */
+#define SCOUTFS_DIRENT_LAST_POS (INT_MAX - 1)
 
 enum {
 	SCOUTFS_DT_FIFO = 0,

@@ -128,6 +128,20 @@ struct dentry_info {
 
 static struct kmem_cache *scoutfs_dentry_cachep;
 
+static void scoutfs_d_release(struct dentry *dentry)
+{
+	struct dentry_info *di = dentry->d_fsdata;
+
+	if (di) {
+		kmem_cache_free(scoutfs_dentry_cachep, di);
+		dentry->d_fsdata = NULL;
+	}
+}
+
+static const struct dentry_operations scoutfs_dentry_ops = {
+	.d_release = scoutfs_d_release,
+};
+
 static struct dentry_info *alloc_dentry_info(struct dentry *dentry)
 {
 	struct dentry_info *di;
@@ -141,8 +155,11 @@ static struct dentry_info *alloc_dentry_info(struct dentry *dentry)
 		return ERR_PTR(-ENOMEM);
 
 	spin_lock(&dentry->d_lock);
-	if (!dentry->d_fsdata)
+	if (!dentry->d_fsdata) {
 		dentry->d_fsdata = di;
+		d_set_d_op(dentry, &scoutfs_dentry_ops);
+	}
+
 	spin_unlock(&dentry->d_lock);
 
 	if (di != dentry->d_fsdata)

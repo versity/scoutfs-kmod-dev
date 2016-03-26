@@ -81,12 +81,16 @@ struct skip_path {
  */
 static int invalid_item_off(u32 off)
 {
-	return off < ((SCOUTFS_BLOCK_SIZE * SCOUTFS_BLOOM_BLOCKS) +
-		      sizeof(struct scoutfs_item_block)) ||
-		(off & SCOUTFS_BLOCK_MASK) <
-			sizeof(struct scoutfs_block_header) ||
-		(off & SCOUTFS_BLOCK_MASK) >
-			(SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_item));
+	if (off < ((SCOUTFS_BLOCK_SIZE * SCOUTFS_BLOOM_BLOCKS) +
+			sizeof(struct scoutfs_item_block)) ||
+	   (off & SCOUTFS_BLOCK_MASK) < sizeof(struct scoutfs_block_header) ||
+	   (off & SCOUTFS_BLOCK_MASK) >
+			(SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_item))) {
+		trace_printk("invalid offset %u\n", off);
+		return 1;
+	}
+
+	return 0;
 }
 
 /*

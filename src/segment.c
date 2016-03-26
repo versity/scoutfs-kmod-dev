@@ -188,9 +188,15 @@ static int add_item_off(struct scoutfs_sb_info *sbi, int height)
 {
 	int len = offsetof(struct scoutfs_item, skip_next[height]);
 	int off = sbi->dirty_item_off;
+	int block_off;
 	int tail_free;
 
-	/* item's can't cross a block boundary */
+	/* items can't start in a block header */
+	block_off = off & SCOUTFS_BLOCK_MASK;
+	if (block_off < sizeof(struct scoutfs_block_header))
+		off += sizeof(struct scoutfs_block_header) - block_off;
+
+	/* items can't cross a block boundary */
 	tail_free = SCOUTFS_BLOCK_SIZE - (off & SCOUTFS_BLOCK_MASK);
 	if (tail_free < len)
 		off += tail_free + sizeof(struct scoutfs_block_header);
@@ -431,6 +437,8 @@ next_chunk:
 
 	item_off = add_item_off(sbi, height);
 	val_off = sub_val_off(sbi, bytes);
+
+	trace_printk("item_off %u val_off %u\n", item_off, val_off);
 
 	if (item_off > val_off) {
 		ret = scoutfs_finish_dirty_segment(sb);

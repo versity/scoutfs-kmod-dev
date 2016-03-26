@@ -100,8 +100,14 @@ struct scoutfs_key {
 
 #define SCOUTFS_ROOT_INO 1
 
-#define SCOUTFS_INODE_KEY 128
-#define SCOUTFS_DIRENT_KEY 192
+/*
+ * Currently we sort keys by the numeric value of the types, but that
+ * isn't necessary.  We could have an arbitrary sort order.  So we don't
+ * have to stress about cleverly allocating the types.
+ */
+#define SCOUTFS_INODE_KEY	1
+#define SCOUTFS_DIRENT_KEY	2
+#define SCOUTFS_DATA_KEY	3
 
 struct scoutfs_ring_map_block {
 	struct scoutfs_block_header hdr;
@@ -202,6 +208,13 @@ struct scoutfs_item {
 	u8 skip_height;
 	__le32 skip_next[0];
 } __packed;
+
+/*
+ * Item size caps item file data item length so that they fit in checksummed
+ * 4k blocks with a bit of expansion room.
+ */
+#define SCOUTFS_MAX_ITEM_LEN \
+	(SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_block_header) - 32)
 
 struct scoutfs_timespec {
 	__le64 sec;

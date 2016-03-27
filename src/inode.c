@@ -22,6 +22,7 @@
 #include "segment.h"
 #include "dir.h"
 #include "filerw.h"
+#include "scoutfs_trace.h"
 
 /*
  * XXX
@@ -237,6 +238,7 @@ int scoutfs_dirty_inode_item(struct inode *inode)
 	if (!ret) {
 		store_inode(ref.val, inode);
 		scoutfs_put_ref(&ref);
+		trace_scoutfs_dirty_inode(inode);
 	}
 	return ret;
 }
@@ -264,6 +266,7 @@ void scoutfs_update_inode_item(struct inode *inode)
 
 	store_inode(ref.val, inode);
 	scoutfs_put_ref(&ref);
+	trace_scoutfs_update_inode(inode);
 }
 
 /*

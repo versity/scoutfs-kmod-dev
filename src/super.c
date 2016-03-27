@@ -27,6 +27,7 @@
 #include "manifest.h"
 #include "ring.h"
 #include "segment.h"
+#include "scoutfs_trace.h"
 
 /*
  * We've been dirtying log segment blocks and ring blocks as items were
@@ -71,6 +72,8 @@ int scoutfs_advance_dirty_super(struct super_block *sb)
 
 	le64_add_cpu(&super->hdr.seq, 1);
 
+	trace_scoutfs_dirty_super(super);
+
 	return 0;
 }
 
@@ -96,6 +99,7 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 
 	scoutfs_calc_hdr_crc(bh);
 	mark_buffer_dirty(bh);
+	trace_scoutfs_write_super(super);
 	ret = sync_dirty_buffer(bh);
 	brelse(bh);
 

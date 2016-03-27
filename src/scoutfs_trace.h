@@ -66,10 +66,128 @@ TRACE_EVENT(scoutfs_bloom_miss,
 		  __entry->inode, __entry->type, __entry->offset)
 );
 
+TRACE_EVENT(scoutfs_write_begin,
+	TP_PROTO(u64 ino, loff_t pos, unsigned len),
+
+	TP_ARGS(ino, pos, len),
+
+	TP_STRUCT__entry(
+		__field(__u64, inode)
+		__field(__u64, pos)
+		__field(__u32, len)
+	),
+
+	TP_fast_assign(
+		__entry->inode = ino;
+		__entry->pos = pos;
+		__entry->len = len;
+	),
+
+	TP_printk("ino %llu pos %llu len %u",
+		  __entry->inode, __entry->pos, __entry->len)
+);
+
+TRACE_EVENT(scoutfs_write_end,
+	TP_PROTO(u64 ino, loff_t pos, unsigned len, unsigned copied),
+
+	TP_ARGS(ino, pos, len, copied),
+
+	TP_STRUCT__entry(
+		__field(__u64, inode)
+		__field(__u64, pos)
+		__field(__u32, len)
+		__field(__u32, copied)
+	),
+
+	TP_fast_assign(
+		__entry->inode = ino;
+		__entry->pos = pos;
+		__entry->len = len;
+		__entry->copied = copied;
+	),
+
+	TP_printk("ino %llu pos %llu len %u",
+		  __entry->inode, __entry->pos, __entry->len)
+);
+
+TRACE_EVENT(scoutfs_dirty_inode,
+	TP_PROTO(struct inode *inode),
+
+	TP_ARGS(inode),
+
+	TP_STRUCT__entry(
+		__field(__u64, ino)
+		__field(__u64, size)
+	),
+
+	TP_fast_assign(
+		__entry->ino = scoutfs_ino(inode);
+		__entry->size = inode->i_size;
+	),
+
+	TP_printk("ino %llu size %llu",
+		__entry->ino, __entry->size)
+);
+
+TRACE_EVENT(scoutfs_update_inode,
+	TP_PROTO(struct inode *inode),
+
+	TP_ARGS(inode),
+
+	TP_STRUCT__entry(
+		__field(__u64, ino)
+		__field(__u64, size)
+	),
+
+	TP_fast_assign(
+		__entry->ino = scoutfs_ino(inode);
+		__entry->size = inode->i_size;
+	),
+
+	TP_printk("ino %llu size %llu",
+		__entry->ino, __entry->size)
+);
+
+TRACE_EVENT(scoutfs_dirty_super,
+	TP_PROTO(struct scoutfs_super_block *super),
+
+	TP_ARGS(super),
+
+	TP_STRUCT__entry(
+		__field(__u64, blkno)
+		__field(__u64, seq)
+	),
+
+	TP_fast_assign(
+		__entry->blkno = le64_to_cpu(super->hdr.blkno);
+		__entry->seq = le64_to_cpu(super->hdr.seq);
+	),
+
+	TP_printk("blkno %llu seq %llu",
+		__entry->blkno, __entry->seq)
+);
+
+TRACE_EVENT(scoutfs_write_super,
+	TP_PROTO(struct scoutfs_super_block *super),
+
+	TP_ARGS(super),
+
+	TP_STRUCT__entry(
+		__field(__u64, blkno)
+		__field(__u64, seq)
+	),
+
+	TP_fast_assign(
+		__entry->blkno = le64_to_cpu(super->hdr.blkno);
+		__entry->seq = le64_to_cpu(super->hdr.seq);
+	),
+
+	TP_printk("blkno %llu seq %llu",
+		__entry->blkno, __entry->seq)
+);
 
 #endif /* _TRACE_SCOUTFS_H */
 
-/* This part must be outside protection */
 /* This part must be outside protection */
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .

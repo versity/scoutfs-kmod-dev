@@ -19,6 +19,7 @@
 #include "inode.h"
 #include "key.h"
 #include "filerw.h"
+#include "scoutfs_trace.h"
 
 /*
  * File data is stored in items just like everything else.  This is very
@@ -167,8 +168,11 @@ static int scoutfs_write_begin(struct file *file, struct address_space *mapping,
 			       loff_t pos, unsigned len, unsigned flags,
 			       struct page **pagep, void **fsdata)
 {
+	struct inode *inode = mapping->host;
 	pgoff_t index = pos >> PAGE_CACHE_SHIFT;
 	struct page *page;
+
+	trace_scoutfs_write_begin(scoutfs_ino(inode), pos, len);
 
 	page = grab_cache_page_write_begin(mapping, index, flags);
 	if (!page)
@@ -184,6 +188,8 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 {
 	struct inode *inode = mapping->host;
 	unsigned off;
+
+	trace_scoutfs_write_end(scoutfs_ino(inode), pos, len, copied);
 
 	off = pos & (PAGE_CACHE_SIZE - 1);
 

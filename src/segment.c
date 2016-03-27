@@ -146,7 +146,7 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 		/* XXX read-ahead all bloom blocks */
 
 		ret = scoutfs_test_bloom_bits(sb, le64_to_cpu(ment.blkno),
-					      &bits);
+					      key, &bits);
 		if (ret < 0)
 			break;
 		if (!ret) {

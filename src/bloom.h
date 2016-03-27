@@ -9,6 +9,7 @@ struct scoutfs_bloom_bits {
 void scoutfs_calc_bloom_bits(struct scoutfs_bloom_bits *bits,
 			     struct scoutfs_key *key, __le32 *salts);
 int scoutfs_test_bloom_bits(struct super_block *sb, u64 blkno,
+			    struct scoutfs_key *key,
 			    struct scoutfs_bloom_bits *bits);
 int scoutfs_set_bloom_bits(struct super_block *sb, u64 blkno,
 			   struct scoutfs_bloom_bits *bits);

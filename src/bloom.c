@@ -20,6 +20,7 @@
 #include "format.h"
 #include "block.h"
 #include "bloom.h"
+#include "scoutfs_trace.h"
 
 /*
  * Each log segment starts with a bloom filters that spans multiple
@@ -100,6 +101,7 @@ int scoutfs_set_bloom_bits(struct super_block *sb, u64 blkno,
  * might, and -errno if IO fails.
  */
 int scoutfs_test_bloom_bits(struct super_block *sb, u64 blkno,
+			    struct scoutfs_key *key,
 			    struct scoutfs_bloom_bits *bits)
 {
 	struct scoutfs_bloom_block *blm;
@@ -120,6 +122,11 @@ int scoutfs_test_bloom_bits(struct super_block *sb, u64 blkno,
 		if (!ret)
 			break;
 	}
+
+	if (ret)
+		trace_scoutfs_bloom_hit(key);
+	else
+		trace_scoutfs_bloom_miss(key);
 
 	return ret;
 }

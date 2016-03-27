@@ -70,21 +70,6 @@ void scoutfs_destroy_inode(struct inode *inode)
 static void set_inode_ops(struct inode *inode)
 {
 	switch (inode->i_mode & S_IFMT) {
-	/*
-	 * I guess we add a reg.c for regular files?  Or pagecache.c?
-	 * I guess that makes more sense.
-	 *
-	 * - page dirtying makes sure there's a dirty item
-	 * - sync writes back page cache pages
-	 * - writepage copies to dirty item
-	 * - crc calculated after copying
-	 * - pages can be pretty large
-	 * - tail items can be partial?
-	 * - tracing all over the place
-	 * - maybe just less than 4k is the answer?
-	 * - so allocation pulls the value back
-	 * - probably leave some overhead for header growth
-	 */
 	case S_IFREG:
 		inode->i_mapping->a_ops = &scoutfs_file_aops;
 //		inode->i_op = &scoutfs_file_iops;

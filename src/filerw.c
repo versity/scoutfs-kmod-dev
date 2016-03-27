@@ -197,8 +197,12 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 	if (copied < len)
 		zero_user_segment(page, off + copied, len);
 
-	if (pos + copied > inode->i_size)
+	if (pos + copied > inode->i_size) {
 		i_size_write(inode, pos + copied);
+		/* XXX need to think about pinning and enospc */
+		if (!scoutfs_dirty_inode_item(inode))
+			scoutfs_update_inode_item(inode);
+	}
 
 	if (!PageUptodate(page))
 		SetPageUptodate(page);

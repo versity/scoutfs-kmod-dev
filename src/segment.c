@@ -27,7 +27,6 @@
 #include "bloom.h"
 #include "skip.h"
 
-
 /*
  * scoutfs log segments are large multi-block structures that contain
  * key/value items.  This file implements manipulations of the items.
@@ -113,6 +112,26 @@ static int populate_ref(struct super_block *sb, u64 blkno,
 }
 
 /*
+ * Segments are immutable once they're written.  As they're being
+ * dirtied we need to lock concurrent access.  XXX the dirty blkno test
+ * is probably racey.  We could use reader/writer locks here.  And we
+ * could probably make the skip lists support concurrent access.
+ */
+static bool try_lock_dirty_mutex(struct super_block *sb, u64 blkno)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	if (blkno == sbi->dirty_blkno) {
+		mutex_lock(&sbi->dirty_mutex);
+		if (blkno == sbi->dirty_blkno)
+			return true;
+		mutex_unlock(&sbi->dirty_mutex);
+	}
+
+	return false;
+}
+
+/*
  * Return a reference to the item at the given key.  We walk the manifest
  * to find blocks that might contain the key from most recent to oldest.
  * To find the key in each log segment we test it's bloom filter and
@@ -132,6 +151,7 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 	struct scoutfs_item *item = NULL;
 	struct scoutfs_bloom_bits bits;
 	struct buffer_head *bh;
+	bool locked;
 	int ret;
 
 	/* XXX hold manifest */
@@ -156,8 +176,11 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 
 		/* XXX read-ahead all item header blocks */
 
+		locked = try_lock_dirty_mutex(sb, le64_to_cpu(ment.blkno));
 		ret = scoutfs_skip_lookup(sb, le64_to_cpu(ment.blkno), key,
 					  &bh, &item);
+		if (locked)
+			mutex_unlock(&sbi->dirty_mutex);
 		if (ret) {
 			if (ret == -ENOENT)
 				continue;
@@ -311,19 +334,16 @@ static void zero_unused_block(struct super_block *sb, struct buffer_head *bh,
  * Finish off a dirty segment if we have one.  Calculate the checksums of
  * all the blocks, mark them dirty, and drop their pinned reference.
  */
-int scoutfs_finish_dirty_segment(struct super_block *sb)
+static int finish_dirty_segment(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct address_space *mapping = sb->s_bdev->bd_inode->i_mapping;
 	struct buffer_head *bh;
-	u64 blkno;
+	u64 blkno = sbi->dirty_blkno;
 	int ret = 0;
 	u64 i;
 
-	/* XXX sync doesn't lock this test? */
-	blkno = sbi->dirty_blkno;
-	if (!blkno)
-		return 0;
+	WARN_ON_ONCE(!blkno);
 
 	for (i = 0; i < SCOUTFS_BLOCKS_PER_CHUNK; i++) {
 		bh = scoutfs_read_block(sb, blkno + i);
@@ -362,6 +382,33 @@ int scoutfs_finish_dirty_segment(struct super_block *sb)
 
 	return ret;
 }
+
+/*
+ * We've been dirtying log segment blocks and ring blocks as items were
+ * modified.  sync makes sure that they're all persistent and updates
+ * the super.
+ *
+ * XXX need to synchronize with transactions
+ * XXX is state clean after errors?
+ */
+int scoutfs_sync_fs(struct super_block *sb, int wait)
+{
+	struct address_space *mapping = sb->s_bdev->bd_inode->i_mapping;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	int ret = 0;
+
+	mutex_unlock(&sbi->dirty_mutex);
+	if (sbi->dirty_blkno) {
+		ret = finish_dirty_segment(sb) ?:
+		      scoutfs_finish_dirty_ring(sb) ?:
+		      filemap_write_and_wait(mapping) ?:
+		      scoutfs_write_dirty_super(sb) ?:
+		      scoutfs_advance_dirty_super(sb);
+	}
+	mutex_unlock(&sbi->dirty_mutex);
+	return ret;
+}
+
 
 /*
  * Return a reference to a newly allocated and initialized item in a
@@ -441,7 +488,7 @@ next_chunk:
 	trace_printk("item_off %u val_off %u\n", item_off, val_off);
 
 	if (item_off > val_off) {
-		ret = scoutfs_finish_dirty_segment(sb);
+		ret = finish_dirty_segment(sb);
 		if (ret)
 			goto out;
 		goto next_chunk;
@@ -537,12 +584,18 @@ int scoutfs_delete_item(struct super_block *sb, struct scoutfs_item_ref *ref)
 	u64 blkno;
 	int ret;
 
-	blkno = round_down(ref->item_bh->b_blocknr, SCOUTFS_BLOCKS_PER_CHUNK);
-	if (WARN_ON_ONCE(blkno != sbi->dirty_blkno))
-		return -EINVAL;
+	mutex_lock(&sbi->dirty_mutex);
 
-	ret = scoutfs_skip_delete(sb, blkno, ref->key);
-	WARN_ON_ONCE(ret);
+	blkno = round_down(ref->item_bh->b_blocknr, SCOUTFS_BLOCKS_PER_CHUNK);
+	if (WARN_ON_ONCE(blkno != sbi->dirty_blkno)) {
+		ret = -EINVAL;
+	} else {
+		ret = scoutfs_skip_delete(sb, blkno, ref->key);
+		WARN_ON_ONCE(ret);
+	}
+
+	mutex_unlock(&sbi->dirty_mutex);
+
 	return ret;
 }
 
@@ -580,10 +633,12 @@ int scoutfs_next_item(struct super_block *sb, struct scoutfs_key *first,
 		      struct scoutfs_key *last, struct list_head *iter_list,
 		      struct scoutfs_item_ref *ref)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_ring_manifest_entry ment;
 	struct scoutfs_item_iter *least;
 	struct scoutfs_item_iter *iter;
 	struct scoutfs_item_iter *pos;
+	bool locked;
 	int ret;
 
 restart:
@@ -625,6 +680,8 @@ restart:
 	ret = 0;
 	list_for_each_entry_safe(iter, pos, iter_list, list) {
 
+		locked = try_lock_dirty_mutex(sb, iter->blkno);
+
 		/* search towards the first key if we haven't yet */
 		if (!iter->item) {
 			ret = scoutfs_skip_search(sb, iter->blkno, first,
@@ -636,6 +693,9 @@ restart:
 			ret = scoutfs_skip_next(sb, iter->blkno,
 						&iter->bh, &iter->item);
 		}
+
+		if (locked)
+			mutex_unlock(&sbi->dirty_mutex);
 
 		/* we're done with this block if we past the last key */
 		while (!ret && scoutfs_key_cmp(&iter->item->key, last) > 0) {

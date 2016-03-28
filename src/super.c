@@ -29,25 +29,6 @@
 #include "segment.h"
 #include "scoutfs_trace.h"
 
-/*
- * We've been dirtying log segment blocks and ring blocks as items were
- * modified.  sync makes sure that they're all persistent and updates
- * the super.
- *
- * XXX need to synchronize with transactions
- * XXX is state clean after errors?
- */
-static int scoutfs_sync_fs(struct super_block *sb, int wait)
-{
-	struct address_space *mapping = sb->s_bdev->bd_inode->i_mapping;
-
-	return scoutfs_finish_dirty_segment(sb) ?:
-	       scoutfs_finish_dirty_ring(sb) ?:
-	       filemap_write_and_wait(mapping) ?:
-	       scoutfs_write_dirty_super(sb) ?:
-	       scoutfs_advance_dirty_super(sb);
-}
-
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
 	.destroy_inode = scoutfs_destroy_inode,

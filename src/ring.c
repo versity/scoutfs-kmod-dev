@@ -40,7 +40,7 @@ static int replay_ring_block(struct super_block *sb, struct buffer_head *bh)
 		switch(ent->type) {
 		case SCOUTFS_RING_ADD_MANIFEST:
 			ment = (void *)(ent + 1);
-			ret = scoutfs_add_manifest(sb, ment);
+			ret = scoutfs_insert_manifest(sb, ment);
 			break;
 		case SCOUTFS_RING_DEL_MANIFEST:
 			del = (void *)(ent + 1);

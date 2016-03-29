@@ -161,6 +161,8 @@ struct scoutfs_ring_manifest_entry {
 	struct scoutfs_key last;
 } __packed;
 
+#define SCOUTFS_MANIFESTS_PER_LEVEL 10
+
 struct scoutfs_ring_del_manifest {
 	__le64 blkno;
 } __packed;

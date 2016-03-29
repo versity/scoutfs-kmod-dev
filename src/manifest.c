@@ -19,6 +19,7 @@
 #include "manifest.h"
 #include "key.h"
 #include "ring.h"
+#include "scoutfs_trace.h"
 
 /*
  * The manifest organizes log segment blocks into a tree structure.
@@ -42,6 +43,7 @@ struct scoutfs_manifest {
 
 	struct scoutfs_level {
 		struct rb_root root;
+		u64 count;
 	} levels[SCOUTFS_MAX_LEVEL + 1];
 };
 
@@ -111,11 +113,14 @@ static struct scoutfs_manifest_node *unlink_mnode(struct scoutfs_manifest *mani,
 
 	mnode = radix_tree_lookup(&mani->blkno_radix, blkno);
 	if (mnode) {
+		trace_scoutfs_delete_manifest(&mnode->ment);
+
 		if (!list_empty(&mnode->head))
 			list_del_init(&mnode->head);
 		if (!RB_EMPTY_NODE(&mnode->node)) {
 			rb_erase(&mnode->node,
 				 &mani->levels[mnode->ment.level].root);
+			mani->levels[mnode->ment.level].count--;
 			RB_CLEAR_NODE(&mnode->node);
 		}
 	}
@@ -144,61 +149,114 @@ void scoutfs_delete_manifest(struct super_block *sb, u64 blkno)
 }
 
 /*
- * This is called during ring replay to reconstruct the manifest state
- * from the ring entries.  Moving segments between levels is recorded
- * with a single ring entry so we always try to look up the segment in
- * the manifest before we add it to the manifest.
+ * A newly inserted manifest can be inserted at the level
+ * above the first block that it intersects.
  */
-int scoutfs_add_manifest(struct super_block *sb,
-			 struct scoutfs_ring_manifest_entry *ment)
+static u8 insertion_level(struct super_block *sb,
+			  struct scoutfs_ring_manifest_entry *ment)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_manifest *mani = sbi->mani;
 	struct scoutfs_manifest_node *mnode;
+	int i;
+
+	list_for_each_entry(mnode, &mani->level_zero, head) {
+		if (scoutfs_cmp_key_ranges(&ment->first, &ment->last,
+					   &mnode->ment.first,
+					   &mnode->ment.last) == 0)
+			return 0;
+	}
+
+	/* XXX this <= looks fishy :/ */
+	for (i = 1; i <= SCOUTFS_MAX_LEVEL; i++) {
+		mnode = find_mnode(&mani->levels[i].root, &ment->first);
+		if (mnode)
+			break;
+		if (mani->levels[i].count < SCOUTFS_MANIFESTS_PER_LEVEL)
+			return i;
+	}
+
+	return i - 1;
+}
+
+/*
+ * Insert an manifest entry into the blkno radix and either level 0 list
+ * or greater level rbtrees as appropriate.  The new entry will replace
+ * any existing entry at its blkno, perhaps with different keys and
+ * level.
+ *
+ * The caller can ask that we find the highest level that the entry can
+ * be inserted into before it intersects with an existing entry.  The
+ * caller's entry is updated with the new level so they can store it in
+ * the ring.  Doing so here avoids extra ring churn of doing it later in
+ * merging.
+ */
+static int insert_manifest(struct super_block *sb,
+			   struct scoutfs_ring_manifest_entry *ment,
+			   bool find_level)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_manifest *mani = sbi->mani;
+	struct scoutfs_manifest_node *mnode;
+	struct scoutfs_manifest_node *found;
 	u64 blkno = le64_to_cpu(ment->blkno);
-	bool preloaded = false;
-	int ret;
+	int ret = 0;
+
+	/* allocation/preloading should be cheap enough to always try */
+	mnode = kmalloc(sizeof(struct scoutfs_manifest_node), GFP_NOFS);
+	if (!mnode)
+		return -ENOMEM; /* XXX hmm, fatal?  prealloc?*/
+
+	ret = radix_tree_preload(GFP_NOFS & ~__GFP_HIGHMEM);
+	if (ret) {
+		kfree(mnode);
+		return ret;
+	}
+
+	INIT_LIST_HEAD(&mnode->head);
+	RB_CLEAR_NODE(&mnode->node);
 
 	spin_lock(&mani->lock);
 
-	mnode = unlink_mnode(mani, blkno);
-	if (!mnode) {
-		spin_unlock(&mani->lock);
-		mnode = kmalloc(sizeof(struct scoutfs_manifest_node),
-				GFP_NOFS);
-		if (!mnode)
-			return -ENOMEM; /* XXX hmm, fatal?  prealloc?*/
-
-		ret = radix_tree_preload(GFP_NOFS & ~__GFP_HIGHMEM);
-		if (ret) {
-			kfree(mnode);
-			return ret;
-		}
-		preloaded = true;
-
-		INIT_LIST_HEAD(&mnode->head);
-		RB_CLEAR_NODE(&mnode->node);
-		spin_lock(&mani->lock);
-		/* preloading should guarantee this succeeds */
+	/* reuse found to avoid radix delete/insert churn */
+	found = unlink_mnode(mani, blkno);
+	if (!found) {
 		radix_tree_insert(&mani->blkno_radix, blkno, mnode);
+	} else {
+		swap(found, mnode);
 	}
 
+	/* careful to find our level after deleting old blkno ment */
+	if (find_level)
+		ment->level = insertion_level(sb, ment);
+
+	trace_scoutfs_insert_manifest(ment);
+
 	mnode->ment = *ment;
-	if (ment->level)
+	if (ment->level) {
 		insert_mnode(&mani->levels[ment->level].root, mnode);
-	else
+		mani->levels[ment->level].count++;
+	} else {
 		list_add(&mnode->head, &mani->level_zero);
+	}
 
 	spin_unlock(&mani->lock);
-	if (preloaded)
-		radix_tree_preload_end();
+	radix_tree_preload_end();
+	kfree(found);
 
 	return 0;
 }
 
+/* Index an existing entry */
+int scoutfs_insert_manifest(struct super_block *sb,
+			    struct scoutfs_ring_manifest_entry *ment)
+{
+	return insert_manifest(sb, ment, false);
+}
+
 /*
- * The caller is writing a new log segment.  We add it to the in-memory
- * manifest and write it to dirty ring blocks.
+ * Add an entry for a newly written segment to the indexes and record it
+ * in the ring.  The entry can be modified by insertion.
  *
  * XXX we'd also need to add stale manifest entry's to the ring
  * XXX In the future we'd send it to the leader
@@ -206,9 +264,17 @@ int scoutfs_add_manifest(struct super_block *sb,
 int scoutfs_new_manifest(struct super_block *sb,
 			 struct scoutfs_ring_manifest_entry *ment)
 {
-	return scoutfs_add_manifest(sb, ment) ?:
-	       scoutfs_dirty_ring_entry(sb, SCOUTFS_RING_ADD_MANIFEST,
-					ment, sizeof(*ment));
+	int ret;
+
+	ret = insert_manifest(sb, ment, true);
+	if (!ret) {
+		ret = scoutfs_dirty_ring_entry(sb, SCOUTFS_RING_ADD_MANIFEST,
+					       ment, sizeof(*ment));
+		if (ret)
+			scoutfs_delete_manifest(sb, le64_to_cpu(ment->blkno));
+	}
+
+	return ret;
 }
 
 /*

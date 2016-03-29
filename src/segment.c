@@ -350,7 +350,7 @@ static int update_dirty_segment_manifest(struct super_block *sb, u64 blkno,
 	}
 
 	if (all_items)
-		ret = scoutfs_add_manifest(sb, &ment);
+		ret = scoutfs_insert_manifest(sb, &ment);
 	else
 		ret = scoutfs_new_manifest(sb, &ment);
 out:

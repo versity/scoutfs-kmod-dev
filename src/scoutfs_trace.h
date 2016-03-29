@@ -24,6 +24,8 @@
 
 #include <linux/tracepoint.h>
 
+#include "key.h"
+
 TRACE_EVENT(scoutfs_bloom_hit,
 	TP_PROTO(struct scoutfs_key *key),
 
@@ -184,6 +186,78 @@ TRACE_EVENT(scoutfs_write_super,
 
 	TP_printk("blkno %llu seq %llu",
 		__entry->blkno, __entry->seq)
+);
+
+TRACE_EVENT(scoutfs_insert_manifest,
+	TP_PROTO(struct scoutfs_ring_manifest_entry *ment),
+
+	TP_ARGS(ment),
+
+	TP_STRUCT__entry(
+		__field(__u64, blkno)
+		__field(__u64, seq)
+		__field(__u8, level)
+		__field(__u64, first_inode)
+		__field(__u8, first_type)
+		__field(__u64, first_offset)
+		__field(__u64, last_inode)
+		__field(__u8, last_type)
+		__field(__u64, last_offset)
+	),
+
+	TP_fast_assign(
+		__entry->blkno = le64_to_cpu(ment->blkno);
+		__entry->seq = le64_to_cpu(ment->seq);
+		__entry->level = ment->level;
+		__entry->first_inode = le64_to_cpu(ment->first.inode);
+		__entry->first_type = ment->first.type;
+		__entry->first_offset = le64_to_cpu(ment->first.offset);
+		__entry->last_inode = le64_to_cpu(ment->last.inode);
+		__entry->last_type = ment->last.type;
+		__entry->last_offset = le64_to_cpu(ment->last.offset);
+	),
+
+	TP_printk("blkno %llu seq %llu level %u first "CKF" last "CKF,
+		__entry->blkno, __entry->seq, __entry->level,
+		__entry->first_inode, __entry->first_type,
+		__entry->first_offset, __entry->last_inode,
+		__entry->last_type, __entry->last_offset)
+);
+
+TRACE_EVENT(scoutfs_delete_manifest,
+	TP_PROTO(struct scoutfs_ring_manifest_entry *ment),
+
+	TP_ARGS(ment),
+
+	TP_STRUCT__entry(
+		__field(__u64, blkno)
+		__field(__u64, seq)
+		__field(__u8, level)
+		__field(__u64, first_inode)
+		__field(__u8, first_type)
+		__field(__u64, first_offset)
+		__field(__u64, last_inode)
+		__field(__u8, last_type)
+		__field(__u64, last_offset)
+	),
+
+	TP_fast_assign(
+		__entry->blkno = le64_to_cpu(ment->blkno);
+		__entry->seq = le64_to_cpu(ment->seq);
+		__entry->level = ment->level;
+		__entry->first_inode = le64_to_cpu(ment->first.inode);
+		__entry->first_type = ment->first.type;
+		__entry->first_offset = le64_to_cpu(ment->first.offset);
+		__entry->last_inode = le64_to_cpu(ment->last.inode);
+		__entry->last_type = ment->last.type;
+		__entry->last_offset = le64_to_cpu(ment->last.offset);
+	),
+
+	TP_printk("blkno %llu seq %llu level %u first "CKF" last "CKF,
+		__entry->blkno, __entry->seq, __entry->level,
+		__entry->first_inode, __entry->first_type,
+		__entry->first_offset, __entry->last_inode,
+		__entry->last_type, __entry->last_offset)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

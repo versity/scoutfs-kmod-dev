@@ -28,8 +28,8 @@
  * the exception whose segments can have key ranges that overlap.
  *
  * We also store pointers to the manifest entries in a radix tree
- * indexed by their block number so that we can easily find existing
- * entries for deletion.
+ * indexed by their block number so that we can easily update existing
+ * entries.
  *
  * Level 0 segments are stored in the list with the most recent at the
  * head of the list.  Level 0's rb tree will always be empty.

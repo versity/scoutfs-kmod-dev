@@ -290,7 +290,8 @@ static int start_dirty_segment(struct super_block *sb, u64 blkno)
 
 		if (i == SCOUTFS_BLOOM_BLOCKS) {
 			iblk = (void *)bh->b_data;
-			/* also zero first unused item slot */
+			memset(&iblk->first, ~0, sizeof(struct scoutfs_key));
+			memset(&iblk->last, 0, sizeof(struct scoutfs_key));
 			memset(&iblk->skip_root, 0, sizeof(iblk->skip_root) +
 			       sizeof(struct scoutfs_item));
 		}
@@ -307,6 +308,52 @@ static int start_dirty_segment(struct super_block *sb, u64 blkno)
 		}
 	}
 
+	return ret;
+}
+
+/*
+ * As we fill a dirty segment we don't know which keys it's going to
+ * contain.  We add a manifest entry in memory that has it contain all
+ * items so that reading will know to search the dirty segment.
+ *
+ * Once it's finalized we know the specific range of items it contains
+ * and we update the manifest entry in memory for that range and write
+ * that to the ring.
+ */
+static int update_dirty_segment_manifest(struct super_block *sb, u64 blkno,
+					 bool all_items)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_ring_manifest_entry ment;
+	struct scoutfs_item_block *iblk;
+	struct buffer_head *bh;
+	int ret;
+
+	ment.blkno = cpu_to_le64(blkno);
+	ment.seq = sbi->super.hdr.seq;
+	ment.level = 0;
+
+	if (all_items) {
+		memset(&ment.first, 0, sizeof(struct scoutfs_key));
+		memset(&ment.last, ~0, sizeof(struct scoutfs_key));
+	} else {
+		bh = scoutfs_read_block(sb, blkno + SCOUTFS_BLOOM_BLOCKS);
+		if (!bh) {
+			ret = -EIO;
+			goto out;
+		}
+
+		iblk = (void *)bh->b_data;
+		ment.first = iblk->first;
+		ment.last = iblk->last;
+		brelse(bh);
+	}
+
+	if (all_items)
+		ret = scoutfs_add_manifest(sb, &ment);
+	else
+		ret = scoutfs_new_manifest(sb, &ment);
+out:
 	return ret;
 }
 
@@ -339,6 +386,8 @@ static void zero_unused_block(struct super_block *sb, struct buffer_head *bh,
 /*
  * Finish off a dirty segment if we have one.  Calculate the checksums of
  * all the blocks, mark them dirty, and drop their pinned reference.
+ *
+ * XXX should do something with empty dirty segments.
  */
 static int finish_dirty_segment(struct super_block *sb)
 {
@@ -369,12 +418,8 @@ static int finish_dirty_segment(struct super_block *sb)
 		brelse(bh);
 	}
 
-	/*
-	 * XXX the manifest entry for this log segment has a key range
-	 * that is much too large.  We should shrink it here to reflect
-	 * the real keys.  That would reduce the number of blocks involved
-	 * in merging it into level 1.
-	 */
+	/* update manifest with range of items and add to ring */
+	ret = update_dirty_segment_manifest(sb, blkno, false);
 
 	/*
 	 * Try to kick off a background write of the finished segment.  Callers
@@ -434,9 +479,9 @@ int scoutfs_create_item(struct super_block *sb, struct scoutfs_key *key,
 		        unsigned bytes, struct scoutfs_item_ref *ref)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_ring_manifest_entry ment;
 	struct scoutfs_bloom_bits bits;
 	struct scoutfs_item *item;
+	struct scoutfs_item_block *iblk;
 	struct buffer_head *bh;
 	int item_off;
 	int val_off;
@@ -463,21 +508,8 @@ next_chunk:
 		if (ret)
 			goto out;
 
-		/*
-		 * We need a local manifest in memory to find items as
-		 * we insert them in the dirty segment.  We don't know
-		 * what keys are going to be used so we cover the whole
-		 * thing.
-		 *
-		 * XXX But we're also adding it to the ring here.  We should
-		 * add it as its finalized and its item range is collapsed.
-		 */
-		ment.blkno = cpu_to_le64(blkno);
-		ment.seq = sbi->super.hdr.seq;
-		ment.level = 0;
-		memset(&ment.first, 0, sizeof(ment.first));
-		memset(&ment.last, ~0, sizeof(ment.last));
-		ret = scoutfs_new_manifest(sb, &ment);
+		/* add initial in-memory manifest entry with all items */
+		ret = update_dirty_segment_manifest(sb, blkno, true);
 		if (ret)
 			goto out;
 
@@ -508,8 +540,6 @@ next_chunk:
 		goto out;
 	}
 
-	/* populate iblk first and last?  better than in manifest? */
-
 	item = (void *)bh->b_data + (item_off & SCOUTFS_BLOCK_MASK);
 	item->key = *key;
 	item->offset = cpu_to_le32(val_off);
@@ -524,6 +554,24 @@ next_chunk:
 	brelse(bh);
 	if (ret)
 		goto out;
+
+	bh = scoutfs_read_block(sb, sbi->dirty_blkno + SCOUTFS_BLOOM_BLOCKS);
+	if (!bh) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/*
+	 * Update first and last keys as we go.  It's ok if future deletions
+	 * make this range larger than the actual keys.  That'll almost
+	 * never happen and it'll get fixed up in merging.
+	 */
+	iblk = (void *)bh->b_data;
+	if (scoutfs_key_cmp(key, &iblk->first) < 0)
+		iblk->first = *key;
+	if (scoutfs_key_cmp(key, &iblk->last) > 0)
+		iblk->last = *key;
+	brelse(bh);
 
 	/* XXX delete skip on failure? */
 

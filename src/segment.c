@@ -201,6 +201,12 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 	return ret;
 }
 
+/* return the byte length of the item header including its skip elements */
+static int item_bytes(int height)
+{
+	return offsetof(struct scoutfs_item, skip_next[height]);
+}
+
 /*
  * The dirty_item_off points to the byte offset after the last item.
  * Advance it past block tails and initial block headers until there's
@@ -209,7 +215,7 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
  */
 static int add_item_off(struct scoutfs_sb_info *sbi, int height)
 {
-	int len = offsetof(struct scoutfs_item, skip_next[height]);
+	int len = item_bytes(height);
 	int off = sbi->dirty_item_off;
 	int block_off;
 	int tail_free;
@@ -487,7 +493,7 @@ next_chunk:
 
 	trace_printk("item_off %u val_off %u\n", item_off, val_off);
 
-	if (item_off > val_off) {
+	if (item_off + item_bytes(height) > val_off) {
 		ret = finish_dirty_segment(sb);
 		if (ret)
 			goto out;

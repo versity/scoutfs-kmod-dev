@@ -36,15 +36,18 @@
 #define SCOUTFS_SUPER_NR 2
 
 /*
- *  7 bits in a ~76k bloom filter gives ~1% false positive for our max
- *  of 64k items.
+ * The bloom filters are statically sized.  It's a tradeoff between
+ * storage overhead and false positive rate.  At the moment we have
+ * as few as 1000 and as many as 18000 items in a segment.  We can
+ * get a ~1% false positive rate (triggering header search) rate at
+ * the high end with a ~20k bloom filter.
  *
- *  n = 65,536, p = 0.01 (1 in 100) → m = 628,167 (76.68KB), k = 7
+ *  n = 18,000, p = 0.01 (1 in 100) → m = 172,532 (21.06KB), k = 7
  */
 #define SCOUTFS_BLOOM_BITS 7
-#define SCOUTFS_BLOOM_BIT_WIDTH 20 /* 2^20 > m */
+#define SCOUTFS_BLOOM_BIT_WIDTH 18 /* 2^18 > m */
 #define SCOUTFS_BLOOM_BIT_MASK ((1 << SCOUTFS_BLOOM_BIT_WIDTH) - 1)
-#define SCOUTFS_BLOOM_BLOCKS ((76 * 1024) / SCOUTFS_BLOCK_SIZE)
+#define SCOUTFS_BLOOM_BLOCKS ((20 * 1024) / SCOUTFS_BLOCK_SIZE)
 #define SCOUTFS_BLOOM_SALTS \
 	DIV_ROUND_UP(SCOUTFS_BLOOM_BITS * SCOUTFS_BLOOM_BIT_WIDTH, 32)
 

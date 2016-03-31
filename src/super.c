@@ -27,7 +27,10 @@
 #include "manifest.h"
 #include "ring.h"
 #include "segment.h"
+#include "counters.h"
 #include "scoutfs_trace.h"
+
+static struct kset *scoutfs_kset;
 
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
@@ -178,15 +181,15 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 		return -EINVAL;
 	}
 
-	ret = read_supers(sb);
-	if (ret)
-		return ret;
+	/* XXX can have multiple mounts of a  device, need mount id */
+	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
+	if (!sbi->kset)
+		return -ENOMEM;
 
-	ret = scoutfs_setup_manifest(sb);
-	if (ret)
-		return ret;
-
-	ret = scoutfs_replay_ring(sb);
+	ret = scoutfs_setup_counters(sb) ?:
+	      read_supers(sb) ?:
+	      scoutfs_setup_manifest(sb) ?:
+	      scoutfs_replay_ring(sb);
 	if (ret)
 		return ret;
 
@@ -218,6 +221,9 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		/* kill block super should have synced */
 		WARN_ON_ONCE(sbi->dirty_blkno);
 		scoutfs_destroy_manifest(sb);
+		scoutfs_destroy_counters(sb);
+		if (sbi->kset)
+			kset_unregister(sbi->kset);
 		kfree(sbi);
 	}
 }
@@ -230,19 +236,38 @@ static struct file_system_type scoutfs_fs_type = {
 	.fs_flags	= FS_REQUIRES_DEV,
 };
 
+/* safe to call at any failure point in _init */
+static void teardown_module(void)
+{
+	scoutfs_dir_exit();
+	scoutfs_inode_exit();
+	if (scoutfs_kset)
+		kset_unregister(scoutfs_kset);
+}
+
 static int __init scoutfs_module_init(void)
 {
-	return scoutfs_inode_init() ?:
-	       scoutfs_dir_init() ?:
-	       register_filesystem(&scoutfs_fs_type);
+	int ret;
+
+	scoutfs_init_counters();
+
+	scoutfs_kset = kset_create_and_add("scoutfs", NULL, fs_kobj);
+	if (!scoutfs_kset)
+		return -ENOMEM;
+
+	ret = scoutfs_inode_init() ?:
+	      scoutfs_dir_init() ?:
+	      register_filesystem(&scoutfs_fs_type);
+	if (ret)
+		teardown_module();
+	return ret;
 }
 module_init(scoutfs_module_init)
 
 static void __exit scoutfs_module_exit(void)
 {
 	unregister_filesystem(&scoutfs_fs_type);
-	scoutfs_dir_exit();
-	scoutfs_inode_exit();
+	teardown_module();
 }
 module_exit(scoutfs_module_exit)
 

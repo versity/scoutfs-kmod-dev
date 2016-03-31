@@ -5,6 +5,7 @@
 #include "format.h"
 
 struct scoutfs_manifest;
+struct scoutfs_counters;
 
 struct scoutfs_sb_info {
 	struct scoutfs_super_block super;
@@ -31,6 +32,11 @@ struct scoutfs_sb_info {
 	u64 dirty_blkno;
 	int dirty_item_off;
 	int dirty_val_off;
+
+	/* $sysfs/fs/scoutfs/$id/ */
+	struct kset *kset;
+
+	struct scoutfs_counters *counters;
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)

@@ -19,6 +19,7 @@
 #include "key.h"
 #include "block.h"
 #include "skip.h"
+#include "counters.h"
 
 /*
  * The items in a log segment block are sorted by their keys in a skip
@@ -216,6 +217,8 @@ int scoutfs_skip_insert(struct super_block *sb, u64 blkno,
 	    WARN_ON_ONCE(item->skip_height > SCOUTFS_SKIP_HEIGHT))
 		return -EINVAL;
 
+	scoutfs_inc_counter(sb, skip_insert);
+
 	ret = skip_search(sb, blkno, &path, &item->key, &cmp);
 	if (ret == 0) {
 		if (cmp == 0) {
@@ -261,6 +264,7 @@ int scoutfs_skip_lookup(struct super_block *sb, u64 blkno,
 			struct scoutfs_key *key, struct buffer_head **bh,
 			struct scoutfs_item **item)
 {
+	scoutfs_inc_counter(sb, skip_lookup);
 	return skip_lookup(sb, blkno, key, bh, item, true);
 }
 
@@ -271,6 +275,7 @@ int scoutfs_skip_search(struct super_block *sb, u64 blkno,
 			struct scoutfs_key *key, struct buffer_head **bh,
 			struct scoutfs_item **item)
 {
+	scoutfs_inc_counter(sb, skip_search);
 	return skip_lookup(sb, blkno, key, bh, item, false);
 }
 
@@ -283,6 +288,8 @@ int scoutfs_skip_delete(struct super_block *sb, u64 blkno,
 	int cmp;
 	int ret;
 	int i;
+
+	scoutfs_inc_counter(sb, skip_delete);
 
 	ret = skip_search(sb, blkno, &path, key, &cmp);
 	if (ret == 0) {
@@ -315,6 +322,8 @@ int scoutfs_skip_next(struct super_block *sb, u64 blkno,
 
 	if (!(*bh))
 		return -ENOENT;
+
+	scoutfs_inc_counter(sb, skip_next);
 
 	next = (*item)->skip_next[0];
 	brelse(*bh);

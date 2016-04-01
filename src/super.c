@@ -30,6 +30,10 @@
 #include "counters.h"
 #include "scoutfs_trace.h"
 
+/* only for giant rbtree hack */
+#include <linux/rbtree.h>
+#include "ival.h"
+
 static struct kset *scoutfs_kset;
 
 static const struct super_operations scoutfs_super_ops = {
@@ -248,6 +252,8 @@ static void teardown_module(void)
 static int __init scoutfs_module_init(void)
 {
 	int ret;
+
+	giant_rbtree_hack_build_bugs();
 
 	scoutfs_init_counters();
 

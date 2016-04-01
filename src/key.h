@@ -71,4 +71,10 @@ static inline void scoutfs_inc_key(struct scoutfs_key *key)
 	}
 }
 
+static inline struct scoutfs_key *scoutfs_max_key(struct scoutfs_key *a,
+						  struct scoutfs_key *b)
+{
+	return scoutfs_key_cmp(a, b) > 0 ? a : b;
+}
+
 #endif

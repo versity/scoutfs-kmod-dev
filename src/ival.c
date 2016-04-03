@@ -135,14 +135,13 @@ struct scoutfs_ival *scoutfs_next_ival(struct scoutfs_ival_tree *tree,
 	if (!ival)
 		return first_ival(tree, start, end);
 
-	while ((node = rb_next(&ival->node))) {
+	node = rb_next(&ival->node);
+	if (node) {
 		ival = container_of(node, struct scoutfs_ival, node);
-
-		if (scoutfs_cmp_key_ranges(start, end,
-					   &ival->start, &ival->end))
-			ival = NULL;
-		break;
+		if (!scoutfs_cmp_key_ranges(start, end,
+					    &ival->start, &ival->end))
+			return ival;
 	}
 
-	return ival;
+	return NULL;
 }

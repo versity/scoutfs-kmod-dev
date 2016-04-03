@@ -66,7 +66,7 @@ struct scoutfs_item_iter {
 	struct buffer_head *bh;
 	struct scoutfs_item *item;
 	u64 blkno;
-	bool restart_after;
+	struct scoutfs_key after_seg;
 };
 
 void scoutfs_put_iter_list(struct list_head *list)
@@ -138,8 +138,6 @@ static bool try_lock_dirty_mutex(struct super_block *sb, u64 blkno)
  * then search through the item keys.  The first matching item we find
  * is returned.
  *
- * XXX lock the dirty log segment?
- *
  * -ENOENT is returned if the item isn't present.  The caller needs to put
  * the ref if we return success.
  */
@@ -147,12 +145,15 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 		      struct scoutfs_item_ref *ref)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_ring_manifest_entry ment;
 	struct scoutfs_item *item = NULL;
 	struct scoutfs_bloom_bits bits;
+	struct scoutfs_manifest_entry *ments;
 	struct buffer_head *bh;
 	bool locked;
+	u64 blkno;
 	int ret;
+	int nr;
+	int i;
 
 	/* XXX hold manifest */
 
@@ -160,13 +161,19 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 
 	item = NULL;
 	ret = -ENOENT;
-	memset(&ment, 0, sizeof(struct scoutfs_ring_manifest_entry));
-	while (scoutfs_foreach_range_segment(sb, key, key, &ment)) {
 
+	nr = scoutfs_manifest_find_key(sb, key, &ments);
+	if (nr < 0)
+		return nr;
+	if (nr == 0)
+		return -ENOENT;
+
+	for (i = 0; i < nr; i++) {
 		/* XXX read-ahead all bloom blocks */
+		blkno = le64_to_cpu(ments[i].blkno);
+		/* XXX verify seqs */
 
-		ret = scoutfs_test_bloom_bits(sb, le64_to_cpu(ment.blkno),
-					      key, &bits);
+		ret = scoutfs_test_bloom_bits(sb, blkno, key, &bits);
 		if (ret < 0)
 			break;
 		if (!ret) {
@@ -176,9 +183,8 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 
 		/* XXX read-ahead all item header blocks */
 
-		locked = try_lock_dirty_mutex(sb, le64_to_cpu(ment.blkno));
-		ret = scoutfs_skip_lookup(sb, le64_to_cpu(ment.blkno), key,
-					  &bh, &item);
+		locked = try_lock_dirty_mutex(sb, blkno);
+		ret = scoutfs_skip_lookup(sb, blkno, key, &bh, &item);
 		if (locked)
 			mutex_unlock(&sbi->dirty_mutex);
 		if (ret) {
@@ -189,12 +195,14 @@ int scoutfs_read_item(struct super_block *sb, struct scoutfs_key *key,
 		break;
 	}
 
+	kfree(ments);
+
 	/* XXX release manifest */
 
 	/* XXX read-ahead all value blocks? */
 
 	if (!ret) {
-		ret = populate_ref(sb, le64_to_cpu(ment.blkno), bh, item, ref);
+		ret = populate_ref(sb, blkno, bh, item, ref);
 		brelse(bh);
 	}
 
@@ -312,49 +320,49 @@ static int start_dirty_segment(struct super_block *sb, u64 blkno)
 }
 
 /*
- * As we fill a dirty segment we don't know which keys it's going to
- * contain.  We add a manifest entry in memory that has it contain all
- * items so that reading will know to search the dirty segment.
+ * As we start to fill a dirty segment we don't know which keys it's
+ * going to contain.  We add a manifest entry in memory that has it
+ * contain all items so that reading will know to search the dirty
+ * segment.
  *
  * Once it's finalized we know the specific range of items it contains
  * and we update the manifest entry in memory for that range and write
  * that to the ring.
+ *
+ * Inserting the updated segment can fail.  If we deleted the segment,
+ * then insertion failed, then reinserting the original entry could fail.
+ * Instead we briefly allow two manifest entries for the same segment.
  */
 static int update_dirty_segment_manifest(struct super_block *sb, u64 blkno,
 					 bool all_items)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_ring_manifest_entry ment;
+	struct scoutfs_manifest_entry ment;
+	struct scoutfs_manifest_entry updated;
 	struct scoutfs_item_block *iblk;
 	struct buffer_head *bh;
-	int ret;
 
 	ment.blkno = cpu_to_le64(blkno);
 	ment.seq = sbi->super.hdr.seq;
 	ment.level = 0;
-
-	if (all_items) {
-		memset(&ment.first, 0, sizeof(struct scoutfs_key));
-		memset(&ment.last, ~0, sizeof(struct scoutfs_key));
-	} else {
-		bh = scoutfs_read_block(sb, blkno + SCOUTFS_BLOOM_BLOCKS);
-		if (!bh) {
-			ret = -EIO;
-			goto out;
-		}
-
-		iblk = (void *)bh->b_data;
-		ment.first = iblk->first;
-		ment.last = iblk->last;
-		brelse(bh);
-	}
+	memset(&ment.first, 0, sizeof(struct scoutfs_key));
+	memset(&ment.last, ~0, sizeof(struct scoutfs_key));
 
 	if (all_items)
-		ret = scoutfs_insert_manifest(sb, &ment);
-	else
-		ret = scoutfs_new_manifest(sb, &ment);
-out:
-	return ret;
+		return scoutfs_insert_manifest(sb, &ment);
+
+	bh = scoutfs_read_block(sb, blkno + SCOUTFS_BLOOM_BLOCKS);
+	if (!bh)
+		return -EIO;
+
+	updated = ment;
+
+	iblk = (void *)bh->b_data;
+	updated.first = iblk->first;
+	updated.last = iblk->last;
+	brelse(bh);
+
+	return scoutfs_finalize_manifest(sb, &ment, &updated);
 }
 
 /*
@@ -670,41 +678,40 @@ int scoutfs_delete_item(struct super_block *sb, struct scoutfs_item_ref *ref)
  *
  * We put the segment references and iteration cursors in a list in the
  * caller so that they can find many next items by advancing the cursors
- * without having to walk the manifest and perform initial binary
+ * without having to walk the manifest and perform initial skip list
  * searches in each segment.
  *
  * The caller is responsible for putting the item ref if we return
  * success.  -ENOENT is returned if there are no more items in the
  * search range.
- *
- * XXX this is wonky.  We don't want to search the manifest for the
- * range, just the initial value.  Then we record the last key in
- * segments we finish and only restart if least is > that or there are
- * no least.  We have to advance the first key when restarting the
- * search.
  */
 int scoutfs_next_item(struct super_block *sb, struct scoutfs_key *first,
 		      struct scoutfs_key *last, struct list_head *iter_list,
 		      struct scoutfs_item_ref *ref)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_ring_manifest_entry ment;
+	struct scoutfs_manifest_entry *ments = NULL;
+	struct scoutfs_key key = *first;
+	struct scoutfs_key least_hole;
 	struct scoutfs_item_iter *least;
 	struct scoutfs_item_iter *iter;
 	struct scoutfs_item_iter *pos;
 	bool locked;
 	int ret;
+	int nr;
+	int i;
 
 restart:
 	if (list_empty(iter_list)) {
+		/* find all the segments that may contain the key */
+		ret = scoutfs_manifest_find_key(sb, &key, &ments);
+		if (ret == 0)
+			ret = -ENOENT;
+		if (ret < 0)
+			goto out;
+		nr = ret;
 
-		/*
-		 * Find all the segments that intersect the search range
-		 * and find the next item in the block from the start
-		 * of the range.
-		 */
-		memset(&ment, 0, sizeof(struct scoutfs_ring_manifest_entry));
-		while (scoutfs_foreach_range_segment(sb, first, last, &ment)) {
+		for (i = 0; i < nr; i++) {
 			iter = kzalloc(sizeof(struct scoutfs_item_iter),
 				      GFP_NOFS);
 			if (!iter) {
@@ -712,38 +719,32 @@ restart:
 				goto out;
 			}
 
-			/*
-			 * We will restart the walk of the manifest blocks if
-			 * we iterate over all the items in this block without
-			 * exhausting the search range.
-			 */
-			if (ment.level > 0 &&
-			    scoutfs_key_cmp(&ment.last, last) < 0)
-				iter->restart_after = true;
-
-			iter->blkno = le64_to_cpu(ment.blkno);
+			iter->blkno = le64_to_cpu(ments[i].blkno);
+			iter->after_seg = ments[i].last;
+			scoutfs_inc_key(&iter->after_seg);
 			list_add_tail(&iter->list, iter_list);
 		}
-		if (list_empty(iter_list)) {
-			ret = -ENOENT;
-			goto out;
-		}
+
+		kfree(ments);
+		ments = NULL;
 	}
 
+	memset(&least_hole, ~0, sizeof(least_hole));
 	least = NULL;
-	ret = 0;
 	list_for_each_entry_safe(iter, pos, iter_list, list) {
 
 		locked = try_lock_dirty_mutex(sb, iter->blkno);
 
-		/* search towards the first key if we haven't yet */
+		/* search towards the key if we haven't yet */
 		if (!iter->item) {
-			ret = scoutfs_skip_search(sb, iter->blkno, first,
+			ret = scoutfs_skip_search(sb, iter->blkno, &key,
 						  &iter->bh, &iter->item);
+		} else {
+			ret = 0;
 		}
 
-		/* then iterate until we find or pass the first key */
-		while (!ret && scoutfs_key_cmp(&iter->item->key, first) < 0) {
+		/* then iterate until we find or pass the key */
+		while (!ret && scoutfs_key_cmp(&iter->item->key, &key) < 0) {
 			ret = scoutfs_skip_next(sb, iter->blkno,
 						&iter->bh, &iter->item);
 		}
@@ -751,34 +752,44 @@ restart:
 		if (locked)
 			mutex_unlock(&sbi->dirty_mutex);
 
-		/* we're done with this block if we past the last key */
-		while (!ret && scoutfs_key_cmp(&iter->item->key, last) > 0) {
+		/* we're done with this segment if it has an item after last */
+		if (!ret && scoutfs_key_cmp(&iter->item->key, last) > 0) {
+			list_del_init(&iter->list);
 			brelse(iter->bh);
-			iter->bh = NULL;
-			iter->item = NULL;
-			ret = -ENOENT;
+			kfree(iter);
+			continue;
 		}
 
+		/*
+		 * If we run out of keys in the segment then we don't know
+		 * the state of keys after this segment in this level.  If
+		 * the hole after the segment is still inside the search
+		 * range then we might need to search it for the next
+		 * item if the least item of the remaining blocks is
+		 * greater than the hole.
+		 */
 		if (ret == -ENOENT) {
-			if (iter->restart_after) {
-				/* need next block at this level */
-				scoutfs_put_iter_list(iter_list);
-				goto restart;
-			} else {
-				/* this level is done */
-				list_del_init(&iter->list);
-				brelse(iter->bh);
-				kfree(iter);
-				continue;
-			}
-		}
-		if (ret)
-			goto out;
+			if (scoutfs_key_cmp(&iter->after_seg, last) <= 0 &&
+			    scoutfs_key_cmp(&iter->after_seg, &least_hole) < 0)
+				least_hole = iter->after_seg;
 
-		/* remember the most recent smallest key from the first */
+			list_del_init(&iter->list);
+			brelse(iter->bh);
+			kfree(iter);
+			continue;
+		}
+
+		/* remember the most recent smallest key */
 		if (!least ||
 		    scoutfs_key_cmp(&iter->item->key, &least->item->key) < 0)
 			least = iter;
+	}
+
+	/* if we had a gap before the least then we need a new search */
+	if (least && scoutfs_key_cmp(&least_hole, &least->item->key) < 0) {
+		scoutfs_put_iter_list(iter_list);
+		key = least_hole;
+		goto restart;
 	}
 
 	if (least)
@@ -787,8 +798,8 @@ restart:
 	else
 		ret = -ENOENT;
 out:
+	kfree(ments);
 	if (ret)
 		scoutfs_put_iter_list(iter_list);
 	return ret;
-
 }

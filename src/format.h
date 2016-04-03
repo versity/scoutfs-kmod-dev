@@ -153,7 +153,7 @@ enum {
  * isn't unused key space between blocks in a level.  We might search
  * blocks when we didn't need to.
  */
-struct scoutfs_ring_manifest_entry {
+struct scoutfs_manifest_entry {
 	__le64 blkno;
 	__le64 seq;
 	__u8 level;
@@ -162,10 +162,6 @@ struct scoutfs_ring_manifest_entry {
 } __packed;
 
 #define SCOUTFS_MANIFESTS_PER_LEVEL 10
-
-struct scoutfs_ring_del_manifest {
-	__le64 blkno;
-} __packed;
 
 /* 2^22 * 10^13 > 2^64 */
 #define SCOUTFS_MAX_LEVEL 13

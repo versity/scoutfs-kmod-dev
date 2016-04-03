@@ -28,8 +28,7 @@ static int replay_ring_block(struct super_block *sb, struct buffer_head *bh)
 {
 	struct scoutfs_ring_block *ring = (void *)bh->b_data;
 	struct scoutfs_ring_entry *ent = (void *)(ring + 1);
-	struct scoutfs_ring_manifest_entry *ment;
-	struct scoutfs_ring_del_manifest *del;
+	struct scoutfs_manifest_entry *ment;
 	struct scoutfs_ring_bitmap *bm;
 	int ret = 0;
 	int i;
@@ -43,8 +42,8 @@ static int replay_ring_block(struct super_block *sb, struct buffer_head *bh)
 			ret = scoutfs_insert_manifest(sb, ment);
 			break;
 		case SCOUTFS_RING_DEL_MANIFEST:
-			del = (void *)(ent + 1);
-			scoutfs_delete_manifest(sb, le64_to_cpu(del->blkno));
+			ment = (void *)(ent + 1);
+			scoutfs_delete_manifest(sb, ment);
 			break;
 		case SCOUTFS_RING_BITMAP:
 			bm = (void *)(ent + 1);

@@ -5,6 +5,11 @@ struct scoutfs_ival_tree {
 	struct rb_root root;
 };
 
+static inline void scoutfs_init_ival_tree(struct scoutfs_ival_tree *tree)
+{
+	tree->root = RB_ROOT;
+}
+
 struct scoutfs_ival {
 	struct rb_node node;
 	struct scoutfs_key start;
@@ -20,6 +25,16 @@ struct scoutfs_ival *scoutfs_next_ival(struct scoutfs_ival_tree *tree,
 				       struct scoutfs_key *start,
 				       struct scoutfs_key *end,
 				       struct scoutfs_ival *ival);
+
+/*
+ * Walk all the intervals in postorder.  This lets us free each ival we
+ * see without erasing and rebalancing.
+ */
+#define foreach_postorder_ival_safe(itree, ival, node, tmp)		\
+	for (node = rb_first_postorder(&(itree)->root);			\
+	     ival = container_of(node, struct scoutfs_ival, node),	\
+		(node && (tmp = *node, 1)), node;			\
+	     node = rb_next_postorder(&tmp))
 
 // struct rb_node {
 //         long unsigned int          __rb_parent_color;    /*     0     8 */

@@ -25,6 +25,7 @@
 #include <linux/tracepoint.h>
 
 #include "key.h"
+#include "format.h"
 
 TRACE_EVENT(scoutfs_bloom_hit,
 	TP_PROTO(struct scoutfs_key *key),
@@ -189,7 +190,7 @@ TRACE_EVENT(scoutfs_write_super,
 );
 
 TRACE_EVENT(scoutfs_insert_manifest,
-	TP_PROTO(struct scoutfs_ring_manifest_entry *ment),
+	TP_PROTO(struct scoutfs_manifest_entry *ment),
 
 	TP_ARGS(ment),
 
@@ -225,7 +226,7 @@ TRACE_EVENT(scoutfs_insert_manifest,
 );
 
 TRACE_EVENT(scoutfs_delete_manifest,
-	TP_PROTO(struct scoutfs_ring_manifest_entry *ment),
+	TP_PROTO(struct scoutfs_manifest_entry *ment),
 
 	TP_ARGS(ment),
 

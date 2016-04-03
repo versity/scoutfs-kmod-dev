@@ -70,7 +70,6 @@ void scoutfs_insert_ival(struct scoutfs_ival_tree *tree,
 		ival->subtree_end = *scoutfs_max_key(&ival->subtree_end,
 						     &ins->end);
 
-		/* XXX <= and >= consistent? */
 		if (scoutfs_key_cmp(&ins->start, &ival->start) < 0)
 			node = &(*node)->rb_left;
 		else

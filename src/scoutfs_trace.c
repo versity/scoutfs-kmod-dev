@@ -24,9 +24,6 @@
 #include "dir.h"
 #include "msg.h"
 #include "block.h"
-#include "manifest.h"
-#include "ring.h"
-#include "segment.h"
 
 #define CREATE_TRACE_POINTS
 #include "scoutfs_trace.h"

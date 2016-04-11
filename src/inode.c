@@ -19,7 +19,7 @@
 #include "super.h"
 #include "key.h"
 #include "inode.h"
-#include "segment.h"
+#include "btree.h"
 #include "dir.h"
 #include "filerw.h"
 #include "scoutfs_trace.h"
@@ -112,17 +112,17 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 
 static int scoutfs_read_locked_inode(struct inode *inode)
 {
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct super_block *sb = inode->i_sb;
-	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_key key;
 	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_read_item(sb, &key, &ref);
+	ret = scoutfs_btree_lookup(sb, &key, &curs);
 	if (!ret) {
-		load_inode(inode, ref.val);
-		scoutfs_put_ref(&ref);
+		load_inode(inode, curs.val);
+		scoutfs_btree_release(&curs);
 	}
 
 	return 0;
@@ -213,16 +213,17 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 int scoutfs_dirty_inode_item(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	DECLARE_SCOUTFS_ITEM_REF(ref);
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct scoutfs_key key;
 	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_dirty_item(sb, &key, sizeof(struct scoutfs_inode), &ref);
+	ret = scoutfs_btree_dirty(sb, &key, sizeof(struct scoutfs_inode),
+				   &curs);
 	if (!ret) {
-		store_inode(ref.val, inode);
-		scoutfs_put_ref(&ref);
+		store_inode(curs.val, inode);
+		scoutfs_btree_release(&curs);
 		trace_scoutfs_dirty_inode(inode);
 	}
 	return ret;
@@ -239,18 +240,20 @@ int scoutfs_dirty_inode_item(struct inode *inode)
  */
 void scoutfs_update_inode_item(struct inode *inode)
 {
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct super_block *sb = inode->i_sb;
-	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_key key;
 	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_read_item(sb, &key, &ref);
+	/* XXX maybe just use dirty again?  not sure.. */
+	ret = scoutfs_btree_dirty(sb, &key, sizeof(struct scoutfs_inode),
+				   &curs);
 	BUG_ON(ret);
 
-	store_inode(ref.val, inode);
-	scoutfs_put_ref(&ref);
+	store_inode(curs.val, inode);
+	scoutfs_btree_release(&curs);
 	trace_scoutfs_update_inode(inode);
 }
 
@@ -262,8 +265,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct scoutfs_inode_info *ci;
-	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_key key;
 	struct inode *inode;
 	int ret;
@@ -285,14 +288,14 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_create_item(inode->i_sb, &key,
-				  sizeof(struct scoutfs_inode), &ref);
+	ret = scoutfs_btree_insert(inode->i_sb, &key,
+				   sizeof(struct scoutfs_inode), &curs);
 	if (ret) {
 		iput(inode);
 		return ERR_PTR(ret);
 	}
 
-	scoutfs_put_ref(&ref);
+	scoutfs_btree_release(&curs);
 	return inode;
 }
 

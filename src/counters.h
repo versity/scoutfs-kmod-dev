@@ -12,14 +12,11 @@
  * other places by this macro.  Don't forget to update LAST_COUNTER.
  */
 #define EXPAND_EACH_COUNTER 		\
-	EXPAND_COUNTER(skip_lookup)	\
-	EXPAND_COUNTER(skip_insert)	\
-	EXPAND_COUNTER(skip_search)	\
-	EXPAND_COUNTER(skip_delete)	\
-	EXPAND_COUNTER(skip_next)	\
+	EXPAND_COUNTER(block_mem_alloc)	\
+	EXPAND_COUNTER(block_mem_free)
 
-#define FIRST_COUNTER skip_lookup
-#define LAST_COUNTER skip_next
+#define FIRST_COUNTER block_mem_alloc
+#define LAST_COUNTER block_mem_free
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

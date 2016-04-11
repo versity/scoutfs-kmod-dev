@@ -1,10 +1,30 @@
 #ifndef _SCOUTFS_BLOCK_H_
 #define _SCOUTFS_BLOCK_H_
 
-struct buffer_head *scoutfs_read_block(struct super_block *sb, u64 blkno);
-struct buffer_head *scoutfs_read_block_off(struct super_block *sb, u64 blkno,
-					   u32 off);
-struct buffer_head *scoutfs_new_block(struct super_block *sb, u64 blkno);
-void scoutfs_calc_hdr_crc(struct buffer_head *bh);
+#include <linux/fs.h>
+#include <linux/rwlock.h>
+#include <linux/atomic.h>
+
+#define SCOUTFS_BLOCK_BIT_UPTODATE (1 << 0)
+#define SCOUTFS_BLOCK_BIT_ERROR (1 << 1)
+
+struct scoutfs_block {
+	struct rw_semaphore rwsem;
+	atomic_t refcount;
+	u64 blkno;
+
+	unsigned long bits;
+
+	struct super_block *sb;
+	/* only high order page alloc for now */
+	struct page *page;
+	void *data;
+};
+
+struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno);
+struct scoutfs_block *scoutfs_new_block(struct super_block *sb, u64 blkno);
+void scoutfs_put_block(struct scoutfs_block *bl);
+
+void scoutfs_calc_hdr_crc(struct scoutfs_block *bl);
 
 #endif

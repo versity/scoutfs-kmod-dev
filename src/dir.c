@@ -20,8 +20,8 @@
 #include "dir.h"
 #include "inode.h"
 #include "key.h"
-#include "segment.h"
 #include "super.h"
+#include "btree.h"
 
 /*
  * Directory entries are stored in entries with offsets calculated from
@@ -114,9 +114,9 @@ static unsigned int dent_bytes(unsigned int name_len)
 	return sizeof(struct scoutfs_dirent) + name_len;
 }
 
-static unsigned int item_name_len(struct scoutfs_item_ref *ref)
+static unsigned int item_name_len(struct scoutfs_btree_cursor *curs)
 {
-	return ref->val_len - sizeof(struct scoutfs_dirent);
+	return curs->val_len - sizeof(struct scoutfs_dirent);
 }
 /*
  * Store the dirent item hash in the dentry so that we don't have to
@@ -176,8 +176,8 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 				     unsigned int flags)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct super_block *sb = dir->i_sb;
-	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct scoutfs_dirent *dent;
 	struct dentry_info *di;
 	struct scoutfs_key key;
@@ -209,15 +209,14 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		h = name_hash(dentry->d_name.name, dentry->d_name.len, h);
 		scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
 
-		scoutfs_put_ref(&ref);
-		ret = scoutfs_read_item(sb, &key, &ref);
+		ret = scoutfs_btree_lookup(sb, &key, &curs);
 		if (ret == -ENOENT)
 			continue;
 		if (ret < 0)
 			break;
 
-		dent = ref.val;
-		name_len = item_name_len(&ref);
+		dent = curs.val;
+		name_len = item_name_len(&curs);
 		if (names_equal(dentry->d_name.name, dentry->d_name.len,
 				dent->name, name_len)) {
 			ino = le64_to_cpu(dent->ino);
@@ -228,7 +227,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		}
 	}
 
-	scoutfs_put_ref(&ref);
+	scoutfs_btree_release(&curs);
 out:
 	if (ret == -ENOENT) {
 		inode = NULL;
@@ -275,12 +274,11 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 {
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
-	DECLARE_SCOUTFS_ITEM_REF(ref);
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct scoutfs_dirent *dent;
 	struct scoutfs_key first;
 	struct scoutfs_key last;
 	unsigned int name_len;
-	LIST_HEAD(iter_list);
 	int ret = 0;
 	u32 pos;
 
@@ -294,14 +292,13 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 		scoutfs_set_key(&first, scoutfs_ino(inode), SCOUTFS_DIRENT_KEY,
 				file->f_pos);
 
-		scoutfs_put_ref(&ref);
-		ret = scoutfs_next_item(sb, &first, &last, &iter_list, &ref);
+		ret = scoutfs_btree_next(sb, &first, &last, &curs);
 		if (ret)
 			break;
 
-		dent = ref.val;
-		name_len = item_name_len(&ref);
-		pos = scoutfs_key_offset(ref.key);
+		dent = curs.val;
+		name_len = item_name_len(&curs);
+		pos = scoutfs_key_offset(curs.key);
 
 		if (filldir(dirent, dent->name, name_len, pos,
 			    le64_to_cpu(dent->ino), dentry_type(dent->type)))
@@ -310,8 +307,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 		file->f_pos = pos + 1;
 	}
 
-	scoutfs_put_ref(&ref);
-	scoutfs_put_iter_list(&iter_list);
+	scoutfs_btree_release(&curs);
 
 	if (ret == -ENOENT)
 		ret = 0;
@@ -324,9 +320,9 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 {
 	struct super_block *sb = dir->i_sb;
 	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct inode *inode = NULL;
 	struct scoutfs_dirent *dent;
-	DECLARE_SCOUTFS_ITEM_REF(ref);
 	struct dentry_info *di;
 	struct scoutfs_key key;
 	int bytes;
@@ -356,7 +352,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		h = name_hash(dentry->d_name.name, dentry->d_name.len, h);
 		scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
 
-		ret = scoutfs_create_item(sb, &key, bytes, &ref);
+		ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
 		if (ret != -EEXIST)
 			break;
 	}
@@ -366,13 +362,13 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		goto out;
 	}
 
-	dent = ref.val;
+	dent = curs.val;
 	dent->ino = cpu_to_le64(scoutfs_ino(inode));
 	dent->type = mode_to_type(inode->i_mode);
 	memcpy(dent->name, dentry->d_name.name, dentry->d_name.len);
 	di->hash = h;
 
-	scoutfs_put_ref(&ref);
+	scoutfs_btree_release(&curs);
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -417,7 +413,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode = dentry->d_inode;
 	struct timespec ts = current_kernel_time();
-	DECLARE_SCOUTFS_ITEM_REF(ref);
+	struct scoutfs_btree_cursor curs = {NULL,};
 	struct dentry_info *di;
 	struct scoutfs_key key;
 	int ret = 0;
@@ -436,12 +432,12 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, di->hash);
 
-	ret = scoutfs_read_item(sb, &key, &ref);
+	ret = scoutfs_btree_lookup(sb, &key, &curs);
 	if (ret)
 		goto out;
 
-	ret = scoutfs_delete_item(sb, &ref);
-	scoutfs_put_ref(&ref);
+	ret = scoutfs_btree_delete(sb, &curs);
+	scoutfs_btree_release(&curs);
 	if (ret)
 		goto out;
 

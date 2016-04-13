@@ -23,6 +23,13 @@ struct scoutfs_block {
 
 struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno);
 struct scoutfs_block *scoutfs_new_block(struct super_block *sb, u64 blkno);
+struct scoutfs_block *scoutfs_alloc_block(struct super_block *sb);
+
+struct scoutfs_block *scoutfs_read_ref(struct super_block *sb,
+				       struct scoutfs_block_ref *ref);
+struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
+				        struct scoutfs_block_ref *ref);
+
 void scoutfs_put_block(struct scoutfs_block *bl);
 
 void scoutfs_calc_hdr_crc(struct scoutfs_block *bl);

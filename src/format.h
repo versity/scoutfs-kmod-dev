@@ -34,6 +34,72 @@ struct scoutfs_block_header {
 	__le64 blkno;
 } __packed;
 
+/*
+ * We should be able to make the offset smaller if neither dirents nor
+ * data items use the full 64 bits.
+ */
+struct scoutfs_key {
+	__le64 inode;
+	u8 type;
+	__le64 offset;
+} __packed;
+
+/*
+ * Currently we sort keys by the numeric value of the types, but that
+ * isn't necessary.  We could have an arbitrary sort order.  So we don't
+ * have to stress about cleverly allocating the types.
+ */
+#define SCOUTFS_INODE_KEY	1
+#define SCOUTFS_DIRENT_KEY	2
+#define SCOUTFS_DATA_KEY	3
+
+#define SCOUTFS_MAX_ITEM_LEN 2048
+
+/*
+ * Block references include the sequence number so that we can detect
+ * readers racing with writers and so that we can tell that we don't
+ * need to follow a reference when traversing based on seqs.
+ */
+struct scoutfs_block_ref {
+	__le64 blkno;
+	__le64 seq;
+} __packed;
+
+struct scoutfs_treap_root {
+	__le16 off;
+} __packed;
+
+struct scoutfs_treap_node {
+	__le16 parent;
+	__le16 left;
+	__le16 right;
+	__le32 prio;
+} __packed;
+
+struct scoutfs_btree_root {
+	u8 height;
+	struct scoutfs_block_ref ref;
+} __packed;
+
+struct scoutfs_btree_block {
+	struct scoutfs_block_header hdr;
+	struct scoutfs_treap_root treap;
+	__le16 total_free;
+	__le16 tail_free;
+	__le16 nr_items;
+} __packed;
+
+struct scoutfs_btree_item {
+	struct scoutfs_key key;
+	struct scoutfs_treap_node tnode;
+	__le16 val_len;
+	char val[0];
+} __packed;
+
+/* Blocks are no more than half free. */
+#define SCOUTFS_BTREE_FREE_LIMIT \
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) / 2)
+
 #define SCOUTFS_UUID_BYTES 16
 
 /*
@@ -50,30 +116,10 @@ struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
-} __packed;
-
-/*
- * We should be able to make the offset smaller if neither dirents nor
- * data items use the full 64 bits.
- */
-struct scoutfs_key {
-	__le64 inode;
-	u8 type;
-	__le64 offset;
+        struct scoutfs_btree_root btree_root;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1
-
-/*
- * Currently we sort keys by the numeric value of the types, but that
- * isn't necessary.  We could have an arbitrary sort order.  So we don't
- * have to stress about cleverly allocating the types.
- */
-#define SCOUTFS_INODE_KEY	1
-#define SCOUTFS_DIRENT_KEY	2
-#define SCOUTFS_DATA_KEY	3
-
-#define SCOUTFS_MAX_ITEM_LEN 2048
 
 struct scoutfs_timespec {
 	__le64 sec;

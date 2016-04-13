@@ -64,6 +64,7 @@ static struct scoutfs_block *alloc_block(struct super_block *sb, u64 blkno)
 void scoutfs_put_block(struct scoutfs_block *bl)
 {
 	if (!IS_ERR_OR_NULL(bl) && atomic_dec_and_test(&bl->refcount)) {
+		trace_printk("freeing bl %p\n", bl);
 		__free_pages(bl->page, SCOUTFS_BLOCK_PAGE_ORDER);
 		kfree(bl);
 		scoutfs_inc_counter(bl->sb, block_mem_free);
@@ -153,10 +154,14 @@ struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno)
 	spin_lock(&sbi->block_lock);
 
 	bl = radix_tree_lookup(&sbi->block_radix, blkno);
-	if (bl && test_bit(SCOUTFS_BLOCK_BIT_ERROR, &bl->bits)) {
-		radix_tree_delete(&sbi->block_radix, bl->blkno);
-		scoutfs_put_block(bl);
-		bl = NULL;
+	if (bl) {
+		if (test_bit(SCOUTFS_BLOCK_BIT_ERROR, &bl->bits)) {
+			radix_tree_delete(&sbi->block_radix, bl->blkno);
+			scoutfs_put_block(bl);
+			bl = NULL;
+		} else {
+			atomic_inc(&bl->refcount);
+		}
 	}
 
 	spin_unlock(&sbi->block_lock);
@@ -180,6 +185,7 @@ struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno)
 	if (found) {
 		scoutfs_put_block(bl);
 		bl = found;
+		atomic_inc(&bl->refcount);
 	} else {
 		radix_tree_insert(&sbi->block_radix, blkno, bl);
 		atomic_inc(&bl->refcount);
@@ -213,8 +219,115 @@ out:
 }
 
 /*
+ * Return the block pointed to by the caller's reference.
+ *
+ * If the reference sequence numbers don't match then we could be racing
+ * with another writer. We back off and try again.  If it happens too
+ * many times the caller assumes that we've hit persistent corruption
+ * and returns an error.
+ *
+ * XXX how does this race with
+ *  - reads that span transactions?
+ *  - writers creating a new dirty block?
+ */
+struct scoutfs_block *scoutfs_read_ref(struct super_block *sb,
+				       struct scoutfs_block_ref *ref)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_block_header *hdr;
+	struct scoutfs_block *bl;
+	struct scoutfs_block *found;
+
+	bl = scoutfs_read_block(sb, le64_to_cpu(ref->blkno));
+	if (!IS_ERR(bl)) {
+		hdr = bl->data;
+
+		if (WARN_ON_ONCE(hdr->seq != ref->seq)) {
+			/* XXX hack, make this a function */
+			spin_lock(&sbi->block_lock);
+			found = radix_tree_lookup(&sbi->block_radix,
+						  bl->blkno);
+			if (found == bl) {
+				radix_tree_delete(&sbi->block_radix, bl->blkno);
+				scoutfs_put_block(bl);
+			}
+			spin_unlock(&sbi->block_lock);
+
+			scoutfs_put_block(bl);
+			bl = ERR_PTR(-EAGAIN);
+		}
+	}
+
+	return bl;
+}
+
+/*
+ * Give the caller a dirty block that they can safely modify.  If the
+ * reference refers to a stable clean block then we allocate a new block
+ * and update the reference.
+ *
+ * Blocks are dirtied and modified within a transaction that has a given
+ * sequence number which we use to determine if the block is currently
+ * dirty or not.
+ *
+ * For now we're using the dirty super block in the sb_info to track
+ * the dirty seq.  That'll be different when we have multiple btrees.
+ *
+ * Callers are working in structures that have sufficient locking to
+ * protect references to the source block.  If we've come to dirty it then
+ * there won't be concurrent users and we can just move it in the cache.
+ */
+struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
+				        struct scoutfs_block_ref *ref)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_block_header *hdr;
+	struct scoutfs_block *found;
+	struct scoutfs_block *bl;
+	u64 blkno;
+	int ret;
+
+	bl = scoutfs_read_block(sb, le64_to_cpu(ref->blkno));
+	if (IS_ERR(bl) || ref->seq == sbi->super.hdr.seq)
+		return bl;
+
+	ret = radix_tree_preload(GFP_NOFS);
+	if (ret) {
+		scoutfs_put_block(bl);
+		return ERR_PTR(ret);
+	}
+
+	/* XXX cheesy */
+	blkno = atomic64_inc_return(&sbi->next_blkno);
+	hdr = bl->data;
+
+	spin_lock(&sbi->block_lock);
+
+	/* XXX don't really like this */
+	found = radix_tree_lookup(&sbi->block_radix, bl->blkno);
+	if (found == bl) {
+		radix_tree_delete(&sbi->block_radix, bl->blkno);
+		atomic_dec(&bl->refcount);
+	}
+
+	bl->blkno = blkno;
+	hdr->blkno = cpu_to_le64(blkno);
+	hdr->seq = sbi->super.hdr.seq;
+	radix_tree_insert(&sbi->block_radix, blkno, bl);
+	atomic_inc(&bl->refcount);
+
+	spin_unlock(&sbi->block_lock);
+	radix_tree_preload_end();
+
+	ref->blkno = hdr->blkno;
+	ref->seq = hdr->seq;
+
+	return bl;
+}
+
+/*
  * Return a newly allocated metadata block with an updated block header
- * to match the current dirty super block.  Callers are responsible for
+ * to match the current dirty seq.  Callers are responsible for
  * serializing access to the block and for zeroing unwritten block
  * contents.
  */
@@ -242,6 +355,7 @@ struct scoutfs_block *scoutfs_new_block(struct super_block *sb, u64 blkno)
 	hdr = bl->data;
 	*hdr = sbi->super.hdr;
 	hdr->blkno = cpu_to_le64(blkno);
+	hdr->seq = sbi->super.hdr.seq;
 
 	spin_lock(&sbi->block_lock);
 	found = radix_tree_lookup(&sbi->block_radix, blkno);
@@ -263,6 +377,21 @@ out:
 	}
 
 	return bl;
+}
+
+/*
+ * Allocate a new dirty writable block.  The caller must be in a
+ * transaction so that we can assign the dirty seq.
+ */
+struct scoutfs_block *scoutfs_alloc_block(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	u64 blkno;
+
+	/* XXX cheesy */
+	blkno = atomic64_inc_return(&sbi->next_blkno);
+
+	return scoutfs_new_block(sb, blkno);
 }
 
 void scoutfs_calc_hdr_crc(struct scoutfs_block *bl)

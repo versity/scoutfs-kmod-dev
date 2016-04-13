@@ -112,7 +112,7 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 
 static int scoutfs_read_locked_inode(struct inode *inode)
 {
-	struct scoutfs_btree_cursor curs = {NULL,};
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
 	int ret;
@@ -209,23 +209,20 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
  *
  * The caller has to prevent sync between dirtying and updating the
  * inodes.
+ *
+ * XXX this will have to do something about variable length inodes
  */
 int scoutfs_dirty_inode_item(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_cursor curs = {NULL,};
 	struct scoutfs_key key;
 	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_btree_dirty(sb, &key, sizeof(struct scoutfs_inode),
-				   &curs);
-	if (!ret) {
-		store_inode(curs.val, inode);
-		scoutfs_btree_release(&curs);
+	ret = scoutfs_btree_dirty(sb, &key);
+	if (!ret)
 		trace_scoutfs_dirty_inode(inode);
-	}
 	return ret;
 }
 
@@ -240,18 +237,13 @@ int scoutfs_dirty_inode_item(struct inode *inode)
  */
 void scoutfs_update_inode_item(struct inode *inode)
 {
-	struct scoutfs_btree_cursor curs = {NULL,};
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
-	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	/* XXX maybe just use dirty again?  not sure.. */
-	ret = scoutfs_btree_dirty(sb, &key, sizeof(struct scoutfs_inode),
-				   &curs);
-	BUG_ON(ret);
-
+	scoutfs_btree_update(sb, &key, &curs);
 	store_inode(curs.val, inode);
 	scoutfs_btree_release(&curs);
 	trace_scoutfs_update_inode(inode);
@@ -265,7 +257,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_btree_cursor curs = {NULL,};
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_inode_info *ci;
 	struct scoutfs_key key;
 	struct inode *inode;

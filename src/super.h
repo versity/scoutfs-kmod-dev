@@ -18,6 +18,9 @@ struct scoutfs_sb_info {
 	atomic64_t next_ino;
 	atomic64_t next_blkno;
 
+	/* XXX there will be a lot more of these :) */
+	struct rw_semaphore btree_rwsem;
+
 	/* $sysfs/fs/scoutfs/$id/ */
 	struct kset *kset;
 

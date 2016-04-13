@@ -103,6 +103,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->block_lock);
 	INIT_RADIX_TREE(&sbi->block_radix, GFP_NOFS);
 	init_waitqueue_head(&sbi->block_wq);
+	init_rwsem(&sbi->btree_rwsem);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);

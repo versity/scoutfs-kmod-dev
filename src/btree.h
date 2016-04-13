@@ -8,51 +8,27 @@ struct scoutfs_btree_cursor {
 
 	/* for callers */
 	struct scoutfs_key *key;
-	unsigned val_len;
 	void *val;
+	u16 val_len;
+	u16 write:1;
 };
 
-static inline int scoutfs_btree_lookup(struct super_block *sb,
-				       struct scoutfs_key *key,
-				       struct scoutfs_btree_cursor *curs)
-{
-	return -ENOSYS;
-}
+#define DECLARE_SCOUTFS_BTREE_CURSOR(name) \
+        struct scoutfs_btree_cursor name = {NULL,}
 
-static inline int scoutfs_btree_insert(struct super_block *sb,
-				       struct scoutfs_key *key,
-				       unsigned short val_len,
-				       struct scoutfs_btree_cursor *curs)
-{
-	return -ENOSYS;
-}
+int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_key *key,
+			 struct scoutfs_btree_cursor *curs);
+int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_key *key,
+			 unsigned int val_len,
+			 struct scoutfs_btree_cursor *curs);
+int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key);
+int scoutfs_btree_next(struct super_block *sb, struct scoutfs_key *first,
+		       struct scoutfs_key *last,
+		       struct scoutfs_btree_cursor *curs);
+int scoutfs_btree_dirty(struct super_block *sb, struct scoutfs_key *key);
+void scoutfs_btree_update(struct super_block *sb, struct scoutfs_key *key,
+                          struct scoutfs_btree_cursor *curs);
 
-static inline int scoutfs_btree_dirty(struct super_block *sb,
-				      struct scoutfs_key *key,
-				      unsigned short val_len,
-				      struct scoutfs_btree_cursor *curs)
-{
-	return -ENOSYS;
-}
-
-
-static inline int scoutfs_btree_delete(struct super_block *sb,
-				       struct scoutfs_btree_cursor *curs)
-{
-	return -ENOSYS;
-}
-
-static inline int scoutfs_btree_next(struct super_block *sb,
-				     struct scoutfs_key *first,
-				     struct scoutfs_key *last,
-				     struct scoutfs_btree_cursor *curs)
-{
-	return -ENOSYS;
-}
-
-static inline int scoutfs_btree_release(struct scoutfs_btree_cursor *curs)
-{
-	return -ENOSYS;
-}
+void scoutfs_btree_release(struct scoutfs_btree_cursor *curs);
 
 #endif

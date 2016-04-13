@@ -5,3 +5,4 @@ src/*.cmd
 src/.tmp_versions/
 src/Module.symvers
 src/modules.order
+cscope.*

@@ -81,7 +81,7 @@ static bool map_data_region(struct data_region *dr, u64 pos, struct page *page)
 static int scoutfs_readpage(struct file *file, struct page *page)
 {
 	struct inode *inode = file->f_mapping->host;
-	struct scoutfs_btree_cursor curs = {NULL,};
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
 	struct data_region dr;
@@ -93,6 +93,7 @@ static int scoutfs_readpage(struct file *file, struct page *page)
 		scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_DATA_KEY,
 				dr.item_key);
 
+		scoutfs_btree_release(&curs);
 		ret = scoutfs_btree_lookup(sb, &key, &curs);
 		if (ret == -ENOENT) {
 			addr = kmap_atomic(page);
@@ -107,6 +108,8 @@ static int scoutfs_readpage(struct file *file, struct page *page)
 		memcpy(addr + dr.page_off, curs.val + dr.item_off, dr.len);
 		kunmap_atomic(addr);
 	}
+
+	scoutfs_btree_release(&curs);
 
 	if (!ret)
 		SetPageUptodate(page);
@@ -125,7 +128,7 @@ static int scoutfs_readpage(struct file *file, struct page *page)
 static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
 {
 	struct inode *inode = page->mapping->host;
-	struct scoutfs_btree_cursor curs = {NULL,};
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
 	struct data_region dr;
@@ -140,6 +143,7 @@ static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
 				dr.item_key);
 
 		/* XXX dirty */
+		scoutfs_btree_release(&curs);
 		ret = scoutfs_btree_insert(sb, &key, SCOUTFS_MAX_ITEM_LEN,
 					   &curs);
 		if (ret)

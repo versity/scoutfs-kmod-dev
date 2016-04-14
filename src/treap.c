@@ -29,11 +29,28 @@
  * The caller is responsible for locking access to the tree.
  */
 
+/*
+ * treap nodes are embedded in btree items.  Their offset is relative to
+ * the treap root which is embedded in the btree block header.  Their
+ * offset can't have the item overlap the btree block header, nor can
+ * the item fall off the end of the block.
+ */
+static void bug_on_bad_node_off(u16 off)
+{
+	BUG_ON(off < (sizeof(struct scoutfs_btree_block) -
+		      offsetof(struct scoutfs_btree_block, treap) +
+		      offsetof(struct scoutfs_btree_item, tnode)));
+	BUG_ON(off > (SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_item) +
+		      offsetof(struct scoutfs_btree_item, tnode)));
+}
+
 static struct scoutfs_treap_node *off_node(struct scoutfs_treap_root *root,
 					   __le16 off)
 {
 	if (!off)
 		return NULL;
+
+	bug_on_bad_node_off(le16_to_cpu(off));
 
 	return (void *)root + le16_to_cpu(off);
 }
@@ -41,10 +58,15 @@ static struct scoutfs_treap_node *off_node(struct scoutfs_treap_root *root,
 static __le16 node_off(struct scoutfs_treap_root *root,
 			struct scoutfs_treap_node *node)
 {
+	u16 off;
+
 	if (!node)
 		return 0;
 
-	return cpu_to_le16((char *)node - (char *)root);
+	off = (char *)node - (char *)root;
+	bug_on_bad_node_off(off);
+
+	return cpu_to_le16(off);
 }
 
 /*

@@ -80,7 +80,7 @@ static int read_supers(struct super_block *sb)
 	 * XXX These don't exist in the super yet.  They should soon.
 	 */
 	atomic64_set(&sbi->next_ino, SCOUTFS_ROOT_INO + 1);
-	atomic64_set(&sbi->next_blkno, 2);
+	atomic64_set(&sbi->next_blkno, 6);
 
 	return 0;
 }

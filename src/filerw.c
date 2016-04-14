@@ -18,6 +18,7 @@
 #include "inode.h"
 #include "key.h"
 #include "filerw.h"
+#include "trans.h"
 #include "scoutfs_trace.h"
 #include "btree.h"
 
@@ -138,6 +139,10 @@ static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
 
 	set_page_writeback(page);
 
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		goto out;
+
 	for_each_data_region(&dr, page, pos) {
 		scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_DATA_KEY,
 				dr.item_key);
@@ -156,7 +161,8 @@ static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
 	}
 
 	scoutfs_btree_release(&curs);
-
+	scoutfs_release_trans(sb);
+out:
 	if (ret) {
 		SetPageError(page);
 		mapping_set_error(&inode->i_data, ret);
@@ -191,6 +197,7 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 			     struct page *page, void *fsdata)
 {
 	struct inode *inode = mapping->host;
+	struct super_block *sb = inode->i_sb;
 	unsigned off;
 
 	trace_scoutfs_write_end(scoutfs_ino(inode), pos, len, copied);
@@ -203,9 +210,19 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 
 	if (pos + copied > inode->i_size) {
 		i_size_write(inode, pos + copied);
-		/* XXX need to think about pinning and enospc */
-		if (!scoutfs_dirty_inode_item(inode))
-			scoutfs_update_inode_item(inode);
+
+		/*
+		 * XXX This is a crazy hack that will go away when the
+		 * file data paths are more robust.  We're barely
+		 * holding them together with duct tape while building
+		 * up the robust metadata support that's needed to do a
+		 * good job with the data pats.
+		 */
+		if (!scoutfs_hold_trans(sb)) {
+			if (!scoutfs_dirty_inode_item(inode))
+				scoutfs_update_inode_item(inode);
+			scoutfs_release_trans(sb);
+		}
 	}
 
 	if (!PageUptodate(page))

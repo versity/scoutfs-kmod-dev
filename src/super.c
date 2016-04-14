@@ -25,6 +25,7 @@
 #include "msg.h"
 #include "block.h"
 #include "counters.h"
+#include "trans.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -32,7 +33,52 @@ static struct kset *scoutfs_kset;
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
 	.destroy_inode = scoutfs_destroy_inode,
+	.sync_fs = scoutfs_sync_fs,
 };
+
+/*
+ * The caller advances the block number and sequence number in the super
+ * every time it wants to dirty it and eventually write it to reference
+ * dirty data that's been written.
+ */
+void scoutfs_advance_dirty_super(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+
+	le64_add_cpu(&super->hdr.blkno, 1);
+	if (le64_to_cpu(super->hdr.blkno) == (SCOUTFS_SUPER_BLKNO +
+					      SCOUTFS_SUPER_NR))
+		super->hdr.blkno = cpu_to_le64(SCOUTFS_SUPER_BLKNO);
+
+	le64_add_cpu(&super->hdr.seq, 1);
+}
+
+/*
+ * The caller is responsible for setting the super header's blkno
+ * and seq to something reasonable.
+ */
+int scoutfs_write_dirty_super(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	size_t sz = sizeof(struct scoutfs_super_block);
+	u64 blkno = le64_to_cpu(sbi->super.hdr.blkno);
+	struct scoutfs_block *bl;
+	int ret;
+
+	/* XXX prealloc? */
+	bl = scoutfs_new_block(sb, blkno);
+	if (WARN_ON_ONCE(IS_ERR(bl)))
+		return PTR_ERR(bl);
+
+	memcpy(bl->data, &sbi->super, sz);
+	memset(bl->data + sz, 0, SCOUTFS_BLOCK_SIZE - sz);
+	scoutfs_calc_hdr_crc(bl);
+	ret = scoutfs_write_block(bl);
+
+	scoutfs_put_block(bl);
+	return ret;
+}
 
 static int read_supers(struct super_block *sb)
 {
@@ -97,13 +143,20 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	sbi = kzalloc(sizeof(struct scoutfs_sb_info), GFP_KERNEL);
 	sb->s_fs_info = sbi;
+	sbi->sb = sb;
 	if (!sbi)
 		return -ENOMEM;
 
 	spin_lock_init(&sbi->block_lock);
 	INIT_RADIX_TREE(&sbi->block_radix, GFP_NOFS);
 	init_waitqueue_head(&sbi->block_wq);
+	atomic_set(&sbi->block_writes, 0);
 	init_rwsem(&sbi->btree_rwsem);
+	atomic_set(&sbi->trans_holds, 0);
+	init_waitqueue_head(&sbi->trans_hold_wq);
+	spin_lock_init(&sbi->trans_write_lock);
+	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
+	init_waitqueue_head(&sbi->trans_write_wq);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
@@ -111,9 +164,12 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 		return -ENOMEM;
 
 	ret = scoutfs_setup_counters(sb) ?:
-	      read_supers(sb);
+	      read_supers(sb) ?:
+	      scoutfs_setup_trans(sb);
 	if (ret)
 		return ret;
+
+	scoutfs_advance_dirty_super(sb);
 
 	inode = scoutfs_iget(sb, SCOUTFS_ROOT_INO);
 	if (IS_ERR(inode))
@@ -138,6 +194,7 @@ static void scoutfs_kill_sb(struct super_block *sb)
 
 	kill_block_super(sb);
 	if (sbi) {
+		scoutfs_shutdown_trans(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)
 			kset_unregister(sbi->kset);

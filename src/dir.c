@@ -22,6 +22,7 @@
 #include "key.h"
 #include "super.h"
 #include "btree.h"
+#include "trans.h"
 
 /*
  * Directory entries are stored in entries with offsets calculated from
@@ -332,13 +333,19 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
-	ret = scoutfs_dirty_inode_item(dir);
+	ret = scoutfs_hold_trans(sb);
 	if (ret)
 		return ret;
 
+	ret = scoutfs_dirty_inode_item(dir);
+	if (ret)
+		goto out;
+
 	inode = scoutfs_new_inode(sb, dir, mode, rdev);
-	if (IS_ERR(inode))
-		return PTR_ERR(inode);
+	if (IS_ERR(inode)) {
+		ret = PTR_ERR(inode);
+		goto out;
+	}
 
 	bytes = dent_bytes(dentry->d_name.len);
 
@@ -384,6 +391,7 @@ out:
 	/* XXX delete the inode item here */
 	if (ret && !IS_ERR_OR_NULL(inode))
 		iput(inode);
+	scoutfs_release_trans(sb);
 	return ret;
 }
 
@@ -419,10 +427,14 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
 		return -ENOTEMPTY;
 
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		return ret;
+
 	ret = scoutfs_dirty_inode_item(dir) ?:
 	      scoutfs_dirty_inode_item(inode);
 	if (ret)
-		return ret;
+		goto out;
 
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, di->hash);
 
@@ -444,6 +456,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	scoutfs_update_inode_item(dir);
 
 out:
+	scoutfs_release_trans(sb);
 	return ret;
 }
 

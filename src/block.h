@@ -30,6 +30,10 @@ struct scoutfs_block *scoutfs_read_ref(struct super_block *sb,
 struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 				        struct scoutfs_block_ref *ref);
 
+int scoutfs_has_dirty_blocks(struct super_block *sb);
+int scoutfs_write_block(struct scoutfs_block *bl);
+int scoutfs_write_dirty_blocks(struct super_block *sb);
+
 void scoutfs_put_block(struct scoutfs_block *bl);
 
 void scoutfs_calc_hdr_crc(struct scoutfs_block *bl);

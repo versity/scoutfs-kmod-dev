@@ -22,6 +22,8 @@
 #include "crc.h"
 #include "counters.h"
 
+#define DIRTY_RADIX_TAG 0
+
 /*
  * XXX
  *  - tie into reclaim
@@ -113,6 +115,38 @@ static void block_read_end_io(struct bio *bio, int err)
 	wake_up(&sbi->block_wq);
 
 	scoutfs_put_block(bl);
+	bio_put(bio);
+}
+
+/*
+ * Once a transaction block is persistent it's fine to drop the dirty
+ * tag.  It's been checksummed so it can be read in again.  It's seq
+ * will be in the current transaction so it'll simply be dirtied and
+ * checksummed and written out again.
+ */
+static void block_write_end_io(struct bio *bio, int err)
+{
+	struct scoutfs_block *bl = bio->bi_private;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(bl->sb);
+	unsigned long flags;
+
+	if (!err) {
+		spin_lock_irqsave(&sbi->block_lock, flags);
+		radix_tree_tag_clear(&sbi->block_radix,
+				     bl->blkno, DIRTY_RADIX_TAG);
+		spin_unlock_irqrestore(&sbi->block_lock, flags);
+	}
+
+	/* not too worried about racing ints */
+	if (err && !sbi->block_write_err)
+		sbi->block_write_err = err;
+
+	if (atomic_dec_and_test(&sbi->block_writes))
+		wake_up(&sbi->block_wq);
+
+	scoutfs_put_block(bl);
+	bio_put(bio);
+
 }
 
 static int block_submit_bio(struct scoutfs_block *bl, int rw)
@@ -121,19 +155,30 @@ static int block_submit_bio(struct scoutfs_block *bl, int rw)
 	struct bio *bio;
 	int ret;
 
+	if (WARN_ON_ONCE(bl->blkno >=
+		i_size_read(sb->s_bdev->bd_inode) >> SCOUTFS_BLOCK_SHIFT)) {
+		printk("trying to read bad blkno %llu\n", bl->blkno);
+	}
+
+
 	bio = bio_alloc(GFP_NOFS, SCOUTFS_PAGES_PER_BLOCK);
 	if (WARN_ON_ONCE(!bio))
 		return -ENOMEM;
 
 	bio->bi_sector = bl->blkno << (SCOUTFS_BLOCK_SHIFT - 9);
 	bio->bi_bdev = sb->s_bdev;
-	/* XXX can we do that? */
-	ret = bio_add_page(bio, bl->page, SCOUTFS_BLOCK_SIZE, 0);
-	if (rw & WRITE)
-		;
-	else
+	if (rw & WRITE) {
+		bio->bi_end_io = block_write_end_io;
+	} else
 		bio->bi_end_io = block_read_end_io;
 	bio->bi_private = bl;
+
+	ret = bio_add_page(bio, bl->page, SCOUTFS_BLOCK_SIZE, 0);
+	if (WARN_ON_ONCE(ret != SCOUTFS_BLOCK_SIZE)) {
+		bio_put(bio);
+		return -ENOMEM;
+	}
+
 	atomic_inc(&bl->refcount);
 	submit_bio(rw, bio);
 
@@ -148,10 +193,11 @@ struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_block *found;
 	struct scoutfs_block *bl;
+	unsigned long flags;
 	int ret;
 
 	/* find an existing block, dropping if it's errored */
-	spin_lock(&sbi->block_lock);
+	spin_lock_irqsave(&sbi->block_lock, flags);
 
 	bl = radix_tree_lookup(&sbi->block_radix, blkno);
 	if (bl) {
@@ -164,7 +210,7 @@ struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno)
 		}
 	}
 
-	spin_unlock(&sbi->block_lock);
+	spin_unlock_irqrestore(&sbi->block_lock, flags);
 	if (bl)
 		goto wait;
 
@@ -179,7 +225,7 @@ struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno)
 	if (ret)
 		goto out;
 
-	spin_lock(&sbi->block_lock);
+	spin_lock_irqsave(&sbi->block_lock, flags);
 
 	found = radix_tree_lookup(&sbi->block_radix, blkno);
 	if (found) {
@@ -191,7 +237,7 @@ struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno)
 		atomic_inc(&bl->refcount);
 	}
 
-	spin_unlock(&sbi->block_lock);
+	spin_unlock_irqrestore(&sbi->block_lock, flags);
 	radix_tree_preload_end();
 
 	if (!found) {
@@ -237,6 +283,7 @@ struct scoutfs_block *scoutfs_read_ref(struct super_block *sb,
 	struct scoutfs_block_header *hdr;
 	struct scoutfs_block *bl;
 	struct scoutfs_block *found;
+	unsigned long flags;
 
 	bl = scoutfs_read_block(sb, le64_to_cpu(ref->blkno));
 	if (!IS_ERR(bl)) {
@@ -244,14 +291,14 @@ struct scoutfs_block *scoutfs_read_ref(struct super_block *sb,
 
 		if (WARN_ON_ONCE(hdr->seq != ref->seq)) {
 			/* XXX hack, make this a function */
-			spin_lock(&sbi->block_lock);
+			spin_lock_irqsave(&sbi->block_lock, flags);
 			found = radix_tree_lookup(&sbi->block_radix,
 						  bl->blkno);
 			if (found == bl) {
 				radix_tree_delete(&sbi->block_radix, bl->blkno);
 				scoutfs_put_block(bl);
 			}
-			spin_unlock(&sbi->block_lock);
+			spin_unlock_irqrestore(&sbi->block_lock, flags);
 
 			scoutfs_put_block(bl);
 			bl = ERR_PTR(-EAGAIN);
@@ -259,6 +306,100 @@ struct scoutfs_block *scoutfs_read_ref(struct super_block *sb,
 	}
 
 	return bl;
+}
+
+/*
+ * XXX This is a gross hack for writing the super.  It doesn't have
+ * per-block write completion indication, it just knows that it's the
+ * only thing that will be writing.
+ */
+int scoutfs_write_block(struct scoutfs_block *bl)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(bl->sb);
+	int ret;
+
+	BUG_ON(atomic_read(&sbi->block_writes) != 0);
+
+	atomic_inc(&sbi->block_writes);
+	ret = block_submit_bio(bl, WRITE);
+	if (ret)
+		atomic_dec(&sbi->block_writes);
+	else
+		wait_event(sbi->block_wq, atomic_read(&sbi->block_writes) == 0);
+
+	return ret ?: sbi->block_write_err;
+}
+
+/*
+ * A quick cheap test so that write dirty blocks only has to return
+ * success or error, not also the lack of dirty blocks.
+ */
+int scoutfs_has_dirty_blocks(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	return radix_tree_tagged(&sbi->block_radix, DIRTY_RADIX_TAG);
+}
+
+/*
+ * Write out all the currently dirty blocks.  The caller has waited
+ * for all the dirty blocks to be consistent and has prevented further
+ * writes while we're working.
+ *
+ * The blocks are kept dirty so that they won't be evicted by reclaim
+ * while they're in flight.  Reads can traverse the blocks while they're
+ * in flight.
+ */
+int scoutfs_write_dirty_blocks(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_block *blocks[16];
+	struct scoutfs_block *bl;
+	unsigned long flags;
+	unsigned long blkno;
+	int ret;
+	int nr;
+	int i;
+
+	blkno = 0;
+	sbi->block_write_err = 0;
+	ret = 0;
+	atomic_inc(&sbi->block_writes);
+
+	do {
+		/* get refs to a bunch of dirty blocks */
+		spin_lock_irqsave(&sbi->block_lock, flags);
+		nr = radix_tree_gang_lookup_tag(&sbi->block_radix,
+						(void **)blocks, blkno,
+						ARRAY_SIZE(blocks),
+						DIRTY_RADIX_TAG);
+		if (nr > 0)
+			blkno = blocks[nr - 1]->blkno + 1;
+		for (i = 0; i < nr; i++)
+			atomic_inc(&blocks[i]->refcount);
+		spin_unlock_irqrestore(&sbi->block_lock, flags);
+
+		/* submit them in order, being careful to put all on err */
+		for (i = 0; i < nr; i++) {
+			bl = blocks[i];
+
+			if (ret == 0) {
+				/* XXX crc could be farmed out */
+				scoutfs_calc_hdr_crc(bl);
+				atomic_inc(&sbi->block_writes);
+				ret = block_submit_bio(bl, WRITE);
+				if (ret)
+					atomic_dec(&sbi->block_writes);
+			}
+			scoutfs_put_block(bl);
+		}
+	} while (nr && !ret);
+
+	/* wait for all io to drain */
+	atomic_dec(&sbi->block_writes);
+	wait_event(sbi->block_wq, atomic_read(&sbi->block_writes) == 0);
+
+	return ret ?: sbi->block_write_err;
 }
 
 /*
@@ -284,6 +425,7 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 	struct scoutfs_block_header *hdr;
 	struct scoutfs_block *found;
 	struct scoutfs_block *bl;
+	unsigned long flags;
 	u64 blkno;
 	int ret;
 
@@ -301,7 +443,7 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 	blkno = atomic64_inc_return(&sbi->next_blkno);
 	hdr = bl->data;
 
-	spin_lock(&sbi->block_lock);
+	spin_lock_irqsave(&sbi->block_lock, flags);
 
 	/* XXX don't really like this */
 	found = radix_tree_lookup(&sbi->block_radix, bl->blkno);
@@ -314,9 +456,10 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 	hdr->blkno = cpu_to_le64(blkno);
 	hdr->seq = sbi->super.hdr.seq;
 	radix_tree_insert(&sbi->block_radix, blkno, bl);
+	radix_tree_tag_set(&sbi->block_radix, blkno, DIRTY_RADIX_TAG);
 	atomic_inc(&bl->refcount);
 
-	spin_unlock(&sbi->block_lock);
+	spin_unlock_irqrestore(&sbi->block_lock, flags);
 	radix_tree_preload_end();
 
 	ref->blkno = hdr->blkno;
@@ -337,6 +480,7 @@ struct scoutfs_block *scoutfs_new_block(struct super_block *sb, u64 blkno)
 	struct scoutfs_block_header *hdr;
 	struct scoutfs_block *found;
 	struct scoutfs_block *bl;
+	unsigned long flags;
 	int ret;
 
 	/* allocate a new block and try to insert it */
@@ -357,7 +501,7 @@ struct scoutfs_block *scoutfs_new_block(struct super_block *sb, u64 blkno)
 	hdr->blkno = cpu_to_le64(blkno);
 	hdr->seq = sbi->super.hdr.seq;
 
-	spin_lock(&sbi->block_lock);
+	spin_lock_irqsave(&sbi->block_lock, flags);
 	found = radix_tree_lookup(&sbi->block_radix, blkno);
 	if (found) {
 		radix_tree_delete(&sbi->block_radix, blkno);
@@ -365,8 +509,9 @@ struct scoutfs_block *scoutfs_new_block(struct super_block *sb, u64 blkno)
 	}
 
 	radix_tree_insert(&sbi->block_radix, blkno, bl);
+	radix_tree_tag_set(&sbi->block_radix, blkno, DIRTY_RADIX_TAG);
 	atomic_inc(&bl->refcount);
-	spin_unlock(&sbi->block_lock);
+	spin_unlock_irqrestore(&sbi->block_lock, flags);
 
 	radix_tree_preload_end();
 	ret = 0;

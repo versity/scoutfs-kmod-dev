@@ -621,7 +621,6 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_btree_block *parent = NULL;
-	struct scoutfs_btree_block *bt;
 	struct scoutfs_btree_root *root;
 	struct scoutfs_block *par_bl = NULL;
 	struct scoutfs_block *bl = NULL;
@@ -659,10 +658,9 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		}
 		if (IS_ERR(bl))
 			break;
-		bt = bl->data;
 
 		/* see if a search needs to move to the next parent ref */
-		if (next_leaf(parent, &item, bt, op, level, key)) {
+		if (next_leaf(parent, &item, bl->data, op, level, key)) {
 			ref = (void *)item->val;
 			level++;
 			scoutfs_put_block(bl);
@@ -686,7 +684,7 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		unlock_block(sbi, par_bl, dirty);
 		scoutfs_put_block(par_bl);
 		par_bl = bl;
-		parent = bt;
+		parent = par_bl->data;
 
 		/* there should always be a parent item */
 		item = bt_after(parent, key);

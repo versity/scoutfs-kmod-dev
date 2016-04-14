@@ -208,6 +208,7 @@ static void move_items(struct scoutfs_btree_block *dst,
 		       int to_move)
 {
 	struct scoutfs_btree_item *from;
+	struct scoutfs_btree_item *del;
 	struct scoutfs_btree_item *to;
 	unsigned int val_len;
 
@@ -222,12 +223,13 @@ static void move_items(struct scoutfs_btree_block *dst,
 		to = create_item(dst, &from->key, val_len);
 		memcpy(to->val, from->val, val_len);
 
-		delete_item(src, from);
-
+		del = from;
 		if (move_right)
 			from = bt_prev(src, from);
 		else
 			from = bt_next(src, from);
+
+		delete_item(src, del);
 		to_move -= item_bytes(to);
 	}
 }
@@ -267,8 +269,7 @@ static void compact_items(struct scoutfs_btree_block *bt)
 		if (from->tnode.parent != MAGIC_DELETED_PARENT) {
 			if (from != to) {
 				memmove(to, from, bytes);
-				scoutfs_treap_move(&bt->treap,
-						   &from->tnode,
+				scoutfs_treap_move(&bt->treap, &from->tnode,
 						   &to->tnode);
 			}
 			to = (void *)to + bytes;
@@ -296,6 +297,7 @@ static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
 	if (!IS_ERR(bl)) {
 		bt = bl->data;
 
+		bt->treap.off = 0;
 		bt->total_free = cpu_to_le16(SCOUTFS_BLOCK_SIZE -
 					sizeof(struct scoutfs_btree_block));
 		bt->tail_free = bt->total_free;
@@ -421,10 +423,15 @@ static struct scoutfs_block *try_split(struct super_block *sb,
 	create_parent_item(parent, left, greatest_key(left));
 
 	if (scoutfs_key_cmp(key, greatest_key(left)) <= 0) {
+		/* insertion will go to the new left block */
 		scoutfs_put_block(right_bl);
 		right_bl = left_bl;
 	} else {
+		/* insertion will still go through us, might need to compact */
 		scoutfs_put_block(left_bl);
+
+		if (le16_to_cpu(right->tail_free) < bytes)
+			compact_items(right);
 	}
 
 	scoutfs_put_block(par_bl);

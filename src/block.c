@@ -21,6 +21,7 @@
 #include "block.h"
 #include "crc.h"
 #include "counters.h"
+#include "buddy.h"
 
 #define DIRTY_RADIX_TAG 0
 
@@ -428,20 +429,19 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 	unsigned long flags;
 	u64 blkno;
 	int ret;
+	int err;
 
 	bl = scoutfs_read_block(sb, le64_to_cpu(ref->blkno));
 	if (IS_ERR(bl) || ref->seq == sbi->super.hdr.seq)
 		return bl;
 
-	ret = radix_tree_preload(GFP_NOFS);
-	if (ret) {
-		scoutfs_put_block(bl);
-		return ERR_PTR(ret);
-	}
+	ret = scoutfs_buddy_alloc(sb, &blkno, 0);
+	if (ret < 0)
+		goto out;
 
-	/* XXX cheesy */
-	blkno = atomic64_inc_return(&sbi->next_blkno);
-	hdr = bl->data;
+	ret = radix_tree_preload(GFP_NOFS);
+	if (ret)
+		goto out;
 
 	spin_lock_irqsave(&sbi->block_lock, flags);
 
@@ -453,8 +453,10 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 	}
 
 	bl->blkno = blkno;
+	hdr = bl->data;
 	hdr->blkno = cpu_to_le64(blkno);
 	hdr->seq = sbi->super.hdr.seq;
+
 	radix_tree_insert(&sbi->block_radix, blkno, bl);
 	radix_tree_tag_set(&sbi->block_radix, blkno, DIRTY_RADIX_TAG);
 	atomic_inc(&bl->refcount);
@@ -464,6 +466,16 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 
 	ref->blkno = hdr->blkno;
 	ref->seq = hdr->seq;
+	ret = 0;
+out:
+	if (ret) {
+		if (blkno) {
+			err = scoutfs_buddy_free(sb, blkno, 0);
+			WARN_ON_ONCE(err); /* XXX hmm */
+		}
+		scoutfs_put_block(bl);
+		bl = ERR_PTR(ret);
+	}
 
 	return bl;
 }
@@ -530,13 +542,21 @@ out:
  */
 struct scoutfs_block *scoutfs_alloc_block(struct super_block *sb)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_block *bl;
 	u64 blkno;
+	int ret;
+	int err;
 
-	/* XXX cheesy */
-	blkno = atomic64_inc_return(&sbi->next_blkno);
+	ret = scoutfs_buddy_alloc(sb, &blkno, 0);
+	if (ret < 0)
+		return ERR_PTR(ret);
 
-	return scoutfs_new_block(sb, blkno);
+	bl = scoutfs_new_block(sb, blkno);
+	if (IS_ERR(bl)) {
+		err = scoutfs_buddy_free(sb, blkno, 0);
+		WARN_ON_ONCE(err); /* XXX hmm */
+	}
+	return bl;
 }
 
 void scoutfs_calc_hdr_crc(struct scoutfs_block *bl)
@@ -544,4 +564,13 @@ void scoutfs_calc_hdr_crc(struct scoutfs_block *bl)
 	struct scoutfs_block_header *hdr = bl->data;
 
 	hdr->crc = cpu_to_le32(scoutfs_crc_block(hdr));
+}
+
+void scoutfs_zero_block_tail(struct scoutfs_block *bl, size_t off)
+{
+	if (WARN_ON_ONCE(off > SCOUTFS_BLOCK_SIZE))
+		return;
+
+	if (off < SCOUTFS_BLOCK_SIZE)
+		memset(bl->data + off, 0, SCOUTFS_BLOCK_SIZE - off);
 }

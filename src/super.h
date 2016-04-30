@@ -5,8 +5,10 @@
 #include <linux/rbtree.h>
 
 #include "format.h"
+#include "buddy.h"
 
 struct scoutfs_counters;
+struct buddy_alloc;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -20,7 +22,9 @@ struct scoutfs_sb_info {
 	int block_write_err;
 
 	atomic64_t next_ino;
-	atomic64_t next_blkno;
+
+	struct mutex buddy_mutex;
+	struct buddy_alloc *bud;
 
 	/* XXX there will be a lot more of these :) */
 	struct rw_semaphore btree_rwsem;

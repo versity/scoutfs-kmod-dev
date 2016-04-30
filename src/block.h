@@ -37,5 +37,6 @@ int scoutfs_write_dirty_blocks(struct super_block *sb);
 void scoutfs_put_block(struct scoutfs_block *bl);
 
 void scoutfs_calc_hdr_crc(struct scoutfs_block *bl);
+void scoutfs_zero_block_tail(struct scoutfs_block *bl, size_t off);
 
 #endif

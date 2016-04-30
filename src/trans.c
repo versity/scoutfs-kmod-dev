@@ -19,6 +19,7 @@
 #include "super.h"
 #include "block.h"
 #include "trans.h"
+#include "buddy.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -63,7 +64,8 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	/* XXX probably want to write out dirty pages in inodes */
 
 	if (scoutfs_has_dirty_blocks(sb)) {
-		ret = scoutfs_write_dirty_blocks(sb) ?:
+		ret = scoutfs_dirty_buddy_chunks(sb) ?:
+		      scoutfs_write_dirty_blocks(sb) ?:
 		      scoutfs_write_dirty_super(sb);
 		if (!ret)
 			advance = 1;
@@ -71,8 +73,10 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 
 	spin_lock(&sbi->trans_write_lock);
-	if (advance)
+	if (advance) {
 		scoutfs_advance_dirty_super(sb);
+		scoutfs_reset_buddy_chunks(sb);
+	}
 	sbi->trans_write_count++;
 	sbi->trans_write_ret = ret;
 	spin_unlock(&sbi->trans_write_lock);

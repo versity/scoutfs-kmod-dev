@@ -126,7 +126,6 @@ static int read_supers(struct super_block *sb)
 	 * XXX These don't exist in the super yet.  They should soon.
 	 */
 	atomic64_set(&sbi->next_ino, SCOUTFS_ROOT_INO + 1);
-	atomic64_set(&sbi->next_blkno, 6);
 
 	return 0;
 }
@@ -151,6 +150,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	INIT_RADIX_TREE(&sbi->block_radix, GFP_NOFS);
 	init_waitqueue_head(&sbi->block_wq);
 	atomic_set(&sbi->block_writes, 0);
+	mutex_init(&sbi->buddy_mutex);
 	init_rwsem(&sbi->btree_rwsem);
 	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);
@@ -165,11 +165,13 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	ret = scoutfs_setup_counters(sb) ?:
 	      read_supers(sb) ?:
-	      scoutfs_setup_trans(sb);
+	      scoutfs_setup_trans(sb) ?:
+	      scoutfs_read_buddy_chunks(sb);
 	if (ret)
 		return ret;
 
 	scoutfs_advance_dirty_super(sb);
+	scoutfs_reset_buddy_chunks(sb);
 
 	inode = scoutfs_iget(sb, SCOUTFS_ROOT_INO);
 	if (IS_ERR(inode))

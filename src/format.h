@@ -19,6 +19,7 @@
  */
 #define SCOUTFS_SUPER_BLKNO ((64 * 1024) >> SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_SUPER_NR 2
+#define SCOUTFS_BUDDY_BLKNO (SCOUTFS_SUPER_BLKNO + SCOUTFS_SUPER_NR)
 
 /*
  * This header is found at the start of every block so that we can
@@ -103,6 +104,38 @@ struct scoutfs_btree_item {
 #define SCOUTFS_UUID_BYTES 16
 
 /*
+ * Arbitrarily choose a reasonably fine grained 64byte chunk.  This is a
+ * balance between write amplification of writing chunks with a single
+ * modified bit, storage overhead of partial blocks losing a chunk to
+ * make room for the block header and having a pos field per chunk, and
+ * runtime memory overhead of a bit per chunk.
+ */
+#define SCOUTFS_BUDDY_CHUNK_LE64S 8
+#define SCOUTFS_BUDDY_CHUNK_BYTES (SCOUTFS_BUDDY_CHUNK_LE64S * 8)
+#define SCOUTFS_BUDDY_CHUNK_BITS (SCOUTFS_BUDDY_CHUNK_BYTES * 8)
+
+/*
+ * After the pair of super blocks are a preallocated ring of blocks
+ * which record modified regions of the buddy bitmap allocator.
+ *
+ * The seq's header needs to match the unwrapped ring index of the
+ * block.
+ */
+struct scoutfs_buddy_block {
+	struct scoutfs_block_header hdr;
+	u8 nr_chunks;
+	struct scoutfs_buddy_chunk {
+		__le32 pos;
+		__le64 bits[SCOUTFS_BUDDY_CHUNK_LE64S];
+	} __packed chunks[0];
+} __packed;
+
+#define SCOUTFS_BUDDY_CHUNKS_PER_BLOCK \
+	((SCOUTFS_BLOCK_SIZE - offsetof(struct scoutfs_buddy_block, chunks)) /\
+	 SCOUTFS_BUDDY_CHUNK_BYTES)
+
+
+/*
  * The super is stored in a pair of blocks in the first chunk on the
  * device.
  *
@@ -116,6 +149,11 @@ struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
+	__le64 total_blocks;
+	__le32 buddy_blocks;
+	__le32 buddy_sweep_bit;
+	__le64 buddy_head;
+	__le64 buddy_tail;
         struct scoutfs_btree_root btree_root;
 } __packed;
 

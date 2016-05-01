@@ -149,6 +149,7 @@ struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
+	__le64 next_ino;
 	__le64 total_blocks;
 	__le32 buddy_blocks;
 	__le32 buddy_sweep_bit;

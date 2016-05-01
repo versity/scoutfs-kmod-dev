@@ -122,11 +122,6 @@ static int read_supers(struct super_block *sb)
 	scoutfs_info(sb, "using super %u with seq %llu",
 		     found, le64_to_cpu(sbi->super.hdr.seq));
 
-	/*
-	 * XXX These don't exist in the super yet.  They should soon.
-	 */
-	atomic64_set(&sbi->next_ino, SCOUTFS_ROOT_INO + 1);
-
 	return 0;
 }
 
@@ -146,6 +141,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sbi)
 		return -ENOMEM;
 
+	spin_lock_init(&sbi->next_ino_lock);
 	spin_lock_init(&sbi->block_lock);
 	INIT_RADIX_TREE(&sbi->block_radix, GFP_NOFS);
 	init_waitqueue_head(&sbi->block_wq);

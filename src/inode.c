@@ -249,6 +249,27 @@ void scoutfs_update_inode_item(struct inode *inode)
 	trace_scoutfs_update_inode(inode);
 }
 
+static int alloc_ino(struct super_block *sb, u64 *ino)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	int ret;
+
+	spin_lock(&sbi->next_ino_lock);
+
+	if (super->next_ino == 0) {
+		ret = -ENOSPC;
+	} else {
+		*ino = le64_to_cpu(super->next_ino);
+		le64_add_cpu(&super->next_ino, 1);
+		ret = 0;
+	}
+
+	spin_unlock(&sbi->next_ino_lock);
+
+	return ret;
+}
+
 /*
  * Allocate and initialize a new inode.  The caller is responsible for
  * creating links to it and updating it.  @dir can be null.
@@ -256,22 +277,26 @@ void scoutfs_update_inode_item(struct inode *inode)
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_inode_info *ci;
 	struct scoutfs_key key;
 	struct inode *inode;
+	u64 ino;
 	int ret;
+
+	ret = alloc_ino(sb, &ino);
+	if (ret)
+		return ERR_PTR(ret);
 
 	inode = new_inode(sb);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
 	ci = SCOUTFS_I(inode);
-	ci->ino = atomic64_inc_return(&sbi->next_ino);
+	ci->ino = ino;
 	get_random_bytes(&ci->salt, sizeof(ci->salt));
 
-	inode->i_ino = ci->ino;
+	inode->i_ino = ino; /* XXX overflow */
 	inode_init_owner(inode, dir, mode);
 	inode_set_bytes(inode, 0);
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;

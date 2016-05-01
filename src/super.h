@@ -15,13 +15,13 @@ struct scoutfs_sb_info {
 
 	struct scoutfs_super_block super;
 
+	spinlock_t next_ino_lock;
+
 	spinlock_t block_lock;
 	struct radix_tree_root block_radix;
 	wait_queue_head_t block_wq;
 	atomic_t block_writes;
 	int block_write_err;
-
-	atomic64_t next_ino;
 
 	struct mutex buddy_mutex;
 	struct buddy_alloc *bud;

@@ -4,7 +4,6 @@
 struct scoutfs_inode_info {
 	u64 ino;
 	u32 salt;
-	u8 max_dirent_hash_nr;
 
 	struct inode inode;
 };

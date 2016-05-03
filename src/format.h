@@ -182,7 +182,6 @@ struct scoutfs_inode {
 	__le32 mode;
 	__le32 rdev;
 	__le32 salt;
-	__u8   max_dirent_hash_nr;
 	struct scoutfs_timespec atime;
 	struct scoutfs_timespec ctime;
 	struct scoutfs_timespec mtime;
@@ -201,12 +200,19 @@ struct scoutfs_dirent {
 } __packed;
 
 /*
- * The max number of dirent hash values determines the overhead of
- * lookups in very large directories.  With 31bit offsets the number
- * of entries stored before enospc tends to plateau around 200 million
- * entries around 8 functions.  That seems OK for now.
+ * Dirent items are stored at keys with the offset set to the hash of
+ * the name.  Creation can find that hash values collide and will
+ * attempt to linearly probe this many following hash values looking for
+ * an unused value.
+ *
+ * In small directories this doesn't really matter because hash values
+ * will so very rarely collide.  At around 50k items we start to see our
+ * first collisions.  16 slots is still pretty quick to scan in the
+ * btree and it gets us up into the hundreds of millions of entries
+ * before enospc is returned as we run out of hash values.
  */
-#define SCOUTFS_MAX_DENT_HASH_NR 8
+#define SCOUTFS_DIRENT_COLL_NR 16
+
 #define SCOUTFS_NAME_LEN 255
 
 /*

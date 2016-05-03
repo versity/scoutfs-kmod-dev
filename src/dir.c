@@ -28,29 +28,24 @@
  * Directory entries are stored in entries with offsets calculated from
  * the hash of their entry name.
  *
- * The upside of having a single namespace of items used for both lookup
- * and readdir iteration reduces the storage overhead of directories.
- * The downside is that dirent operations produce random item access
- * patterns.
+ * Having a single index of items used for both lookup and readdir
+ * iteration reduces the storage overhead of directories.  It also
+ * avoids having to manage the allocation of readdir positions as
+ * directories age and the aggregate create count inches towards the
+ * small 31 bit position limit.  The downside is that dirent name
+ * operations produce random item access patterns.
  *
- * Hash values are limited to 31 bits to avoid bugs from use of 31 bit
- * signed offsets.  We also avoid bugs in network protocols limited to
- * 32 bit directory positions.
+ * Hash values are limited to 31 bits primarily to support older
+ * deployed protocols that only support 31 bits of file entry offsets,
+ * but also to avoid unlikely bugs in programs that store offsets in
+ * signed ints.
  *
- * We have to worry about collisions because we're using the hash of the
- * name.  We simply allow a name to be stored at multiple hash value
- * locations.  Create iterates until it finds an unused value and lookup
- * iterates until it finds an entry at a hash that matches the name.  We
- * can store the max iteration used during create in the directory to
- * limit the number of values we'll check in lookup.  With 31bit hash
- * values we can get tens of thousands of entries before we use two
- * hashes, hundreds for three, millions for four, and so on.  The vast
- * majority of directories will use one hash value.
- *
- * This would be a crazy design in systems where dirent lookups perform
- * dependent block reads down a radix or btree structure for each hash
- * value.  scoutfs makes this a lot cheaper by using the bloom filters
- * in the log segments to short circuit negative item lookups. 
+ * We have to worry about hash collisions.  We linearly probe a fixed
+ * number of hash values past the natural value.  In a typical small
+ * directory this search will terminate immediately because adjacent
+ * items will have distant offset values.  It's only as the directory
+ * gets very large that hash values will start to be this dense and
+ * sweeping over items in a btree leaf is reasonably efficient.
  */
 
 static unsigned int mode_to_type(umode_t mode)
@@ -96,10 +91,6 @@ static int names_equal(const char *name_a, int len_a, const char *name_b,
 }
 
 /*
- * Return the offset portion of a dirent key from the hash of the name.
- * The hash can't be 0 or 1 for . and .. and we chose to limit the max
- * file->f_pos.
- *
  * XXX This crc nonsense is a quick hack.  We'll want something a
  * lot stronger like siphash.
  */
@@ -169,6 +160,12 @@ static struct dentry_info *alloc_dentry_info(struct dentry *dentry)
 	return dentry->d_fsdata;
 }
 
+static u64 last_dirent_key_offset(u32 h)
+{
+	return min_t(u64, (u64)h + SCOUTFS_DIRENT_COLL_NR - 1,
+			  SCOUTFS_DIRENT_LAST_POS);
+}
+
 /*
  * Lookup searches for an entry for the given name amongst the entries
  * stored in the item at the name's hash. 
@@ -181,18 +178,13 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	struct super_block *sb = dir->i_sb;
 	struct scoutfs_dirent *dent;
 	struct dentry_info *di;
-	struct scoutfs_key key;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
 	unsigned int name_len;
 	struct inode *inode;
 	u64 ino = 0;
 	u32 h = 0;
 	int ret;
-	int i;
-
-	if (si->max_dirent_hash_nr == 0) {
-		ret = -ENOENT;
-		goto out;
-	}
 
 	di = alloc_dentry_info(dentry);
 	if (IS_ERR(di)) {
@@ -205,40 +197,35 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
-	h = si->salt;
-	for (i = 0; i < si->max_dirent_hash_nr; i++) {
-		h = name_hash(dentry->d_name.name, dentry->d_name.len, h);
-		scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
+	h = name_hash(dentry->d_name.name, dentry->d_name.len, si->salt);
 
-		scoutfs_btree_release(&curs);
-		ret = scoutfs_btree_lookup(sb, &key, &curs);
-		if (ret == -ENOENT)
-			continue;
-		if (ret < 0)
-			break;
+	scoutfs_set_key(&first, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
+	scoutfs_set_key(&last, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY,
+			last_dirent_key_offset(h));
+
+	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+
+		/* XXX verify */
 
 		dent = curs.val;
 		name_len = item_name_len(&curs);
 		if (names_equal(dentry->d_name.name, dentry->d_name.len,
 				dent->name, name_len)) {
 			ino = le64_to_cpu(dent->ino);
-			ret = 0;
+			di->hash = scoutfs_key_offset(curs.key);
 			break;
-		} else {
-			ret = -ENOENT;
 		}
 	}
 
 	scoutfs_btree_release(&curs);
+
 out:
-	if (ret == -ENOENT) {
-		inode = NULL;
-	} else if (ret) {
+	if (ret < 0)
 		inode = ERR_PTR(ret);
-	} else {
-		di->hash = h;
+	else if (ino == 0)
+		inode = NULL;
+	else
 		inode = scoutfs_iget(sb, ino);
-	}
 
 	return d_splice_alias(inode, dentry);
 }
@@ -266,8 +253,8 @@ static int dir_emit_dots(struct file *file, void *dirent, filldir_t filldir)
 }
 
 /*
- * readdir finds the next entry at or past the hash|coll_nr stored in
- * the current file position.
+ * readdir simply iterates over the dirent items for the dir inode and
+ * uses their offset as the readdir position.
  *
  * It will need to be careful not to read past the region of the dirent
  * hash offset keys that it has access to.
@@ -320,11 +307,12 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct inode *inode = NULL;
 	struct scoutfs_dirent *dent;
 	struct dentry_info *di;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
 	struct scoutfs_key key;
 	int bytes;
 	int ret;
 	u64 h;
-	int i;
 
 	di = alloc_dentry_info(dentry);
 	if (IS_ERR(di))
@@ -348,33 +336,40 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	}
 
 	bytes = dent_bytes(dentry->d_name.len);
+	h = name_hash(dentry->d_name.name, dentry->d_name.len, si->salt);
+	scoutfs_set_key(&first, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
+	scoutfs_set_key(&last, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY,
+			last_dirent_key_offset(h));
 
-	h = si->salt;
-	for (i = 0; i < SCOUTFS_MAX_DENT_HASH_NR; i++) {
-		h = name_hash(dentry->d_name.name, dentry->d_name.len, h);
-		scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, h);
-
-		ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
-		if (ret != -EEXIST)
-			break;
+	/* find the first unoccupied key offset after the hashed name */
+	key = first;
+	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+		key = *curs.key;
+		scoutfs_inc_key(&key);
 	}
-	if (ret) {
-		if (ret == -EEXIST)
-			ret = -ENOSPC;
+	scoutfs_btree_release(&curs);
+	if (ret < 0)
+		goto out;
+
+	if (scoutfs_key_cmp(&key, &last) > 0) {
+		ret = -ENOSPC;
 		goto out;
 	}
+
+	ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
+	if (ret)
+		goto out;
 
 	dent = curs.val;
 	dent->ino = cpu_to_le64(scoutfs_ino(inode));
 	dent->type = mode_to_type(inode->i_mode);
 	memcpy(dent->name, dentry->d_name.name, dentry->d_name.len);
-	di->hash = h;
+	di->hash = scoutfs_key_offset(&key);
 
 	scoutfs_btree_release(&curs);
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
-	si->max_dirent_hash_nr = max_t(int, i + 1, si->max_dirent_hash_nr);
 	inode->i_mtime = inode->i_atime = inode->i_ctime = dir->i_mtime;
 
 	if (S_ISDIR(mode)) {

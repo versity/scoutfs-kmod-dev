@@ -107,7 +107,6 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	inode->i_ctime.tv_nsec = le32_to_cpu(cinode->ctime.nsec);
 	
 	ci->salt = le32_to_cpu(cinode->salt);
-	ci->max_dirent_hash_nr = cinode->max_dirent_hash_nr;
 }
 
 static int scoutfs_read_locked_inode(struct inode *inode)
@@ -189,7 +188,6 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->mtime.nsec = cpu_to_le32(inode->i_mtime.tv_nsec);
 
 	cinode->salt = cpu_to_le32(ci->salt);
-	cinode->max_dirent_hash_nr = ci->max_dirent_hash_nr;
 }
 
 /*

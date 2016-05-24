@@ -26,6 +26,8 @@
 #include "block.h"
 #include "counters.h"
 #include "trans.h"
+#include "roster.h"
+#include "wrlock.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -153,6 +155,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
+	INIT_LIST_HEAD(&sbi->roster_head);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
@@ -162,6 +165,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	ret = scoutfs_setup_counters(sb) ?:
 	      read_supers(sb) ?:
 	      scoutfs_setup_trans(sb) ?:
+	      scoutfs_wrlock_setup(sb) ?:
+	      scoutfs_roster_add(sb) ?:
 	      scoutfs_read_buddy_chunks(sb);
 	if (ret)
 		return ret;
@@ -192,6 +197,8 @@ static void scoutfs_kill_sb(struct super_block *sb)
 
 	kill_block_super(sb);
 	if (sbi) {
+		scoutfs_roster_remove(sb);
+		scoutfs_wrlock_teardown(sb);
 		scoutfs_shutdown_trans(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)

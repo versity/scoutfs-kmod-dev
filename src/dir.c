@@ -22,7 +22,7 @@
 #include "key.h"
 #include "super.h"
 #include "btree.h"
-#include "trans.h"
+#include "wrlock.h"
 
 /*
  * Directory entries are stored in entries with offsets calculated from
@@ -310,7 +310,9 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct scoutfs_key first;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
+	DECLARE_SCOUTFS_WRLOCK_HELD(held);
 	int bytes;
+	u64 ino;
 	int ret;
 	u64 h;
 
@@ -321,7 +323,11 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
-	ret = scoutfs_hold_trans(sb);
+	ret = scoutfs_alloc_ino(sb, &ino);
+	if (ret)
+		return ret;
+
+	ret = scoutfs_wrlock_lock(sb, &held, 2, scoutfs_ino(dir), ino);
 	if (ret)
 		return ret;
 
@@ -329,7 +335,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (ret)
 		goto out;
 
-	inode = scoutfs_new_inode(sb, dir, mode, rdev);
+	inode = scoutfs_new_inode(sb, dir, ino, mode, rdev);
 	if (IS_ERR(inode)) {
 		ret = PTR_ERR(inode);
 		goto out;
@@ -386,7 +392,7 @@ out:
 	/* XXX delete the inode item here */
 	if (ret && !IS_ERR_OR_NULL(inode))
 		iput(inode);
-	scoutfs_release_trans(sb);
+	scoutfs_wrlock_unlock(sb, &held);
 	return ret;
 }
 
@@ -411,6 +417,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode = dentry->d_inode;
 	struct timespec ts = current_kernel_time();
+	DECLARE_SCOUTFS_WRLOCK_HELD(held);
 	struct dentry_info *di;
 	struct scoutfs_key key;
 	int ret = 0;
@@ -422,7 +429,8 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
 		return -ENOTEMPTY;
 
-	ret = scoutfs_hold_trans(sb);
+	ret = scoutfs_wrlock_lock(sb, &held, 2, scoutfs_ino(dir),
+				  scoutfs_ino(inode));
 	if (ret)
 		return ret;
 
@@ -451,7 +459,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	scoutfs_update_inode_item(dir);
 
 out:
-	scoutfs_release_trans(sb);
+	scoutfs_wrlock_unlock(sb, &held);
 	return ret;
 }
 

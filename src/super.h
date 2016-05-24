@@ -9,6 +9,7 @@
 
 struct scoutfs_counters;
 struct buddy_alloc;
+struct wrlock_context;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -16,6 +17,8 @@ struct scoutfs_sb_info {
 	struct scoutfs_super_block super;
 
 	spinlock_t next_ino_lock;
+	u64 next_ino;
+	u64 next_ino_count;
 
 	spinlock_t block_lock;
 	struct radix_tree_root block_radix;
@@ -43,6 +46,11 @@ struct scoutfs_sb_info {
 	struct kset *kset;
 
 	struct scoutfs_counters *counters;
+
+	struct list_head roster_head;
+	u64 roster_id;
+
+	struct wrlock_context *wrlock_context;
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)

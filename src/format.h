@@ -159,6 +159,8 @@ struct scoutfs_super_block {
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1
+#define SCOUTFS_INO_BATCH_SHIFT 20
+#define SCOUTFS_INO_BATCH (1 << SCOUTFS_INO_BATCH_SHIFT)
 
 struct scoutfs_timespec {
 	__le64 sec;

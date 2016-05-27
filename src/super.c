@@ -28,6 +28,7 @@
 #include "trans.h"
 #include "roster.h"
 #include "wrlock.h"
+#include "trace.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -222,12 +223,14 @@ static void teardown_module(void)
 	scoutfs_inode_exit();
 	if (scoutfs_kset)
 		kset_unregister(scoutfs_kset);
+	scoutfs_trace_exit();
 }
 
 static int __init scoutfs_module_init(void)
 {
 	int ret;
 
+	scoutfs_trace_init();
 	scoutfs_init_counters();
 
 	scoutfs_kset = kset_create_and_add("scoutfs", NULL, fs_kobj);

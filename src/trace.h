@@ -97,18 +97,22 @@ static inline void only_check_format(const char *fmt, ...)
  */
 #define scoutfs_trace(sb, fmt, ...) 					\
 do {									\
+	struct scoutfs_sb_info *__sbi = SCOUTFS_SB(sb);			\
 	static char __scoutfs_trace_section __fmt[] = 			\
-		"ns %llu sb %llx pid %llu cpu %llu "fmt; 		\
+		"[%llu.%llu] %llu %llu %llu " __stringify(__LINE__) ": "\
+		fmt;							\
+	struct timeval __tv;						\
 									\
 	BUILD_BUG_ON(fmt[sizeof(fmt) - 2] == '\n');			\
 									\
 	/* check the caller's format before we prepend things to it */	\
 	only_check_format(fmt, CAST_ARGS_U64(__VA_ARGS__));		\
 									\
-	__trace_write(__fmt, 						\
-		      CAST_ARGS_U64(sched_clock(), (long)(sb),		\
-				    current->pid, get_cpu(),		\
-				    __VA_ARGS__));			\
+	do_gettimeofday(&__tv);						\
+									\
+	__trace_write(__fmt, CAST_ARGS_U64(__tv.tv_sec, __tv.tv_usec,	\
+		      __sbi->ctr, current->pid, get_cpu(),		\
+		      __VA_ARGS__));					\
 	put_cpu();							\
 } while (0)
 

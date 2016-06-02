@@ -128,6 +128,12 @@ static int read_supers(struct super_block *sb)
 	return 0;
 }
 
+/*
+ * Only used for tracing output, it's a convenient way to cheaply differentiate
+ * messages from different super blocks.
+ */
+static atomic64_t scoutfs_sb_ctr = ATOMIC64_INIT(0);
+
 static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct scoutfs_sb_info *sbi;
@@ -157,6 +163,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
 	INIT_LIST_HEAD(&sbi->roster_head);
+
+	sbi->ctr = atomic64_inc_return(&scoutfs_sb_ctr);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);

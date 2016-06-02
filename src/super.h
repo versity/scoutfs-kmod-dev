@@ -14,6 +14,8 @@ struct wrlock_context;
 struct scoutfs_sb_info {
 	struct super_block *sb;
 
+	u64 ctr;
+
 	struct scoutfs_super_block super;
 
 	spinlock_t next_ino_lock;

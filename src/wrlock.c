@@ -299,7 +299,9 @@ static struct wrlock_entry *alloc_ent(void)
 /*
  * Callers try to free the ent every time they remove a reference to it
  * from the context and are done with it.  We only free it if there are
- * no more references to it in the context.
+ * no more references to it in the context.  This is called with the
+ * context lock held so it's not racing with other tasks that are
+ * removing references and trying to free.
  */
 static void try_free_ent(struct wrlock_context *ctx, struct wrlock_entry *ent)
 {
@@ -418,6 +420,7 @@ static void unblock_shard(struct wrlock_context *ctx,
 			  struct wrlock_context_shard *shard)
 {
 	struct wrlock_entry *ent;
+	struct wrlock_entry *gr;
 	int i;
 
 	ent = blocked_ent(shard);
@@ -440,10 +443,13 @@ static void unblock_shard(struct wrlock_context *ctx,
 	if (!is_local(ctx, ent)) {
 		for (i = 0; i < ent->nr_shards; i++) {
 			shard = &ctx->shards[ent->shards[i].shd];
+
 			if (shard->granted) {
-				WARN_ON_ONCE(shard->granted->writers);
-				try_free_ent(ctx, shard->granted);
+				gr = shard->granted;
+				WARN_ON_ONCE(gr->writers);
+
 				shard->granted = NULL;
+				try_free_ent(ctx, gr);
 			}
 		}
 
@@ -459,8 +465,11 @@ static void unblock_shard(struct wrlock_context *ctx,
 		WARN_ON_ONCE(shard->granted == ent);
 
 		if (shard->granted) {
-			ent->writers += shard->granted->writers;
-			try_free_ent(ctx, shard->granted);
+			gr = shard->granted;
+			ent->writers += gr->writers;
+
+			shard->granted = NULL;
+			try_free_ent(ctx, gr);
 		}
 
 		shard->granted = ent;
@@ -970,8 +979,11 @@ void scoutfs_wrlock_teardown(struct super_block *sb)
 	for (i = 0; i < ctx->nr_shards; i++) {
 		shard = &ctx->shards[i];
 
-		try_free_ent(ctx, shard->granted);
-		shard->granted = NULL;
+		if (shard->granted) {
+			ent = shard->granted;
+			shard->granted = NULL;
+			try_free_ent(ctx, ent);
+		}
 
 		list_for_each_entry_safe(ent, tmp, &ctx->send_list, send_head) {
 			list_del_init(&ent->send_head);

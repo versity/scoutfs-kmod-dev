@@ -4,7 +4,6 @@
 #include "wire.h"
 
 struct scoutfs_wrlock_held {
-	bool held_trans;
 	u8 nr_shards;
 	u32 shards[SCOUTFS_WRLOCK_MAX_SHARDS];
 };

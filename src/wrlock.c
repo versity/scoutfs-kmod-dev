@@ -21,6 +21,7 @@
 #include "wrlock.h"
 #include "trans.h"
 #include "roster.h"
+#include "trace.h"
 
 /*
  * The persistent structures in each shard in a scoutfs volume can only
@@ -147,9 +148,8 @@ struct wrlock_entry {
 	} shards[SCOUTFS_WRLOCK_MAX_SHARDS];
 };
 
-#define ENTF "ent %p %llu.%u.%llu gr %ld wr %ld lpi %llu nr %u"
-#define ENTA(ent) ent, ent->id.counter, ent->id.jitter, ent->id.roster_id, \
-		  ent->grants, ent->writers, ent->last_peer_id, ent->nr_shards
+#define ENTF "ent id %llu.%llu.%llu"
+#define ENTA(ent) ent->id.counter, ent->id.jitter, ent->id.roster_id
 
 static struct wrlock_entry *ent_from_blocked_node(struct rb_node *node)
 {
@@ -227,6 +227,8 @@ static void insert_ent(struct wrlock_context *ctx, struct wrlock_entry *ins)
 	for (i = 0; i < ins->nr_shards; i++)
 		insert_ent_shard(&ctx->shards[ins->shards[i].shd].blocked_root,
 				 ins, &ins->shards[i].blocked_node);
+
+	scoutfs_trace(ctx->sb, "inserted "ENTF, ENTA(ins));
 }
 
 static struct wrlock_entry *lookup_ent(struct wrlock_context *ctx,
@@ -269,6 +271,8 @@ static void erase_ent(struct wrlock_context *ctx, struct wrlock_entry *ent)
 	for (i = 0; i < ent->nr_shards; i++)
 		erase_and_clear(&ent->shards[i].blocked_node,
 				&ctx->shards[ent->shards[i].shd].blocked_root);
+
+	scoutfs_trace(ctx->sb, "erased "ENTF, ENTA(ent));
 }
 
 static struct wrlock_entry *alloc_ent(void)
@@ -310,8 +314,8 @@ static void try_free_ent(struct wrlock_context *ctx, struct wrlock_entry *ent)
 			return;
 	}
 
-	trace_printk("ent "ENTF"\n", ENTA(ent));
 	WARN_ON_ONCE(ent->writers);
+	scoutfs_trace(ctx->sb, "freed "ENTF, ENTA(ent));
 
 	kfree(ent);
 }
@@ -379,6 +383,7 @@ static void queue_send(struct wrlock_context *ctx, struct wrlock_entry *ent)
 	if (list_empty(&ent->send_head)) {
 		list_add_tail(&ent->send_head, &ctx->send_list);
 		queue_work(ctx->send_workq, &ctx->send_work);
+		scoutfs_trace(ctx->sb, "queued "ENTF, ENTA(ent));
 	}
 }
 
@@ -426,7 +431,7 @@ static void unblock_shard(struct wrlock_context *ctx,
 		return;
 	}
 
-	trace_printk("ent "ENTF"\n", ENTA(ent));
+	scoutfs_trace(ctx->sb, "unblocked "ENTF, ENTA(ent));
 
 	erase_ent(ctx, ent);
 	mark_ent_shards(ctx, ent);
@@ -461,6 +466,9 @@ static void unblock_shard(struct wrlock_context *ctx,
 		shard->granted = ent;
 		if (ent->waiter)
 			ent->writers++;
+
+		scoutfs_trace(ctx->sb, "granted ctx 0x%llx shd %llu wr %llu",
+			      ctx, ent->shards[i].shd, ent->writers);
 	}
 
 	if (ent->waiter) {
@@ -486,7 +494,6 @@ static void unblock_marked_shards(struct wrlock_context *ctx)
 	while ((shard = list_first_entry_or_null(&ctx->mark_list,
 						 struct wrlock_context_shard,
 						 mark_head))) {
-		trace_printk("ctx %p shard %p\n", ctx, shard);
 		list_del_init(&shard->mark_head);
 		unblock_shard(ctx, shard);
 	}
@@ -511,8 +518,6 @@ static u32 ino_shd(struct wrlock_context *ctx, u64 ino)
 static void add_ent_shd(struct wrlock_entry *ent, u32 shd)
 {
 	int i;
-
-	trace_printk("shd %u nr %u\n", shd, ent->nr_shards);
 
 	for (i = 0; i < ent->nr_shards; i++) {
 		if (shd < ent->shards[i].shd)
@@ -580,8 +585,6 @@ int scoutfs_wrlock_lock(struct super_block *sb,
 
 	ent->id.counter = ctx->next_id_counter++;
 
-	trace_printk("ent "ENTF"\n", ENTA(ent));
-
 	insert_ent(ctx, ent);
 	mark_ent_shards(ctx, ent);
 	unblock_marked_shards(ctx);
@@ -591,6 +594,8 @@ int scoutfs_wrlock_lock(struct super_block *sb,
 	ret = wait_event_interruptible(ctx->waitq, held->nr_shards);
 	if (ret == 0)
 		ret = scoutfs_hold_trans(sb);
+
+	scoutfs_trace(sb, "lock nr %llu ret %lld", held->nr_shards, ret);
 
 	/* unlock on error locks the context before using held.nr_shards */
 	if (ret)
@@ -632,7 +637,12 @@ void scoutfs_wrlock_unlock(struct super_block *sb,
 		    WARN_ON_ONCE(shard->granted->writers <= 0))
 			continue;
 
-		if (--shard->granted->writers == 0)
+		shard->granted->writers--;
+
+		scoutfs_trace(sb, "unlock ctx 0x%llx shd %llu wr %llu",
+			      ctx, shd, shard->granted->writers);
+
+		if (shard->granted->writers == 0)
 			mark_context_shard(ctx, shd);
 	}
 
@@ -727,9 +737,16 @@ void scoutfs_wrlock_process_grant(struct super_block *sb,
 	spin_lock(&ctx->lock);
 
 	ent = lookup_ent(ctx, &id);
-	if (ent && ++ent->grants == ctx->grants_needed) {
-		mark_ent_shards(ctx, ent);
-		unblock_marked_shards(ctx);
+	if (ent) {
+		ent->grants++;
+
+		scoutfs_trace(sb, "grant rx "ENTF" grants %llu needed %llu",
+			      ENTA(ent), ent->grants, ctx->grants_needed);
+
+		if (ent->grants == ctx->grants_needed) {
+			mark_ent_shards(ctx, ent);
+			unblock_marked_shards(ctx);
+		}
 	}
 
 	spin_unlock(&ctx->lock);
@@ -782,6 +799,8 @@ static void send_work_func(struct work_struct *work)
 			msg.len = sizeof(msg.grant);
 			peer_id = ent->id.roster_id;
 		}
+
+		scoutfs_trace(sb, "send "ENTF" cmd %llu", ENTA(ent), msg.cmd);
 
 		list_del_init(&ent->send_head);
 		try_free_ent(ctx, ent);
@@ -840,6 +859,9 @@ void scoutfs_wrlock_roster_update(struct super_block *sb, u64 peer_id,
 	} else {
 		ctx->grants_needed--;
 	}
+
+	scoutfs_trace(sb, "update ctx 0x%llx peer_id %llu join %llu gr %llu",
+		      ctx, peer_id, join, ctx->grants_needed);
 
 	/*
 	 * Walk all the blocked entries on all the shards.  Entries can
@@ -920,6 +942,8 @@ int scoutfs_wrlock_setup(struct super_block *sb)
 
 	sbi->wrlock_context = ctx;
 
+	scoutfs_trace(sb, "setup ctx 0x%llx", ctx);
+
 	return 0;
 }
 
@@ -939,7 +963,7 @@ void scoutfs_wrlock_teardown(struct super_block *sb)
 	if (!ctx)
 		return;
 
-	trace_printk("ctx %p\n", ctx);
+	scoutfs_trace(sb, "teardown ctx 0x%llx", ctx);
 
 	destroy_workqueue(ctx->send_workq);
 

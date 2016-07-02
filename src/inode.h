@@ -18,8 +18,6 @@ static inline u64 scoutfs_ino(struct inode *inode)
 	return SCOUTFS_I(inode)->ino;
 }
 
-int scoutfs_alloc_ino(struct super_block *sb, u64 *ino);
-
 struct inode *scoutfs_alloc_inode(struct super_block *sb);
 void scoutfs_destroy_inode(struct inode *inode);
 
@@ -27,7 +25,7 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
 int scoutfs_dirty_inode_item(struct inode *inode);
 void scoutfs_update_inode_item(struct inode *inode);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
-				u64 ino, umode_t mode, dev_t rdev);
+				umode_t mode, dev_t rdev);
 
 void scoutfs_inode_exit(void);
 int scoutfs_inode_init(void);

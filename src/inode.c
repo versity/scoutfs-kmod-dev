@@ -22,7 +22,6 @@
 #include "btree.h"
 #include "dir.h"
 #include "filerw.h"
-#include "wrlock.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -248,68 +247,23 @@ void scoutfs_update_inode_item(struct inode *inode)
 	trace_scoutfs_update_inode(inode);
 }
 
-/*
- * This will need to try and find a mostly idle shard.  For now we only
- * have one :).
- */
-static int get_next_ino_batch(struct super_block *sb)
+static int alloc_ino(struct super_block *sb, u64 *ino)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	DECLARE_SCOUTFS_WRLOCK_HELD(held);
+	struct scoutfs_super_block *super = &sbi->super;
 	int ret;
-
-	ret = scoutfs_wrlock_lock(sb, &held, 1, 1);
-	if (ret)
-		return ret;
 
 	spin_lock(&sbi->next_ino_lock);
-	if (!sbi->next_ino_count) {
-		sbi->next_ino = le64_to_cpu(sbi->super.next_ino);
-		if (sbi->next_ino + SCOUTFS_INO_BATCH < sbi->next_ino) {
-			ret = -ENOSPC;
-		} else {
-			le64_add_cpu(&sbi->super.next_ino, SCOUTFS_INO_BATCH);
-			sbi->next_ino_count = SCOUTFS_INO_BATCH;
-			ret = 0;
-		}
+
+	if (super->next_ino == 0) {
+		ret = -ENOSPC;
+	} else {
+		*ino = le64_to_cpu(super->next_ino);
+		le64_add_cpu(&super->next_ino, 1);
+		ret = 0;
 	}
+
 	spin_unlock(&sbi->next_ino_lock);
-
-	scoutfs_wrlock_unlock(sb, &held);
-
-	return ret;
-}
-
-/*
- * Inode allocation is at the core of supporting parallel creation.
- * Each mount needs to allocate from a pool of free inode numbers which
- * map to a shard that it has locked.
- */
-int scoutfs_alloc_ino(struct super_block *sb, u64 *ino)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	int ret;
-
-	do {
-		/* don't really care if this is racey */
-		if (!sbi->next_ino_count) {
-			ret = get_next_ino_batch(sb);
-			if (ret)
-				break;
-		}
-
-		spin_lock(&sbi->next_ino_lock);
-
-		if (sbi->next_ino_count) {
-			*ino = sbi->next_ino++;
-			sbi->next_ino_count--;
-			ret = 0;
-		} else {
-			ret = -EAGAIN;
-		}
-		spin_unlock(&sbi->next_ino_lock);
-
-	} while (ret == -EAGAIN);
 
 	return ret;
 }
@@ -319,14 +273,18 @@ int scoutfs_alloc_ino(struct super_block *sb, u64 *ino)
  * creating links to it and updating it.  @dir can be null.
  */
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
-				u64 ino, umode_t mode, dev_t rdev)
+				umode_t mode, dev_t rdev)
 {
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_inode_info *ci;
 	struct scoutfs_key key;
 	struct inode *inode;
+	u64 ino;
 	int ret;
 
+	ret = alloc_ino(sb, &ino);
+	if (ret)
+		return ERR_PTR(ret);
 
 	inode = new_inode(sb);
 	if (!inode)

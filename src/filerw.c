@@ -18,7 +18,7 @@
 #include "inode.h"
 #include "key.h"
 #include "filerw.h"
-#include "wrlock.h"
+#include "trans.h"
 #include "scoutfs_trace.h"
 #include "btree.h"
 
@@ -130,7 +130,6 @@ static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
 {
 	struct inode *inode = page->mapping->host;
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
-	DECLARE_SCOUTFS_WRLOCK_HELD(held);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
 	struct data_region dr;
@@ -140,7 +139,7 @@ static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
 
 	set_page_writeback(page);
 
-	ret = scoutfs_wrlock_lock(sb, &held, 1, scoutfs_ino(inode));
+	ret = scoutfs_hold_trans(sb);
 	if (ret)
 		goto out;
 
@@ -162,7 +161,7 @@ static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
 	}
 
 	scoutfs_btree_release(&curs);
-	scoutfs_wrlock_unlock(sb, &held);
+	scoutfs_release_trans(sb);
 out:
 	if (ret) {
 		SetPageError(page);
@@ -199,7 +198,6 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 {
 	struct inode *inode = mapping->host;
 	struct super_block *sb = inode->i_sb;
-	DECLARE_SCOUTFS_WRLOCK_HELD(held);
 	unsigned off;
 
 	trace_scoutfs_write_end(scoutfs_ino(inode), pos, len, copied);
@@ -220,10 +218,10 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 		 * up the robust metadata support that's needed to do a
 		 * good job with the data pats.
 		 */
-		if (!scoutfs_wrlock_lock(sb, &held, 1, scoutfs_ino(inode))) {
+		if (!scoutfs_hold_trans(sb)) {
 			if (!scoutfs_dirty_inode_item(inode))
 				scoutfs_update_inode_item(inode);
-			scoutfs_wrlock_unlock(sb, &held);
+			scoutfs_release_trans(sb);
 		}
 	}
 

@@ -11,7 +11,7 @@ CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
 scoutfs-y += first.o
 
 scoutfs-y += block.o btree.o buddy.o counters.o crc.o dir.o filerw.o \
-	     inode.o ioctl.o msg.o roster.o scoutfs_trace.o super.o trace.o \
-	     trans.o treap.o wrlock.o
+	     inode.o ioctl.o msg.o scoutfs_trace.o super.o trace.o trans.o \
+	     treap.o
 
 scoutfs-y += last.o

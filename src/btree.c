@@ -953,3 +953,38 @@ void scoutfs_btree_release(struct scoutfs_btree_cursor *curs)
 	}
 	curs->bl = NULL;
 }
+
+/*
+ * Find the first missing key between the caller's keys, inclusive.  Set
+ * the caller's hole key and return 0 if we find a missing key.  Return
+ * -ENOSPC if all the keys in the range were present or -errno on errors.
+ *
+ * The caller ensures that it's safe for us to be walking this region
+ * of the tree.
+ */
+int scoutfs_btree_hole(struct super_block *sb, struct scoutfs_key *first,
+		       struct scoutfs_key *last, struct scoutfs_key *hole)
+{
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	int ret;
+
+	*hole = *first;
+	while ((ret = scoutfs_btree_next(sb, first, last, &curs)) > 0) {
+		/* return our expected hole if we skipped it */
+		if (scoutfs_key_cmp(hole, curs.key) < 0)
+			break;
+
+		*hole = *curs.key;
+		scoutfs_inc_key(hole);
+	}
+	scoutfs_btree_release(&curs);
+
+	if (ret >= 0) {
+		if (scoutfs_key_cmp(hole, last) <= 0)
+			ret = 0;
+		else
+			ret = -ENOSPC;
+	}
+
+	return ret;
+}

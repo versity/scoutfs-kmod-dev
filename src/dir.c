@@ -341,20 +341,9 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	scoutfs_set_key(&last, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY,
 			last_dirent_key_offset(h));
 
-	/* find the first unoccupied key offset after the hashed name */
-	key = first;
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
-		key = *curs.key;
-		scoutfs_inc_key(&key);
-	}
-	scoutfs_btree_release(&curs);
-	if (ret < 0)
+	ret = scoutfs_btree_hole(sb, &first, &last, &key);
+	if (ret)
 		goto out;
-
-	if (scoutfs_key_cmp(&key, &last) > 0) {
-		ret = -ENOSPC;
-		goto out;
-	}
 
 	ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
 	if (ret)

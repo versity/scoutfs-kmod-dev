@@ -5,6 +5,8 @@ struct scoutfs_inode_info {
 	u64 ino;
 	u32 salt;
 
+	struct rw_semaphore xattr_rwsem;
+
 	struct inode inode;
 };
 

@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/xattr.h>
 
 #include "format.h"
 #include "super.h"
@@ -23,6 +24,7 @@
 #include "dir.h"
 #include "filerw.h"
 #include "scoutfs_trace.h"
+#include "xattr.h"
 
 /*
  * XXX
@@ -35,6 +37,8 @@ static struct kmem_cache *scoutfs_inode_cachep;
 static void scoutfs_inode_ctor(void *obj)
 {
 	struct scoutfs_inode_info *ci = obj;
+
+	init_rwsem(&ci->xattr_rwsem);
 
 	inode_init_once(&ci->inode);
 }
@@ -63,6 +67,13 @@ void scoutfs_destroy_inode(struct inode *inode)
 	call_rcu(&inode->i_rcu, scoutfs_i_callback);
 }
 
+static const struct inode_operations scoutfs_file_iops = {
+	.setxattr	= scoutfs_setxattr,
+	.getxattr	= scoutfs_getxattr,
+	.listxattr	= scoutfs_listxattr,
+	.removexattr	= scoutfs_removexattr,
+};
+
 /*
  * Called once new inode allocation or inode reading has initialized
  * enough of the inode for us to set the ops based on the mode.
@@ -72,7 +83,7 @@ static void set_inode_ops(struct inode *inode)
 	switch (inode->i_mode & S_IFMT) {
 	case S_IFREG:
 		inode->i_mapping->a_ops = &scoutfs_file_aops;
-//		inode->i_op = &scoutfs_file_iops;
+		inode->i_op = &scoutfs_file_iops;
 		inode->i_fop = &scoutfs_file_fops;
 		break;
 	case S_IFDIR:

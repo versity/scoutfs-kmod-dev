@@ -12,6 +12,6 @@ scoutfs-y += first.o
 
 scoutfs-y += block.o btree.o buddy.o counters.o crc.o dir.o filerw.o \
 	     inode.o ioctl.o msg.o name.o scoutfs_trace.o super.o trace.o \
-	     trans.o treap.o
+	     trans.o treap.o xattr.o
 
 scoutfs-y += last.o

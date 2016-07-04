@@ -22,6 +22,7 @@
 #include "format.h"
 #include "inode.h"
 #include "dir.h"
+#include "xattr.h"
 #include "msg.h"
 #include "block.h"
 #include "counters.h"

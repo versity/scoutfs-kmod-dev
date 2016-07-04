@@ -51,8 +51,9 @@ struct scoutfs_key {
  * have to stress about cleverly allocating the types.
  */
 #define SCOUTFS_INODE_KEY	1
-#define SCOUTFS_DIRENT_KEY	2
-#define SCOUTFS_DATA_KEY	3
+#define SCOUTFS_XATTR_KEY	2
+#define SCOUTFS_DIRENT_KEY	3
+#define SCOUTFS_DATA_KEY	4
 
 #define SCOUTFS_MAX_ITEM_LEN 2048
 
@@ -236,5 +237,15 @@ enum {
 	SCOUTFS_DT_SOCK,
 	SCOUTFS_DT_WHT,
 };
+
+#define SCOUTFS_MAX_XATTR_NAME_LEN 255
+#define SCOUTFS_MAX_XATTR_VALUE_LEN 255
+#define SCOUTFS_XATTR_HASH_MASK 7ULL
+
+struct scoutfs_xattr {
+	__u8 name_len;
+	__u8 value_len;
+	__u8 name[0];
+} __packed;
 
 #endif

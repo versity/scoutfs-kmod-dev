@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/crc32c.h>
 #include <linux/uio.h>
+#include <linux/xattr.h>
 
 #include "format.h"
 #include "dir.h"
@@ -24,6 +25,7 @@
 #include "btree.h"
 #include "trans.h"
 #include "name.h"
+#include "xattr.h"
 
 /*
  * Directory entries are stored in entries with offsets calculated from
@@ -451,6 +453,10 @@ const struct inode_operations scoutfs_dir_iops = {
 	.mkdir		= scoutfs_mkdir,
 	.unlink		= scoutfs_unlink,
 	.rmdir		= scoutfs_unlink,
+	.setxattr	= scoutfs_setxattr,
+	.getxattr	= scoutfs_getxattr,
+	.listxattr	= scoutfs_listxattr,
+	.removexattr	= scoutfs_removexattr,
 };
 
 void scoutfs_dir_exit(void)

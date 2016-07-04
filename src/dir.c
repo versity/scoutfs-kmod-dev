@@ -23,6 +23,7 @@
 #include "super.h"
 #include "btree.h"
 #include "trans.h"
+#include "name.h"
 
 /*
  * Directory entries are stored in entries with offsets calculated from
@@ -84,11 +85,6 @@ static unsigned int dentry_type(unsigned int type)
 	return DT_UNKNOWN;
 }
 
-static int names_equal(const char *name_a, int len_a, const char *name_b,
-		       int len_b)
-{
-	return (len_a == len_b) && !memcmp(name_a, name_b, len_a);
-}
 
 /*
  * XXX This crc nonsense is a quick hack.  We'll want something a
@@ -209,8 +205,8 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 
 		dent = curs.val;
 		name_len = item_name_len(&curs);
-		if (names_equal(dentry->d_name.name, dentry->d_name.len,
-				dent->name, name_len)) {
+		if (scoutfs_names_equal(dentry->d_name.name, dentry->d_name.len,
+					dent->name, name_len)) {
 			ino = le64_to_cpu(dent->ino);
 			di->hash = scoutfs_key_offset(curs.key);
 			break;

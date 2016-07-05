@@ -97,7 +97,8 @@ static inline void only_check_format(const char *fmt, ...)
  */
 #define scoutfs_trace(sb, fmt, ...) 					\
 do {									\
-	struct scoutfs_sb_info *__sbi = SCOUTFS_SB(sb);			\
+	struct super_block *__sb = (sb);				\
+	u64 __sbi_ctr = __sb ? SCOUTFS_SB(__sb)->ctr : 0;		\
 	static char __scoutfs_trace_section __fmt[] = 			\
 		"[%llu.%llu] %llu %llu %llu " __stringify(__LINE__) ": "\
 		fmt;							\
@@ -111,7 +112,7 @@ do {									\
 	do_gettimeofday(&__tv);						\
 									\
 	__trace_write(__fmt, CAST_ARGS_U64(__tv.tv_sec, __tv.tv_usec,	\
-		      __sbi->ctr, current->pid, get_cpu(),		\
+		      __sbi_ctr, current->pid, get_cpu(),		\
 		      __VA_ARGS__));					\
 	put_cpu();							\
 } while (0)

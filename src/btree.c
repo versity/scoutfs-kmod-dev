@@ -414,9 +414,9 @@ static struct scoutfs_block *try_split(struct super_block *sb,
 
 	/* only grow the tree once we have the split neighbour */
 	if (par_bl) {
-		struct scoutfs_key ones;
-		memset(&ones, 0xff, sizeof(ones));
-		create_parent_item(parent, right, &ones);
+		struct scoutfs_key maximal;
+		scoutfs_set_max_key(&maximal);
+		create_parent_item(parent, right, &maximal);
 	}
 
 	move_items(left, right, false, used_total(right) / 2);

@@ -8,6 +8,7 @@ struct scoutfs_btree_cursor {
 
 	/* for callers */
 	struct scoutfs_key *key;
+	u64 seq;
 	void *val;
 	u16 val_len;
 	u16 write:1;
@@ -30,6 +31,9 @@ void scoutfs_btree_update(struct super_block *sb, struct scoutfs_key *key,
                           struct scoutfs_btree_cursor *curs);
 int scoutfs_btree_hole(struct super_block *sb, struct scoutfs_key *first,
 		       struct scoutfs_key *last, struct scoutfs_key *hole);
+int scoutfs_btree_since(struct super_block *sb, struct scoutfs_key *first,
+		        struct scoutfs_key *last, u64 seq,
+		        struct scoutfs_btree_cursor *curs);
 
 void scoutfs_btree_release(struct scoutfs_btree_cursor *curs);
 

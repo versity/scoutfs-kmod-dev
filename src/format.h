@@ -91,9 +91,14 @@ struct scoutfs_btree_block {
 	__le16 nr_items;
 } __packed;
 
+/*
+ * The item sequence number is set to the dirty block's sequence number
+ * when the item is modified.  It is not changed by splits or merges.
+ */
 struct scoutfs_btree_item {
 	struct scoutfs_key key;
 	struct scoutfs_treap_node tnode;
+	__le64 seq;
 	__le16 val_len;
 	char val[0];
 } __packed;

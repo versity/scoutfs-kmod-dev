@@ -20,6 +20,7 @@
 #include "key.h"
 #include "treap.h"
 #include "btree.h"
+#include "trace.h"
 
 /*
  * scoutfs stores file system metadata in btrees whose items have fixed
@@ -47,6 +48,11 @@
  * spine of the tree has maximal keys so that they don't have to be
  * updated if we insert an item with a key greater than everything in
  * the tree.
+ *
+ * btree blocks, block references, and items all have sequence numbers
+ * that are set to the current dirty btree sequence number when they're
+ * modified.  This lets us efficiently search a range of keys for items
+ * that are newer than a given sequence number.
  *
  * Operations are performed in one pass down the tree.  This lets us
  * cascade locks from the root down to the leaves and avoids having to
@@ -171,6 +177,7 @@ static struct scoutfs_btree_item *create_item(struct scoutfs_btree_block *bt,
 	le16_add_cpu(&bt->nr_items, 1);
 
 	item->key = *key;
+	item->seq = bt->hdr.seq;
 	item->val_len = cpu_to_le16(val_len);
 
 	scoutfs_treap_insert(&bt->treap, cmp_tnode_items, &item->tnode);
@@ -222,6 +229,7 @@ static void move_items(struct scoutfs_btree_block *dst,
 
 		to = create_item(dst, &from->key, val_len);
 		memcpy(to->val, from->val, val_len);
+		to->seq = from->seq;
 
 		del = from;
 		if (move_right)
@@ -527,50 +535,9 @@ enum {
 	WALK_INSERT = 1,
 	WALK_DELETE,
 	WALK_NEXT,
-	WALK_PREV,
+	WALK_NEXT_SEQ,
 	WALK_DIRTY,
 };
-
-/*
- * Usually we descend to a leaf that contains the key.  But if we're
- * searching for a next or previous item then we might hit a leaf block
- * that contains the key but no items in the direction of the search.
- * We might need to ascend and continue the search in the next block.
- *
- * The caller has just descended to a leaf and is asking us to discover
- * this case.  We set the parent item and return true to tell the caller
- * to read the new parent item's referenced block.
- *
- * XXX I don't think this can see bts with 0 items?  would need to verify?
- */
-static bool next_leaf(struct scoutfs_btree_block *parent,
-		     struct scoutfs_btree_item **par_item,
-		     struct scoutfs_btree_block *bt, int op, int level,
-		     struct scoutfs_key *key)
-{
-	struct scoutfs_btree_item *nei;
-
-	if (level > 0 || !parent || le16_to_cpu(parent->nr_items) < 2)
-		return false;
-
-	if (op == WALK_NEXT) {
-		nei = bt_next(parent, *par_item);
-		if (nei && (scoutfs_key_cmp(key, greatest_key(bt)) > 0)) {
-			*par_item = nei;
-			return true;
-		}
-	}
-
-	if (op == WALK_PREV) {
-		nei = bt_prev(parent, *par_item);
-		if (nei && (scoutfs_key_cmp(key, least_key(bt)) < 0)) {
-			*par_item = nei;
-			return true;
-		}
-	}
-
-	return false;
-}
 
 /*
  * As we descend we lock parent blocks (or the root), then lock the child,
@@ -608,16 +575,72 @@ static void unlock_block(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl,
 		up_read(rwsem);
 }
 
+static u64 item_block_ref_seq(struct scoutfs_btree_item *item)
+{
+	struct scoutfs_block_ref *ref = (void *)item->val;
+
+	return le64_to_cpu(ref->seq);
+}
+
+/*
+ * Return true if we should skip this item while iterating by sequence
+ * number.  If it's a parent then we test the block ref's seq, if it's a
+ * leaf item then we check the item's seq.
+ */
+static int item_skip_seq(struct scoutfs_btree_item *item,
+			 int level, u64 seq, int op)
+{
+	return op == WALK_NEXT_SEQ && item &&
+	       ((level > 0 && item_block_ref_seq(item) < seq) ||
+	        (level == 0 && le64_to_cpu(item->seq) < seq));
+}
+
+/*
+ * Return the next item, possibly skipping those with sequence numbers
+ * less than the desired sequence number.
+ */
+static struct scoutfs_btree_item *
+item_next_seq(struct scoutfs_btree_block *bt, struct scoutfs_btree_item *item,
+	      int level, u64 seq, int op)
+{
+	do {
+		item = bt_next(bt, item);
+	} while (item_skip_seq(item, level, seq, op));
+
+	return item;
+}
+
+/*
+ * Return the first item after the given key, possibly skipping those
+ * with sequence numbers less than the desired sequence number.
+ */
+static struct scoutfs_btree_item *
+item_after_seq(struct scoutfs_btree_block *bt, struct scoutfs_key *key,
+	       int level, u64 seq, int op)
+{
+	struct scoutfs_btree_item *item;
+
+	item = bt_after(bt, key);
+	if (item_skip_seq(item, level, seq, op))
+		item = item_next_seq(bt, item, level, seq, op);
+
+	return item;
+}
 
 /*
  * Return the leaf block that should contain the given key.  The caller
  * is responsible for searching the leaf block and performing their
- * operation.  The block is returned locked for either reading or writing
- * depending on the operation.
+ * operation.  The block is returned locked for either reading or
+ * writing depending on the operation.
+ *
+ * As we descend through parent items we set next_key to the first key
+ * in the next sibling's block.  This is used by iteration to advance to
+ * the next block when they're done with the block this returns.
  */
 static struct scoutfs_block *btree_walk(struct super_block *sb,
 					struct scoutfs_key *key,
-					unsigned int val_len, int op)
+					struct scoutfs_key *next_key,
+					unsigned int val_len, u64 seq, int op)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_btree_block *parent = NULL;
@@ -629,6 +652,13 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 	unsigned int level;
 	const bool dirty = op == WALK_INSERT || op == WALK_DELETE ||
 			   op == WALK_DIRTY;
+
+	scoutfs_trace(sb, "key "CKF" level %llu seq %llu op %llu",
+		      CKA(key), val_len, seq, op);
+
+	/* no sibling blocks if we don't have parent blocks */
+	if (next_key)
+		scoutfs_set_max_key(next_key);
 
 	lock_block(sbi, par_bl, dirty);
 
@@ -649,6 +679,13 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		return bl;
 	}
 
+
+	/* skip the whole tree if the root ref's seq is old */
+	if (op == WALK_NEXT_SEQ && le64_to_cpu(ref->seq) < seq) {
+		unlock_block(sbi, par_bl, dirty);
+		return ERR_PTR(-ENOENT);
+	}
+
 	while (level--) {
 		/* XXX hmm, need to think about retry */
 		if (dirty) {
@@ -659,12 +696,14 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		if (IS_ERR(bl))
 			break;
 
-		/* see if a search needs to move to the next parent ref */
-		if (next_leaf(parent, &item, bl->data, op, level, key)) {
-			ref = (void *)item->val;
-			level++;
-			scoutfs_put_block(bl);
-			continue;
+		/*
+		 * Update the next key an iterator should read from.
+		 * Keep in mind that iteration is read only so the
+		 * parent item won't be changed splitting or merging.
+		 */
+		if (parent && next_key) {
+			*next_key = item->key;
+			scoutfs_inc_key(next_key);
 		}
 
 		if (op == WALK_INSERT)
@@ -686,12 +725,20 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		par_bl = bl;
 		parent = par_bl->data;
 
-		/* there should always be a parent item */
-		item = bt_after(parent, key);
+		/*
+		 * Find the parent item that references the next child
+		 * block to search.  If we're skipping items with old
+		 * seqs then we might not have any child items to
+		 * search.
+		 */
+		item = item_after_seq(parent, key, level, seq, op);
 		if (!item) {
 			/* current block dropped as parent below */
-			bl = ERR_PTR(-EIO);
-			break;
+			if (op == WALK_NEXT_SEQ) {
+				bl = ERR_PTR(-ENOENT);
+			} else {
+				bl = ERR_PTR(-EIO);
+			} break;
 		}
 
 		/* XXX verify sane length */
@@ -711,6 +758,7 @@ static void set_cursor(struct scoutfs_btree_cursor *curs,
 	curs->bl = bl;
 	curs->item = item;
 	curs->key = &item->key;
+	curs->seq = le64_to_cpu(item->seq);
 	curs->val = item->val;
 	curs->val_len = le16_to_cpu(item->val_len);
 	curs->write = !!write;
@@ -729,7 +777,7 @@ int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_key *key,
 
 	BUG_ON(curs->bl);
 
-	bl = btree_walk(sb, key, 0, 0);
+	bl = btree_walk(sb, key, NULL, 0, 0, 0);
 	if (IS_ERR(bl))
 		return PTR_ERR(bl);
 
@@ -765,7 +813,7 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_key *key,
 
 	BUG_ON(curs->bl);
 
-	bl = btree_walk(sb, key, val_len, WALK_INSERT);
+	bl = btree_walk(sb, key, NULL, val_len, 0, WALK_INSERT);
 	if (IS_ERR(bl))
 		return PTR_ERR(bl);
 	bt = bl->data;
@@ -797,7 +845,7 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 	struct scoutfs_block *bl;
 	int ret;
 
-	bl = btree_walk(sb, key, 0, WALK_DELETE);
+	bl = btree_walk(sb, key, NULL, 0, 0, WALK_DELETE);
 	if (IS_ERR(bl))
 		return PTR_ERR(bl);
 	bt = bl->data;
@@ -826,57 +874,84 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 }
 
 /*
- * The caller initializes the cursor and first and last keys and then
- * gets the cursor set to each item within those keys.
+ * Iterate over items in the tree starting with first and ending with
+ * last.  We point the cursor at each item and return to the caller.
+ * The caller continues the search with the cursor.
  *
- * The btree walk takes care of advancing past interior leaves that
- * don't contain items past the key.  Our job is to find the next item
- * after the key.  If that next item's key is past the caller's last key
- * then the iteration is done.
+ * The caller can limit results to items with a sequence number greater
+ * than or equal to their sequence number.
  *
- * returns 0 if no next, > 0 when curs contains next, < 0 on error
+ * When there isn't an item in the cursor then we walk the btree to the
+ * leaf that should contain the key and look for items from there.  When
+ * we exhaust leaves we search the tree again from the next key that was
+ * increased past the leaf's parent's item.
+ *
+ * Returns > 0 when the cursor has an item, 0 when done, and -errno on error.
  */
-int scoutfs_btree_next(struct super_block *sb, struct scoutfs_key *first,
-		       struct scoutfs_key *last,
-		       struct scoutfs_btree_cursor *curs)
+static int btree_next(struct super_block *sb, struct scoutfs_key *first,
+		      struct scoutfs_key *last, u64 seq, int op,
+		      struct scoutfs_btree_cursor *curs)
 {
 	struct scoutfs_btree_block *bt;
 	struct scoutfs_block *bl;
 	struct scoutfs_key key = *first;
+	struct scoutfs_key next_key;
 	int ret;
 
-	trace_printk("first "CKF" last "CKF" %d curs "CKF"\n",
-		CKA(first), CKA(last),
-		!!curs->bl, CKA(curs->bl ? curs->key : &key));
+	scoutfs_trace(sb, "first "CKF" last "CKF" seq %llu op %llu curs "CKF,
+		      CKA(first), CKA(last), seq, op,
+		      CKA(curs->bl ? curs->key : first));
+
+	if (scoutfs_key_cmp(first, last) > 0)
+		return 0;
 
 	/* find the next item after the cursor, releasing if we're done */
 	if (curs->bl) {
 		key = curs->item->key;
 		scoutfs_inc_key(&key);
 
-		curs->item = bt_next(curs->bl->data, curs->item);
-		trace_printk("next %p\n", curs->item);
+		curs->item = item_next_seq(curs->bl->data, curs->item,
+					   0, seq, op);
 		if (curs->item)
 			set_cursor(curs, curs->bl, curs->item, curs->write);
 		else
 			scoutfs_btree_release(curs);
 	}
 
-	/* walk the tree to find the key, can be first or later */
-	if (!curs->bl) {
-		bl = btree_walk(sb, &key, 0, WALK_NEXT);
-		if (IS_ERR(bl))
+	/* find the leaf that contains the next item after the key */
+	while (!curs->bl && scoutfs_key_cmp(&key, last) <= 0) {
+
+		bl = btree_walk(sb, &key, &next_key, 0, seq, op);
+
+		/* next seq walks can terminate in parents with old seqs */
+		if (op == WALK_NEXT_SEQ && bl == ERR_PTR(-ENOENT)) {
+			key = next_key;
+			continue;
+		}
+
+		if (IS_ERR(bl)) {
+			if (bl == ERR_PTR(-ENOENT))
+				break;
 			return PTR_ERR(bl);
+		}
 		bt = bl->data;
 
-		curs->item = bt_after(bl->data, &key);
-		trace_printk("after %p\n", curs->item);
+		/* keep trying leaves until next_key passes last */
+		curs->item = item_after_seq(bl->data, &key, 0, seq, op);
+		if (!curs->item) {
+			key = next_key;
+			up_read(&bl->rwsem);
+			scoutfs_put_block(bl);
+			continue;
+		}
+
 		if (curs->item) {
 			set_cursor(curs, bl, curs->item, false);
 		} else {
 			up_read(&bl->rwsem);
 			scoutfs_put_block(bl);
 		}
+		break;
 	}
 
 	/* only return the next item if it's within last */
@@ -887,8 +962,21 @@ int scoutfs_btree_next(struct super_block *sb, struct scoutfs_key *first,
 		ret = 0;
 	}
 
-	trace_printk("ret %d\n", ret);
 	return ret;
+}
+
+int scoutfs_btree_next(struct super_block *sb, struct scoutfs_key *first,
+		       struct scoutfs_key *last,
+		       struct scoutfs_btree_cursor *curs)
+{
+	return btree_next(sb, first, last, 0, WALK_NEXT, curs);
+}
+
+int scoutfs_btree_since(struct super_block *sb, struct scoutfs_key *first,
+		        struct scoutfs_key *last, u64 seq,
+		        struct scoutfs_btree_cursor *curs)
+{
+	return btree_next(sb, first, last, seq, WALK_NEXT_SEQ, curs);
 }
 
 /*
@@ -904,7 +992,7 @@ int scoutfs_btree_dirty(struct super_block *sb, struct scoutfs_key *key)
 	struct scoutfs_block *bl;
 	int ret;
 
-	bl = btree_walk(sb, key, 0, WALK_DIRTY);
+	bl = btree_walk(sb, key, NULL, 0, 0, WALK_DIRTY);
 	if (IS_ERR(bl))
 		return PTR_ERR(bl);
 
@@ -929,16 +1017,19 @@ void scoutfs_btree_update(struct super_block *sb, struct scoutfs_key *key,
 			  struct scoutfs_btree_cursor *curs)
 {
 	struct scoutfs_btree_item *item;
+	struct scoutfs_btree_block *bt;
 	struct scoutfs_block *bl;
 
 	BUG_ON(curs->bl);
 
-	bl = btree_walk(sb, key, 0, WALK_DIRTY);
+	bl = btree_walk(sb, key, NULL, 0, 0, WALK_DIRTY);
 	BUG_ON(IS_ERR(bl));
 
 	item = bt_lookup(bl->data, key);
 	BUG_ON(!item);
 
+	bt = bl->data;
+	item->seq = bt->hdr.seq;
 	set_cursor(curs, bl, item, true);
 }
 

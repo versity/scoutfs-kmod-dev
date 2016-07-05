@@ -21,6 +21,7 @@
 #include "trans.h"
 #include "scoutfs_trace.h"
 #include "btree.h"
+#include "ioctl.h"
 
 /*
  * File data is stored in items just like everything else.  This is very
@@ -246,4 +247,5 @@ const struct file_operations scoutfs_file_fops = {
 	.write		= do_sync_write,
 	.aio_read	= generic_file_aio_read,
 	.aio_write	= generic_file_aio_write,
+	.unlocked_ioctl	= scoutfs_ioctl,
 };

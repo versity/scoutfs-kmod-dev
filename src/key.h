@@ -4,7 +4,7 @@
 #include <linux/types.h>
 #include "format.h"
 
-#define CKF "%llu.%u.%llu"
+#define CKF "%llu.%llu.%llu"
 #define CKA(key) \
 	le64_to_cpu((key)->inode), (key)->type, le64_to_cpu((key)->offset)
 
@@ -24,10 +24,17 @@ static inline int le64_cmp(__le64 a, __le64 b)
 	       le64_to_cpu(a) > le64_to_cpu(b) ? 1 : 0;
 }
 
+/*
+ * Items are sorted by type and then by inode to reflect the relative
+ * frequency of use.  Inodes and xattrs are hot, then dirents, then file
+ * data extents.  We want each use class to be hot and dense, we don't
+ * want a scan of the inodes to have to skip over each inode's extent
+ * items.
+ */
 static inline int scoutfs_key_cmp(struct scoutfs_key *a, struct scoutfs_key *b)
 {
-	return le64_cmp(a->inode, b->inode) ?:
-	       ((short)a->type - (short)b->type) ?: 
+	return ((short)a->type - (short)b->type) ?:
+	       le64_cmp(a->inode, b->inode) ?:
 	       le64_cmp(a->offset, b->offset);
 }
 
@@ -67,8 +74,19 @@ static inline void scoutfs_set_max_key(struct scoutfs_key *key)
 	scoutfs_set_key(key, ~0ULL, ~0, ~0ULL);
 }
 
+/*
+ * This saturates at (~0,~0,~0) instead of wrapping.  This will never be
+ * an issue for real item keys but parent item keys along the right
+ * spine of the tree have maximal key values that could wrap if
+ * incremented.
+ */
 static inline void scoutfs_inc_key(struct scoutfs_key *key)
 {
+	if (key->inode == cpu_to_le64(~0ULL) &&
+	    key->type == (u8)~0 &&
+	    key->offset == cpu_to_le64(~0ULL))
+		return;
+
 	le64_add_cpu(&key->offset, 1);
 	if (!key->offset) {
 		if (++key->type == 0)

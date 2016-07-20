@@ -20,7 +20,6 @@
 #include "key.h"
 #include "treap.h"
 #include "btree.h"
-#include "trace.h"
 
 /*
  * scoutfs stores file system metadata in btrees whose items have fixed
@@ -653,9 +652,6 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 	const bool dirty = op == WALK_INSERT || op == WALK_DELETE ||
 			   op == WALK_DIRTY;
 
-	scoutfs_trace(sb, "key "CKF" level %llu seq %llu op %llu",
-		      CKA(key), val_len, seq, op);
-
 	/* no sibling blocks if we don't have parent blocks */
 	if (next_key)
 		scoutfs_set_max_key(next_key);
@@ -897,10 +893,6 @@ static int btree_next(struct super_block *sb, struct scoutfs_key *first,
 	struct scoutfs_key key = *first;
 	struct scoutfs_key next_key;
 	int ret;
-
-	scoutfs_trace(sb, "first "CKF" last "CKF" seq %llu op %llu curs "CKF,
-		      CKA(first), CKA(last), seq, op,
-		      CKA(curs->bl ? curs->key : first));
 
 	if (scoutfs_key_cmp(first, last) > 0)
 		return 0;

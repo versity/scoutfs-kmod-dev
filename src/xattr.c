@@ -23,7 +23,6 @@
 #include "trans.h"
 #include "name.h"
 #include "xattr.h"
-#include "trace.h"
 
 /*
  * xattrs are stored in items with offsets set to the hash of their
@@ -209,9 +208,6 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct scoutfs_key new_key;
 	bool old;
 	int ret;
-
-	scoutfs_trace(sb, "name %llx value %llx size %llu flags %lld",
-		      name, value, size, flags);
 
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;

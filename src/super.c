@@ -27,7 +27,6 @@
 #include "block.h"
 #include "counters.h"
 #include "trans.h"
-#include "trace.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -127,12 +126,6 @@ static int read_supers(struct super_block *sb)
 	return 0;
 }
 
-/*
- * Only used for tracing output, it's a convenient way to cheaply differentiate
- * messages from different super blocks.
- */
-static atomic64_t scoutfs_sb_ctr = ATOMIC64_INIT(0);
-
 static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct scoutfs_sb_info *sbi;
@@ -161,8 +154,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
-
-	sbi->ctr = atomic64_inc_return(&scoutfs_sb_ctr);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
@@ -225,14 +216,12 @@ static void teardown_module(void)
 	scoutfs_inode_exit();
 	if (scoutfs_kset)
 		kset_unregister(scoutfs_kset);
-	scoutfs_trace_exit();
 }
 
 static int __init scoutfs_module_init(void)
 {
 	int ret;
 
-	scoutfs_trace_init();
 	scoutfs_init_counters();
 
 	scoutfs_kset = kset_create_and_add("scoutfs", NULL, fs_kobj);

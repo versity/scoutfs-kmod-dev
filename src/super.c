@@ -47,6 +47,8 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 
+	sbi->stable_super = sbi->super;
+
 	le64_add_cpu(&super->hdr.blkno, 1);
 	if (le64_to_cpu(super->hdr.blkno) == (SCOUTFS_SUPER_BLKNO +
 					      SCOUTFS_SUPER_NR))
@@ -107,8 +109,7 @@ static int read_supers(struct super_block *sb)
 
 		if (found < 0 || (le64_to_cpu(super->hdr.seq) >
 				le64_to_cpu(sbi->super.hdr.seq))) {
-			memcpy(&sbi->super, super,
-			       sizeof(struct scoutfs_super_block));
+			sbi->super = *super;
 			found = i;
 		}
 	}
@@ -122,6 +123,8 @@ static int read_supers(struct super_block *sb)
 
 	scoutfs_info(sb, "using super %u with seq %llu",
 		     found, le64_to_cpu(sbi->super.hdr.seq));
+
+	sbi->stable_super = sbi->super;
 
 	return 0;
 }
@@ -162,13 +165,11 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	ret = scoutfs_setup_counters(sb) ?:
 	      read_supers(sb) ?:
-	      scoutfs_setup_trans(sb) ?:
-	      scoutfs_read_buddy_chunks(sb);
+	      scoutfs_setup_trans(sb);
 	if (ret)
 		return ret;
 
 	scoutfs_advance_dirty_super(sb);
-	scoutfs_reset_buddy_chunks(sb);
 
 	inode = scoutfs_iget(sb, SCOUTFS_ROOT_INO);
 	if (IS_ERR(inode))

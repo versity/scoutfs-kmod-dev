@@ -19,7 +19,8 @@
  */
 #define SCOUTFS_SUPER_BLKNO ((64 * 1024) >> SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_SUPER_NR 2
-#define SCOUTFS_BUDDY_BLKNO (SCOUTFS_SUPER_BLKNO + SCOUTFS_SUPER_NR)
+#define SCOUTFS_BUDDY_BM_BLKNO (SCOUTFS_SUPER_BLKNO + SCOUTFS_SUPER_NR)
+#define SCOUTFS_BUDDY_BM_NR 2
 
 /*
  * This header is found at the start of every block so that we can
@@ -34,6 +35,52 @@ struct scoutfs_block_header {
 	__le64 seq;
 	__le64 blkno;
 } __packed;
+
+/*
+ * Block references include the sequence number so that we can detect
+ * readers racing with writers and so that we can tell that we don't
+ * need to follow a reference when traversing based on seqs.
+ */
+struct scoutfs_block_ref {
+	__le64 blkno;
+	__le64 seq;
+} __packed;
+
+struct scoutfs_bitmap_block {
+	struct scoutfs_block_header hdr;
+	__le64 bits[0];
+} __packed;
+
+/*
+ * Track allocations from BLOCK_SIZE to (BLOCK_SIZE << ..._ORDERS).
+ */
+#define SCOUTFS_BUDDY_ORDERS 8
+
+struct scoutfs_buddy_block {
+	struct scoutfs_block_header hdr;
+	__le32 order_counts[SCOUTFS_BUDDY_ORDERS];
+	__le64 bits[0];
+} __packed;
+
+/*
+ * If we had log2(raw bits) orders we'd fully use all of the raw bits in
+ * the block.  We're close enough that the amount of space wasted at the
+ * end (~1/256th of the block, ~64 bytes) isn't worth worrying about.
+ */
+#define SCOUTFS_BUDDY_ORDER0_BITS \
+	(((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_block)) * 8) / 2)
+
+struct scoutfs_buddy_indirect {
+	struct scoutfs_block_header hdr;
+	struct scoutfs_buddy_slot {
+		__u8 free_orders;
+		struct scoutfs_block_ref ref;
+	} slots[0];
+} __packed;
+
+#define SCOUTFS_BUDDY_SLOTS						\
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_block)) /	\
+		sizeof(struct scoutfs_buddy_slot))
 
 /*
  * We should be able to make the offset smaller if neither dirents nor
@@ -56,16 +103,6 @@ struct scoutfs_key {
 #define SCOUTFS_DATA_KEY	4
 
 #define SCOUTFS_MAX_ITEM_LEN 2048
-
-/*
- * Block references include the sequence number so that we can detect
- * readers racing with writers and so that we can tell that we don't
- * need to follow a reference when traversing based on seqs.
- */
-struct scoutfs_block_ref {
-	__le64 blkno;
-	__le64 seq;
-} __packed;
 
 struct scoutfs_treap_root {
 	__le16 off;
@@ -109,48 +146,6 @@ struct scoutfs_btree_item {
 
 #define SCOUTFS_UUID_BYTES 16
 
-/*
- * Arbitrarily choose a reasonably fine grained 64byte chunk.  This is a
- * balance between write amplification of writing chunks with a single
- * modified bit, storage overhead of partial blocks losing a chunk to
- * make room for the block header and having a pos field per chunk, and
- * runtime memory overhead of a bit per chunk.
- */
-#define SCOUTFS_BUDDY_CHUNK_LE64S 8
-#define SCOUTFS_BUDDY_CHUNK_BYTES (SCOUTFS_BUDDY_CHUNK_LE64S * 8)
-#define SCOUTFS_BUDDY_CHUNK_BITS (SCOUTFS_BUDDY_CHUNK_BYTES * 8)
-
-/*
- * After the pair of super blocks are a preallocated ring of blocks
- * which record modified regions of the buddy bitmap allocator.
- *
- * The seq's header needs to match the unwrapped ring index of the
- * block.
- */
-struct scoutfs_buddy_block {
-	struct scoutfs_block_header hdr;
-	u8 nr_chunks;
-	struct scoutfs_buddy_chunk {
-		__le32 pos;
-		__le64 bits[SCOUTFS_BUDDY_CHUNK_LE64S];
-	} __packed chunks[0];
-} __packed;
-
-#define SCOUTFS_BUDDY_CHUNKS_PER_BLOCK \
-	((SCOUTFS_BLOCK_SIZE - offsetof(struct scoutfs_buddy_block, chunks)) /\
-	 SCOUTFS_BUDDY_CHUNK_BYTES)
-
-
-/*
- * The super is stored in a pair of blocks in the first chunk on the
- * device.
- *
- * The ring map blocks describe the chunks that make up the ring.
- *
- * The rest of the ring fields describe the state of the ring blocks
- * that are stored in their chunks.  The active portion of the ring
- * describes the current state of the system and is replayed on mount.
- */
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
@@ -158,10 +153,9 @@ struct scoutfs_super_block {
 	__le64 next_ino;
 	__le64 total_blocks;
 	__le32 buddy_blocks;
-	__le32 buddy_sweep_bit;
-	__le64 buddy_head;
-	__le64 buddy_tail;
         struct scoutfs_btree_root btree_root;
+        struct scoutfs_block_ref buddy_ind_ref;
+        struct scoutfs_block_ref buddy_bm_ref;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1

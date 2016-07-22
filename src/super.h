@@ -14,6 +14,7 @@ struct scoutfs_sb_info {
 	struct super_block *sb;
 
 	struct scoutfs_super_block super;
+	struct scoutfs_super_block stable_super;
 
 	spinlock_t next_ino_lock;
 
@@ -24,7 +25,6 @@ struct scoutfs_sb_info {
 	int block_write_err;
 
 	struct mutex buddy_mutex;
-	struct buddy_alloc *bud;
 
 	/* XXX there will be a lot more of these :) */
 	struct rw_semaphore btree_rwsem;

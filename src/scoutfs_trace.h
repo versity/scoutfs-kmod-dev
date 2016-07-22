@@ -109,6 +109,53 @@ TRACE_EVENT(scoutfs_update_inode,
 		__entry->ino, __entry->size)
 );
 
+TRACE_EVENT(scoutfs_buddy_alloc,
+	TP_PROTO(u64 blkno, int order, int region, int ret),
+
+	TP_ARGS(blkno, order, region, ret),
+
+	TP_STRUCT__entry(
+		__field(u64, blkno)
+		__field(int, order)
+		__field(int, region)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->blkno = blkno;
+		__entry->order = order;
+		__entry->region = region;
+		__entry->ret = ret;
+	),
+
+	TP_printk("blkno %llu order %d region %d ret %d",
+		__entry->blkno, __entry->order, __entry->region, __entry->ret)
+);
+
+
+TRACE_EVENT(scoutfs_buddy_free,
+	TP_PROTO(u64 blkno, int order, int region, int ret),
+
+	TP_ARGS(blkno, order, region, ret),
+
+	TP_STRUCT__entry(
+		__field(u64, blkno)
+		__field(int, order)
+		__field(int, region)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->blkno = blkno;
+		__entry->order = order;
+		__entry->region = region;
+		__entry->ret = ret;
+	),
+
+	TP_printk("blkno %llu order %d region %d ret %d",
+		__entry->blkno, __entry->order, __entry->region, __entry->ret)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

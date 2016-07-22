@@ -434,7 +434,7 @@ static struct scoutfs_block *dirty_ref(struct super_block *sb,
 	struct scoutfs_block *found;
 	struct scoutfs_block *bl;
 	unsigned long flags;
-	u64 blkno;
+	u64 blkno = 0;
 	int ret;
 	int err;
 
@@ -442,7 +442,7 @@ static struct scoutfs_block *dirty_ref(struct super_block *sb,
 	if (IS_ERR(bl) || ref->seq == sbi->super.hdr.seq)
 		return bl;
 
-	ret = scoutfs_buddy_alloc(sb, &blkno, 0);
+	ret = scoutfs_buddy_alloc_same(sb, &blkno, 0, le64_to_cpu(ref->blkno));
 	if (ret < 0)
 		goto out;
 

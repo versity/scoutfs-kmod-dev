@@ -63,7 +63,6 @@
  *  - shrink and grow
  *  - metadata and data regions
  *  - worry about testing for free buddies outside device during free?
- *  - btree should free blocks on merge and some failure
  *  - we could track the first set in order bitmaps, dunno if it'd be worth it
  */
 

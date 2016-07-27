@@ -59,7 +59,6 @@
  * performed as we descend.
  *
  * XXX
- *  - actually free blknos
  *  - do we want a level in the btree header?  seems like we would?
  *  - validate structures on read?
  */
@@ -314,6 +313,13 @@ static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
 	return bl;
 }
 
+/* the caller has ensured that the free must succeed */
+static void free_tree_block(struct super_block *sb, __le64 blkno)
+{
+	int err = scoutfs_buddy_free(sb, le64_to_cpu(blkno), 0);
+	WARN_ON_ONCE(err);
+}
+
 /*
  * Allocate a new tree block and point the root at it.  The caller
  * is responsible for the items in the new root block.
@@ -400,24 +406,25 @@ static struct scoutfs_block *try_split(struct super_block *sb,
 		return right_bl;
 	}
 
+	/* alloc split neighbour first to avoid unwinding tree growth */
+	left_bl = alloc_tree_block(sb);
+	if (IS_ERR(left_bl)) {
+		scoutfs_put_block(right_bl);
+		return left_bl;
+	}
+	left = left_bl->data;
+
 	if (!parent) {
 		par_bl = grow_tree(sb, root);
 		if (IS_ERR(par_bl)) {
+			free_tree_block(sb, left->hdr.blkno);
+			scoutfs_put_block(left_bl);
 			scoutfs_put_block(right_bl);
 			return par_bl;
 		}
 
 		parent = par_bl->data;
 	}
-
-	left_bl = alloc_tree_block(sb);
-	if (IS_ERR(left_bl)) {
-		/* XXX free parent block? */
-		scoutfs_put_block(par_bl);
-		scoutfs_put_block(right_bl);
-		return left_bl;
-	}
-	left = left_bl->data;
 
 	/* only grow the tree once we have the split neighbour */
 	if (par_bl) {
@@ -460,6 +467,10 @@ static struct scoutfs_block *try_split(struct super_block *sb,
  *
  * The caller only has the parent locked.  They'll lock whichever
  * block we return.
+ *
+ * We free sibling or parent btree block blknos if we drain them of items.
+ * They're dirtied either by descent or before we start migrating items
+ * so freeing their blkno must succeed.
  *
  * XXX this could more cleverly chose a merge candidate sibling
  */
@@ -514,7 +525,7 @@ static struct scoutfs_block *try_merge(struct super_block *sb,
 	/* delete an empty sib or update if we changed its greatest key */
 	if (sib_bt->nr_items == 0) {
 		delete_item(parent, sib_item);
-		/* XXX free sib block */
+		free_tree_block(sb, sib_bt->hdr.blkno);
 	} else if (move_right) {
 		sib_item->key = *greatest_key(sib_bt);
 	}
@@ -524,7 +535,7 @@ static struct scoutfs_block *try_merge(struct super_block *sb,
 		root->height--;
 		root->ref.blkno = bt->hdr.blkno;
 		root->ref.seq = bt->hdr.seq;
-		/* XXX free block */
+		free_tree_block(sb, parent->hdr.blkno);
 	}
 
 	return bl;
@@ -836,6 +847,7 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_key *key,
 int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_btree_root *root;
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
 	struct scoutfs_block *bl;
@@ -855,9 +867,13 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 
 		/* delete the final block in the tree */
 		if (bt->nr_items == 0) {
-			memset(&sbi->super.btree_root, 0,
-			       sizeof(struct scoutfs_btree_root));
-			/* XXX free block */
+			root = &sbi->super.btree_root;
+
+			root->height = 0;
+			root->ref.blkno = 0;
+			root->ref.seq = 0;
+
+			free_tree_block(sb, bt->hdr.blkno);
 		}
 	} else {
 		ret = -ENOENT;

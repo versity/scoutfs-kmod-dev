@@ -412,18 +412,25 @@ int scoutfs_write_dirty_blocks(struct super_block *sb)
  * sequence number which we use to determine if the block is currently
  * dirty or not.
  *
- * For now we're using the dirty super block in the sb_info to track
- * the dirty seq.  That'll be different when we have multiple btrees.
+ * For now we're using the dirty super block in the sb_info to track the
+ * dirty seq.  That'll be different when we have multiple btrees.
  *
  * Callers are working in structures that have sufficient locking to
- * protect references to the source block.  If we've come to dirty it then
- * there won't be concurrent users and we can just move it in the cache.
+ * protect references to the source block.  If we've come to dirty it
+ * then there won't be concurrent users and we can just move it in the
+ * cache.
+ *
+ * The caller can ask that we either move the existing cached block to
+ * its new dirty blkno in the cache or copy its contents to a newly
+ * allocated dirty block.  The caller knows if they'll ever reference
+ * the old clean block again (buddy does, btree doesn't.)
  */
-struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
-				        struct scoutfs_block_ref *ref)
+static struct scoutfs_block *dirty_ref(struct super_block *sb,
+				       struct scoutfs_block_ref *ref, bool cow)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_block_header *hdr;
+	struct scoutfs_block *copy_bl = NULL;
 	struct scoutfs_block *found;
 	struct scoutfs_block *bl;
 	unsigned long flags;
@@ -439,24 +446,51 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 	if (ret < 0)
 		goto out;
 
+	if (cow) {
+		copy_bl = alloc_block(sb, blkno);
+		if (IS_ERR(copy_bl)) {
+			ret = PTR_ERR(copy_bl);
+			goto out;
+		}
+		set_bit(SCOUTFS_BLOCK_BIT_UPTODATE, &copy_bl->bits);
+	}
+
 	ret = radix_tree_preload(GFP_NOFS);
 	if (ret)
 		goto out;
 
 	spin_lock_irqsave(&sbi->block_lock, flags);
 
-	/* XXX don't really like this */
-	found = radix_tree_lookup(&sbi->block_radix, bl->blkno);
-	if (found == bl) {
-		radix_tree_delete(&sbi->block_radix, bl->blkno);
-		atomic_dec(&bl->refcount);
+	/* delete anything at the new blkno */
+	found = radix_tree_lookup(&sbi->block_radix, blkno);
+	if (found) {
+		radix_tree_delete(&sbi->block_radix, blkno);
+		scoutfs_put_block(found);
+	}
+
+	if (cow) {
+		/* copy contents to the new block, hdr updated below */
+		memcpy(copy_bl->data, bl->data, SCOUTFS_BLOCK_SIZE);
+		scoutfs_put_block(bl);
+		bl = copy_bl;
+		copy_bl = NULL;
+	} else {
+		/* move the existing block to its new dirty blkno */
+		found = radix_tree_lookup(&sbi->block_radix, bl->blkno);
+		if (found == bl) {
+			radix_tree_delete(&sbi->block_radix, bl->blkno);
+			atomic_dec(&bl->refcount);
+		}
 	}
 
 	bl->blkno = blkno;
 	hdr = bl->data;
 	hdr->blkno = cpu_to_le64(blkno);
 	hdr->seq = sbi->super.hdr.seq;
+	ref->blkno = hdr->blkno;
+	ref->seq = hdr->seq;
 
+	/* insert the dirty block at its new blkno */
 	radix_tree_insert(&sbi->block_radix, blkno, bl);
 	radix_tree_tag_set(&sbi->block_radix, blkno, DIRTY_RADIX_TAG);
 	atomic_inc(&bl->refcount);
@@ -464,10 +498,9 @@ struct scoutfs_block *scoutfs_dirty_ref(struct super_block *sb,
 	spin_unlock_irqrestore(&sbi->block_lock, flags);
 	radix_tree_preload_end();
 
-	ref->blkno = hdr->blkno;
-	ref->seq = hdr->seq;
 	ret = 0;
 out:
+	scoutfs_put_block(copy_bl);
 	if (ret) {
 		if (blkno) {
 			err = scoutfs_buddy_free(sb, blkno, 0);
@@ -478,6 +511,17 @@ out:
 	}
 
 	return bl;
+}
+
+struct scoutfs_block *scoutfs_block_cow_ref(struct super_block *sb,
+					    struct scoutfs_block_ref *ref)
+{
+	return dirty_ref(sb, ref, true);
+}
+struct scoutfs_block *scoutfs_block_dirty_ref(struct super_block *sb,
+				             struct scoutfs_block_ref *ref)
+{
+	return dirty_ref(sb, ref, false);
 }
 
 /*

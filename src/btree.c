@@ -488,7 +488,7 @@ static struct scoutfs_block *try_merge(struct super_block *sb,
 		move_right = true;
 	}
 
-	sib_bl = scoutfs_dirty_ref(sb, (void *)sib_item->val);
+	sib_bl = scoutfs_block_dirty_ref(sb, (void *)sib_item->val);
 	if (IS_ERR(sib_bl)) {
 		/* XXX do we need to unlock this?  don't think so */
 		scoutfs_put_block(bl);
@@ -685,7 +685,7 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 	while (level--) {
 		/* XXX hmm, need to think about retry */
 		if (dirty) {
-			bl = scoutfs_dirty_ref(sb, ref);
+			bl = scoutfs_block_dirty_ref(sb, ref);
 		} else {
 			bl = scoutfs_read_ref(sb, ref);
 		}

@@ -434,6 +434,7 @@ static struct scoutfs_block *dirty_ref(struct super_block *sb,
 	struct scoutfs_block *found;
 	struct scoutfs_block *bl;
 	unsigned long flags;
+	u64 clean_blkno;
 	u64 blkno = 0;
 	int ret;
 	int err;
@@ -441,6 +442,12 @@ static struct scoutfs_block *dirty_ref(struct super_block *sb,
 	bl = scoutfs_read_block(sb, le64_to_cpu(ref->blkno));
 	if (IS_ERR(bl) || ref->seq == sbi->super.hdr.seq)
 		return bl;
+
+	clean_blkno = bl->blkno;
+
+	ret = scoutfs_buddy_dirty(sb, clean_blkno, 0);
+	if (ret < 0)
+		goto out;
 
 	ret = scoutfs_buddy_alloc_same(sb, &blkno, 0, le64_to_cpu(ref->blkno));
 	if (ret < 0)
@@ -498,6 +505,9 @@ static struct scoutfs_block *dirty_ref(struct super_block *sb,
 	spin_unlock_irqrestore(&sbi->block_lock, flags);
 	radix_tree_preload_end();
 
+	/* free clean blkno after preload end enables preemption */
+	err = scoutfs_buddy_free(sb, clean_blkno, 0);
+	WARN_ON(err); /* XXX corruption (dirtying should prevent) */
 	ret = 0;
 out:
 	scoutfs_put_block(copy_bl);

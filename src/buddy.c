@@ -63,9 +63,7 @@
  *  - shrink and grow
  *  - metadata and data regions
  *  - worry about testing for free buddies outside device during free?
- *  - scoutfs_dirty_ref should call us to free old stable
  *  - btree should free blocks on merge and some failure
- *  - might want to add a alloc predirty call to avoid error unwind failure
  *  - we could track the first set in order bitmaps, dunno if it'd be worth it
  */
 
@@ -595,6 +593,89 @@ static int alloc_region(struct super_block *sb, u64 *blkno, int order,
 int scoutfs_buddy_alloc(struct super_block *sb, u64 *blkno, int order)
 {
 	return alloc_region(sb, blkno, order, 0, REGION_BUDDY);
+}
+
+static int bitmap_dirty(struct super_block *sb, u64 blkno)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_block *bl;
+
+	/* mkfs should have ensured that there's bitmap blocks */
+	/* XXX corruption */
+	if (sbi->super.buddy_bm_ref.blkno == 0)
+		return -EIO;
+
+	/* dirty the bitmap block */
+	bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_bm_ref);
+	if (IS_ERR(bl))
+		return PTR_ERR(bl);
+
+	scoutfs_put_block(bl);
+	return 0;
+}
+
+static int buddy_dirty(struct super_block *sb, u64 blkno, int order)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_buddy_indirect *ind;
+	struct scoutfs_block *ind_bl = NULL;
+	struct scoutfs_block *bl = NULL;
+	int ret;
+	int sl;
+
+	mutex_lock(&sbi->buddy_mutex);
+
+	/* mkfs should have ensured that there's indirect blocks */
+	if (sbi->super.buddy_ind_ref.blkno == 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/* get the dirty indirect block */
+	ind_bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_ind_ref);
+	if (IS_ERR(ind_bl)) {
+		ret = PTR_ERR(ind_bl);
+		goto out;
+	}
+	ind = ind_bl->data;
+
+	sl = indirect_slot(super, blkno);
+	bl = dirty_buddy_block(sb, sl, &ind->slots[sl]);
+	if (IS_ERR(bl))
+		ret = PTR_ERR(bl);
+	else
+		ret = 0;
+out:
+	mutex_unlock(&sbi->buddy_mutex);
+	scoutfs_put_block(ind_bl);
+	scoutfs_put_block(bl);
+
+	return ret;
+}
+
+
+/*
+ * Create dirty cow copies of the bitmap, indirect, and buddy blocks
+ * so that a free of the given extent in the current transaction is
+ * guaranteed to succeed.
+ *
+ * This is only meant for buddy allocators who are complicated enough
+ * to need help avoiding error conditions.
+ */
+int scoutfs_buddy_dirty(struct super_block *sb, u64 blkno, int order)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+
+	switch(blkno_region(super, blkno)) {
+		case REGION_BM:
+			return bitmap_dirty(sb, blkno);
+		case REGION_BUDDY:
+			return buddy_dirty(sb, blkno, order);
+	}
+
+	return 0;
 }
 
 /*

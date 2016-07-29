@@ -6,7 +6,7 @@
 /* super block id */
 #define SCOUTFS_SUPER_ID	0x2e736674756f6373ULL	/* "scoutfs." */
 
-#define SCOUTFS_BLOCK_SHIFT 14
+#define SCOUTFS_BLOCK_SHIFT 12
 #define SCOUTFS_BLOCK_SIZE (1 << SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_BLOCK_MASK (SCOUTFS_BLOCK_SIZE - 1)
 
@@ -102,7 +102,7 @@ struct scoutfs_key {
 #define SCOUTFS_DIRENT_KEY	3
 #define SCOUTFS_DATA_KEY	4
 
-#define SCOUTFS_MAX_ITEM_LEN 2048
+#define SCOUTFS_MAX_ITEM_LEN 512
 
 struct scoutfs_treap_root {
 	__le16 off;

@@ -294,14 +294,14 @@ static void compact_items(struct scoutfs_btree_block *bt)
  * Allocate and initialize a new tree block. The caller adds references
  * to it.
  */
-static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
+static struct buffer_head *alloc_tree_block(struct super_block *sb)
 {
 	struct scoutfs_btree_block *bt;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 
-	bl = scoutfs_alloc_block(sb);
-	if (!IS_ERR(bl)) {
-		bt = bl->data;
+	bh = scoutfs_block_dirty_alloc(sb);
+	if (!IS_ERR(bh)) {
+		bt = bh_data(bh);
 
 		bt->treap.off = 0;
 		bt->total_free = cpu_to_le16(SCOUTFS_BLOCK_SIZE -
@@ -310,7 +310,7 @@ static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
 		bt->nr_items = 0;
 	}
 
-	return bl;
+	return bh;
 }
 
 /* the caller has ensured that the free must succeed */
@@ -324,22 +324,22 @@ static void free_tree_block(struct super_block *sb, __le64 blkno)
  * Allocate a new tree block and point the root at it.  The caller
  * is responsible for the items in the new root block.
  */
-static struct scoutfs_block *grow_tree(struct super_block *sb,
+static struct buffer_head *grow_tree(struct super_block *sb,
 				       struct scoutfs_btree_root *root)
 {
 	struct scoutfs_block_header *hdr;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 
-	bl = alloc_tree_block(sb);
-	if (!IS_ERR(bl)) {
-		hdr = bl->data;
+	bh = alloc_tree_block(sb);
+	if (!IS_ERR(bh)) {
+		hdr = bh_data(bh);
 
 		root->height++;
 		root->ref.blkno = hdr->blkno;
 		root->ref.seq = hdr->seq;
 	}
 
-	return bl;
+	return bh;
 }
 
 /*
@@ -380,18 +380,18 @@ static void create_parent_item(struct scoutfs_btree_block *parent,
  * the child that we return.  It's skipping locking the new parent as it
  * descends but that's fine.
  */
-static struct scoutfs_block *try_split(struct super_block *sb,
+static struct buffer_head *try_split(struct super_block *sb,
 				       struct scoutfs_btree_root *root,
 				       int level, struct scoutfs_key *key,
 				       unsigned int val_len,
 				       struct scoutfs_btree_block *parent,
 				       struct scoutfs_btree_item *par_item,
-				       struct scoutfs_block *right_bl)
+				       struct buffer_head *right_bh)
 {
-	struct scoutfs_btree_block *right = right_bl->data;
+	struct scoutfs_btree_block *right = bh_data(right_bh);
 	struct scoutfs_btree_block *left;
-	struct scoutfs_block *left_bl;
-	struct scoutfs_block *par_bl = NULL;
+	struct buffer_head *left_bh;
+	struct buffer_head *par_bh = NULL;
 	unsigned int bytes;
 
 	if (level)
@@ -399,35 +399,35 @@ static struct scoutfs_block *try_split(struct super_block *sb,
 	bytes = val_bytes(val_len);
 
 	if (le16_to_cpu(right->tail_free) >= bytes)
-		return right_bl;
+		return right_bh;
 
 	if (le16_to_cpu(right->total_free) >= bytes) {
 		compact_items(right);
-		return right_bl;
+		return right_bh;
 	}
 
 	/* alloc split neighbour first to avoid unwinding tree growth */
-	left_bl = alloc_tree_block(sb);
-	if (IS_ERR(left_bl)) {
-		scoutfs_put_block(right_bl);
-		return left_bl;
+	left_bh = alloc_tree_block(sb);
+	if (IS_ERR(left_bh)) {
+		scoutfs_block_put(right_bh);
+		return left_bh;
 	}
-	left = left_bl->data;
+	left = bh_data(left_bh);
 
 	if (!parent) {
-		par_bl = grow_tree(sb, root);
-		if (IS_ERR(par_bl)) {
+		par_bh = grow_tree(sb, root);
+		if (IS_ERR(par_bh)) {
 			free_tree_block(sb, left->hdr.blkno);
-			scoutfs_put_block(left_bl);
-			scoutfs_put_block(right_bl);
-			return par_bl;
+			scoutfs_block_put(left_bh);
+			scoutfs_block_put(right_bh);
+			return par_bh;
 		}
 
-		parent = par_bl->data;
+		parent = bh_data(par_bh);
 	}
 
 	/* only grow the tree once we have the split neighbour */
-	if (par_bl) {
+	if (par_bh) {
 		struct scoutfs_key maximal;
 		scoutfs_set_max_key(&maximal);
 		create_parent_item(parent, right, &maximal);
@@ -438,19 +438,19 @@ static struct scoutfs_block *try_split(struct super_block *sb,
 
 	if (scoutfs_key_cmp(key, greatest_key(left)) <= 0) {
 		/* insertion will go to the new left block */
-		scoutfs_put_block(right_bl);
-		right_bl = left_bl;
+		scoutfs_block_put(right_bh);
+		right_bh = left_bh;
 	} else {
 		/* insertion will still go through us, might need to compact */
-		scoutfs_put_block(left_bl);
+		scoutfs_block_put(left_bh);
 
 		if (le16_to_cpu(right->tail_free) < bytes)
 			compact_items(right);
 	}
 
-	scoutfs_put_block(par_bl);
+	scoutfs_block_put(par_bh);
 
-	return right_bl;
+	return right_bh;
 }
 
 /*
@@ -474,21 +474,21 @@ static struct scoutfs_block *try_split(struct super_block *sb,
  *
  * XXX this could more cleverly chose a merge candidate sibling
  */
-static struct scoutfs_block *try_merge(struct super_block *sb,
+static struct buffer_head *try_merge(struct super_block *sb,
 				     struct scoutfs_btree_root *root,
 				     struct scoutfs_btree_block *parent,
 				     struct scoutfs_btree_item *par_item,
-				     struct scoutfs_block *bl)
+				     struct buffer_head *bh)
 {
-	struct scoutfs_btree_block *bt = bl->data;
+	struct scoutfs_btree_block *bt = bh_data(bh);
 	struct scoutfs_btree_block *sib_bt;
-	struct scoutfs_block *sib_bl;
+	struct buffer_head *sib_bh;
 	struct scoutfs_btree_item *sib_item;
 	int to_move;
 	bool move_right;
 
 	if (le16_to_cpu(bt->total_free) <= SCOUTFS_BTREE_FREE_LIMIT)
-		return bl;
+		return bh;
 
 	/* move items right into our block if we have a left sibling */
 	sib_item = bt_prev(parent, par_item);
@@ -499,13 +499,13 @@ static struct scoutfs_block *try_merge(struct super_block *sb,
 		move_right = true;
 	}
 
-	sib_bl = scoutfs_block_dirty_ref(sb, (void *)sib_item->val);
-	if (IS_ERR(sib_bl)) {
+	sib_bh = scoutfs_block_dirty_ref(sb, (void *)sib_item->val);
+	if (IS_ERR(sib_bh)) {
 		/* XXX do we need to unlock this?  don't think so */
-		scoutfs_put_block(bl);
-		return sib_bl;
+		scoutfs_block_put(bh);
+		return sib_bh;
 	}
-	sib_bt = sib_bl->data;
+	sib_bt = bh_data(sib_bh);
 
 	if (used_total(sib_bt) <= le16_to_cpu(bt->total_free))
 		to_move = used_total(sib_bt);
@@ -538,7 +538,7 @@ static struct scoutfs_block *try_merge(struct super_block *sb,
 		free_tree_block(sb, parent->hdr.blkno);
 	}
 
-	return bl;
+	return bh;
 }
 
 enum {
@@ -549,40 +549,42 @@ enum {
 	WALK_DIRTY,
 };
 
+static inline void lock_root(struct scoutfs_sb_info *sbi, bool dirty)
+{
+	if (dirty)
+		down_write(&sbi->btree_rwsem);
+	else
+		down_read(&sbi->btree_rwsem);
+}
+
+static inline void unlock_root(struct scoutfs_sb_info *sbi, bool dirty)
+{
+	if (dirty)
+		up_write(&sbi->btree_rwsem);
+	else
+		up_read(&sbi->btree_rwsem);
+}
+
 /*
  * As we descend we lock parent blocks (or the root), then lock the child,
  * then unlock the parent.
  */
-static void lock_block(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl,
-		       bool dirty)
+static inline void lock_block(struct scoutfs_sb_info *sbi,
+			      struct buffer_head *bh, bool dirty)
 {
-	struct rw_semaphore *rwsem;
-
-	if (bl == NULL)
-		rwsem = &sbi->btree_rwsem;
+	if (bh == NULL)
+		lock_root(sbi, dirty);
 	else
-		rwsem = &bl->rwsem;
-
-	if (dirty)
-		down_write(rwsem);
-	else
-		down_read(rwsem);
+		lock_buffer(bh);
 }
 
-static void unlock_block(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl,
-		         bool dirty)
+static inline void unlock_block(struct scoutfs_sb_info *sbi,
+				struct buffer_head *bh, bool dirty)
 {
-	struct rw_semaphore *rwsem;
-
-	if (bl == NULL)
-		rwsem = &sbi->btree_rwsem;
+	if (bh == NULL)
+		unlock_root(sbi, dirty);
 	else
-		rwsem = &bl->rwsem;
-
-	if (dirty)
-		up_write(rwsem);
-	else
-		up_read(rwsem);
+		unlock_buffer(bh);
 }
 
 static u64 item_block_ref_seq(struct scoutfs_btree_item *item)
@@ -647,7 +649,7 @@ item_after_seq(struct scoutfs_btree_block *bt, struct scoutfs_key *key,
  * in the next sibling's block.  This is used by iteration to advance to
  * the next block when they're done with the block this returns.
  */
-static struct scoutfs_block *btree_walk(struct super_block *sb,
+static struct buffer_head *btree_walk(struct super_block *sb,
 					struct scoutfs_key *key,
 					struct scoutfs_key *next_key,
 					unsigned int val_len, u64 seq, int op)
@@ -655,8 +657,8 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_btree_block *parent = NULL;
 	struct scoutfs_btree_root *root;
-	struct scoutfs_block *par_bl = NULL;
-	struct scoutfs_block *bl = NULL;
+	struct buffer_head *par_bh = NULL;
+	struct buffer_head *bh = NULL;
 	struct scoutfs_btree_item *item = NULL;
 	struct scoutfs_block_ref *ref;
 	unsigned int level;
@@ -667,7 +669,7 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 	if (next_key)
 		scoutfs_set_max_key(next_key);
 
-	lock_block(sbi, par_bl, dirty);
+	lock_block(sbi, par_bh, dirty);
 
 	/* XXX one for now */
 	root = &sbi->super.btree_root;
@@ -676,31 +678,31 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 
 	if (!root->height) {
 		if (op == WALK_INSERT) {
-			bl = ERR_PTR(-ENOENT);
+			bh = ERR_PTR(-ENOENT);
 		} else {
-			bl = grow_tree(sb, root);
-			if (!IS_ERR(bl))
-				lock_block(sbi, bl, dirty);
+			bh = grow_tree(sb, root);
+			if (!IS_ERR(bh))
+				lock_block(sbi, bh, dirty);
 		}
-		unlock_block(sbi, par_bl, dirty);
-		return bl;
+		unlock_block(sbi, par_bh, dirty);
+		return bh;
 	}
 
 
 	/* skip the whole tree if the root ref's seq is old */
 	if (op == WALK_NEXT_SEQ && le64_to_cpu(ref->seq) < seq) {
-		unlock_block(sbi, par_bl, dirty);
+		unlock_block(sbi, par_bh, dirty);
 		return ERR_PTR(-ENOENT);
 	}
 
 	while (level--) {
 		/* XXX hmm, need to think about retry */
 		if (dirty) {
-			bl = scoutfs_block_dirty_ref(sb, ref);
+			bh = scoutfs_block_dirty_ref(sb, ref);
 		} else {
-			bl = scoutfs_read_ref(sb, ref);
+			bh = scoutfs_block_read_ref(sb, ref);
 		}
-		if (IS_ERR(bl))
+		if (IS_ERR(bh))
 			break;
 
 		/*
@@ -714,23 +716,23 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		}
 
 		if (op == WALK_INSERT)
-			bl = try_split(sb, root, level, key, val_len, parent,
-				       item, bl);
+			bh = try_split(sb, root, level, key, val_len, parent,
+				       item, bh);
 		if ((op == WALK_DELETE) && parent)
-			bl = try_merge(sb, root, parent, item, bl);
-		if (IS_ERR(bl))
+			bh = try_merge(sb, root, parent, item, bh);
+		if (IS_ERR(bh))
 			break;
 
-		lock_block(sbi, bl, dirty);
+		lock_block(sbi, bh, dirty);
 
 		if (!level)
 			break;
 
 		/* unlock parent before searching so others can use it */
-		unlock_block(sbi, par_bl, dirty);
-		scoutfs_put_block(par_bl);
-		par_bl = bl;
-		parent = par_bl->data;
+		unlock_block(sbi, par_bh, dirty);
+		scoutfs_block_put(par_bh);
+		par_bh = bh;
+		parent = bh_data(par_bh);
 
 		/*
 		 * Find the parent item that references the next child
@@ -742,9 +744,9 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		if (!item) {
 			/* current block dropped as parent below */
 			if (op == WALK_NEXT_SEQ) {
-				bl = ERR_PTR(-ENOENT);
+				bh = ERR_PTR(-ENOENT);
 			} else {
-				bl = ERR_PTR(-EIO);
+				bh = ERR_PTR(-EIO);
 			} break;
 		}
 
@@ -752,17 +754,17 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 		ref = (void *)item->val;
 	}
 
-	unlock_block(sbi, par_bl, dirty);
-	scoutfs_put_block(par_bl);
+	unlock_block(sbi, par_bh, dirty);
+	scoutfs_block_put(par_bh);
 
-	return bl;
+	return bh;
 }
 
 static void set_cursor(struct scoutfs_btree_cursor *curs,
-		       struct scoutfs_block *bl,
+		       struct buffer_head *bh,
 		       struct scoutfs_btree_item *item, bool write)
 {
-	curs->bl = bl;
+	curs->bh = bh;
 	curs->item = item;
 	curs->key = &item->key;
 	curs->seq = le64_to_cpu(item->seq);
@@ -779,22 +781,24 @@ int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_key *key,
 			 struct scoutfs_btree_cursor *curs)
 {
 	struct scoutfs_btree_item *item;
-	struct scoutfs_block *bl;
+	struct scoutfs_btree_block *bt;
+	struct buffer_head *bh;
 	int ret;
 
-	BUG_ON(curs->bl);
+	BUG_ON(curs->bh);
 
-	bl = btree_walk(sb, key, NULL, 0, 0, 0);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
+	bh = btree_walk(sb, key, NULL, 0, 0, 0);
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
 
-	item = bt_lookup(bl->data, key);
+	bt = bh_data(bh);
+	item = bt_lookup(bt, key);
 	if (item) {
-		set_cursor(curs, bl, item, false);
+		set_cursor(curs, bh, item, false);
 		ret = 0;
 	} else {
-		up_read(&bl->rwsem);
-		scoutfs_put_block(bl);
+		unlock_block(NULL, bh, false);
+		scoutfs_block_put(bh);
 		ret = -ENOENT;
 	}
 
@@ -815,25 +819,25 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_key *key,
 {
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 	int ret;
 
-	BUG_ON(curs->bl);
+	BUG_ON(curs->bh);
 
-	bl = btree_walk(sb, key, NULL, val_len, 0, WALK_INSERT);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
-	bt = bl->data;
+	bh = btree_walk(sb, key, NULL, val_len, 0, WALK_INSERT);
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
+	bt = bh_data(bh);
 
 	/* XXX should this return -eexist? */
 	item = bt_lookup(bt, key);
 	if (!item) {
 		item = create_item(bt, key, val_len);
-		set_cursor(curs, bl, item, true);
+		set_cursor(curs, bh, item, true);
 		ret = 0;
 	} else {
-		up_write(&bl->rwsem);
-		scoutfs_put_block(bl);
+		unlock_block(NULL, bh, true);
+		scoutfs_block_put(bh);
 		ret = -ENOENT;
 	}
 
@@ -850,13 +854,13 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 	struct scoutfs_btree_root *root;
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 	int ret;
 
-	bl = btree_walk(sb, key, NULL, 0, 0, WALK_DELETE);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
-	bt = bl->data;
+	bh = btree_walk(sb, key, NULL, 0, 0, WALK_DELETE);
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
+	bt = bh_data(bh);
 
 	item = bt_lookup(bt, key);
 	if (item) {
@@ -879,8 +883,8 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 		ret = -ENOENT;
 	}
 
-	up_write(&bl->rwsem);
-	scoutfs_put_block(bl);
+	unlock_block(NULL, bh, true);
+	scoutfs_block_put(bh);
 
 	return ret;
 }
@@ -905,7 +909,7 @@ static int btree_next(struct super_block *sb, struct scoutfs_key *first,
 		      struct scoutfs_btree_cursor *curs)
 {
 	struct scoutfs_btree_block *bt;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 	struct scoutfs_key key = *first;
 	struct scoutfs_key next_key;
 	int ret;
@@ -914,50 +918,50 @@ static int btree_next(struct super_block *sb, struct scoutfs_key *first,
 		return 0;
 
 	/* find the next item after the cursor, releasing if we're done */
-	if (curs->bl) {
+	if (curs->bh) {
+		bt = bh_data(curs->bh);
 		key = curs->item->key;
 		scoutfs_inc_key(&key);
 
-		curs->item = item_next_seq(curs->bl->data, curs->item,
-					   0, seq, op);
+		curs->item = item_next_seq(bt, curs->item, 0, seq, op);
 		if (curs->item)
-			set_cursor(curs, curs->bl, curs->item, curs->write);
+			set_cursor(curs, curs->bh, curs->item, curs->write);
 		else
 			scoutfs_btree_release(curs);
 	}
 
 	/* find the leaf that contains the next item after the key */
-	while (!curs->bl && scoutfs_key_cmp(&key, last) <= 0) {
+	while (!curs->bh && scoutfs_key_cmp(&key, last) <= 0) {
 
-		bl = btree_walk(sb, &key, &next_key, 0, seq, op);
+		bh = btree_walk(sb, &key, &next_key, 0, seq, op);
 
 		/* next seq walks can terminate in parents with old seqs */
-		if (op == WALK_NEXT_SEQ && bl == ERR_PTR(-ENOENT)) {
+		if (op == WALK_NEXT_SEQ && bh == ERR_PTR(-ENOENT)) {
 			key = next_key;
 			continue;
 		}
 
-		if (IS_ERR(bl)) {
-			if (bl == ERR_PTR(-ENOENT))
+		if (IS_ERR(bh)) {
+			if (bh == ERR_PTR(-ENOENT))
 				break;
-			return PTR_ERR(bl);
+			return PTR_ERR(bh);
 		}
-		bt = bl->data;
+		bt = bh_data(bh);
 
 		/* keep trying leaves until next_key passes last */
-		curs->item = item_after_seq(bl->data, &key, 0, seq, op);
+		curs->item = item_after_seq(bt, &key, 0, seq, op);
 		if (!curs->item) {
 			key = next_key;
-			up_read(&bl->rwsem);
-			scoutfs_put_block(bl);
+			unlock_block(NULL, bh, false);
+			scoutfs_block_put(bh);
 			continue;
 		}
 
 		if (curs->item) {
-			set_cursor(curs, bl, curs->item, false);
+			set_cursor(curs, bh, curs->item, false);
 		} else {
-			up_read(&bl->rwsem);
-			scoutfs_put_block(bl);
+			unlock_block(NULL, bh, false);
+			scoutfs_block_put(bh);
 		}
 		break;
 	}
@@ -997,22 +1001,24 @@ int scoutfs_btree_since(struct super_block *sb, struct scoutfs_key *first,
 int scoutfs_btree_dirty(struct super_block *sb, struct scoutfs_key *key)
 {
 	struct scoutfs_btree_item *item;
-	struct scoutfs_block *bl;
+	struct scoutfs_btree_block *bt;
+	struct buffer_head *bh;
 	int ret;
 
-	bl = btree_walk(sb, key, NULL, 0, 0, WALK_DIRTY);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
+	bh = btree_walk(sb, key, NULL, 0, 0, WALK_DIRTY);
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
 
-	item = bt_lookup(bl->data, key);
+	bt = bh_data(bh);
+	item = bt_lookup(bt, key);
 	if (item) {
 		ret = 0;
 	} else {
 		ret = -ENOENT;
 	}
 
-	up_write(&bl->rwsem);
-	scoutfs_put_block(bl);
+	unlock_block(NULL, bh, true);
+	scoutfs_block_put(bh);
 
 	return ret;
 }
@@ -1026,31 +1032,28 @@ void scoutfs_btree_update(struct super_block *sb, struct scoutfs_key *key,
 {
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 
-	BUG_ON(curs->bl);
+	BUG_ON(curs->bh);
 
-	bl = btree_walk(sb, key, NULL, 0, 0, WALK_DIRTY);
-	BUG_ON(IS_ERR(bl));
+	bh = btree_walk(sb, key, NULL, 0, 0, WALK_DIRTY);
+	BUG_ON(IS_ERR(bh));
+	bt = bh_data(bh);
 
-	item = bt_lookup(bl->data, key);
+	item = bt_lookup(bt, key);
 	BUG_ON(!item);
 
-	bt = bl->data;
 	item->seq = bt->hdr.seq;
-	set_cursor(curs, bl, item, true);
+	set_cursor(curs, bh, item, true);
 }
 
 void scoutfs_btree_release(struct scoutfs_btree_cursor *curs)
 {
-	if (curs->bl) {
-		if (curs->write)
-			up_write(&curs->bl->rwsem);
-		else
-			up_read(&curs->bl->rwsem);
-		scoutfs_put_block(curs->bl);
+	if (curs->bh) {
+		unlock_block(NULL, curs->bh, curs->write);
+		scoutfs_block_put(curs->bh);
 	}
-	curs->bl = NULL;
+	curs->bh = NULL;
 }
 
 /*

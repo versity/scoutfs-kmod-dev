@@ -55,6 +55,8 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 		super->hdr.blkno = cpu_to_le64(SCOUTFS_SUPER_BLKNO);
 
 	le64_add_cpu(&super->hdr.seq, 1);
+
+	trace_printk("super seq now %llu\n", le64_to_cpu(super->hdr.seq));
 }
 
 /*
@@ -64,22 +66,24 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 int scoutfs_write_dirty_super(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	size_t sz = sizeof(struct scoutfs_super_block);
-	u64 blkno = le64_to_cpu(sbi->super.hdr.blkno);
-	struct scoutfs_block *bl;
+	struct scoutfs_super_block *super;
+	struct buffer_head *bh;
 	int ret;
 
 	/* XXX prealloc? */
-	bl = scoutfs_new_block(sb, blkno);
-	if (WARN_ON_ONCE(IS_ERR(bl)))
-		return PTR_ERR(bl);
+	bh = sb_getblk(sb, le64_to_cpu(sbi->super.hdr.blkno));
+	if (!bh)
+		return -ENOMEM;
+	super = bh_data(bh);
 
-	memcpy(bl->data, &sbi->super, sz);
-	memset(bl->data + sz, 0, SCOUTFS_BLOCK_SIZE - sz);
-	scoutfs_calc_hdr_crc(bl);
-	ret = scoutfs_write_block(bl);
+	*super = sbi->super;
+	scoutfs_block_zero(bh, sizeof(struct scoutfs_super_block));
+	scoutfs_block_set_crc(bh);
 
-	scoutfs_put_block(bl);
+	mark_buffer_dirty(bh);
+	ret = sync_dirty_buffer(bh);
+
+	scoutfs_block_put(bh);
 	return ret;
 }
 
@@ -87,19 +91,18 @@ static int read_supers(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
-	struct scoutfs_block *bl = NULL;
+	struct buffer_head *bh = NULL;
 	int found = -1;
 	int i;
 
 	for (i = 0; i < SCOUTFS_SUPER_NR; i++) {
-		scoutfs_put_block(bl);
-		bl = scoutfs_read_block(sb, SCOUTFS_SUPER_BLKNO + i);
-		if (IS_ERR(bl)) {
+		scoutfs_block_put(bh);
+		bh = scoutfs_block_read(sb, SCOUTFS_SUPER_BLKNO + i);
+		if (IS_ERR(bh)) {
 			scoutfs_warn(sb, "couldn't read super block %u", i);
 			continue;
 		}
-
-		super = bl->data;
+		super = bh_data(bh);
 
 		if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
 			scoutfs_warn(sb, "super block %u has invalid id %llx",
@@ -114,7 +117,7 @@ static int read_supers(struct super_block *sb)
 		}
 	}
 
-	scoutfs_put_block(bl);
+	scoutfs_block_put(bh);
 
 	if (found < 0) {
 		scoutfs_err(sb, "unable to read valid super block");
@@ -147,7 +150,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	spin_lock_init(&sbi->next_ino_lock);
 	spin_lock_init(&sbi->block_lock);
-	INIT_RADIX_TREE(&sbi->block_radix, GFP_NOFS);
+	sbi->block_dirty_tree = RB_ROOT;
 	init_waitqueue_head(&sbi->block_wq);
 	atomic_set(&sbi->block_writes, 0);
 	mutex_init(&sbi->buddy_mutex);
@@ -157,6 +160,11 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
+
+	if (!sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE)) {
+		printk(KERN_ERR "couldn't set blocksize\n");
+		return -EINVAL;
+	}
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
@@ -198,6 +206,9 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)
 			kset_unregister(sbi->kset);
+
+		/* XXX write errors can leave dirty blocks */
+		WARN_ON_ONCE(!RB_EMPTY_ROOT(&sbi->block_dirty_tree));
 		kfree(sbi);
 	}
 }

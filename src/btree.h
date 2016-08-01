@@ -3,7 +3,7 @@
 
 struct scoutfs_btree_cursor {
 	/* for btree.c */
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 	struct scoutfs_btree_item *item;
 
 	/* for callers */

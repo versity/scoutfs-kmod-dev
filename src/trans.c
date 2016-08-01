@@ -63,13 +63,12 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 	/* XXX probably want to write out dirty pages in inodes */
 
-	if (scoutfs_has_dirty_blocks(sb)) {
-		ret = scoutfs_write_dirty_blocks(sb) ?:
-		      scoutfs_write_dirty_super(sb);
+	ret = scoutfs_block_write_dirty(sb);
+	if (ret > 0) {
+		ret = scoutfs_write_dirty_super(sb);
 		if (!ret)
 			advance = 1;
 	}
-
 
 	spin_lock(&sbi->trans_write_lock);
 	if (advance)

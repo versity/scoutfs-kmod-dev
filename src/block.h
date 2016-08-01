@@ -2,43 +2,35 @@
 #define _SCOUTFS_BLOCK_H_
 
 #include <linux/fs.h>
-#include <linux/rwlock.h>
-#include <linux/atomic.h>
+#include <linux/buffer_head.h>
 
-#define SCOUTFS_BLOCK_BIT_UPTODATE (1 << 0)
-#define SCOUTFS_BLOCK_BIT_ERROR (1 << 1)
+struct buffer_head *scoutfs_block_read(struct super_block *sb, u64 blkno);
+struct buffer_head *scoutfs_block_read_ref(struct super_block *sb,
+					   struct scoutfs_block_ref *ref);
 
-struct scoutfs_block {
-	struct rw_semaphore rwsem;
-	atomic_t refcount;
-	u64 blkno;
-
-	unsigned long bits;
-
-	struct super_block *sb;
-	/* only high order page alloc for now */
-	struct page *page;
-	void *data;
-};
-
-struct scoutfs_block *scoutfs_read_block(struct super_block *sb, u64 blkno);
-struct scoutfs_block *scoutfs_new_block(struct super_block *sb, u64 blkno);
-struct scoutfs_block *scoutfs_alloc_block(struct super_block *sb);
-
-struct scoutfs_block *scoutfs_read_ref(struct super_block *sb,
-				       struct scoutfs_block_ref *ref);
-struct scoutfs_block *scoutfs_block_cow_ref(struct super_block *sb,
+struct buffer_head *scoutfs_block_dirty(struct super_block *sb, u64 blkno);
+struct buffer_head *scoutfs_block_dirty_alloc(struct super_block *sb);
+struct buffer_head *scoutfs_block_dirty_ref(struct super_block *sb,
 					    struct scoutfs_block_ref *ref);
-struct scoutfs_block *scoutfs_block_dirty_ref(struct super_block *sb,
-				             struct scoutfs_block_ref *ref);
 
-int scoutfs_has_dirty_blocks(struct super_block *sb);
-int scoutfs_write_block(struct scoutfs_block *bl);
-int scoutfs_write_dirty_blocks(struct super_block *sb);
+int scoutfs_block_write_dirty(struct super_block *sb);
 
-void scoutfs_put_block(struct scoutfs_block *bl);
+void scoutfs_block_set_crc(struct buffer_head *bh);
+void scoutfs_block_zero(struct buffer_head *bh, size_t off);
 
-void scoutfs_calc_hdr_crc(struct scoutfs_block *bl);
-void scoutfs_zero_block_tail(struct scoutfs_block *bl, size_t off);
+/* XXX seems like this should be upstream :) */
+static inline void *bh_data(struct buffer_head *bh)
+{
+	return (void *)bh->b_data;
+}
+
+static inline void scoutfs_block_put(struct buffer_head *bh)
+{
+	if (!IS_ERR_OR_NULL(bh)) {
+		trace_printk("putting bh %p count %d\n",
+			     bh, atomic_read(&bh->b_count));
+		brelse(bh);
+	}
+}
 
 #endif

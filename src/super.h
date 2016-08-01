@@ -19,7 +19,7 @@ struct scoutfs_sb_info {
 	spinlock_t next_ino_lock;
 
 	spinlock_t block_lock;
-	struct radix_tree_root block_radix;
+	struct rb_root block_dirty_tree;
 	wait_queue_head_t block_wq;
 	atomic_t block_writes;
 	int block_write_err;

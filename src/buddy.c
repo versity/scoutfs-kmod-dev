@@ -212,8 +212,8 @@ static int bitmap_alloc(struct super_block *sb, u64 *blkno)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_bitmap_block *st_bm;
 	struct scoutfs_bitmap_block *bm;
-	struct scoutfs_block *st_bl;
-	struct scoutfs_block *bm_bl;
+	struct buffer_head *st_bh;
+	struct buffer_head *bm_bh;
 	int size;
 	int ret;
 	int d;
@@ -226,18 +226,18 @@ static int bitmap_alloc(struct super_block *sb, u64 *blkno)
 		return -EIO;
 
 	/* dirty the bitmap block */
-	bm_bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_bm_ref);
-	if (IS_ERR(bm_bl))
-		return PTR_ERR(bm_bl);
-	bm = bm_bl->data;
+	bm_bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_bm_ref);
+	if (IS_ERR(bm_bh))
+		return PTR_ERR(bm_bh);
+	bm = bh_data(bm_bh);
 
 	/* read the stable bitmap block */
-	st_bl = scoutfs_read_ref(sb, &sbi->stable_super.buddy_bm_ref);
-	if (IS_ERR(st_bl)) {
-		ret = PTR_ERR(st_bl);
+	st_bh = scoutfs_block_read_ref(sb, &sbi->stable_super.buddy_bm_ref);
+	if (IS_ERR(st_bh)) {
+		ret = PTR_ERR(st_bh);
 		goto out;
 	}
-	st_bm = st_bl->data;
+	st_bm = bh_data(st_bh);
 
 	/* find the first bit that is set in both dirty and stable bitmaps */
 	size = le32_to_cpu(sbi->super.buddy_blocks);
@@ -255,8 +255,8 @@ static int bitmap_alloc(struct super_block *sb, u64 *blkno)
 	clear_bit_le(d, &bm->bits);
 	ret = 0;
 out:
-	scoutfs_put_block(st_bl);
-	scoutfs_put_block(bm_bl);
+	scoutfs_block_put(st_bh);
+	scoutfs_block_put(bm_bh);
 	return ret;
 }
 
@@ -265,7 +265,7 @@ static int bitmap_free(struct super_block *sb, u64 blkno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_bitmap_block *bm;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 	int nr;
 
 	/* mkfs should have ensured that there's bitmap blocks */
@@ -273,14 +273,14 @@ static int bitmap_free(struct super_block *sb, u64 blkno)
 	if (sbi->super.buddy_bm_ref.blkno == 0)
 		return -EIO;
 
-	bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_bm_ref);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
-	bm = bl->data;
+	bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_bm_ref);
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
+	bm = bh_data(bh);
 
 	nr = blkno - (SCOUTFS_BUDDY_BM_BLKNO + SCOUTFS_BUDDY_BM_NR);
 	set_bit_le(nr, bm->bits);
-	scoutfs_put_block(bl);
+	scoutfs_block_put(bh);
 
 	return 0;
 }
@@ -289,13 +289,13 @@ static int bitmap_free(struct super_block *sb, u64 blkno)
  * Give the caller a dirty buddy block.  If the slot hasn't been used
  * yet then we need to allocate and initialize a new block.
  */
-static struct scoutfs_block *dirty_buddy_block(struct super_block *sb, int sl,
+static struct buffer_head *dirty_buddy_block(struct super_block *sb, int sl,
 					       struct scoutfs_buddy_slot *slot)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_buddy_block *bud;
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 	u64 blkno;
 	int count;
 	int order;
@@ -305,19 +305,19 @@ static struct scoutfs_block *dirty_buddy_block(struct super_block *sb, int sl,
 
 	/* the fast path is to dirty an existing block */
 	if (slot->ref.blkno)
-		return scoutfs_block_cow_ref(sb, &slot->ref);
+		return scoutfs_block_dirty_ref(sb, &slot->ref);
 
 	ret = bitmap_alloc(sb, &blkno);
 	if (ret)
 		return ERR_PTR(ret);
 
-	bl = scoutfs_new_block(sb, blkno);
-	if (IS_ERR(bl)) {
+	bh = scoutfs_block_dirty(sb, blkno);
+	if (IS_ERR(bh)) {
 		bitmap_free(sb, blkno);
-		return bl;
+		return bh;
 	}
-	bud = bl->data;
-	scoutfs_zero_block_tail(bl, sizeof(bud->hdr));
+	bud = bh_data(bh);
+	scoutfs_block_zero(bh, sizeof(bud->hdr));
 
 	/* mark the initial run of highest orders free */
 	count = slot_count(super, sl);
@@ -345,7 +345,7 @@ static struct scoutfs_block *dirty_buddy_block(struct super_block *sb, int sl,
 
 	update_free_orders(slot, bud);
 
-	return bl;
+	return bh;
 }
 
 /*
@@ -414,29 +414,29 @@ static int alloc_slot(struct super_block *sb,  int sl,
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_buddy_block *bud;
 	struct scoutfs_buddy_block *st_bud;
-	struct scoutfs_block *st_bl;
-	struct scoutfs_block *bl;
+	struct buffer_head *st_bh;
+	struct buffer_head *bh;
 	int found;
 	int ret;
 	int nr;
 	int i;
 
 	/* initialize or dirty the slot's buddy block */
-	bl = dirty_buddy_block(sb, sl, slot);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
-	bud = bl->data;
+	bh = dirty_buddy_block(sb, sl, slot);
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
+	bud = bh_data(bh);
 
 	/* read stable slots's buddy block if there is one */
 	if (stable_ref->blkno) {
-		st_bl = scoutfs_read_ref(sb, stable_ref);
-		if (IS_ERR(st_bl)) {
-			ret = PTR_ERR(st_bl);
+		st_bh = scoutfs_block_read_ref(sb, stable_ref);
+		if (IS_ERR(st_bh)) {
+			ret = PTR_ERR(st_bh);
 			goto out;
 		}
-		st_bud = st_bl->data;
+		st_bud = bh_data(st_bh);
 	} else {
-		st_bl = NULL;
+		st_bh = NULL;
 		st_bud = NULL;
 	}
 
@@ -459,8 +459,8 @@ static int alloc_slot(struct super_block *sb,  int sl,
 	update_free_orders(slot, bud);
 	ret = 0;
 out:
-	scoutfs_put_block(st_bl);
-	scoutfs_put_block(bl);
+	scoutfs_block_put(st_bh);
+	scoutfs_block_put(bh);
 	return ret;
 }
 
@@ -482,8 +482,8 @@ static int alloc_order(struct super_block *sb, u64 *blkno, int order)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_buddy_indirect *st_ind;
 	struct scoutfs_buddy_indirect *ind;
-	struct scoutfs_block *st_bl = NULL;
-	struct scoutfs_block *bl = NULL;
+	struct buffer_head *st_bh = NULL;
+	struct buffer_head *bh = NULL;
 	u8 mask;
 	int ret;
 	int i;
@@ -496,20 +496,20 @@ static int alloc_order(struct super_block *sb, u64 *blkno, int order)
 	}
 
 	/* get the dirty indirect block */
-	bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_ind_ref);
-	if (IS_ERR(bl)) {
-		ret = PTR_ERR(bl);
+	bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_ind_ref);
+	if (IS_ERR(bh)) {
+		ret = PTR_ERR(bh);
 		goto out;
 	}
-	ind = bl->data;
+	ind = bh_data(bh);
 
 	/* get the stable indirect block */
-	st_bl = scoutfs_read_ref(sb, &sbi->stable_super.buddy_ind_ref);
-	if (IS_ERR(st_bl)) {
-		ret = PTR_ERR(st_bl);
+	st_bh = scoutfs_block_read_ref(sb, &sbi->stable_super.buddy_ind_ref);
+	if (IS_ERR(st_bh)) {
+		ret = PTR_ERR(st_bh);
 		goto out;
 	}
-	st_ind = st_bl->data;
+	st_ind = bh_data(st_bh);
 
 	mask = ~0U << order;
 
@@ -531,8 +531,8 @@ static int alloc_order(struct super_block *sb, u64 *blkno, int order)
 	}
 
 out:
-	scoutfs_put_block(st_bl);
-	scoutfs_put_block(bl);
+	scoutfs_block_put(st_bh);
+	scoutfs_block_put(bh);
 
 	return ret;
 }
@@ -597,7 +597,7 @@ int scoutfs_buddy_alloc(struct super_block *sb, u64 *blkno, int order)
 static int bitmap_dirty(struct super_block *sb, u64 blkno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_block *bl;
+	struct buffer_head *bh;
 
 	/* mkfs should have ensured that there's bitmap blocks */
 	/* XXX corruption */
@@ -605,11 +605,11 @@ static int bitmap_dirty(struct super_block *sb, u64 blkno)
 		return -EIO;
 
 	/* dirty the bitmap block */
-	bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_bm_ref);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
+	bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_bm_ref);
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
 
-	scoutfs_put_block(bl);
+	scoutfs_block_put(bh);
 	return 0;
 }
 
@@ -618,8 +618,8 @@ static int buddy_dirty(struct super_block *sb, u64 blkno, int order)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_buddy_indirect *ind;
-	struct scoutfs_block *ind_bl = NULL;
-	struct scoutfs_block *bl = NULL;
+	struct buffer_head *ind_bh = NULL;
+	struct buffer_head *bh = NULL;
 	int ret;
 	int sl;
 
@@ -632,23 +632,23 @@ static int buddy_dirty(struct super_block *sb, u64 blkno, int order)
 	}
 
 	/* get the dirty indirect block */
-	ind_bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_ind_ref);
-	if (IS_ERR(ind_bl)) {
-		ret = PTR_ERR(ind_bl);
+	ind_bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_ind_ref);
+	if (IS_ERR(ind_bh)) {
+		ret = PTR_ERR(ind_bh);
 		goto out;
 	}
-	ind = ind_bl->data;
+	ind = bh_data(ind_bh);
 
 	sl = indirect_slot(super, blkno);
-	bl = dirty_buddy_block(sb, sl, &ind->slots[sl]);
-	if (IS_ERR(bl))
-		ret = PTR_ERR(bl);
+	bh = dirty_buddy_block(sb, sl, &ind->slots[sl]);
+	if (IS_ERR(bh))
+		ret = PTR_ERR(bh);
 	else
 		ret = 0;
 out:
 	mutex_unlock(&sbi->buddy_mutex);
-	scoutfs_put_block(ind_bl);
-	scoutfs_put_block(bl);
+	scoutfs_block_put(ind_bh);
+	scoutfs_block_put(bh);
 
 	return ret;
 }
@@ -702,8 +702,8 @@ static int buddy_free(struct super_block *sb, u64 blkno, int order)
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_buddy_indirect *ind;
 	struct scoutfs_buddy_block *bud;
-	struct scoutfs_block *ind_bl = NULL;
-	struct scoutfs_block *bl = NULL;
+	struct buffer_head *ind_bh = NULL;
+	struct buffer_head *bh = NULL;
 	int ret;
 	int sl;
 	int nr;
@@ -721,20 +721,20 @@ static int buddy_free(struct super_block *sb, u64 blkno, int order)
 		goto out;
 	}
 
-	ind_bl = scoutfs_block_cow_ref(sb, &sbi->super.buddy_ind_ref);
-	if (IS_ERR(ind_bl)) {
-		ret = PTR_ERR(ind_bl);
+	ind_bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_ind_ref);
+	if (IS_ERR(ind_bh)) {
+		ret = PTR_ERR(ind_bh);
 		goto out;
 	}
-	ind = ind_bl->data;
+	ind = bh_data(ind_bh);
 
 	sl = indirect_slot(super, blkno);
-	bl = scoutfs_block_cow_ref(sb, &ind->slots[sl].ref);
-	if (IS_ERR(bl)) {
-		ret = PTR_ERR(bl);
+	bh = scoutfs_block_dirty_ref(sb, &ind->slots[sl].ref);
+	if (IS_ERR(bh)) {
+		ret = PTR_ERR(bh);
 		goto out;
 	}
-	bud = bl->data;
+	bud = bh_data(bh);
 
 	/*
 	 * Merge our region with its free buddy and then try to merge
@@ -754,11 +754,11 @@ static int buddy_free(struct super_block *sb, u64 blkno, int order)
 	set_buddy_bit(bud, i, nr);
 
 	update_free_orders(&ind->slots[sl], bud);
-	scoutfs_put_block(bl);
+	scoutfs_block_put(bh);
 	ret = 0;
 out:
 	mutex_unlock(&sbi->buddy_mutex);
-	scoutfs_put_block(ind_bl);
+	scoutfs_block_put(ind_bh);
 
 	return ret;
 }

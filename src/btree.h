@@ -4,14 +4,14 @@
 struct scoutfs_btree_cursor {
 	/* for btree.c */
 	struct buffer_head *bh;
-	struct scoutfs_btree_item *item;
+	unsigned int pos;
+	bool write;
 
 	/* for callers */
 	struct scoutfs_key *key;
 	u64 seq;
 	void *val;
 	u16 val_len;
-	u16 write:1;
 };
 
 #define DECLARE_SCOUTFS_BTREE_CURSOR(name) \

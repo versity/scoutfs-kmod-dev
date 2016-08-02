@@ -104,28 +104,26 @@ struct scoutfs_key {
 
 #define SCOUTFS_MAX_ITEM_LEN 512
 
-struct scoutfs_treap_root {
-	__le16 off;
-} __packed;
-
-struct scoutfs_treap_node {
-	__le16 parent;
-	__le16 left;
-	__le16 right;
-	__le32 prio;
-} __packed;
-
 struct scoutfs_btree_root {
 	u8 height;
 	struct scoutfs_block_ref ref;
 } __packed;
 
+/*
+ * @free_end: records the byte offset of the first byte after the free
+ * space in the block between the header and the first item.  New items
+ * are allocated by subtracting the space they need.
+ *
+ * @free_reclaim: records the number of bytes of free space amongst the
+ * items after free_end.  If a block is compacted then this much new
+ * free space would be reclaimed.
+ */
 struct scoutfs_btree_block {
 	struct scoutfs_block_header hdr;
-	struct scoutfs_treap_root treap;
-	__le16 total_free;
-	__le16 tail_free;
-	__le16 nr_items;
+	__le16 free_end;
+	__le16 free_reclaim;
+	__u8 nr_items;
+	__le16 item_offs[0];
 } __packed;
 
 /*
@@ -134,7 +132,6 @@ struct scoutfs_btree_block {
  */
 struct scoutfs_btree_item {
 	struct scoutfs_key key;
-	struct scoutfs_treap_node tnode;
 	__le64 seq;
 	__le16 val_len;
 	char val[0];

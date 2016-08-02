@@ -4,4 +4,4 @@ CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
  
 scoutfs-y += block.o btree.o buddy.o counters.o crc.o dir.o filerw.o \
 	     inode.o ioctl.o msg.o name.o scoutfs_trace.o super.o trans.o \
-	     treap.o xattr.o
+	     xattr.o

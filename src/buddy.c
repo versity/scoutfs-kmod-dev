@@ -703,3 +703,103 @@ int scoutfs_buddy_free(struct super_block *sb, u64 blkno, int order)
 	trace_scoutfs_buddy_free(blkno, order, region, ret);
 	return ret;
 }
+
+/* XXX this should be generic */
+#define min3_t(t, a, b, c) min3((t)(a), (t)(b), (t)(c))
+
+/*
+ * Free all the order allocations that make up the given unaligned block
+ * extent.  Think of it as figuring out the largest aligned allocation
+ * that starts at the blkno and then clamping it by the count.
+ *
+ * For now this is only used by callers who have pinned the blocks that
+ * provided the allocation that they're now freeing from.  It can't
+ * fail.  If it could we would ensure that we re-alloc partial frees
+ * before returning an error.
+ */
+void scoutfs_buddy_free_extent(struct super_block *sb, u64 blkno, u64 count)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->stable_super;
+	int order;
+	int size;
+	int ret;
+
+	while (count) {
+		/* both blkno and count have to have bits set */
+		order = min3_t(int, __ffs64(buddy_bit(super, blkno)),
+			       fls64(count) - 1,
+			       SCOUTFS_BUDDY_ORDERS - 1);
+		size = 1 << order;
+
+		ret = scoutfs_buddy_free(sb, blkno, order);
+		BUG_ON(ret);
+
+		blkno += size;
+		count -= size;
+	}
+}
+
+/*
+ * Return > 1 if the given order allocation was free in the old stable
+ * transaction, 0 if it wasn't, and -errno if errors prevented us from
+ * finding out.
+ *
+ * XXX I bet we could get away without using the buddy mutex
+ */
+int scoutfs_buddy_was_free(struct super_block *sb, u64 blkno, int order)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->stable_super;
+	struct buffer_head *ind_bh = NULL;
+	struct buffer_head *bh = NULL;
+	struct scoutfs_buddy_indirect *ind;
+	struct scoutfs_buddy_block *bud;
+	struct scoutfs_block_ref *ref;
+	int ret;
+	int nr;
+	int sl;
+
+	/* mkfs should have ensured that there's bitmap blocks */
+	/* XXX corruption */
+	if (sbi->super.buddy_bm_ref.blkno == 0 ||
+	    sbi->stable_super.buddy_bm_ref.blkno == 0)
+		return -EIO;
+
+	mutex_lock(&sbi->buddy_mutex);
+
+	/* get the stable indirect block */
+	ind_bh = scoutfs_block_read_ref(sb, &super->buddy_ind_ref);
+	if (IS_ERR(ind_bh)) {
+		ret = PTR_ERR(ind_bh);
+		goto out;
+	}
+	ind = bh_data(ind_bh);
+
+	/* allocation was free if it's slot wasn't populated */
+	sl = indirect_slot(super, blkno);
+	ref = &ind->slots[sl].ref;
+	if (!ref->blkno) {
+		ret = 1;
+		goto out;
+	}
+
+	/* check the allocation bit in the old stable bitmap block */
+	bh = scoutfs_block_read_ref(sb, ref);
+	if (IS_ERR(bh)) {
+		ret = PTR_ERR(bh);
+		goto out;
+	}
+	bud = bh_data(bh);
+
+	nr = buddy_bit(super, blkno) >> order;
+	ret = !!test_buddy_bit_or_higher(bud, order, nr);
+
+out:
+	mutex_unlock(&sbi->buddy_mutex);
+	scoutfs_block_put(ind_bh);
+	scoutfs_block_put(bh);
+
+	trace_printk("blkno %llu order %d ret %d\n", blkno, order, ret);
+	return ret;
+}

@@ -15,15 +15,17 @@
 #include <linux/sched.h>
 #include <linux/wait.h>
 #include <linux/atomic.h>
+#include <linux/writeback.h>
 
 #include "super.h"
 #include "block.h"
 #include "trans.h"
 #include "buddy.h"
+#include "filerw.h"
 #include "scoutfs_trace.h"
 
 /*
- * scoutfs metadata blocks are written in atomic transactions.
+ * scoutfs blocks are written in atomic transactions.
  *
  * Writers hold transactions to dirty blocks.  The transaction can't be
  * written until these active writers release the transaction.  We don't
@@ -44,11 +46,24 @@
  */
 
 /*
- * It's critical that this not try to perform IO if there's nothing
- * dirty.  The sync at unmount can have this work scheduled after sync
- * returns and the unmount path starts to tear down supers and block
- * devices.  We have to safely detect that there's nothing to do using
- * nothing in the vfs.
+ * This work func is responsible for writing out all the dirty blocks
+ * that make up the current dirty transaction.  It prevents writers from
+ * holding a transaction so it doesn't have to worry about blocks being
+ * dirtied while it is working.
+ *
+ * Any dirty block had to have allocated a new blkno which would have
+ * created dirty allocator metadata blocks.  We can avoid writing
+ * entirely if we don't have any dirty metadata blocks.  This is
+ * important because we don't try to serialize this work during
+ * unmount.. we can execute as the vfs is shutting down.. we need to
+ * decide that nothing is dirty without calling the vfs at all.
+ *
+ * We first try to sync the dirty inodes and write their dirty data blocks,
+ * then we write all our dirty metadata blocks, and only when those succeed
+ * do we write the new super that references all of these newly written blocks.
+ *
+ * If there are write errors then blocks are kept dirty in memory and will
+ * be written again at the next sync.
  */
 void scoutfs_trans_write_func(struct work_struct *work)
 {
@@ -57,15 +72,26 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	struct super_block *sb = sbi->sb;
 	bool advance = false;
 	int ret = 0;
+	bool have_umount;
 
 	wait_event(sbi->trans_hold_wq,
 		   atomic_cmpxchg(&sbi->trans_holds, 0, -1) == 0);
 
-	/* XXX probably want to write out dirty pages in inodes */
+	if (scoutfs_block_has_dirty(sb)) {
+		/* XXX need writeback errors from inode address spaces? */
 
-	ret = scoutfs_block_write_dirty(sb);
-	if (ret > 0) {
-		ret = scoutfs_write_dirty_super(sb);
+		/* XXX definitely don't understand this */
+		have_umount = down_read_trylock(&sb->s_umount);
+
+		sync_inodes_sb(sb);
+
+		if (have_umount)
+			up_read(&sb->s_umount);
+
+		scoutfs_filerw_free_alloc(sb);
+
+		ret = scoutfs_block_write_dirty(sb) ?:
+		      scoutfs_write_dirty_super(sb);
 		if (!ret)
 			advance = 1;
 	}

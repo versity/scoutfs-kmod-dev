@@ -280,8 +280,6 @@ static void block_write_end_io(struct buffer_head *bh, int uptodate)
  * be written again in the next transaction commit.
  *
  * Reads can traverse the blocks while they're in flight.
- *
- * The number of blocks written is returned, or -errno on error.
  */
 int scoutfs_block_write_dirty(struct super_block *sb)
 {
@@ -290,13 +288,11 @@ int scoutfs_block_write_dirty(struct super_block *sb)
 	struct rb_node *node;
 	struct blk_plug plug;
 	unsigned long flags;
-	int count;
-	int err;
+	int ret;
 
 	atomic_set(&sbi->block_writes, 1);
 	sbi->block_write_err = 0;
-	count = 0;
-	err = 0;
+	ret = 0;
 
 	blk_start_plug(&plug);
 
@@ -308,7 +304,6 @@ int scoutfs_block_write_dirty(struct super_block *sb)
 		spin_unlock_irqrestore(&sbi->block_lock, flags);
 
 		atomic_inc(&sbi->block_writes);
-		count++;
 		scoutfs_block_set_crc(bh);
 
 		/*
@@ -321,10 +316,10 @@ int scoutfs_block_write_dirty(struct super_block *sb)
 		lock_buffer(bh);
 
 		bh->b_end_io = block_write_end_io;
-		err = submit_bh(WRITE, bh); /* doesn't actually fail? */
+		ret = submit_bh(WRITE, bh); /* doesn't actually fail? */
 
 		spin_lock_irqsave(&sbi->block_lock, flags);
-		if (err)
+		if (ret)
 			break;
 	}
 	spin_unlock_irqrestore(&sbi->block_lock, flags);
@@ -335,10 +330,18 @@ int scoutfs_block_write_dirty(struct super_block *sb)
 	atomic_dec(&sbi->block_writes);
 	wait_event(sbi->block_wq, atomic_read(&sbi->block_writes) == 0);
 
-	trace_printk("err %d sbi err %d count %d\n",
-		     err, sbi->block_write_err, count);
+	trace_printk("ret %d\n", ret);
+	return ret;
+}
 
-	return err ?: sbi->block_write_err ?: count;
+/*
+ * The caller knows that it's not racing with writers.
+ */
+int scoutfs_block_has_dirty(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	return !RB_EMPTY_ROOT(&sbi->block_dirty_tree);
 }
 
 /*

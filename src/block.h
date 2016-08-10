@@ -13,6 +13,7 @@ struct buffer_head *scoutfs_block_dirty_alloc(struct super_block *sb);
 struct buffer_head *scoutfs_block_dirty_ref(struct super_block *sb,
 					    struct scoutfs_block_ref *ref);
 
+int scoutfs_block_has_dirty(struct super_block *sb);
 int scoutfs_block_write_dirty(struct super_block *sb);
 
 void scoutfs_block_set_crc(struct buffer_head *bh);

@@ -43,6 +43,11 @@ struct scoutfs_sb_info {
 	struct kset *kset;
 
 	struct scoutfs_counters *counters;
+
+	/* XXX we'd like this to be per task, not per super */
+	spinlock_t file_alloc_lock;
+	u64 file_alloc_blkno;
+	u64 file_alloc_count;
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)

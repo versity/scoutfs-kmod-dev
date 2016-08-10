@@ -249,10 +249,13 @@ void scoutfs_update_inode_item(struct inode *inode)
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
+	int err;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	scoutfs_btree_update(sb, &key, &curs);
+	err = scoutfs_btree_update(sb, &key, &curs);
+	BUG_ON(err);
+
 	store_inode(curs.val, inode);
 	scoutfs_btree_release(&curs);
 	trace_scoutfs_update_inode(inode);

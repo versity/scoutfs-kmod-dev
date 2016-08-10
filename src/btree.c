@@ -1114,30 +1114,39 @@ int scoutfs_btree_dirty(struct super_block *sb, struct scoutfs_key *key)
 }
 
 /*
- * For this to be safe the caller has to have pinned the dirty blocks
- * for the item in their transaction.
+ * This is guaranteed not to fail if the caller has already dirtied the
+ * block that contains the item in the current transaction.
  */
-void scoutfs_btree_update(struct super_block *sb, struct scoutfs_key *key,
-			  struct scoutfs_btree_cursor *curs)
+int scoutfs_btree_update(struct super_block *sb, struct scoutfs_key *key,
+			 struct scoutfs_btree_cursor *curs)
 {
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
 	struct buffer_head *bh;
 	int pos;
 	int cmp;
+	int ret;
 
 	BUG_ON(curs->bh);
 
 	bh = btree_walk(sb, key, NULL, 0, 0, WALK_DIRTY);
-	BUG_ON(IS_ERR(bh));
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
 	bt = bh_data(bh);
 
 	pos = find_pos(bt, key, &cmp);
-	BUG_ON(cmp);
+	if (cmp == 0) {
+		item = pos_item(bt, pos);
+		item->seq = bt->hdr.seq;
+		set_cursor(curs, bh, pos, true);
+		ret = 0;
+	} else {
+		unlock_block(NULL, bh, true);
+		scoutfs_block_put(bh);
+		ret = -ENOENT;
+	}
 
-	item = pos_item(bt, pos);
-	item->seq = bt->hdr.seq;
-	set_cursor(curs, bh, pos, true);
+	return ret;
 }
 
 void scoutfs_btree_release(struct scoutfs_btree_cursor *curs)

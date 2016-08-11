@@ -5,6 +5,7 @@ struct scoutfs_inode_info {
 	u64 ino;
 	u32 salt;
 
+	atomic64_t link_counter;
 	struct rw_semaphore xattr_rwsem;
 
 	struct inode inode;

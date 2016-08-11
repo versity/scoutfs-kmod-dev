@@ -97,10 +97,11 @@ struct scoutfs_key {
  * isn't necessary.  We could have an arbitrary sort order.  So we don't
  * have to stress about cleverly allocating the types.
  */
-#define SCOUTFS_INODE_KEY	1
-#define SCOUTFS_XATTR_KEY	2
-#define SCOUTFS_DIRENT_KEY	3
-#define SCOUTFS_BMAP_KEY	4
+#define SCOUTFS_INODE_KEY		1
+#define SCOUTFS_XATTR_KEY		2
+#define SCOUTFS_DIRENT_KEY		3
+#define SCOUTFS_LINK_BACKREF_KEY	4
+#define SCOUTFS_BMAP_KEY		5
 
 #define SCOUTFS_MAX_ITEM_LEN 512
 
@@ -173,6 +174,7 @@ struct scoutfs_timespec {
 struct scoutfs_inode {
 	__le64 size;
 	__le64 blocks;
+	__le64 link_counter;
 	__le32 nlink;
 	__le32 uid;
 	__le32 gid;
@@ -192,6 +194,7 @@ struct scoutfs_inode {
  */
 struct scoutfs_dirent {
 	__le64 ino;
+	__le64 counter;
 	__u8 type;
 	__u8 name[0];
 } __packed;
@@ -261,5 +264,15 @@ struct scoutfs_block_map {
 	__le32 crc[SCOUTFS_BLOCK_MAP_COUNT];
 	__le64 blkno[SCOUTFS_BLOCK_MAP_COUNT];
 };
+
+/*
+ * link backrefs give us a way to find all the hard links that refer
+ * to a target inode.  They're stored at an offset determined by an
+ * advancing counter in their inode.
+ */
+struct scoutfs_link_backref {
+	__le64 ino;
+	__le64 offset;
+} __packed;
 
 #endif

@@ -118,6 +118,7 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	inode->i_ctime.tv_nsec = le32_to_cpu(cinode->ctime.nsec);
 	
 	ci->salt = le32_to_cpu(cinode->salt);
+	atomic64_set(&ci->link_counter, le64_to_cpu(cinode->link_counter));
 }
 
 static int scoutfs_read_locked_inode(struct inode *inode)
@@ -199,6 +200,7 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->mtime.nsec = cpu_to_le32(inode->i_mtime.tv_nsec);
 
 	cinode->salt = cpu_to_le32(ci->salt);
+	cinode->link_counter = cpu_to_le64(atomic64_read(&ci->link_counter));
 }
 
 /*
@@ -307,6 +309,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci = SCOUTFS_I(inode);
 	ci->ino = ino;
 	get_random_bytes(&ci->salt, sizeof(ci->salt));
+	atomic64_set(&ci->link_counter, 0);
 
 	inode->i_ino = ino; /* XXX overflow */
 	inode_init_owner(inode, dir, mode);

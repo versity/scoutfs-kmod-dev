@@ -49,6 +49,13 @@
  * items will have distant offset values.  It's only as the directory
  * gets very large that hash values will start to be this dense and
  * sweeping over items in a btree leaf is reasonably efficient.
+ *
+ * For each directory entry item stored in a directory inode there is a
+ * corresponding link backref item stored at the target inode.  This
+ * lets us find all the paths that refer to a given inode.  The link
+ * backref offset comes from an advancing counter in the inode and the
+ * item value contains the dir inode and dirent offset of the referring
+ * link.
  */
 
 static unsigned int mode_to_type(umode_t mode)
@@ -108,11 +115,14 @@ static unsigned int item_name_len(struct scoutfs_btree_cursor *curs)
 {
 	return curs->val_len - sizeof(struct scoutfs_dirent);
 }
+
 /*
- * Store the dirent item hash in the dentry so that we don't have to
- * calculate and search to remove the item. 
+ * Each dirent stores the values that are needed to build the keys of
+ * the items that are removed on unlink so that we don't to search through
+ * items on unlink.
  */
 struct dentry_info {
+	u64 lref_counter;
 	u32 hash;
 };
 
@@ -156,6 +166,13 @@ static struct dentry_info *alloc_dentry_info(struct dentry *dentry)
 		kmem_cache_free(scoutfs_dentry_cachep, di);
 
 	return dentry->d_fsdata;
+}
+
+static void update_dentry_info(struct dentry_info *di, struct scoutfs_key *key,
+			       struct scoutfs_dirent *dent)
+{
+	di->lref_counter = le64_to_cpu(dent->counter);
+	di->hash = scoutfs_key_offset(key);
 }
 
 static u64 last_dirent_key_offset(u32 h)
@@ -210,7 +227,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		if (scoutfs_names_equal(dentry->d_name.name, dentry->d_name.len,
 					dent->name, name_len)) {
 			ino = le64_to_cpu(dent->ino);
-			di->hash = scoutfs_key_offset(curs.key);
+			update_dentry_info(di, curs.key, dent);
 			break;
 		}
 	}
@@ -296,6 +313,34 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	return ret;
 }
 
+static void set_lref_key(struct scoutfs_key *key, u64 ino, u64 ctr)
+{
+	scoutfs_set_key(key, ino, SCOUTFS_LINK_BACKREF_KEY, ctr);
+}
+
+static int update_lref_item(struct super_block *sb, struct scoutfs_key *key,
+			    u64 dir_ino, u64 dir_off, bool update)
+{
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_link_backref *lref;
+	int ret;
+
+	if (update)
+		ret = scoutfs_btree_update(sb, key, &curs);
+	else
+		ret = scoutfs_btree_insert(sb, key, sizeof(*lref), &curs);
+
+	/* XXX verify size */
+	if (ret == 0) {
+		lref = curs.val;
+		lref->ino = cpu_to_le64(dir_ino);
+		lref->offset = cpu_to_le64(dir_off);
+		scoutfs_btree_release(&curs);
+	}
+
+	return ret;
+}
+
 static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		       dev_t rdev)
 {
@@ -308,6 +353,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct scoutfs_key first;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
+	struct scoutfs_key lref_key;
 	int bytes;
 	int ret;
 	u64 h;
@@ -343,15 +389,25 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (ret)
 		goto out;
 
-	ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
+	set_lref_key(&lref_key, scoutfs_ino(inode),
+		     atomic64_inc_return(&SCOUTFS_I(inode)->link_counter));
+	ret = update_lref_item(sb, &lref_key, scoutfs_ino(dir),
+			       scoutfs_key_offset(&key), false);
 	if (ret)
 		goto out;
 
+	ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
+	if (ret) {
+		scoutfs_btree_delete(sb, &lref_key);
+		goto out;
+	}
+
 	dent = curs.val;
 	dent->ino = cpu_to_le64(scoutfs_ino(inode));
+	dent->counter = lref_key.offset;
 	dent->type = mode_to_type(inode->i_mode);
 	memcpy(dent->name, dentry->d_name.name, dentry->d_name.len);
-	di->hash = scoutfs_key_offset(&key);
+	update_dentry_info(di, &key, dent);
 
 	scoutfs_btree_release(&curs);
 
@@ -400,6 +456,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct timespec ts = current_kernel_time();
 	struct dentry_info *di;
 	struct scoutfs_key key;
+	struct scoutfs_key lref_key;
 	int ret = 0;
 
 	if (WARN_ON_ONCE(!dentry->d_fsdata))
@@ -413,8 +470,11 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (ret)
 		return ret;
 
+	set_lref_key(&lref_key, scoutfs_ino(inode), di->lref_counter);
+
 	ret = scoutfs_dirty_inode_item(dir) ?:
-	      scoutfs_dirty_inode_item(inode);
+	      scoutfs_dirty_inode_item(inode) ?:
+	      scoutfs_btree_dirty(sb, &lref_key);
 	if (ret)
 		goto out;
 
@@ -423,6 +483,8 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	ret = scoutfs_btree_delete(sb, &key);
 	if (ret)
 		goto out;
+
+	scoutfs_btree_delete(sb, &lref_key);
 
 	dir->i_ctime = ts;
 	dir->i_mtime = ts;
@@ -439,6 +501,200 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 
 out:
 	scoutfs_release_trans(sb);
+	return ret;
+}
+
+/*
+ * Add an allocated path component to the callers list which links to
+ * the target inode at a counter past the given counter.
+ *
+ * This is implemented by searching for link backrefs on the inode
+ * starting from the given counter.  Those contain references to the
+ * parent directory and dirent key offset that contain the link to the
+ * inode.
+ *
+ * The caller holds no locks that protect components in the path.  We
+ * search the link backref to find the parent dir then acquire it's
+ * i_mutex to make sure that its entries and backrefs are stable.  If
+ * the next backref points to a different dir after we acquire the lock
+ * we bounce off and retry.
+ *
+ * Backref counters are never reused and rename only modifies the
+ * existing backref counter under the dir's mutex.
+ */
+static int add_linkref_name(struct super_block *sb, u64 *dir_ino, u64 ino,
+			    u64 *ctr, struct list_head *list)
+{
+	struct scoutfs_path_component *comp;
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_link_backref *lref;
+	struct scoutfs_dirent *dent;
+	struct inode *inode = NULL;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
+	struct scoutfs_key key;
+	u64 retried = 0;
+	u64 off;
+	int len;
+	int ret;
+
+	comp = kmalloc(sizeof(struct scoutfs_path_component), GFP_KERNEL);
+	if (!comp)
+		return -ENOMEM;
+
+retry:
+	scoutfs_set_key(&first, ino, SCOUTFS_LINK_BACKREF_KEY, *ctr);
+	scoutfs_set_key(&last, ino, SCOUTFS_LINK_BACKREF_KEY, ~0ULL);
+
+	ret = scoutfs_btree_next(sb, &first, &last, &curs);
+	if (ret <= 0)
+		goto out;
+
+	lref = curs.val;
+	*dir_ino = le64_to_cpu(lref->ino),
+	off = le64_to_cpu(lref->offset);
+	*ctr = scoutfs_key_offset(curs.key);
+
+	trace_printk("ino %llu ctr %llu dir_ino %llu off %llu\n",
+		     ino, *ctr, *dir_ino, off);
+
+	scoutfs_btree_release(&curs);
+
+	/* XXX corruption, should never be key == U64_MAX */
+	if (*ctr == U64_MAX) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/* XXX should verify ino and offset, too */
+
+	if (inode && scoutfs_ino(inode) != *dir_ino) {
+		mutex_unlock(&inode->i_mutex);
+		iput(inode);
+		inode = NULL;
+	}
+
+	if (!inode) {
+		inode = scoutfs_iget(sb, *dir_ino);
+		if (IS_ERR(inode)) {
+			ret = PTR_ERR(inode);
+			inode = NULL;
+			if (ret == -ENOENT && retried != *dir_ino) {
+				retried = *dir_ino;
+				goto retry;
+			}
+			goto out;
+		}
+
+		mutex_lock(&inode->i_mutex);
+		goto retry;
+	}
+
+	scoutfs_set_key(&key, *dir_ino, SCOUTFS_DIRENT_KEY, off);
+
+	ret = scoutfs_btree_lookup(sb, &key, &curs);
+	if (ret < 0) {
+		/* XXX corruption, should always have dirent for backref */
+		if (ret == -ENOENT)
+			ret = -EIO;
+		goto out;
+	}
+
+	dent = curs.val;
+	len = item_name_len(&curs);
+
+	trace_printk("dent ino %llu len %d\n", le64_to_cpu(dent->ino), len);
+
+	/* XXX corruption */
+	if (len < 1 || len > SCOUTFS_NAME_LEN) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/* XXX corruption, dirents should always match link backref */
+	if (le64_to_cpu(dent->ino) != ino) {
+		ret = -EIO;
+		goto out;
+	}
+
+	(*ctr)++;
+	comp->len = len;
+	memcpy(comp->name, dent->name, len);
+	list_add(&comp->head, list);
+	comp = NULL; /* won't be freed */
+
+	scoutfs_btree_release(&curs);
+	ret = 1;
+out:
+	if (inode) {
+		mutex_unlock(&inode->i_mutex);
+		iput(inode);
+	}
+
+	kfree(comp);
+	return ret;
+}
+
+void scoutfs_dir_free_path(struct list_head *list)
+{
+	struct scoutfs_path_component *comp;
+	struct scoutfs_path_component *tmp;
+
+	list_for_each_entry_safe(comp, tmp, list, head) {
+		list_del_init(&comp->head);
+		kfree(comp);
+	}
+}
+
+/*
+ * Fill the list with the allocated path components that link the root
+ * to the target inode.  The caller's ctr gives the link counter to
+ * start from.
+ *
+ * This is racing with modification of components in the path.  We can
+ * traverse a partial path only to find that it's been blown away
+ * entirely.  If we see a component go missing we retry.  The removal of
+ * the final link to the inode should prevent repeatedly traversing
+ * paths that no longer exist.
+ *
+ * Returns > 0 and *ctr is updated if an allocated name was added to the
+ * list, 0 if no name past *ctr was found, or -errno on errors.
+ */
+int scoutfs_dir_next_path(struct super_block *sb, u64 ino, u64 *ctr,
+			  struct list_head *list)
+{
+	u64 our_ctr;
+	u64 par_ctr;
+	u64 par_ino;
+	int ret;
+
+	if (*ctr == U64_MAX)
+		return 0;
+
+retry:
+	our_ctr = *ctr;
+	/* get the next link name to the given inode */
+	ret = add_linkref_name(sb, &par_ino, ino, &our_ctr, list);
+	if (ret <= 0)
+		goto out;
+
+	/* then get the names of all the parent dirs */
+	while (par_ino != SCOUTFS_ROOT_INO) {
+		par_ctr = 0;
+		ret = add_linkref_name(sb, &par_ino, par_ino, &par_ctr, list);
+		if (ret < 0)
+			goto out;
+
+		/* restart if there was no parent component */
+		if (ret == 0) {
+			scoutfs_dir_free_path(list);
+			goto retry;
+		}
+	}
+
+out:
+	if (ret > 0)
+		*ctr = our_ctr;
 	return ret;
 }
 

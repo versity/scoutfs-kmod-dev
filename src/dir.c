@@ -341,15 +341,14 @@ static int update_lref_item(struct super_block *sb, struct scoutfs_key *key,
 	return ret;
 }
 
-static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
-		       dev_t rdev)
+static int add_entry_items(struct inode *dir, struct dentry *dentry,
+			   struct inode *inode)
 {
+	struct dentry_info *di = dentry->d_fsdata;
 	struct super_block *sb = dir->i_sb;
 	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
-	struct inode *inode = NULL;
 	struct scoutfs_dirent *dent;
-	struct dentry_info *di;
 	struct scoutfs_key first;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
@@ -358,26 +357,16 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	int ret;
 	u64 h;
 
-	di = alloc_dentry_info(dentry);
-	if (IS_ERR(di))
-		return PTR_ERR(di);
+	/* caller should have allocated the dentry info */
+	if (WARN_ON_ONCE(di == NULL))
+		return -EINVAL;
 
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
-	ret = scoutfs_hold_trans(sb);
-	if (ret)
-		return ret;
-
 	ret = scoutfs_dirty_inode_item(dir);
 	if (ret)
 		goto out;
-
-	inode = scoutfs_new_inode(sb, dir, mode, rdev);
-	if (IS_ERR(inode)) {
-		ret = PTR_ERR(inode);
-		goto out;
-	}
 
 	bytes = dent_bytes(dentry->d_name.len);
 	h = name_hash(dentry->d_name.name, dentry->d_name.len, si->salt);
@@ -410,6 +399,35 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	update_dentry_info(di, &key, dent);
 
 	scoutfs_btree_release(&curs);
+out:
+	return ret;
+}
+
+static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
+		       dev_t rdev)
+{
+	struct super_block *sb = dir->i_sb;
+	struct inode *inode;
+	struct dentry_info *di;
+	int ret;
+
+	di = alloc_dentry_info(dentry);
+	if (IS_ERR(di))
+		return PTR_ERR(di);
+
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		return ret;
+
+	inode = scoutfs_new_inode(sb, dir, mode, rdev);
+	if (IS_ERR(inode)) {
+		ret = PTR_ERR(inode);
+		goto out;
+	}
+
+	ret = add_entry_items(dir, dentry, inode);
+	if (ret)
+		goto out;
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -443,6 +461,44 @@ static int scoutfs_create(struct inode *dir, struct dentry *dentry,
 static int scoutfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	return scoutfs_mknod(dir, dentry, mode | S_IFDIR, 0);
+}
+
+static int scoutfs_link(struct dentry *old_dentry,
+			struct inode *dir, struct dentry *dentry)
+{
+	struct inode *inode = old_dentry->d_inode;
+	struct super_block *sb = dir->i_sb;
+	struct dentry_info *di;
+	int ret;
+
+	if (inode->i_nlink >= SCOUTFS_LINK_MAX)
+		return -EMLINK;
+
+	di = alloc_dentry_info(dentry);
+	if (IS_ERR(di))
+		return PTR_ERR(di);
+
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		return ret;
+
+	ret = add_entry_items(dir, dentry, inode);
+	if (ret)
+		goto out;
+
+	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
+	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+	inode->i_ctime = dir->i_mtime;
+	inc_nlink(inode);
+
+	scoutfs_update_inode_item(inode);
+	scoutfs_update_inode_item(dir);
+
+	atomic_inc(&inode->i_count);
+	d_instantiate(dentry, inode);
+out:
+	scoutfs_release_trans(sb);
+	return ret;
 }
 
 /*
@@ -707,6 +763,7 @@ const struct inode_operations scoutfs_dir_iops = {
 	.mknod		= scoutfs_mknod,
 	.create		= scoutfs_create,
 	.mkdir		= scoutfs_mkdir,
+	.link		= scoutfs_link,
 	.unlink		= scoutfs_unlink,
 	.rmdir		= scoutfs_unlink,
 	.setxattr	= scoutfs_setxattr,

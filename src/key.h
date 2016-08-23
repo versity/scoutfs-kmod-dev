@@ -4,7 +4,7 @@
 #include <linux/types.h>
 #include "format.h"
 
-#define CKF "%llu.%llu.%llu"
+#define CKF "%llu.%u.%llu"
 #define CKA(key) \
 	le64_to_cpu((key)->inode), (key)->type, le64_to_cpu((key)->offset)
 

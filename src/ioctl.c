@@ -21,6 +21,7 @@
 #include "btree.h"
 #include "key.h"
 #include "dir.h"
+#include "name.h"
 #include "ioctl.h"
 
 /*
@@ -200,6 +201,101 @@ out:
 	return ret;
 }
 
+/*
+ * Find inodes that might contain a given xattr name or value.
+ *
+ * The inodes are filled in sorted order from the first to the last
+ * inode.  The number of found inodes is returned.  If an error is hit
+ * it can return the number of inodes found before the error.
+ *
+ * The search can be continued from the next inode after the last
+ * returned.
+ */
+static long scoutfs_ioc_find_xattr(struct file *file, unsigned long arg,
+				   bool find_name)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+	struct scoutfs_ioctl_find_xattr args;
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_key first;
+	struct scoutfs_key last;
+	char __user *ustr;
+	u64 __user *uino;
+	u64 inos[32];
+	char *str;
+	int nr_inos = 0;
+	int copied = 0;
+	int ret;
+	u8 type;
+	u64 h;
+
+	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
+		return -EFAULT;
+
+	if (args.str_len > SCOUTFS_MAX_XATTR_LEN || args.ino_count > INT_MAX)
+		return -EINVAL;
+
+	if (args.ino_count == 0)
+		return 0;
+
+	ustr = (void __user *)(unsigned long)args.str_ptr;
+	uino = (void __user *)(unsigned long)args.ino_ptr;
+
+	str = kmalloc(args.str_len, GFP_KERNEL);
+	if (!str)
+		return -ENOMEM;
+
+	if (copy_from_user(str, ustr, args.str_len)) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	h = scoutfs_name_hash(str, args.str_len);
+
+	if (find_name) {
+		h &= ~SCOUTFS_XATTR_NAME_HASH_MASK;
+		type = SCOUTFS_XATTR_NAME_HASH_KEY;
+	} else {
+		type = SCOUTFS_XATTR_VAL_HASH_KEY;
+	}
+
+	scoutfs_set_key(&first, h, type, args.first_ino);
+	scoutfs_set_key(&last, h, type, args.last_ino);
+
+	while (copied < args.ino_count) {
+
+		while ((ret = scoutfs_btree_next(sb, &first, &last,
+						 &curs)) > 0) {
+			inos[nr_inos++] = scoutfs_key_offset(curs.key);
+
+			first = *curs.key;
+			scoutfs_inc_key(&first);
+
+			if (nr_inos == ARRAY_SIZE(inos) ||
+			    (nr_inos + copied) == args.ino_count) {
+				scoutfs_btree_release(&curs);
+				ret = 0;
+				break;
+			}
+		}
+		if (ret < 0 || nr_inos == 0)
+			break;
+
+		if (copy_to_user(uino, inos, nr_inos * sizeof(u64))) {
+			ret = -EFAULT;
+			break;
+		}
+
+		uino += nr_inos;
+		copied += nr_inos;
+		nr_inos = 0;
+	}
+
+out:
+	kfree(str);
+	return copied ?: ret;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -207,6 +303,10 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_inodes_since(file, arg);
 	case SCOUTFS_IOC_INODE_PATHS:
 		return scoutfs_ioc_inode_paths(file, arg);
+	case SCOUTFS_IOC_FIND_XATTR_NAME:
+		return scoutfs_ioc_find_xattr(file, arg, true);
+	case SCOUTFS_IOC_FIND_XATTR_VAL:
+		return scoutfs_ioc_find_xattr(file, arg, false);
 	}
 
 	return -ENOTTY;

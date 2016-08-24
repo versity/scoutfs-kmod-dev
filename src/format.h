@@ -72,6 +72,7 @@ struct scoutfs_buddy_block {
 
 struct scoutfs_buddy_indirect {
 	struct scoutfs_block_header hdr;
+	__le64 order_totals[SCOUTFS_BUDDY_ORDERS];
 	struct scoutfs_buddy_slot {
 		__u8 free_orders;
 		struct scoutfs_block_ref ref;
@@ -79,7 +80,7 @@ struct scoutfs_buddy_indirect {
 } __packed;
 
 #define SCOUTFS_BUDDY_SLOTS						\
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_block)) /	\
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_indirect)) /	\
 		sizeof(struct scoutfs_buddy_slot))
 
 /*

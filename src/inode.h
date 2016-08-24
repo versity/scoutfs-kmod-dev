@@ -30,6 +30,8 @@ void scoutfs_update_inode_item(struct inode *inode);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev);
 
+u64 scoutfs_last_ino(struct super_block *sb);
+
 void scoutfs_inode_exit(void);
 int scoutfs_inode_init(void);
 

@@ -263,6 +263,22 @@ void scoutfs_update_inode_item(struct inode *inode)
 	trace_scoutfs_update_inode(inode);
 }
 
+/*
+ * A quick atomic sample of the last inode number that's been allocated.
+ */
+u64 scoutfs_last_ino(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	u64 last;
+
+	spin_lock(&sbi->next_ino_lock);
+	last = le64_to_cpu(super->next_ino);
+	spin_unlock(&sbi->next_ino_lock);
+
+	return last;
+}
+
 static int alloc_ino(struct super_block *sb, u64 *ino)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);

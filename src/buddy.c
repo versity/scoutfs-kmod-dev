@@ -11,6 +11,7 @@
  * General Public License for more details.
  */
 #include <linux/kernel.h>
+#include <linux/statfs.h>
 
 #include "super.h"
 #include "format.h"
@@ -164,16 +165,22 @@ static int test_buddy_bit_or_higher(struct scoutfs_buddy_block *bud, int order,
 	return false;
 }
 
-static void set_buddy_bit(struct scoutfs_buddy_block *bud, int order, int nr)
+static void set_buddy_bit(struct scoutfs_buddy_indirect *ind,
+			  struct scoutfs_buddy_block *bud, int order, int nr)
 {
-	if (!test_and_set_bit_le(order_nr(order, nr), bud->bits))
+	if (!test_and_set_bit_le(order_nr(order, nr), bud->bits)) {
+		le64_add_cpu(&ind->order_totals[order], 1);
 		le32_add_cpu(&bud->order_counts[order], 1);
+	}
 }
 
-static void clear_buddy_bit(struct scoutfs_buddy_block *bud, int order, int nr)
+static void clear_buddy_bit(struct scoutfs_buddy_indirect *ind,
+			    struct scoutfs_buddy_block *bud, int order, int nr)
 {
-	if (test_and_clear_bit_le(order_nr(order, nr), bud->bits))
+	if (test_and_clear_bit_le(order_nr(order, nr), bud->bits)) {
+		le64_add_cpu(&ind->order_totals[order], -1);
 		le32_add_cpu(&bud->order_counts[order], -1);
+	}
 }
 
 /* returns INT_MAX when there are no bits set */
@@ -289,8 +296,10 @@ static int bitmap_free(struct super_block *sb, u64 blkno)
  * Give the caller a dirty buddy block.  If the slot hasn't been used
  * yet then we need to allocate and initialize a new block.
  */
-static struct buffer_head *dirty_buddy_block(struct super_block *sb, int sl,
-					       struct scoutfs_buddy_slot *slot)
+static struct buffer_head *dirty_buddy_block(struct super_block *sb,
+					     struct scoutfs_buddy_indirect *ind,
+					     int sl,
+					     struct scoutfs_buddy_slot *slot)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
@@ -325,7 +334,7 @@ static struct buffer_head *dirty_buddy_block(struct super_block *sb, int sl,
 	size = 1 << order;
 	nr = 0;
 	while (count > size) {
-		set_buddy_bit(bud, order, nr);
+		set_buddy_bit(ind, bud, order, nr);
 		nr++;
 		count -= size;
 	}
@@ -333,7 +342,7 @@ static struct buffer_head *dirty_buddy_block(struct super_block *sb, int sl,
 	/* set order bits for each of the bits set in the remaining count */
 	do {
 		if (count & (1 << order)) {
-			set_buddy_bit(bud, order, nr);
+			set_buddy_bit(ind, bud, order, nr);
 			nr = (nr + 1) << 1;
 		} else {
 			nr <<= 1;
@@ -405,7 +414,8 @@ static int find_first_fit(struct scoutfs_super_block *super, int sl,
  * that breaks up a larger order.  Higher level callers iterate over
  * smaller orders to provide partial allocations.
  */
-static int alloc_slot(struct super_block *sb,  int sl,
+static int alloc_slot(struct super_block *sb,
+		      struct scoutfs_buddy_indirect *ind, int sl,
 		      struct scoutfs_buddy_slot *slot,
 		      struct scoutfs_block_ref *stable_ref,
 		      u64 *blkno, int order)
@@ -422,7 +432,7 @@ static int alloc_slot(struct super_block *sb,  int sl,
 	int i;
 
 	/* initialize or dirty the slot's buddy block */
-	bh = dirty_buddy_block(sb, sl, slot);
+	bh = dirty_buddy_block(sb, ind, sl, slot);
 	if (IS_ERR(bh))
 		return PTR_ERR(bh);
 	bud = bh_data(bh);
@@ -450,11 +460,11 @@ static int alloc_slot(struct super_block *sb,  int sl,
 	*blkno = slot_buddy_blkno(super, sl, found, nr);
 
 	/* always clear the found order */
-	clear_buddy_bit(bud, found, nr);
+	clear_buddy_bit(ind, bud, found, nr);
 
 	/* free right buddies if we're breaking up a larger order */
 	for (nr <<= 1, i = found - 1; i >= order; i--, nr <<= 1)
-		set_buddy_bit(bud, i, nr | 1);
+		set_buddy_bit(ind, bud, i, nr | 1);
 
 	update_free_orders(slot, bud);
 	ret = 0;
@@ -524,8 +534,8 @@ static int alloc_order(struct super_block *sb, u64 *blkno, int order)
 			continue;
 		}
 
-		ret = alloc_slot(sb, i, &ind->slots[i], &st_ind->slots[i].ref,
-				 blkno, order);
+		ret = alloc_slot(sb, ind, i, &ind->slots[i],
+				 &st_ind->slots[i].ref, blkno, order);
 		if (ret != -ENOSPC)
 			break;
 	}
@@ -664,11 +674,11 @@ static int buddy_free(struct super_block *sb, u64 blkno, int order)
 		if (!test_buddy_bit(bud, i, nr ^ 1))
 			break;
 
-		clear_buddy_bit(bud, i, nr ^ 1);
+		clear_buddy_bit(ind, bud, i, nr ^ 1);
 		nr >>= 1;
 	}
 
-	set_buddy_bit(bud, i, nr);
+	set_buddy_bit(ind, bud, i, nr);
 
 	update_free_orders(&ind->slots[sl], bud);
 	scoutfs_block_put(bh);
@@ -802,4 +812,39 @@ out:
 
 	trace_printk("blkno %llu order %d ret %d\n", blkno, order, ret);
 	return ret;
+}
+
+/*
+ * For now we only have one indirect block off the super.  When we grow
+ * multiple commit block pairs that reference root and indirect blocks
+ * then we'll need to iterate over those.  These results will only ever
+ * be approximate so we can simply use racey valid ref reads to be able
+ * to sample while others are writing.
+ */
+int scoutfs_buddy_bfree(struct super_block *sb, u64 *bfree)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_buddy_indirect *ind;
+	struct buffer_head *bh;
+	int ret;
+	int i;
+
+	*bfree = 0;
+
+	bh = scoutfs_block_read_ref(sb, &super->buddy_ind_ref);
+	if (IS_ERR(bh)) {
+		ret = PTR_ERR(bh);
+		goto out;
+	}
+	ind = bh_data(bh);
+
+	for (i = 0; i < SCOUTFS_BUDDY_ORDERS; i++)
+		*bfree += le64_to_cpu(ind->order_totals[i]) << i;
+
+	scoutfs_block_put(bh);
+	ret = 0;
+out:
+	return ret;
+
 }

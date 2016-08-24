@@ -17,6 +17,7 @@
 #include <linux/magic.h>
 #include <linux/buffer_head.h>
 #include <linux/random.h>
+#include <linux/statfs.h>
 
 #include "super.h"
 #include "format.h"
@@ -27,14 +28,55 @@
 #include "block.h"
 #include "counters.h"
 #include "trans.h"
+#include "buddy.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
+
+/*
+ * We fake the number of free inodes value by assuming that we can fill
+ * free blocks with a certain number of inodes.  We then the number of
+ * current inodes to that free count to determine the total possible
+ * inodes.
+ *
+ * The fsid that we report is constructed from the xor of the first two
+ * and second two little endian u32s that make up the uuid bytes.
+ */
+static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
+{
+	struct super_block *sb = dentry->d_inode->i_sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	__le32 * __packed uuid = (void *)super->uuid;
+	int ret;
+
+	ret = scoutfs_buddy_bfree(sb, &kst->f_bfree);
+	if (ret)
+		return ret;
+
+	kst->f_type = SCOUTFS_SUPER_MAGIC;
+	kst->f_bsize = SCOUTFS_BLOCK_SIZE;
+	kst->f_blocks = le64_to_cpu(super->total_blocks);
+	kst->f_bavail = kst->f_bfree;
+
+	kst->f_ffree = kst->f_bfree * 17;
+	kst->f_files = kst->f_ffree + scoutfs_last_ino(sb);
+
+	/* this fsid is constant.. the uuid is different */
+	kst->f_fsid.val[0] = le32_to_cpu(uuid[0]) ^ le32_to_cpu(uuid[1]);
+	kst->f_fsid.val[1] = le32_to_cpu(uuid[2]) ^ le32_to_cpu(uuid[3]);
+	kst->f_namelen = SCOUTFS_NAME_LEN;
+	kst->f_frsize = SCOUTFS_BLOCK_SIZE;
+	/* the vfs fills f_flags */
+
+	return 0;
+}
 
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
 	.destroy_inode = scoutfs_destroy_inode,
 	.sync_fs = scoutfs_sync_fs,
+	.statfs = scoutfs_statfs,
 };
 
 /*

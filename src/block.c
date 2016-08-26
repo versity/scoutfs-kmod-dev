@@ -194,14 +194,16 @@ struct buffer_head *scoutfs_block_read(struct super_block *sb, u64 blkno)
 		lock_buffer(bh);
 		if (!buffer_scoutfs_verified(bh)) {
 			ret = verify_block_header(sbi, bh);
-			if (ret < 0) {
-				scoutfs_block_put(bh);
-				bh = ERR_PTR(ret);
-			} else {
+			if (!ret)
 				set_buffer_scoutfs_verified(bh);
-			}
+		} else {
+			ret = 0;
 		}
 		unlock_buffer(bh);
+		if (ret < 0) {
+			scoutfs_block_put(bh);
+			bh = ERR_PTR(ret);
+		}
 	}
 
 out:

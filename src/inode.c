@@ -91,7 +91,7 @@ static void set_inode_ops(struct inode *inode)
 		inode->i_fop = &scoutfs_dir_fops;
 		break;
 	case S_IFLNK:
-//		inode->i_op = &scoutfs_symlink_iops;
+		inode->i_op = &scoutfs_symlink_iops;
 		break;
 	default:
 //		inode->i_op = &scoutfs_special_iops;

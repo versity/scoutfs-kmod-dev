@@ -561,6 +561,170 @@ out:
 }
 
 /*
+ * Full a buffer with the null terminated symlink, point nd at it, and
+ * return it so put_link can free it once the vfs is done.
+ *
+ * We chose to pay the runtime cost of per-call allocation and copy
+ * overhead instead of wiring up symlinks to the page cache, storing
+ * each small link in a full page, and later having to reclaim them.
+ */
+static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
+{
+	struct inode *inode = dentry->d_inode;
+	struct super_block *sb = inode->i_sb;
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	loff_t size = i_size_read(inode);
+	struct scoutfs_key first;
+	struct scoutfs_key last;
+	char *path;
+	int off;
+	int ret;
+	int k;
+
+	/* XXX corruption */
+	if (size == 0 || size > SCOUTFS_SYMLINK_MAX_SIZE)
+		return ERR_PTR(-EIO);
+
+	/* unlikely, but possible I suppose */
+	if (size > PATH_MAX)
+		return ERR_PTR(-ENAMETOOLONG);
+
+	path = kmalloc(size, GFP_NOFS);
+	if (!path)
+		return ERR_PTR(-ENOMEM);
+
+	scoutfs_set_key(&first, scoutfs_ino(inode), SCOUTFS_SYMLINK_KEY, 0);
+	scoutfs_set_key(&last, scoutfs_ino(inode), SCOUTFS_SYMLINK_KEY, ~0ULL);
+
+	off = 0;
+	k = 0;
+	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+		if (scoutfs_key_offset(curs.key) != k ||
+		    off + curs.val_len > size) {
+			/* XXX corruption */
+			scoutfs_btree_release(&curs);
+			ret = -EIO;
+			break;
+		}
+
+		memcpy(path + off, curs.val, curs.val_len);
+
+		off += curs.val_len;
+		k++;
+	}
+
+	/* XXX corruption */
+	if (ret == 0 && (off != size || path[off - 1] != '\0'))
+		ret = -EIO;
+
+	if (ret) {
+		kfree(path);
+		path = ERR_PTR(ret);
+	}
+
+	return path;
+}
+
+static void scoutfs_put_link(struct dentry *dentry, struct nameidata *nd,
+			     void *cookie)
+{
+	if (!IS_ERR_OR_NULL(cookie))
+		kfree(cookie);
+}
+
+const struct inode_operations scoutfs_symlink_iops = {
+	.readlink       = generic_readlink,
+	.follow_link    = scoutfs_follow_link,
+	.put_link       = scoutfs_put_link,
+	.setxattr	= scoutfs_setxattr,
+	.getxattr	= scoutfs_getxattr,
+	.listxattr	= scoutfs_listxattr,
+	.removexattr	= scoutfs_removexattr,
+};
+
+/*
+ * Symlink target paths can be annoyingly huge.  We don't want large
+ * items gumming up the btree so we store relatively rare large paths in
+ * multiple items.
+ */
+static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
+			   const char *symname)
+{
+	struct super_block *sb = dir->i_sb;
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct inode *inode = NULL;
+	struct scoutfs_key key;
+	struct dentry_info *di;
+	const int name_len = strlen(symname) + 1;
+	int off;
+	int bytes;
+	int ret;
+	int k = 0;
+
+	/* path_max includes null as does our value for nd_set_link */
+	if (name_len > PATH_MAX || name_len > SCOUTFS_SYMLINK_MAX_SIZE)
+		return -ENAMETOOLONG;
+
+	di = alloc_dentry_info(dentry);
+	if (IS_ERR(di))
+		return PTR_ERR(di);
+
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		return ret;
+
+	inode = scoutfs_new_inode(sb, dir, S_IFLNK|S_IRWXUGO, 0);
+	if (IS_ERR(inode)) {
+		ret = PTR_ERR(inode);
+		goto out;
+	}
+
+	for (k = 0, off = 0; off < name_len; off += bytes, k++) {
+		scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_SYMLINK_KEY,
+				k);
+		bytes = min(name_len, SCOUTFS_MAX_ITEM_LEN);
+
+		ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
+		if (ret)
+			goto out;
+
+		memcpy(curs.val, symname + off, bytes);
+		scoutfs_btree_release(&curs);
+	}
+
+	ret = add_entry_items(dir, dentry, inode);
+	if (ret)
+		goto out;
+
+	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
+	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+
+	inode->i_ctime = dir->i_mtime;
+	i_size_write(inode, name_len);
+
+	scoutfs_update_inode_item(inode);
+	scoutfs_update_inode_item(dir);
+
+	insert_inode_hash(inode);
+	/* XXX need to set i_op/fop before here for sec callbacks */
+	d_instantiate(dentry, inode);
+out:
+	if (ret < 0) {
+		if (!IS_ERR_OR_NULL(inode))
+			iput(inode);
+
+		while (k--) {
+			scoutfs_set_key(&key, scoutfs_ino(inode),
+					SCOUTFS_SYMLINK_KEY, k);
+			scoutfs_btree_delete(sb, &key);
+		}
+	}
+
+	scoutfs_release_trans(sb);
+	return ret;
+}
+
+/*
  * Add an allocated path component to the callers list which links to
  * the target inode at a counter past the given counter.
  *
@@ -770,6 +934,7 @@ const struct inode_operations scoutfs_dir_iops = {
 	.getxattr	= scoutfs_getxattr,
 	.listxattr	= scoutfs_listxattr,
 	.removexattr	= scoutfs_removexattr,
+	.symlink	= scoutfs_symlink,
 };
 
 void scoutfs_dir_exit(void)

@@ -104,7 +104,8 @@ struct scoutfs_key {
 #define SCOUTFS_XATTR_VAL_HASH_KEY	4
 #define SCOUTFS_DIRENT_KEY		5
 #define SCOUTFS_LINK_BACKREF_KEY	6
-#define SCOUTFS_BMAP_KEY		7
+#define SCOUTFS_SYMLINK_KEY		7
+#define SCOUTFS_BMAP_KEY		8
 
 #define SCOUTFS_MAX_ITEM_LEN 512
 
@@ -190,6 +191,9 @@ struct scoutfs_inode {
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1
+
+/* like the block size, a reasonable min PATH_MAX across platforms */
+#define SCOUTFS_SYMLINK_MAX_SIZE 4096
 
 /*
  * Dirents are stored in items with an offset of the hash of their name.

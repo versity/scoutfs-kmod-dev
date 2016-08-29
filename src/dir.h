@@ -5,6 +5,7 @@
 
 extern const struct file_operations scoutfs_dir_fops;
 extern const struct inode_operations scoutfs_dir_iops;
+extern const struct inode_operations scoutfs_symlink_iops;
 
 int scoutfs_dir_init(void);
 void scoutfs_dir_exit(void);

@@ -177,6 +177,95 @@ static void return_file_block(struct super_block *sb, u64 blkno)
 	spin_unlock(&sbi->file_alloc_lock);
 }
 
+static bool bmap_has_blocks(struct scoutfs_block_map *bmap)
+{
+	int i;
+
+	for (i = 0; i < SCOUTFS_BLOCK_MAP_COUNT; i++) {
+		if (bmap->blkno[i])
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Free mapped blocks whose entire contents are past the new specified
+ * size.  The caller holds a transaction.  If we truncate all the blocks
+ * in a mapping item then we remove the item.
+ *
+ * This is the low level block allocation and bmap item manipulation.
+ * Callers manage higher order truncation and orphan cleanup.
+ *
+ * XXX what to do about leaving items past i_size?
+ * XXX probably should be a range
+ */
+int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
+{
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_block_map *bmap;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
+	struct scoutfs_key key;
+	bool delete;
+	u64 iblock;
+	u64 blkno;
+	int ret;
+	int i;
+
+	iblock = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SIZE);
+	i = iblock & SCOUTFS_BLOCK_MAP_MASK;
+
+	scoutfs_set_key(&first, ino, SCOUTFS_BMAP_KEY,
+			iblock & ~(u64)SCOUTFS_BLOCK_MAP_MASK);
+	scoutfs_set_key(&last, ino, SCOUTFS_BMAP_KEY, ~0ULL);
+
+	trace_printk("iblock %llu i %d\n", iblock, i);
+
+	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+		key = *curs.key;
+		first = *curs.key;
+		scoutfs_inc_key(&first);
+		scoutfs_btree_release(&curs);
+
+		ret = scoutfs_btree_update(sb, &key, &curs);
+		if (ret)
+			break;
+
+		/* XXX check sanity */
+		bmap = curs.val;
+
+		for (; i < SCOUTFS_BLOCK_MAP_COUNT; i++) {
+			blkno = le64_to_cpu(bmap->blkno[i]);
+			if (blkno == 0)
+				continue;
+
+			ret = scoutfs_buddy_free(sb, blkno, 0);
+			if (ret)
+				break;
+
+			bmap->blkno[i] = 0;
+		}
+		delete = !bmap_has_blocks(bmap);
+
+		scoutfs_btree_release(&curs);
+		if (ret)
+			break;
+
+		i = 0;
+
+		if (delete) {
+			ret = scoutfs_btree_delete(sb, &key);
+			if (ret)
+				break;
+		}
+
+		/* XXX sync transaction if it's enormous */
+	}
+
+	return ret;
+}
+
 /*
  * The caller ensures that this is serialized against all other callers
  * and writers.

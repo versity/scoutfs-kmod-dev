@@ -23,6 +23,8 @@ static inline u64 scoutfs_ino(struct inode *inode)
 
 struct inode *scoutfs_alloc_inode(struct super_block *sb);
 void scoutfs_destroy_inode(struct inode *inode);
+int scoutfs_drop_inode(struct inode *inode);
+void scoutfs_evict_inode(struct inode *inode);
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
 int scoutfs_dirty_inode_item(struct inode *inode);

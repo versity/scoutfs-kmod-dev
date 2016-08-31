@@ -725,6 +725,35 @@ out:
 }
 
 /*
+ * Delete all the symlink items.  There should only ever be a handful of
+ * these that contain the target path of the symlink.
+ */
+int scoutfs_symlink_drop(struct super_block *sb, u64 ino)
+{
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_key first;
+	struct scoutfs_key last;
+	struct scoutfs_key key;
+	int ret;
+
+	scoutfs_set_key(&first, ino, SCOUTFS_SYMLINK_KEY, 0);
+	scoutfs_set_key(&last, ino, SCOUTFS_SYMLINK_KEY, ~0ULL);
+
+	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+		key = *curs.key;
+		first = *curs.key;
+		scoutfs_inc_key(&first);
+		scoutfs_btree_release(&curs);
+
+		ret = scoutfs_btree_delete(sb, &key);
+		if (ret)
+			break;
+	}
+
+	return ret;
+}
+
+/*
  * Add an allocated path component to the callers list which links to
  * the target inode at a counter past the given counter.
  *

@@ -8,4 +8,6 @@ int scoutfs_setxattr(struct dentry *dentry, const char *name,
 int scoutfs_removexattr(struct dentry *dentry, const char *name);
 ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size);
 
+int scoutfs_xattr_drop(struct super_block *sb, u64 ino);
+
 #endif

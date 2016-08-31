@@ -487,3 +487,70 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 	return ret < 0 ? ret : total;
 }
+
+/*
+ * Delete all the xattr items associted with this inode.  The caller
+ * holds a transaction.
+ *
+ * The name and value hashes are sorted by the hash value instead of the
+ * inode so we have to use the inode's xattr items to find them.  We
+ * only remove the xattr item once the hash items are removed.
+ *
+ * Hash items can be shared amongst xattrs whose names or values hash to
+ * the same hash value.  We don't bother trying to remove the hash items
+ * as the last xattr is removed.  We remove it the first chance we get,
+ * try to avoid obviously removing the same hash item next, and allow
+ * failure when we try to remove a hash item that wasn't found.
+ */
+int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
+{
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_xattr *xat;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
+	struct scoutfs_key key;
+	struct scoutfs_key name_key;
+	struct scoutfs_key val_key;
+	__le64 last_name;
+	__le64 last_val;
+	u64 val_hash;
+	bool have_last;
+	int ret;
+
+	scoutfs_set_key(&first, ino, SCOUTFS_XATTR_KEY, 0);
+	scoutfs_set_key(&last, ino, SCOUTFS_XATTR_KEY, ~0ULL);
+
+	have_last = false;
+	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+		xat = curs.val;
+		key = *curs.key;
+		val_hash = scoutfs_name_hash(xat_value(xat), xat->value_len);
+		set_name_val_keys(&name_key, &val_key, &key, val_hash);
+
+		first = *curs.key;
+		scoutfs_inc_key(&first);
+		scoutfs_btree_release(&curs);
+
+		if (!have_last || last_name != name_key.inode) {
+			ret = scoutfs_btree_delete(sb, &name_key);
+			if (ret && ret != -ENOENT)
+				break;
+			last_name = name_key.inode;
+		}
+
+		if (!have_last || last_val != val_key.inode) {
+			ret = scoutfs_btree_delete(sb, &val_key);
+			if (ret && ret != -ENOENT)
+				break;
+			last_val = val_key.inode;
+		}
+
+		have_last = true;
+
+		ret = scoutfs_btree_delete(sb, &key);
+		if (ret && ret != -ENOENT)
+			break;
+	}
+
+	return ret;
+}

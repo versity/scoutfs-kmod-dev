@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/xattr.h>
+#include <linux/mm.h>
 
 #include "format.h"
 #include "super.h"
@@ -25,6 +26,7 @@
 #include "filerw.h"
 #include "scoutfs_trace.h"
 #include "xattr.h"
+#include "trans.h"
 
 /*
  * XXX
@@ -345,6 +347,83 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	scoutfs_btree_release(&curs);
 	return inode;
+}
+
+/*
+ * Remove all the items associated with a given inode.
+ */
+static void drop_inode_items(struct super_block *sb, u64 ino)
+{
+	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_inode *sinode;
+	struct scoutfs_key key;
+	bool release = false;
+	umode_t mode;
+	int ret;
+
+	/* sample the inode mode */
+	scoutfs_set_key(&key, ino, SCOUTFS_INODE_KEY, 0);
+	ret = scoutfs_btree_lookup(sb, &key, &curs);
+	if (ret)
+		goto out;
+
+	sinode = curs.val;
+	mode = le32_to_cpu(sinode->mode);
+	scoutfs_btree_release(&curs);
+
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		goto out;
+	release = true;
+
+	ret = scoutfs_xattr_drop(sb, ino);
+	if (ret)
+		goto out;
+
+	if (S_ISLNK(mode))
+		ret = scoutfs_symlink_drop(sb, ino);
+	else if (S_ISREG(mode))
+		ret = scoutfs_truncate_block_items(sb, ino, 0);
+	if (ret)
+		goto out;
+
+	ret = scoutfs_btree_delete(sb, &key);
+out:
+	if (ret)
+		trace_printk("drop items failed ret %d ino %llu\n", ret, ino);
+	if (release)
+		scoutfs_release_trans(sb);
+}
+
+/*
+ * iput_final has already written out the dirty pages to the inode
+ * before we get here.  We're left with a clean inode that we have to
+ * tear down.  If there are no more links to the inode then we also
+ * remove all its persistent structures.
+ */
+void scoutfs_evict_inode(struct inode *inode)
+{
+	trace_printk("ino %llu nlink %d bad %d\n",
+		     scoutfs_ino(inode), inode->i_nlink, is_bad_inode(inode));
+
+	if (is_bad_inode(inode))
+		goto clear;
+
+	truncate_inode_pages_final(&inode->i_data);
+
+	if (inode->i_nlink == 0)
+		drop_inode_items(inode->i_sb, scoutfs_ino(inode));
+clear:
+	clear_inode(inode);
+}
+
+int scoutfs_drop_inode(struct inode *inode)
+{
+	int ret = generic_drop_inode(inode);
+
+	trace_printk("ret %d nlink %d unhashed %d\n",
+		     ret, inode->i_nlink, inode_unhashed(inode));
+	return ret;
 }
 
 void scoutfs_inode_exit(void)

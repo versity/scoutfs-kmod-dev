@@ -22,6 +22,8 @@
 #define SCOUTFS_BUDDY_BM_BLKNO (SCOUTFS_SUPER_BLKNO + SCOUTFS_SUPER_NR)
 #define SCOUTFS_BUDDY_BM_NR 2
 
+#define SCOUTFS_MAX_TRANS_BLOCKS  (128 * 1024 * 1024 / SCOUTFS_BLOCK_SIZE)
+
 /*
  * This header is found at the start of every block so that we can
  * verify that it's what we were looking for.  The crc and padding

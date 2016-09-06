@@ -580,6 +580,7 @@ static int buddy_alloc(struct super_block *sb, u64 *blkno, int order)
 static int alloc_region(struct super_block *sb, u64 *blkno, int order,
 			u64 existing, int region)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	int ret;
 
 	switch(region) {
@@ -593,7 +594,14 @@ static int alloc_region(struct super_block *sb, u64 *blkno, int order,
 		case REGION_BUDDY:
 			ret = buddy_alloc(sb, blkno, order);
 			break;
+		default:
+			WARN_ON_ONCE(1);
+			ret = -EINVAL;
 	}
+
+	/* this misses other direct calls to bitmap_alloc, but that's minor */
+	if (ret >= 0)
+		atomic_add(1 << ret, &sbi->buddy_count);
 
 	trace_scoutfs_buddy_alloc(*blkno, order, region, ret);
 	return ret;
@@ -847,4 +855,24 @@ int scoutfs_buddy_bfree(struct super_block *sb, u64 *bfree)
 out:
 	return ret;
 
+}
+
+/*
+ * Return the number of block allocations since the last time the
+ * counter was reset.  This count doesn't include some internal bitmap
+ * block allocations but that should be a small fraction of the main
+ * allocations.
+ */
+unsigned int scoutfs_buddy_alloc_count(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	return atomic_read(&sbi->buddy_count);
+}
+
+void scoutfs_buddy_reset_count(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	return atomic_set(&sbi->buddy_count, 0);
 }

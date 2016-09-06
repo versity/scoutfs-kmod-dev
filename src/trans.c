@@ -97,8 +97,10 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	}
 
 	spin_lock(&sbi->trans_write_lock);
-	if (advance)
+	if (advance) {
 		scoutfs_advance_dirty_super(sb);
+		scoutfs_buddy_reset_count(sb);
+	}
 	sbi->trans_write_count++;
 	sbi->trans_write_ret = ret;
 	spin_unlock(&sbi->trans_write_lock);
@@ -172,12 +174,23 @@ int scoutfs_hold_trans(struct super_block *sb)
 				  atomic_add_unless(&sbi->trans_holds, 1, -1));
 }
 
+/*
+ * As we release we ask the allocator how many blocks have been
+ * allocated since the last transaction was successfully committed.  If
+ * it's large enough we kick off a write.  This is mostly to reduce the
+ * commit latency.  We also don't want to let the IO pipeline sit idle.
+ * Once we have enough blocks to write efficiently we should do so.
+ */
 void scoutfs_release_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 
-	if (atomic_sub_return(1, &sbi->trans_holds) == 0)
+	if (atomic_sub_return(1, &sbi->trans_holds) == 0) {
+		if (scoutfs_buddy_alloc_count(sb) >= SCOUTFS_MAX_TRANS_BLOCKS)
+			scoutfs_sync_fs(sb, 0);
+
 		wake_up(&sbi->trans_hold_wq);
+	}
 }
 
 int scoutfs_setup_trans(struct super_block *sb)

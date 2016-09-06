@@ -198,6 +198,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	init_waitqueue_head(&sbi->block_wq);
 	atomic_set(&sbi->block_writes, 0);
 	mutex_init(&sbi->buddy_mutex);
+	atomic_set(&sbi->buddy_count, 0);
 	init_rwsem(&sbi->btree_rwsem);
 	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);

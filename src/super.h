@@ -25,6 +25,7 @@ struct scoutfs_sb_info {
 	int block_write_err;
 
 	struct mutex buddy_mutex;
+	atomic_t buddy_count;
 
 	/* XXX there will be a lot more of these :) */
 	struct rw_semaphore btree_rwsem;

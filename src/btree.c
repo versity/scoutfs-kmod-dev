@@ -181,6 +181,9 @@ static struct scoutfs_btree_item *create_item(struct scoutfs_btree_block *bt,
 	bt->item_offs[pos] = bt->free_end;
 	bt->nr_items++;
 
+	BUG_ON(le16_to_cpu(bt->free_end) <
+	       offsetof(struct scoutfs_btree_block, item_offs[bt->nr_items]));
+
 	item = pos_item(bt, pos);
 	item->key = *key;
 	item->seq = bt->hdr.seq;

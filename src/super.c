@@ -205,6 +205,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
+	spin_lock_init(&sbi->file_alloc_lock);
 
 	if (!sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE)) {
 		printk(KERN_ERR "couldn't set blocksize\n");

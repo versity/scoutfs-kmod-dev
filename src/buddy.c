@@ -388,7 +388,7 @@ static int find_first_fit(struct scoutfs_super_block *super, int sl,
 			made_progress = true;
 
 			/* advance to next bit if it's not free in stable */
-			if (!st_bud ||
+			if (st_bud &&
 			    !test_buddy_bit_or_higher(st_bud, i, nr)) {
 				nrs[i] = nr + 1;
 				continue;

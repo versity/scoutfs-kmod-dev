@@ -963,8 +963,10 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 	int ret;
 
 	bh = btree_walk(sb, key, NULL, 0, 0, WALK_DELETE);
-	if (IS_ERR(bh))
-		return PTR_ERR(bh);
+	if (IS_ERR(bh)) {
+		ret = PTR_ERR(bh);
+		goto out;
+	}
 	bt = bh_data(bh);
 
 	pos = find_pos(bt, key, &cmp);
@@ -991,6 +993,8 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_key *key)
 	unlock_block(NULL, bh, true);
 	scoutfs_block_put(bh);
 
+out:
+	trace_printk("key "CKF" ret %d\n", CKA(key), ret);
 	return ret;
 }
 

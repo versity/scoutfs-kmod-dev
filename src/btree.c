@@ -599,7 +599,14 @@ static struct buffer_head *try_merge(struct super_block *sb,
 	else
 		to_move = reclaimable_free(bt) - SCOUTFS_BTREE_FREE_LIMIT;
 
-	if (contig_free(bt) < to_move)
+	/*
+	 * Make sure there's room to move a max size item if it's the
+	 * next in line when we only have one byte left to try and move.
+	 *
+	 * XXX This is getting awfully fiddly.  Should we be refactoring
+	 * item insertion/deletion to do this for us?
+	 */
+	if (contig_free(bt) < (to_move + (SCOUTFS_MAX_ITEM_LEN - 1)))
 		compact_items(bt);
 
 	trace_printk("sib_pos %d move_right %u to_move %u\n",

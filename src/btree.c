@@ -742,6 +742,92 @@ static unsigned int find_pos_after_seq(struct scoutfs_btree_block *bt,
 }
 
 /*
+ * Verify that the btree block isn't corrupt.  This is way too expensive
+ * to do for each block access though that's very helpful for debugging
+ * btree block corruption.
+ *
+ * It should be done the first time we read blocks and it doing it for
+ * every block access should be hidden behind runtime options.
+ *
+ * XXX
+ *  - make sure items don't overlap
+ *  - make sure offs point to live items
+ *  - do things with level
+ *  - see if item keys make sense
+ */
+static int verify_btree_block(struct scoutfs_btree_block *bt, int level,
+			      struct scoutfs_key *small,
+			      struct scoutfs_key *large)
+{
+	struct scoutfs_btree_item *item;
+	struct scoutfs_key *prev;
+	unsigned int bytes = 0;
+	unsigned int after_offs = sizeof(struct scoutfs_btree_block);
+	unsigned int first_off;
+	unsigned int off;
+	unsigned int nr;
+	unsigned int i = 0;
+	int bad = 1;
+
+	nr = bt->nr_items;
+	if (nr == 0)
+		goto out;
+
+	if (nr > SCOUTFS_BTREE_MAX_ITEMS) {
+		nr = SCOUTFS_BTREE_MAX_ITEMS;
+		goto out;
+	}
+
+	after_offs = offsetof(struct scoutfs_btree_block, item_offs[nr]);
+	first_off = SCOUTFS_BLOCK_SIZE;
+
+	for (i = 0; i < nr; i++) {
+
+		off = le16_to_cpu(bt->item_offs[i]);
+		if (off >= SCOUTFS_BLOCK_SIZE || off < after_offs)
+			goto out;
+
+		first_off = min(first_off, off);
+
+		item = pos_item(bt, i);
+		bytes += item_bytes(item);
+
+		if ((i == 0 && scoutfs_key_cmp(&item->key, small) < 0) ||
+		    (i > 0 && scoutfs_key_cmp(&item->key, prev) <= 0) ||
+		    (i == (nr - 1) && scoutfs_key_cmp(&item->key, large) > 0))
+			goto out;
+
+		prev = &item->key;
+	}
+
+	if (first_off < le16_to_cpu(bt->free_end))
+		goto out;
+
+	if ((le16_to_cpu(bt->free_end) + bytes +
+	     le16_to_cpu(bt->free_reclaim)) != SCOUTFS_BLOCK_SIZE)
+		goto out;
+
+	bad = 0;
+out:
+	if (bad) {
+		printk("bt %p small "CKF" large "CKF" end %u reclaim %u nr %u (max %lu after %u bytes %u)\n",
+			bt, CKA(small), CKA(large), le16_to_cpu(bt->free_end),
+			le16_to_cpu(bt->free_reclaim), bt->nr_items,
+			SCOUTFS_BTREE_MAX_ITEMS, after_offs, bytes);
+		for (i = 0; i < nr; i++) {
+			item = pos_item(bt, i);
+			off = le16_to_cpu(bt->item_offs[i]);
+			printk("  [%u] off %u key "CKF" len %u\n",
+					i, off, CKA(&item->key),
+					le16_to_cpu(item->val_len));
+		}
+		BUG_ON(bad);
+	}
+
+	return 0;
+}
+
+/*
  * Return the leaf block that should contain the given key.  The caller
  * is responsible for searching the leaf block and performing their
  * operation.  The block is returned locked for either reading or
@@ -763,10 +849,13 @@ static struct buffer_head *btree_walk(struct super_block *sb,
 	struct buffer_head *bh = NULL;
 	struct scoutfs_btree_item *item = NULL;
 	struct scoutfs_block_ref *ref;
+	struct scoutfs_key small;
+	struct scoutfs_key large;
 	unsigned int level;
 	unsigned int pos = 0;
 	const bool dirty = op == WALK_INSERT || op == WALK_DELETE ||
 			   op == WALK_DIRTY;
+	int ret;
 
 	/* no sibling blocks if we don't have parent blocks */
 	if (next_key)
@@ -798,11 +887,22 @@ static struct buffer_head *btree_walk(struct super_block *sb,
 		return ERR_PTR(-ENOENT);
 	}
 
+	scoutfs_set_key(&small, 0, 0, 0);
+	scoutfs_set_key(&large, ~0ULL, ~0, ~0ULL);
+
 	while (level--) {
 		/* XXX hmm, need to think about retry */
 		bh = get_block_ref(sb, ref, dirty);
 		if (IS_ERR(bh))
 			break;
+
+		/* XXX enable this */
+		ret = 0 && verify_btree_block(bh_data(bh), level, &small, &large);
+		if (ret) {
+			scoutfs_block_put(bh);
+			bh = ERR_PTR(ret);
+			break;
+		}
 
 		if (op == WALK_INSERT)
 			bh = try_split(sb, root, level, key, val_len, parent,
@@ -852,6 +952,10 @@ static struct buffer_head *btree_walk(struct super_block *sb,
 			*next_key = item->key;
 			scoutfs_inc_key(next_key);
 		}
+
+		if (pos)
+			small = pos_item(parent, pos - 1)->key;
+		large = item->key;
 	}
 
 	unlock_block(sbi, par_bh, dirty);

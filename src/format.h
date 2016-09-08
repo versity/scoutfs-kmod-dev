@@ -148,6 +148,14 @@ struct scoutfs_btree_item {
 #define SCOUTFS_BTREE_FREE_LIMIT \
 	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) / 2)
 
+/* XXX does this exist upstream somewhere? */
+#define member_sizeof(TYPE, MEMBER) (sizeof(((TYPE *)0)->MEMBER))
+
+#define SCOUTFS_BTREE_MAX_ITEMS \
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) /	\
+	 (member_sizeof(struct scoutfs_btree_block, item_offs[0]) +	\
+          sizeof(struct scoutfs_btree_item)))
+
 #define SCOUTFS_UUID_BYTES 16
 
 struct scoutfs_super_block {

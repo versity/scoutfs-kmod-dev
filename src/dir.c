@@ -16,6 +16,7 @@
 #include <linux/crc32c.h>
 #include <linux/uio.h>
 #include <linux/xattr.h>
+#include <linux/namei.h>
 
 #include "format.h"
 #include "dir.h"
@@ -620,6 +621,8 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	if (ret) {
 		kfree(path);
 		path = ERR_PTR(ret);
+	} else {
+		nd_set_link(nd, path);
 	}
 
 	return path;

@@ -353,11 +353,13 @@ static void compact_items(struct scoutfs_btree_block *bt)
 /* sorting relies on masking pointers to find the containing block */
 static inline struct buffer_head *check_bh_alignment(struct buffer_head *bh)
 {
-	struct scoutfs_btree_block *bt = bh_data(bh);
+	if (!IS_ERR_OR_NULL(bh)) {
+		struct scoutfs_btree_block *bt = bh_data(bh);
 
-	if (!IS_ERR_OR_NULL(bh) && WARN_ON_ONCE(aligned_bt(bt) != bt)) {
-		scoutfs_block_put(bh);
-		return ERR_PTR(-EIO);
+		if (WARN_ON_ONCE(aligned_bt(bt) != bt)) {
+			scoutfs_block_put(bh);
+			return ERR_PTR(-EIO);
+		}
 	}
 
 	return bh;

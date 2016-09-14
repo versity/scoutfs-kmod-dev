@@ -202,6 +202,7 @@ static bool bmap_has_blocks(struct scoutfs_block_map *bmap)
  */
 int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_block_map *bmap;
 	struct scoutfs_key first;
@@ -222,13 +223,13 @@ int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 
 	trace_printk("iblock %llu i %d\n", iblock, i);
 
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		key = *curs.key;
 		first = *curs.key;
 		scoutfs_inc_key(&first);
 		scoutfs_btree_release(&curs);
 
-		ret = scoutfs_btree_update(sb, &key, &curs);
+		ret = scoutfs_btree_update(sb, meta, &key, &curs);
 		if (ret)
 			break;
 
@@ -255,7 +256,7 @@ int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 		i = 0;
 
 		if (delete) {
-			ret = scoutfs_btree_delete(sb, &key);
+			ret = scoutfs_btree_delete(sb, meta, &key);
 			if (ret)
 				break;
 		}
@@ -301,6 +302,7 @@ static void set_bmap_key(struct scoutfs_key *key, struct inode *inode,
 static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 {
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_block_map *bmap;
 	struct scoutfs_key key;
@@ -310,7 +312,7 @@ static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 	*blkno = 0;
 
 	set_bmap_key(&key, inode, iblock);
-	ret = scoutfs_btree_lookup(sb, &key, &curs);
+	ret = scoutfs_btree_lookup(sb, meta, &key, &curs);
 	if (!ret) {
 		bmap = curs.val;
 
@@ -347,6 +349,7 @@ static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 {
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_block_map *bmap;
 	struct scoutfs_key key;
@@ -360,13 +363,14 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 	set_bmap_key(&key, inode, iblock);
 
 	/* we always need a writable block map item */
-	ret = scoutfs_btree_update(sb, &key, &curs);
+	ret = scoutfs_btree_update(sb, meta, &key, &curs);
 	if (ret < 0 && ret != -ENOENT)
 		goto out;
 
 	/* might need to create a new item and delete it after errors */
 	if (ret == -ENOENT) {
-		ret = scoutfs_btree_insert(sb, &key, sizeof(*bmap), &curs);
+		ret = scoutfs_btree_insert(sb, meta, &key, sizeof(*bmap),
+					   &curs);
 		if (ret < 0)
 			goto out;
 		memset(curs.val, 0, sizeof(*bmap));
@@ -412,7 +416,7 @@ out:
 		if (new_blkno)
 			return_file_block(sb, new_blkno);
 		if (inserted) {
-			err = scoutfs_btree_delete(sb, &key);
+			err = scoutfs_btree_delete(sb, meta, &key);
 			BUG_ON(err); /* always succeeds */
 		}
 	}

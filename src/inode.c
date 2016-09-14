@@ -127,12 +127,13 @@ static int scoutfs_read_locked_inode(struct inode *inode)
 {
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_key key;
 	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_btree_lookup(sb, &key, &curs);
+	ret = scoutfs_btree_lookup(sb, meta, &key, &curs);
 	if (!ret) {
 		load_inode(inode, curs.val);
 		scoutfs_btree_release(&curs);
@@ -228,12 +229,13 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 int scoutfs_dirty_inode_item(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_key key;
 	int ret;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_btree_dirty(sb, &key);
+	ret = scoutfs_btree_dirty(sb, meta, &key);
 	if (!ret)
 		trace_scoutfs_dirty_inode(inode);
 	return ret;
@@ -252,12 +254,13 @@ void scoutfs_update_inode_item(struct inode *inode)
 {
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_key key;
 	int err;
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	err = scoutfs_btree_update(sb, &key, &curs);
+	err = scoutfs_btree_update(sb, meta, &key, &curs);
 	BUG_ON(err);
 
 	store_inode(curs.val, inode);
@@ -309,6 +312,7 @@ static int alloc_ino(struct super_block *sb, u64 *ino)
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_inode_info *ci;
 	struct scoutfs_key key;
@@ -338,7 +342,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
 
-	ret = scoutfs_btree_insert(inode->i_sb, &key,
+	ret = scoutfs_btree_insert(inode->i_sb, meta, &key,
 				   sizeof(struct scoutfs_inode), &curs);
 	if (ret) {
 		iput(inode);
@@ -354,6 +358,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
  */
 static void drop_inode_items(struct super_block *sb, u64 ino)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_inode *sinode;
 	struct scoutfs_key key;
@@ -363,7 +368,7 @@ static void drop_inode_items(struct super_block *sb, u64 ino)
 
 	/* sample the inode mode */
 	scoutfs_set_key(&key, ino, SCOUTFS_INODE_KEY, 0);
-	ret = scoutfs_btree_lookup(sb, &key, &curs);
+	ret = scoutfs_btree_lookup(sb, meta, &key, &curs);
 	if (ret)
 		goto out;
 
@@ -387,7 +392,7 @@ static void drop_inode_items(struct super_block *sb, u64 ino)
 	if (ret)
 		goto out;
 
-	ret = scoutfs_btree_delete(sb, &key);
+	ret = scoutfs_btree_delete(sb, meta, &key);
 out:
 	if (ret)
 		trace_printk("drop items failed ret %d ino %llu\n", ret, ino);

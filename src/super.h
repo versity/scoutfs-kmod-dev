@@ -56,6 +56,12 @@ static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
+/* The root of the metadata btree */
+static inline struct scoutfs_btree_root *SCOUTFS_META(struct super_block *sb)
+{
+	return &SCOUTFS_SB(sb)->super.btree_root;
+}
+
 void scoutfs_advance_dirty_super(struct super_block *sb);
 int scoutfs_write_dirty_super(struct super_block *sb);
 

@@ -192,6 +192,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct super_block *sb = dir->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_dirent *dent;
 	struct dentry_info *di;
 	struct scoutfs_key first;
@@ -219,7 +220,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	scoutfs_set_key(&last, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY,
 			last_dirent_key_offset(h));
 
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 
 		/* XXX verify */
 
@@ -279,6 +280,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 {
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_dirent *dent;
 	struct scoutfs_key first;
@@ -295,7 +297,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	scoutfs_set_key(&last, scoutfs_ino(inode), SCOUTFS_DIRENT_KEY,
 			SCOUTFS_DIRENT_LAST_POS);
 
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		dent = curs.val;
 		name_len = item_name_len(&curs);
 		pos = scoutfs_key_offset(curs.key);
@@ -322,14 +324,15 @@ static void set_lref_key(struct scoutfs_key *key, u64 ino, u64 ctr)
 static int update_lref_item(struct super_block *sb, struct scoutfs_key *key,
 			    u64 dir_ino, u64 dir_off, bool update)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_link_backref *lref;
 	int ret;
 
 	if (update)
-		ret = scoutfs_btree_update(sb, key, &curs);
+		ret = scoutfs_btree_update(sb, meta, key, &curs);
 	else
-		ret = scoutfs_btree_insert(sb, key, sizeof(*lref), &curs);
+		ret = scoutfs_btree_insert(sb, meta, key, sizeof(*lref), &curs);
 
 	/* XXX verify size */
 	if (ret == 0) {
@@ -347,6 +350,7 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 {
 	struct dentry_info *di = dentry->d_fsdata;
 	struct super_block *sb = dir->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_dirent *dent;
@@ -375,7 +379,7 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	scoutfs_set_key(&last, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY,
 			last_dirent_key_offset(h));
 
-	ret = scoutfs_btree_hole(sb, &first, &last, &key);
+	ret = scoutfs_btree_hole(sb, meta, &first, &last, &key);
 	if (ret)
 		goto out;
 
@@ -386,9 +390,9 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out;
 
-	ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
+	ret = scoutfs_btree_insert(sb, meta, &key, bytes, &curs);
 	if (ret) {
-		scoutfs_btree_delete(sb, &lref_key);
+		scoutfs_btree_delete(sb, meta, &lref_key);
 		goto out;
 	}
 
@@ -509,6 +513,7 @@ out:
 static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct super_block *sb = dir->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct inode *inode = dentry->d_inode;
 	struct timespec ts = current_kernel_time();
 	struct dentry_info *di;
@@ -531,17 +536,17 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 
 	ret = scoutfs_dirty_inode_item(dir) ?:
 	      scoutfs_dirty_inode_item(inode) ?:
-	      scoutfs_btree_dirty(sb, &lref_key);
+	      scoutfs_btree_dirty(sb, meta, &lref_key);
 	if (ret)
 		goto out;
 
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, di->hash);
 
-	ret = scoutfs_btree_delete(sb, &key);
+	ret = scoutfs_btree_delete(sb, meta, &key);
 	if (ret)
 		goto out;
 
-	scoutfs_btree_delete(sb, &lref_key);
+	scoutfs_btree_delete(sb, meta, &lref_key);
 
 	dir->i_ctime = ts;
 	dir->i_mtime = ts;
@@ -573,6 +578,7 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	loff_t size = i_size_read(inode);
 	struct scoutfs_key first;
@@ -599,7 +605,7 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 
 	off = 0;
 	k = 0;
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		if (scoutfs_key_offset(curs.key) != k ||
 		    off + curs.val_len > size) {
 			/* XXX corruption */
@@ -654,6 +660,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 			   const char *symname)
 {
 	struct super_block *sb = dir->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct inode *inode = NULL;
 	struct scoutfs_key key;
@@ -687,7 +694,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 				k);
 		bytes = min(name_len, SCOUTFS_MAX_ITEM_LEN);
 
-		ret = scoutfs_btree_insert(sb, &key, bytes, &curs);
+		ret = scoutfs_btree_insert(sb, meta, &key, bytes, &curs);
 		if (ret)
 			goto out;
 
@@ -719,7 +726,7 @@ out:
 		while (k--) {
 			scoutfs_set_key(&key, scoutfs_ino(inode),
 					SCOUTFS_SYMLINK_KEY, k);
-			scoutfs_btree_delete(sb, &key);
+			scoutfs_btree_delete(sb, meta, &key);
 		}
 	}
 
@@ -733,6 +740,7 @@ out:
  */
 int scoutfs_symlink_drop(struct super_block *sb, u64 ino)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_key first;
 	struct scoutfs_key last;
@@ -742,13 +750,13 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino)
 	scoutfs_set_key(&first, ino, SCOUTFS_SYMLINK_KEY, 0);
 	scoutfs_set_key(&last, ino, SCOUTFS_SYMLINK_KEY, ~0ULL);
 
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		key = *curs.key;
 		first = *curs.key;
 		scoutfs_inc_key(&first);
 		scoutfs_btree_release(&curs);
 
-		ret = scoutfs_btree_delete(sb, &key);
+		ret = scoutfs_btree_delete(sb, meta, &key);
 		if (ret)
 			break;
 	}
@@ -777,6 +785,7 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino)
 static int add_linkref_name(struct super_block *sb, u64 *dir_ino, u64 ino,
 			    u64 *ctr, struct list_head *list)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_path_component *comp;
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_link_backref *lref;
@@ -798,7 +807,7 @@ retry:
 	scoutfs_set_key(&first, ino, SCOUTFS_LINK_BACKREF_KEY, *ctr);
 	scoutfs_set_key(&last, ino, SCOUTFS_LINK_BACKREF_KEY, ~0ULL);
 
-	ret = scoutfs_btree_next(sb, &first, &last, &curs);
+	ret = scoutfs_btree_next(sb, meta, &first, &last, &curs);
 	if (ret <= 0)
 		goto out;
 
@@ -844,7 +853,7 @@ retry:
 
 	scoutfs_set_key(&key, *dir_ino, SCOUTFS_DIRENT_KEY, off);
 
-	ret = scoutfs_btree_lookup(sb, &key, &curs);
+	ret = scoutfs_btree_lookup(sb, meta, &key, &curs);
 	if (ret < 0) {
 		/* XXX corruption, should always have dirent for backref */
 		if (ret == -ENOENT)

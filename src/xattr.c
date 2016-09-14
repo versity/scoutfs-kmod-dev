@@ -114,6 +114,7 @@ static int search_xattr_items(struct inode *inode, const char *name,
 			      struct xattr_search_results *res)
 {
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_key first;
 	struct scoutfs_key last;
@@ -127,7 +128,7 @@ static int search_xattr_items(struct inode *inode, const char *name,
 	res->found_hole = false;
 	res->hole_key = first;
 
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		xat = curs.val;
 
 		/* found a hole when we skip past next expected key */
@@ -176,6 +177,7 @@ static int insert_xattr(struct inode *inode, const char *name,
 			u64 val_hash)
 {
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	bool inserted_name_hash_item = false;
 	__le64 * __packed refcount;
@@ -186,7 +188,8 @@ static int insert_xattr(struct inode *inode, const char *name,
 
 	set_name_val_keys(&name_key, &val_key, key, val_hash);
 
-	ret = scoutfs_btree_insert(sb, key, xat_bytes(name_len, size), &curs);
+	ret = scoutfs_btree_insert(sb, meta, key,
+				   xat_bytes(name_len, size), &curs);
 	if (ret)
 		return ret;
 
@@ -200,7 +203,7 @@ static int insert_xattr(struct inode *inode, const char *name,
 
 	/* insert the name hash item for find_xattr if we're first */
 	if (!other_coll) {
-		ret = scoutfs_btree_insert(sb, &name_key, 0, &curs);
+		ret = scoutfs_btree_insert(sb, meta, &name_key, 0, &curs);
 		/* XXX eexist would be corruption */
 		if (ret)
 			goto out;
@@ -209,10 +212,10 @@ static int insert_xattr(struct inode *inode, const char *name,
 	}
 
 	/* increment the val hash item for find_xattr, inserting if first */
-	ret = scoutfs_btree_update(sb, &val_key, &curs);
+	ret = scoutfs_btree_update(sb, meta, &val_key, &curs);
 	if (ret == -ENOENT) {
-		ret = scoutfs_btree_insert(sb, &val_key, sizeof(*refcount),
-					   &curs);
+		ret = scoutfs_btree_insert(sb, meta, &val_key,
+					   sizeof(*refcount), &curs);
 		if (ret == 0) {
 			/* XXX test sane item size */
 			refcount = curs.val;
@@ -227,9 +230,9 @@ static int insert_xattr(struct inode *inode, const char *name,
 
 out:
 	if (ret) {
-		scoutfs_btree_delete(sb, key);
+		scoutfs_btree_delete(sb, meta, key);
 		if (inserted_name_hash_item)
-			scoutfs_btree_delete(sb, &name_key);
+			scoutfs_btree_delete(sb, meta, &name_key);
 	}
 	return ret;
 }
@@ -243,6 +246,7 @@ out:
 static int delete_xattr(struct super_block *sb, struct scoutfs_key *key,
 			bool other_coll, u64 val_hash)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_key name_key;
 	struct scoutfs_key val_key;
@@ -253,22 +257,22 @@ static int delete_xattr(struct super_block *sb, struct scoutfs_key *key,
 	set_name_val_keys(&name_key, &val_key, key, val_hash);
 
 	if (!other_coll) {
-		ret = scoutfs_btree_dirty(sb, &name_key);
+		ret = scoutfs_btree_dirty(sb, meta, &name_key);
 		if (ret)
 			goto out;
 	}
-	ret = scoutfs_btree_dirty(sb, &val_key);
+	ret = scoutfs_btree_dirty(sb, meta, &val_key);
 	if (ret)
 		goto out;
 
-	ret = scoutfs_btree_delete(sb, key);
+	ret = scoutfs_btree_delete(sb, meta, key);
 	if (ret)
 		goto out;
 
 	if (!other_coll)
-		scoutfs_btree_delete(sb, &name_key);
+		scoutfs_btree_delete(sb, meta, &name_key);
 
-	scoutfs_btree_update(sb, &val_key, &curs);
+	scoutfs_btree_update(sb, meta, &val_key, &curs);
 	refcount = curs.val;
 	le64_add_cpu(refcount, -1ULL);
 	if (*refcount == 0)
@@ -276,7 +280,7 @@ static int delete_xattr(struct super_block *sb, struct scoutfs_key *key,
 	scoutfs_btree_release(&curs);
 
 	if (del_val)
-		scoutfs_btree_delete(sb, &val_key);
+		scoutfs_btree_delete(sb, meta, &val_key);
 	ret = 0;
 out:
 	return ret;
@@ -296,6 +300,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 {
 	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	size_t name_len = strlen(name);
@@ -312,7 +317,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	down_read(&si->xattr_rwsem);
 
 	ret = -ENODATA;
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		xat = curs.val;
 
 		if (!scoutfs_names_equal(name, name_len, xat->name,
@@ -452,6 +457,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_xattr *xat;
 	struct scoutfs_key first;
@@ -465,7 +471,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	down_read(&si->xattr_rwsem);
 
 	total = 0;
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		xat = curs.val;
 
 		total += xat->name_len + 1;
@@ -504,6 +510,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
  */
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 {
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	struct scoutfs_xattr *xat;
 	struct scoutfs_key first;
@@ -521,7 +528,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 	scoutfs_set_key(&last, ino, SCOUTFS_XATTR_KEY, ~0ULL);
 
 	have_last = false;
-	while ((ret = scoutfs_btree_next(sb, &first, &last, &curs)) > 0) {
+	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
 		xat = curs.val;
 		key = *curs.key;
 		val_hash = scoutfs_name_hash(xat_value(xat), xat->value_len);
@@ -532,14 +539,14 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 		scoutfs_btree_release(&curs);
 
 		if (!have_last || last_name != name_key.inode) {
-			ret = scoutfs_btree_delete(sb, &name_key);
+			ret = scoutfs_btree_delete(sb, meta, &name_key);
 			if (ret && ret != -ENOENT)
 				break;
 			last_name = name_key.inode;
 		}
 
 		if (!have_last || last_val != val_key.inode) {
-			ret = scoutfs_btree_delete(sb, &val_key);
+			ret = scoutfs_btree_delete(sb, meta, &val_key);
 			if (ret && ret != -ENOENT)
 				break;
 			last_val = val_key.inode;
@@ -547,7 +554,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 
 		have_last = true;
 
-		ret = scoutfs_btree_delete(sb, &key);
+		ret = scoutfs_btree_delete(sb, meta, &key);
 		if (ret && ret != -ENOENT)
 			break;
 	}

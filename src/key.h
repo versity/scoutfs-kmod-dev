@@ -100,4 +100,16 @@ static inline struct scoutfs_key *scoutfs_max_key(struct scoutfs_key *a,
 	return scoutfs_key_cmp(a, b) > 0 ? a : b;
 }
 
+static inline bool scoutfs_key_is_zero(struct scoutfs_key *key)
+{
+	return key->inode == 0 && key->type == 0 && key->offset == 0;
+}
+
+static inline void scoutfs_key_set_zero(struct scoutfs_key *key)
+{
+	key->inode = 0;
+	key->type = 0;
+	key->offset = 0;
+}
+
 #endif

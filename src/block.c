@@ -207,8 +207,6 @@ struct buffer_head *scoutfs_block_read(struct super_block *sb, u64 blkno)
 	}
 
 out:
-	trace_printk("blkno %llu bh %p (ret %ld)\n",
-		     blkno, bh, IS_ERR(bh) ? PTR_ERR(bh) : 0);
 	return bh;
 }
 
@@ -447,9 +445,6 @@ struct buffer_head *scoutfs_block_dirty(struct super_block *sb, u64 blkno)
 	set_buffer_uptodate(bh);
 	set_buffer_scoutfs_verified(bh);
 out:
-	trace_printk("blkno %llu bh %p (ret %ld)\n",
-		     blkno, bh, IS_ERR(bh) ? PTR_ERR(bh) : 0);
-
 	return bh;
 }
 

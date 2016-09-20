@@ -27,11 +27,8 @@ static inline void *bh_data(struct buffer_head *bh)
 
 static inline void scoutfs_block_put(struct buffer_head *bh)
 {
-	if (!IS_ERR_OR_NULL(bh)) {
-		trace_printk("putting bh %p count %d\n",
-			     bh, atomic_read(&bh->b_count));
+	if (!IS_ERR_OR_NULL(bh))
 		brelse(bh);
-	}
 }
 
 #endif

@@ -94,6 +94,15 @@ static inline void scoutfs_inc_key(struct scoutfs_key *key)
 	}
 }
 
+static inline void scoutfs_dec_key(struct scoutfs_key *key)
+{
+	le64_add_cpu(&key->offset, -1ULL);
+	if (key->offset == cpu_to_le64(~0ULL)) {
+		if (key->type-- == 0)
+			le64_add_cpu(&key->inode, -1ULL);
+	}
+}
+
 static inline struct scoutfs_key *scoutfs_max_key(struct scoutfs_key *a,
 						  struct scoutfs_key *b)
 {

@@ -56,7 +56,7 @@
  * XXX
  *  - do we want a level in the btree header?  seems like we would?
  *  - validate structures on read?
- *  - internal bh/pos/cmp interface is clumsy.. could use cursor
+ *  - internal bh/pos/cmp interface is clumsy..
  */
 
 /* number of contiguous bytes used by the item header and val of given len */
@@ -119,6 +119,73 @@ pos_item(struct scoutfs_btree_block *bt, unsigned int pos)
 static inline struct scoutfs_key *greatest_key(struct scoutfs_btree_block *bt)
 {
 	return &pos_item(bt, bt->nr_items - 1)->key;
+}
+
+/*
+ * Copy as much of the item as fits in the value vector.  The min of the
+ * value vec length and the item length is returned, including possibly
+ * 0.
+ */
+static int copy_to_val(struct scoutfs_btree_val *val,
+		       struct scoutfs_btree_item *item)
+{
+	size_t val_len = le16_to_cpu(item->val_len);
+	char *val_ptr = item->val;
+	struct kvec *kv;
+	size_t bytes;
+	size_t off;
+	int i;
+
+	for (i = 0, off = 0; val_len > 0 && i < ARRAY_SIZE(val->vec); i++) {
+		kv = &val->vec[i];
+
+		if (WARN_ON_ONCE(kv->iov_len && !kv->iov_base))
+			return -EINVAL;
+
+		bytes = min(val_len, kv->iov_len);
+		if (bytes)
+			memcpy(kv->iov_base, val_ptr + off, bytes);
+
+		val_len -= bytes;
+		off += bytes;
+	}
+
+	return off;
+}
+
+/*
+ * Copy the caller's value vector into the item in the tree block.  This
+ * is only called when the item should exactly match the value vector.
+ *
+ * -EINVAL is returned if the lengths don't match.
+ */
+static int copy_to_item(struct scoutfs_btree_item *item,
+			struct scoutfs_btree_val *val)
+{
+	size_t val_len = le16_to_cpu(item->val_len);
+	char *val_ptr = item->val;
+	struct kvec *kv;
+	size_t bytes;
+	int i;
+
+	if (val_len != scoutfs_btree_val_length(val))
+		return -EINVAL;
+
+	for (i = 0; i < ARRAY_SIZE(val->vec); i++) {
+		kv = &val->vec[i];
+
+		if (WARN_ON_ONCE(kv->iov_len && !kv->iov_base))
+			return -EINVAL;
+
+		bytes = min(val_len, kv->iov_len);
+		if (bytes)
+			memcpy(val_ptr, kv->iov_base, bytes);
+
+		val_len -= bytes;
+		val_ptr += bytes;
+	}
+
+	return 0;
 }
 
 /*
@@ -964,38 +1031,25 @@ static struct buffer_head *btree_walk(struct super_block *sb,
 	return bh;
 }
 
-static void set_cursor(struct scoutfs_btree_cursor *curs,
-		       struct buffer_head *bh, unsigned int pos, bool write)
-{
-	struct scoutfs_btree_block *bt = bh_data(bh);
-	struct scoutfs_btree_item *item = pos_item(bt, pos);
-
-	curs->bh = bh;
-	curs->pos = pos;
-	curs->write = write;
-
-	curs->key = &item->key;
-	curs->seq = le64_to_cpu(item->seq);
-	curs->val = item->val;
-	curs->val_len = le16_to_cpu(item->val_len);
-}
-
 /*
- * Point the caller's cursor at the item if it's found.  It can't be
- * modified.  -ENOENT is returned if the key isn't found in the tree.
+ * Copy the given value identified by the given key into the caller's
+ * buffer.  The number of bytes copied is returned, -ENOENT if the key
+ * wasn't found, or -errno on errors.
  */
 int scoutfs_btree_lookup(struct super_block *sb,
 			 struct scoutfs_btree_root *root,
 			 struct scoutfs_key *key,
-			 struct scoutfs_btree_cursor *curs)
+			 struct scoutfs_btree_val *val)
 {
+	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
 	struct buffer_head *bh;
 	unsigned int pos;
 	int cmp;
 	int ret;
 
-	BUG_ON(curs->bh);
+	trace_printk("key "CKF" val_len %d\n",
+		     CKA(key), scoutfs_btree_val_length(val));
 
 	bh = btree_walk(sb, root, key, NULL, 0, 0, 0);
 	if (IS_ERR(bh))
@@ -1004,37 +1058,49 @@ int scoutfs_btree_lookup(struct super_block *sb,
 
 	pos = find_pos(bt, key, &cmp);
 	if (cmp == 0) {
-		set_cursor(curs, bh, pos, false);
-		ret = 0;
+		item = pos_item(bt, pos);
+		ret = copy_to_val(val, item);
 	} else {
-		unlock_block(NULL, bh, false);
-		scoutfs_block_put(bh);
 		ret = -ENOENT;
 	}
+
+	unlock_block(NULL, bh, false);
+	scoutfs_block_put(bh);
+
+	trace_printk("key "CKF" ret %d\n", CKA(key), ret);
 
 	return ret;
 }
 
 /*
- * Insert a new item in the tree and point the caller's cursor at it.
- * The caller is responsible for setting the value.
+ * Insert a new item in the tree.
  *
- * -EEXIST is returned if the key is already present in the tree.
+ * 0 is returned on success.  -EEXIST is returned if the key is already
+ * present in the tree.
  *
- * XXX this walks the treap twice, which isn't great
+ * If no value pointer is given then the item is created with a zero
+ * length value.
  */
 int scoutfs_btree_insert(struct super_block *sb,
 			 struct scoutfs_btree_root *root,
-			 struct scoutfs_key *key, unsigned int val_len,
-			 struct scoutfs_btree_cursor *curs)
+			 struct scoutfs_key *key,
+			 struct scoutfs_btree_val *val)
 {
+	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
 	struct buffer_head *bh;
+	unsigned int val_len;
 	int pos;
 	int cmp;
 	int ret;
 
-	BUG_ON(curs->bh);
+	if (val)
+		val_len = scoutfs_btree_val_length(val);
+	else
+		val_len = 0;
+
+	if (WARN_ON_ONCE(val_len > SCOUTFS_MAX_ITEM_LEN))
+		return -EINVAL;
 
 	bh = btree_walk(sb, root, key, NULL, val_len, 0, WALK_INSERT);
 	if (IS_ERR(bh))
@@ -1043,14 +1109,17 @@ int scoutfs_btree_insert(struct super_block *sb,
 
 	pos = find_pos(bt, key, &cmp);
 	if (cmp) {
-		create_item(bt, pos, key, val_len);
-		set_cursor(curs, bh, pos, true);
-		ret = 0;
+		item = create_item(bt, pos, key, val_len);
+		if (val)
+			ret = copy_to_item(item, val);
+		else
+			ret = 0;
 	} else {
-		unlock_block(NULL, bh, true);
-		scoutfs_block_put(bh);
 		ret = -EEXIST;
 	}
+
+	unlock_block(NULL, bh, true);
+	scoutfs_block_put(bh);
 
 	return ret;
 }
@@ -1104,48 +1173,46 @@ out:
 }
 
 /*
- * Iterate over items in the tree starting with first and ending with
- * last.  We point the cursor at each item and return to the caller.
- * The caller continues the search with the cursor.
+ * Find the next key in the tree starting from 'first', and ending at
+ * 'last'.  'found', 'found_seq', and 'val' are set to the discovered
+ * item if they're provided.
  *
  * The caller can limit results to items with a sequence number greater
  * than or equal to their sequence number.
  *
- * When there isn't an item in the cursor then we walk the btree to the
- * leaf that should contain the key and look for items from there.  When
- * we exhaust leaves we search the tree again from the next key that was
- * increased past the leaf's parent's item.
+ * The only tricky bit is that they key we're searching for might not
+ * exist in the tree.  We can get to the leaf and find that there are no
+ * greater items in the leaf.  We have to search again from the keys
+ * greater than the parent item's keys which the walk gives us.  We also
+ * star the search over from this next key if walking while filtering
+ * based on seqs terminates early.
  *
- * Returns > 0 when the cursor has an item, 0 when done, and -errno on error.
+ * Returns the bytes copied into the value (0 if not provided), -ENOENT
+ * if there is no item past first until last, or -errno on errors.
+ *
+ * It's a common pattern to use the same key for first and found so we're
+ * careful to copy first before we modify found.
  */
 static int btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 		      struct scoutfs_key *first, struct scoutfs_key *last,
-		      u64 seq, int op, struct scoutfs_btree_cursor *curs)
+		      u64 seq, int op, struct scoutfs_key *found,
+		      u64 *found_seq, struct scoutfs_btree_val *val)
 {
+	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
-	struct buffer_head *bh;
+	struct scoutfs_key start = *first;
 	struct scoutfs_key key = *first;
 	struct scoutfs_key next_key;
+	struct buffer_head *bh;
+	int pos;
 	int ret;
 
-	if (scoutfs_key_cmp(first, last) > 0)
-		return 0;
-
-	/* find the next item after the cursor, releasing if we're done */
-	if (curs->bh) {
-		bt = bh_data(curs->bh);
-		key = *curs->key;
-		scoutfs_inc_key(&key);
-
-		curs->pos = next_pos_seq(bt, curs->pos, 0, seq, op);
-		if (curs->pos < bt->nr_items)
-			set_cursor(curs, curs->bh, curs->pos, curs->write);
-		else
-			scoutfs_btree_release(curs);
-	}
+	trace_printk("finding next first "CKF" last "CKF"\n",
+		     CKA(&start), CKA(last));
 
 	/* find the leaf that contains the next item after the key */
-	while (!curs->bh && scoutfs_key_cmp(&key, last) <= 0) {
+	ret = -ENOENT;
+	while (scoutfs_key_cmp(&key, last) <= 0) {
 
 		bh = btree_walk(sb, root, &key, &next_key, 0, seq, op);
 
@@ -1156,49 +1223,60 @@ static int btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 		}
 
 		if (IS_ERR(bh)) {
-			if (bh == ERR_PTR(-ENOENT))
-				break;
-			return PTR_ERR(bh);
+			ret = PTR_ERR(bh);
+			break;
 		}
 		bt = bh_data(bh);
 
 		/* keep trying leaves until next_key passes last */
-		curs->pos = find_pos_after_seq(bt, &key, 0, seq, op);
-		if (curs->pos >= bt->nr_items) {
+		pos = find_pos_after_seq(bt, &key, 0, seq, op);
+		if (pos >= bt->nr_items) {
 			key = next_key;
 			unlock_block(NULL, bh, false);
 			scoutfs_block_put(bh);
 			continue;
 		}
 
-		set_cursor(curs, bh, curs->pos, false);
+		item = pos_item(bt, pos);
+		if (scoutfs_key_cmp(&item->key, last) <= 0) {
+			*found = item->key;
+			if (found_seq)
+				*found_seq = le64_to_cpu(item->seq);
+			if (val)
+				ret = copy_to_val(val, item);
+			else
+				ret = 0;
+		} else {
+			ret = -ENOENT;
+		}
+
+		unlock_block(NULL, bh, false);
+		scoutfs_block_put(bh);
 		break;
 	}
 
-	/* only return the next item if it's within last */
-	if (curs->bh && scoutfs_key_cmp(curs->key, last) <= 0) {
-		ret = 1;
-	} else {
-		scoutfs_btree_release(curs);
-		ret = 0;
-	}
-
+	trace_printk("next first "CKF" last "CKF" found "CKF" ret %d\n",
+		     CKA(&start), CKA(last), CKA(found), ret);
 	return ret;
 }
 
 int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *first, struct scoutfs_key *last,
-		       struct scoutfs_btree_cursor *curs)
+		       struct scoutfs_key *found,
+		       struct scoutfs_btree_val *val)
 {
-	return btree_next(sb, root, first, last, 0, WALK_NEXT, curs);
+	return btree_next(sb, root, first, last, 0, WALK_NEXT,
+			  found, NULL, val);
 }
 
 int scoutfs_btree_since(struct super_block *sb,
 			struct scoutfs_btree_root *root,
 			struct scoutfs_key *first, struct scoutfs_key *last,
-			u64 seq, struct scoutfs_btree_cursor *curs)
+			u64 seq, struct scoutfs_key *found, u64 *found_seq,
+		        struct scoutfs_btree_val *val)
 {
-	return btree_next(sb, root, first, last, seq, WALK_NEXT_SEQ, curs);
+	return btree_next(sb, root, first, last, seq, WALK_NEXT_SEQ,
+			  found, found_seq, val);
 }
 
 /*
@@ -1217,6 +1295,8 @@ int scoutfs_btree_dirty(struct super_block *sb,
 	int cmp;
 	int ret;
 
+	trace_printk("key "CKF"\n", CKA(key));
+
 	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DIRTY);
 	if (IS_ERR(bh))
 		return PTR_ERR(bh);
@@ -1232,17 +1312,22 @@ int scoutfs_btree_dirty(struct super_block *sb,
 	unlock_block(NULL, bh, true);
 	scoutfs_block_put(bh);
 
+	trace_printk("key "CKF" ret %d\n", CKA(key), ret);
+
 	return ret;
 }
 
 /*
  * This is guaranteed not to fail if the caller has already dirtied the
  * block that contains the item in the current transaction.
+ *
+ * 0 is returned on success.  -EINVAL is returned if the caller's value
+ * length doesn't match the existing item's value length.
  */
 int scoutfs_btree_update(struct super_block *sb,
 			 struct scoutfs_btree_root *root,
 			 struct scoutfs_key *key,
-			 struct scoutfs_btree_cursor *curs)
+		         struct scoutfs_btree_val *val)
 {
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
@@ -1250,8 +1335,6 @@ int scoutfs_btree_update(struct super_block *sb,
 	int pos;
 	int cmp;
 	int ret;
-
-	BUG_ON(curs->bh);
 
 	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DIRTY);
 	if (IS_ERR(bh))
@@ -1261,59 +1344,64 @@ int scoutfs_btree_update(struct super_block *sb,
 	pos = find_pos(bt, key, &cmp);
 	if (cmp == 0) {
 		item = pos_item(bt, pos);
-		item->seq = bt->hdr.seq;
-		set_cursor(curs, bh, pos, true);
-		ret = 0;
+		ret = copy_to_item(item, val);
+		if (ret == 0)
+			item->seq = bt->hdr.seq;
 	} else {
-		unlock_block(NULL, bh, true);
-		scoutfs_block_put(bh);
 		ret = -ENOENT;
 	}
+
+	unlock_block(NULL, bh, true);
+	scoutfs_block_put(bh);
 
 	return ret;
 }
 
-void scoutfs_btree_release(struct scoutfs_btree_cursor *curs)
-{
-	if (curs->bh) {
-		unlock_block(NULL, curs->bh, curs->write);
-		scoutfs_block_put(curs->bh);
-	}
-	curs->bh = NULL;
-}
-
 /*
- * Find the first missing key between the caller's keys, inclusive.  Set
- * the caller's hole key and return 0 if we find a missing key.  Return
- * -ENOSPC if all the keys in the range were present or -errno on errors.
+ * Set hole to a missing key in the caller's range.
  *
- * The caller ensures that it's safe for us to be walking this region
- * of the tree.
+ * 0 is returned if we find a missing key, -ENOSPC is returned if all
+ * the keys in the range are present in the tree, and -errno is returned
+ * if we saw an error.
+ *
+ * We try to find the first key in the range.  If the next key is past
+ * the first key then we return the key before the found key.  This will
+ * tend to let us find the hole with one btree search.
+ *
+ * We keep searching as long as we keep finding the first key and will
+ * return -ENOSPC if we fall off the end of the range doing so.
  */
 int scoutfs_btree_hole(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *first,
 		       struct scoutfs_key *last, struct scoutfs_key *hole)
 {
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_key key = *first;
+	struct scoutfs_key found;
 	int ret;
 
-	*hole = *first;
-	while ((ret = scoutfs_btree_next(sb, root, first, last, &curs)) > 0) {
-		/* return our expected hole if we skipped it */
-		if (scoutfs_key_cmp(hole, curs.key) < 0)
-			break;
-
-		*hole = *curs.key;
-		scoutfs_inc_key(hole);
+	if (WARN_ON_ONCE(scoutfs_key_cmp(first, last) > 0)) {
+		scoutfs_key_set_zero(hole);
+		return -EINVAL;
 	}
-	scoutfs_btree_release(&curs);
 
-	if (ret >= 0) {
-		if (scoutfs_key_cmp(hole, last) <= 0)
-			ret = 0;
-		else
-			ret = -ENOSPC;
+	/* search as long as we keep finding our first key */
+	do {
+		ret = scoutfs_btree_next(sb, root, &key, last, &found, NULL);
+	} while (ret == 0 &&
+		 scoutfs_key_cmp(&found, &key) == 0 &&
+		 (scoutfs_inc_key(&key), ret = -ENOSPC,
+		  scoutfs_key_cmp(&key, last) <= 0));
+
+	if (ret == 0) {
+		*hole = found;
+		scoutfs_dec_key(hole);
+	} else if (ret == -ENOENT) {
+		*hole = *last;
+		ret = 0;
 	}
+
+	trace_printk("first "CKF" last "CKF" hole "CKF" ret %d\n",
+		     CKA(first), CKA(last), CKA(hole), ret);
 
 	return ret;
 }

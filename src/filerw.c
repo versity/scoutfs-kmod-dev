@@ -203,12 +203,11 @@ static bool bmap_has_blocks(struct scoutfs_block_map *bmap)
 int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 {
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
-	struct scoutfs_block_map *bmap;
-	struct scoutfs_key first;
+	struct scoutfs_block_map bmap;
+	struct scoutfs_btree_val val;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
-	bool delete;
+	bool modified;
 	u64 iblock;
 	u64 blkno;
 	int ret;
@@ -217,27 +216,38 @@ int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 	iblock = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SIZE);
 	i = iblock & SCOUTFS_BLOCK_MAP_MASK;
 
-	scoutfs_set_key(&first, ino, SCOUTFS_BMAP_KEY,
+	scoutfs_set_key(&key, ino, SCOUTFS_BMAP_KEY,
 			iblock & ~(u64)SCOUTFS_BLOCK_MAP_MASK);
 	scoutfs_set_key(&last, ino, SCOUTFS_BMAP_KEY, ~0ULL);
 
 	trace_printk("iblock %llu i %d\n", iblock, i);
 
-	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
-		key = *curs.key;
-		first = *curs.key;
-		scoutfs_inc_key(&first);
-		scoutfs_btree_release(&curs);
+	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
 
-		ret = scoutfs_btree_update(sb, meta, &key, &curs);
+	for (;;) {
+		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		/* XXX corruption */
+		if (ret != sizeof(bmap)) {
+			ret = -EIO;
+			break;
+		}
+
+		/* XXX check bmap sanity */
+
+		/* make sure we can update bmap after freeing */
+		ret = scoutfs_btree_dirty(sb, meta, &key);
 		if (ret)
 			break;
 
-		/* XXX check sanity */
-		bmap = curs.val;
-
+		modified = false;
 		for (; i < SCOUTFS_BLOCK_MAP_COUNT; i++) {
-			blkno = le64_to_cpu(bmap->blkno[i]);
+			blkno = le64_to_cpu(bmap.blkno[i]);
 			if (blkno == 0)
 				continue;
 
@@ -245,23 +255,22 @@ int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 			if (ret)
 				break;
 
-			bmap->blkno[i] = 0;
+			bmap.blkno[i] = 0;
+			modified = true;
 		}
-		delete = !bmap_has_blocks(bmap);
+		i = 0;
 
-		scoutfs_btree_release(&curs);
+		/* dirtying should have prevented these from failing */
+		if (!bmap_has_blocks(&bmap))
+			scoutfs_btree_delete(sb, meta, &key);
+		else if (modified)
+			scoutfs_btree_update(sb, meta, &key, &val);
+
 		if (ret)
 			break;
 
-		i = 0;
-
-		if (delete) {
-			ret = scoutfs_btree_delete(sb, meta, &key);
-			if (ret)
-				break;
-		}
-
 		/* XXX sync transaction if it's enormous */
+		scoutfs_inc_key(&key);
 	}
 
 	return ret;
@@ -303,8 +312,8 @@ static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
-	struct scoutfs_block_map *bmap;
+	struct scoutfs_btree_val val;
+	struct scoutfs_block_map bmap;
 	struct scoutfs_key key;
 	int ret;
 	int i;
@@ -312,18 +321,21 @@ static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 	*blkno = 0;
 
 	set_bmap_key(&key, inode, iblock);
-	ret = scoutfs_btree_lookup(sb, meta, &key, &curs);
-	if (!ret) {
-		bmap = curs.val;
+	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
 
+	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
+	if (ret == sizeof(bmap)) {
 		i = iblock & SCOUTFS_BLOCK_MAP_MASK;
-		*blkno = le64_to_cpu(bmap->blkno[i]);
+		*blkno = le64_to_cpu(bmap.blkno[i]);
 
-		while (i < SCOUTFS_BLOCK_MAP_COUNT && bmap->blkno[i]) {
+		ret = 0;
+		while (i < SCOUTFS_BLOCK_MAP_COUNT && bmap.blkno[i]) {
 			ret++;
 			i++;
 		}
-		scoutfs_btree_release(&curs);
+	} else if (ret >= 0) {
+		/* XXX corruption */
+		ret = -EIO;
 	} else if (ret == -ENOENT) {
 		ret = 0;
 	}
@@ -350,8 +362,8 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
-	struct scoutfs_block_map *bmap;
+	struct scoutfs_block_map bmap;
+	struct scoutfs_btree_val val;
 	struct scoutfs_key key;
 	bool inserted = false;
 	u64 old_blkno = 0;
@@ -361,25 +373,35 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 	int i;
 
 	set_bmap_key(&key, inode, iblock);
+	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
 
-	/* we always need a writable block map item */
-	ret = scoutfs_btree_update(sb, meta, &key, &curs);
+	/* see if there's an existing mapping */
+	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
 	if (ret < 0 && ret != -ENOENT)
 		goto out;
 
-	/* might need to create a new item and delete it after errors */
+	/* make sure that updating the bmap item won't fail */
 	if (ret == -ENOENT) {
-		ret = scoutfs_btree_insert(sb, meta, &key, sizeof(*bmap),
-					   &curs);
-		if (ret < 0)
+		memset(&bmap, 0, sizeof(bmap));
+		ret = scoutfs_btree_insert(sb, meta, &key, &val);
+		if (ret)
 			goto out;
-		memset(curs.val, 0, sizeof(*bmap));
 		inserted = true;
+
+	} else {
+		/* XXX corruption */
+		if (ret != sizeof(bmap)) {
+			ret = -EIO;
+			goto out;
+		}
+
+		ret = scoutfs_btree_dirty(sb, meta, &key);
+		if (ret)
+			goto out;
 	}
 
-	bmap = curs.val;
 	i = iblock & SCOUTFS_BLOCK_MAP_MASK;
-	old_blkno = le64_to_cpu(bmap->blkno[i]);
+	old_blkno = le64_to_cpu(bmap.blkno[i]);
 
 	/*
 	 * If the existing block was free in stable then its dirty in
@@ -406,12 +428,16 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 			goto out;
 	}
 
-	bmap->blkno[i] = cpu_to_le64(new_blkno);
+	bmap.blkno[i] = cpu_to_le64(new_blkno);
+
+	/* dirtying guarantees success */
+	err = scoutfs_btree_update(sb, meta, &key, &val);
+	BUG_ON(err);
+
 	*blkno_ret = new_blkno;
 	new_blkno = 0;
 	ret = 0;
 out:
-	scoutfs_btree_release(&curs);
 	if (ret) {
 		if (new_blkno)
 			return_file_block(sb, new_blkno);

@@ -39,9 +39,9 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg)
 	struct scoutfs_ioctl_inodes_since args;
 	struct scoutfs_ioctl_ino_seq __user *uiseq;
 	struct scoutfs_ioctl_ino_seq iseq;
-	struct scoutfs_key first;
+	struct scoutfs_key key;
 	struct scoutfs_key last;
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	u64 seq;
 	long bytes;
 	int ret;
 
@@ -52,34 +52,25 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg)
 	if (args.buf_len < sizeof(iseq) || args.buf_len > INT_MAX)
 		return -EINVAL;
 
-	scoutfs_set_key(&first, args.first_ino, SCOUTFS_INODE_KEY, 0);
+	scoutfs_set_key(&key, args.first_ino, SCOUTFS_INODE_KEY, 0);
 	scoutfs_set_key(&last, args.last_ino, SCOUTFS_INODE_KEY, 0);
 
 	bytes = 0;
-	while ((ret = scoutfs_btree_since(sb, meta, &first, &last,
-					  args.seq, &curs)) > 0) {
+	for (;;) {
+		ret = scoutfs_btree_since(sb, meta, &key, &last, args.seq,
+					  &key, &seq, NULL);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
 
-		iseq.ino = scoutfs_key_inode(curs.key);
-		iseq.seq = curs.seq;
+		iseq.ino = scoutfs_key_inode(&key);
+		iseq.seq = seq;
 
-		/*
-		 * We can't copy to userspace with our locks held
-		 * because faults could try to use tree blocks that we
-		 * have locked.  If a non-faulting copy fails we release
-		 * the cursor and try a blocking copy and pick up where
-		 * we left off.
-		 */
-		pagefault_disable();
-		ret = __copy_to_user_inatomic(uiseq, &iseq, sizeof(iseq));
-		pagefault_enable();
-		if (ret) {
-			first = *curs.key;
-			scoutfs_inc_key(&first);
-			scoutfs_btree_release(&curs);
-			if (copy_to_user(uiseq, &iseq, sizeof(iseq))) {
-				ret = -EFAULT;
-				break;
-			}
+		if (copy_to_user(uiseq, &iseq, sizeof(iseq))) {
+			ret = -EFAULT;
+			break;
 		}
 
 		uiseq++;
@@ -88,9 +79,9 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg)
 			ret = 0;
 			break;
 		}
-	}
 
-	scoutfs_btree_release(&curs);
+		scoutfs_inc_key(&key);
+	}
 
 	if (bytes)
 		ret = bytes;
@@ -219,16 +210,14 @@ static long scoutfs_ioc_find_xattr(struct file *file, unsigned long arg,
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_ioctl_find_xattr args;
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
-	struct scoutfs_key first;
+	struct scoutfs_key key;
 	struct scoutfs_key last;
 	char __user *ustr;
 	u64 __user *uino;
-	u64 inos[32];
 	char *str;
-	int nr_inos = 0;
 	int copied = 0;
-	int ret;
+	int ret = 0;
+	u64 ino;
 	u8 type;
 	u64 h;
 
@@ -236,6 +225,9 @@ static long scoutfs_ioc_find_xattr(struct file *file, unsigned long arg,
 		return -EFAULT;
 
 	if (args.str_len > SCOUTFS_MAX_XATTR_LEN || args.ino_count > INT_MAX)
+		return -EINVAL;
+
+	if (args.first_ino > args.last_ino)
 		return -EINVAL;
 
 	if (args.ino_count == 0)
@@ -262,36 +254,27 @@ static long scoutfs_ioc_find_xattr(struct file *file, unsigned long arg,
 		type = SCOUTFS_XATTR_VAL_HASH_KEY;
 	}
 
-	scoutfs_set_key(&first, h, type, args.first_ino);
+	scoutfs_set_key(&key, h, type, args.first_ino);
 	scoutfs_set_key(&last, h, type, args.last_ino);
 
 	while (copied < args.ino_count) {
 
-		while ((ret = scoutfs_btree_next(sb, meta, &first, &last,
-						 &curs)) > 0) {
-			inos[nr_inos++] = scoutfs_key_offset(curs.key);
-
-			first = *curs.key;
-			scoutfs_inc_key(&first);
-
-			if (nr_inos == ARRAY_SIZE(inos) ||
-			    (nr_inos + copied) == args.ino_count) {
-				scoutfs_btree_release(&curs);
+		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, NULL);
+		if (ret < 0) {
+			if (ret == -ENOENT)
 				ret = 0;
-				break;
-			}
-		}
-		if (ret < 0 || nr_inos == 0)
 			break;
+		}
 
-		if (copy_to_user(uino, inos, nr_inos * sizeof(u64))) {
+		ino = scoutfs_key_offset(&key);
+		if (put_user(ino, uino)) {
 			ret = -EFAULT;
 			break;
 		}
 
-		uino += nr_inos;
-		copied += nr_inos;
-		nr_inos = 0;
+		uino++;
+		copied++;
+		scoutfs_inc_key(&key);
 	}
 
 out:

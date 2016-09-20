@@ -115,30 +115,49 @@ static int search_xattr_items(struct inode *inode, const char *name,
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
-	struct scoutfs_key first;
-	struct scoutfs_key last;
+	struct scoutfs_btree_val val;
 	struct scoutfs_xattr *xat;
+	struct scoutfs_key last;
+	struct scoutfs_key key;
+	unsigned int max_len;
 	int ret;
 
-	set_xattr_keys(inode, &first, &last, name, name_len);
+	max_len = xat_bytes(SCOUTFS_MAX_XATTR_LEN, SCOUTFS_MAX_XATTR_LEN),
+	xat = kmalloc(max_len, GFP_KERNEL);
+	if (!xat)
+		return -ENOMEM;
+
+	set_xattr_keys(inode, &key, &last, name, name_len);
+	scoutfs_btree_init_val(&val, xat, max_len);
 
 	res->found = false;
 	res->other_coll = false;
 	res->found_hole = false;
-	res->hole_key = first;
+	res->hole_key = key;
 
-	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
-		xat = curs.val;
+	for (;;) {
+		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		/* XXX corruption */
+		if (ret < sizeof(struct scoutfs_xattr) ||
+		    ret != xat_bytes(xat->name_len, xat->value_len)) {
+			ret = -EIO;
+			break;
+		}
 
 		/* found a hole when we skip past next expected key */
 		if (!res->found_hole &&
-		    scoutfs_key_cmp(&res->hole_key, curs.key) < 0)
+		    scoutfs_key_cmp(&res->hole_key, &key) < 0)
 			res->found_hole = true;
 
-		/* keep searching for a hole past this cursor key */
+		/* keep searching for a hole past this key */
 		if (!res->found_hole) {
-			res->hole_key = *curs.key;
+			res->hole_key = key;
 			scoutfs_inc_key(&res->hole_key);
 		}
 
@@ -147,7 +166,7 @@ static int search_xattr_items(struct inode *inode, const char *name,
 		    scoutfs_names_equal(name, name_len, xat->name,
 				        xat->name_len)) {
 			res->found = true;
-			res->key = *curs.key;
+			res->key = key;
 			res->val_hash = scoutfs_name_hash(xat_value(xat),
 							  xat->value_len);
 		} else {
@@ -157,11 +176,13 @@ static int search_xattr_items(struct inode *inode, const char *name,
 		/* finished once we have all the caller needs */
 		if (res->found && res->other_coll && res->found_hole) {
 			ret = 0;
-			scoutfs_btree_release(&curs);
 			break;
 		}
+
+		scoutfs_inc_key(&key);
 	}
 
+	kfree(xat);
 	return ret;
 }
 
@@ -178,56 +199,55 @@ static int insert_xattr(struct inode *inode, const char *name,
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	bool inserted_name_hash_item = false;
-	__le64 * __packed refcount;
+	struct scoutfs_btree_val val;
+	__le64 refcount;
 	struct scoutfs_key name_key;
 	struct scoutfs_key val_key;
-	struct scoutfs_xattr *xat;
+	struct scoutfs_xattr xat;
 	int ret;
 
+	/* insert the main xattr item */
 	set_name_val_keys(&name_key, &val_key, key, val_hash);
+	scoutfs_btree_init_val(&val, &xat, sizeof(xat), (void *)name, name_len,
+			       (void *)value, size);
 
-	ret = scoutfs_btree_insert(sb, meta, key,
-				   xat_bytes(name_len, size), &curs);
+	xat.name_len = name_len;
+	xat.value_len = size;
+
+	ret = scoutfs_btree_insert(sb, meta, key, &val);
 	if (ret)
 		return ret;
 
-	xat = curs.val;
-	xat->name_len = name_len;
-	xat->value_len = size;
-	memcpy(xat->name, name, name_len);
-	memcpy(xat_value(xat), value, size);
-
-	scoutfs_btree_release(&curs);
-
 	/* insert the name hash item for find_xattr if we're first */
 	if (!other_coll) {
-		ret = scoutfs_btree_insert(sb, meta, &name_key, 0, &curs);
+		ret = scoutfs_btree_insert(sb, meta, &name_key, NULL);
 		/* XXX eexist would be corruption */
 		if (ret)
 			goto out;
-		scoutfs_btree_release(&curs);
 		inserted_name_hash_item = true;
 	}
 
 	/* increment the val hash item for find_xattr, inserting if first */
-	ret = scoutfs_btree_update(sb, meta, &val_key, &curs);
-	if (ret == -ENOENT) {
-		ret = scoutfs_btree_insert(sb, meta, &val_key,
-					   sizeof(*refcount), &curs);
-		if (ret == 0) {
-			/* XXX test sane item size */
-			refcount = curs.val;
-			*refcount = 0;
-		}
-	}
-	if (ret == 0) {
-		refcount = curs.val;
-		le64_add_cpu(refcount, 1);
-		scoutfs_btree_release(&curs);
-	}
+	scoutfs_btree_init_val(&val, &refcount, sizeof(refcount));
 
+	ret = scoutfs_btree_lookup(sb, meta, &val_key, &val);
+	if (ret < 0 && ret != -ENOENT)
+		goto out;
+
+	if (ret == -ENOENT) {
+		refcount = cpu_to_le64(1);
+		ret = scoutfs_btree_insert(sb, meta, &val_key, &val);
+	} else {
+		/* XXX corruption */
+		if (ret != sizeof(refcount)) {
+			ret = -EIO;
+			goto out;
+		}
+
+		le64_add_cpu(&refcount, 1);
+		ret = scoutfs_btree_update(sb, meta, &val_key, &val);
+	}
 out:
 	if (ret) {
 		scoutfs_btree_delete(sb, meta, key);
@@ -247,15 +267,29 @@ static int delete_xattr(struct super_block *sb, struct scoutfs_key *key,
 			bool other_coll, u64 val_hash)
 {
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_btree_val val;
 	struct scoutfs_key name_key;
 	struct scoutfs_key val_key;
-	__le64 * __packed refcount;
-	bool del_val = false;
+	__le64 refcount;
 	int ret;
 
 	set_name_val_keys(&name_key, &val_key, key, val_hash);
 
+	/* update the val_hash refcount, making sure it's not nonsense */
+	scoutfs_btree_init_val(&val, &refcount, sizeof(refcount));
+	ret = scoutfs_btree_lookup(sb, meta, &val_key, &val);
+	if (ret < 0)
+		goto out;
+
+	/* XXX corruption */
+	if (ret != sizeof(refcount)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	le64_add_cpu(&refcount, -1ULL);
+
+	/* ensure that we can update and delete name_ and val_ keys */
 	if (!other_coll) {
 		ret = scoutfs_btree_dirty(sb, meta, &name_key);
 		if (ret)
@@ -272,14 +306,9 @@ static int delete_xattr(struct super_block *sb, struct scoutfs_key *key,
 	if (!other_coll)
 		scoutfs_btree_delete(sb, meta, &name_key);
 
-	scoutfs_btree_update(sb, meta, &val_key, &curs);
-	refcount = curs.val;
-	le64_add_cpu(refcount, -1ULL);
-	if (*refcount == 0)
-		del_val = true;
-	scoutfs_btree_release(&curs);
-
-	if (del_val)
+	if (refcount)
+		scoutfs_btree_update(sb, meta, &val_key, &val);
+	else
 		scoutfs_btree_delete(sb, meta, &val_key);
 	ret = 0;
 out:
@@ -295,6 +324,11 @@ static int unknown_prefix(const char *name)
 	return strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN);
 }
 
+/*
+ * Look up an xattr matching the given name.  We walk our xattr items stored
+ * at the hashed name.  We'll only be able to copy out a value that fits
+ * in the callers buffer.
+ */
 ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 			 size_t size)
 {
@@ -302,27 +336,49 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
 	size_t name_len = strlen(name);
+	struct scoutfs_btree_val val;
 	struct scoutfs_xattr *xat;
-	struct scoutfs_key first;
+	struct scoutfs_key key;
 	struct scoutfs_key last;
+	unsigned int item_len;
 	int ret;
 
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;
 
-	set_xattr_keys(inode, &first, &last, name, name_len);
+	/* make sure we don't allocate an enormous item */
+	if (name_len > SCOUTFS_MAX_XATTR_LEN)
+		return -ENODATA;
+	size = min_t(size_t, size, SCOUTFS_MAX_XATTR_LEN);
+
+	item_len = xat_bytes(name_len, size);
+	xat = kmalloc(item_len, GFP_KERNEL);
+	if (!xat)
+		return -ENOMEM;
+
+	set_xattr_keys(inode, &key, &last, name, name_len);
+	scoutfs_btree_init_val(&val, xat, item_len);
 
 	down_read(&si->xattr_rwsem);
 
-	ret = -ENODATA;
-	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
-		xat = curs.val;
+	for (;;) {
+		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = -ENODATA;
+			break;
+		}
+
+		/* XXX corruption */
+		if (ret < sizeof(struct scoutfs_xattr)) {
+			ret = -EIO;
+			break;
+		}
 
 		if (!scoutfs_names_equal(name, name_len, xat->name,
 					 xat->name_len)) {
-			ret = -ENODATA;
+			scoutfs_inc_key(&key);
 			continue;
 		}
 
@@ -333,12 +389,12 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 			else
 				ret = -ERANGE;
 		}
-		scoutfs_btree_release(&curs);
 		break;
 	}
 
 	up_read(&si->xattr_rwsem);
 
+	kfree(xat);
 	return ret;
 }
 
@@ -458,38 +514,59 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_btree_val val;
 	struct scoutfs_xattr *xat;
-	struct scoutfs_key first;
+	struct scoutfs_key key;
 	struct scoutfs_key last;
+	unsigned int item_len;
 	ssize_t total;
 	int ret;
 
-	scoutfs_set_key(&first, scoutfs_ino(inode), SCOUTFS_XATTR_KEY, 0);
+	item_len = xat_bytes(SCOUTFS_MAX_XATTR_LEN, 0);
+	xat = kmalloc(item_len, GFP_KERNEL);
+	if (!xat)
+		return -ENOMEM;
+
+	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_XATTR_KEY, 0);
 	scoutfs_set_key(&last, scoutfs_ino(inode), SCOUTFS_XATTR_KEY, ~0ULL);
+	scoutfs_btree_init_val(&val, xat, item_len);
 
 	down_read(&si->xattr_rwsem);
 
 	total = 0;
-	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
-		xat = curs.val;
-
-		total += xat->name_len + 1;
-		if (!size)
-			continue;
-		if (!buffer || total > size) {
-			ret = -ERANGE;
+	for (;;) {
+		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
 			break;
 		}
 
-		memcpy(buffer, xat->name, xat->name_len);
-		buffer += xat->name_len;
-		*(buffer++) = '\0';
+		/* XXX corruption */
+		if (ret < sizeof(struct scoutfs_xattr)) {
+			ret = -EIO;
+			break;
+		}
+
+		total += xat->name_len + 1;
+
+		if (size) {
+			if (!buffer || total > size) {
+				ret = -ERANGE;
+				break;
+			}
+
+			memcpy(buffer, xat->name, xat->name_len);
+			buffer += xat->name_len;
+			*(buffer++) = '\0';
+		}
+
+		scoutfs_inc_key(&key);
 	}
 
-	scoutfs_btree_release(&curs);
-
 	up_read(&si->xattr_rwsem);
+
+	kfree(xat);
 
 	return ret < 0 ? ret : total;
 }
@@ -504,60 +581,66 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
  *
  * Hash items can be shared amongst xattrs whose names or values hash to
  * the same hash value.  We don't bother trying to remove the hash items
- * as the last xattr is removed.  We remove it the first chance we get,
- * try to avoid obviously removing the same hash item next, and allow
+ * as the last xattr is removed.  We always try to remove them and allow
  * failure when we try to remove a hash item that wasn't found.
  */
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 {
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	DECLARE_SCOUTFS_BTREE_CURSOR(curs);
+	struct scoutfs_btree_val val;
 	struct scoutfs_xattr *xat;
-	struct scoutfs_key first;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
 	struct scoutfs_key name_key;
 	struct scoutfs_key val_key;
-	__le64 last_name;
-	__le64 last_val;
+	unsigned int item_len;
 	u64 val_hash;
-	bool have_last;
 	int ret;
 
-	scoutfs_set_key(&first, ino, SCOUTFS_XATTR_KEY, 0);
+	scoutfs_set_key(&key, ino, SCOUTFS_XATTR_KEY, 0);
 	scoutfs_set_key(&last, ino, SCOUTFS_XATTR_KEY, ~0ULL);
 
-	have_last = false;
-	while ((ret = scoutfs_btree_next(sb, meta, &first, &last, &curs)) > 0) {
-		xat = curs.val;
-		key = *curs.key;
+	item_len = xat_bytes(SCOUTFS_MAX_XATTR_LEN, SCOUTFS_MAX_XATTR_LEN),
+	xat = kmalloc(item_len, GFP_KERNEL);
+	if (!xat)
+		return -ENOMEM;
+
+	scoutfs_btree_init_val(&val, xat, item_len);
+
+	for (;;) {
+		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		/* XXX corruption */
+		if (ret < sizeof(struct scoutfs_xattr) ||
+		    ret != xat_bytes(xat->name_len, xat->value_len)) {
+			ret = -EIO;
+			break;
+		}
+
 		val_hash = scoutfs_name_hash(xat_value(xat), xat->value_len);
 		set_name_val_keys(&name_key, &val_key, &key, val_hash);
 
-		first = *curs.key;
-		scoutfs_inc_key(&first);
-		scoutfs_btree_release(&curs);
+		ret = scoutfs_btree_delete(sb, meta, &name_key);
+		if (ret && ret != -ENOENT)
+			break;
 
-		if (!have_last || last_name != name_key.inode) {
-			ret = scoutfs_btree_delete(sb, meta, &name_key);
-			if (ret && ret != -ENOENT)
-				break;
-			last_name = name_key.inode;
-		}
-
-		if (!have_last || last_val != val_key.inode) {
-			ret = scoutfs_btree_delete(sb, meta, &val_key);
-			if (ret && ret != -ENOENT)
-				break;
-			last_val = val_key.inode;
-		}
-
-		have_last = true;
+		ret = scoutfs_btree_delete(sb, meta, &val_key);
+		if (ret && ret != -ENOENT)
+			break;
 
 		ret = scoutfs_btree_delete(sb, meta, &key);
 		if (ret && ret != -ENOENT)
 			break;
+
+		scoutfs_inc_key(&key);
 	}
+
+	kfree(xat);
 
 	return ret;
 }

@@ -692,7 +692,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	for (k = 0, off = 0; off < name_len; off += bytes, k++) {
 		scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_SYMLINK_KEY,
 				k);
-		bytes = min(name_len, SCOUTFS_MAX_ITEM_LEN);
+		bytes = min(name_len - off, SCOUTFS_MAX_ITEM_LEN);
 
 		ret = scoutfs_btree_insert(sb, meta, &key, bytes, &curs);
 		if (ret)

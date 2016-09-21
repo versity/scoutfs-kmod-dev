@@ -703,6 +703,8 @@ static struct buffer_head *try_merge(struct super_block *sb,
 		free_tree_block(sb, parent->hdr.blkno);
 	}
 
+	scoutfs_block_put(sib_bh);
+
 	return bh;
 }
 

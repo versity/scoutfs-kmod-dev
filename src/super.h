@@ -27,7 +27,6 @@ struct scoutfs_sb_info {
 	struct mutex buddy_mutex;
 	atomic_t buddy_count;
 
-	/* XXX there will be a lot more of these :) */
 	struct rw_semaphore btree_rwsem;
 
 	atomic_t trans_holds;

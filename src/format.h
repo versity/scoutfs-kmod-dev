@@ -156,6 +156,21 @@ struct scoutfs_btree_item {
 	 (member_sizeof(struct scoutfs_btree_block, item_offs[0]) +	\
           sizeof(struct scoutfs_btree_item)))
 
+/*
+ * We can calculate the max tree depth by calculating how many leaf
+ * blocks the tree could reference.  The block device can only reference
+ * 2^64 bytes.  The tallest parent tree has half full parent blocks.
+ *
+ * So we have the relation:
+ *
+ * ceil(max_items / 2) ^ (max_depth - 1) >= 2^64 / block_size
+ *
+ * and solve for depth:
+ *
+ * max_depth = log(ceil(max_items / 2), 2^64 / block_size) + 1
+ */
+#define SCOUTFS_BTREE_MAX_DEPTH 10
+
 #define SCOUTFS_UUID_BYTES 16
 
 struct scoutfs_super_block {

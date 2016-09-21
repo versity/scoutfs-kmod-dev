@@ -42,6 +42,8 @@ struct block_bh_private {
 	struct super_block *sb;
 	struct buffer_head *bh;
 	struct rb_node node;
+	struct rw_semaphore rwsem;
+	bool rwsem_class;
 };
 
 enum {
@@ -146,6 +148,9 @@ static int insert_bhp(struct super_block *sb, struct buffer_head *bh)
 	bhp->bh = bh;
 	get_bh(bh);
 	bh->b_private = bhp;
+	/* lockdep class can be set by callers that use the lock */
+	init_rwsem(&bhp->rwsem);
+	bhp->rwsem_class = false;
 
 	spin_lock_irqsave(&sbi->block_lock, flags);
 	insert_bhp_rb(&sbi->block_dirty_tree, bh);
@@ -306,13 +311,6 @@ int scoutfs_block_write_dirty(struct super_block *sb)
 		atomic_inc(&sbi->block_writes);
 		scoutfs_block_set_crc(bh);
 
-		/*
-		 * XXX submit_bh() forces us to lock the block while IO is
-		 * in flight.  This is unfortunate because we use the buffer
-		 * head lock to serialize access to btree block contents.
-		 * We should fix that and only use the buffer head lock
-		 * when the APIs force us to.
-		 */
 		lock_buffer(bh);
 
 		bh->b_end_io = block_write_end_io;
@@ -485,4 +483,43 @@ void scoutfs_block_zero(struct buffer_head *bh, size_t off)
 
 	if (off < SCOUTFS_BLOCK_SIZE)
 		memset((char *)bh->b_data + off, 0, SCOUTFS_BLOCK_SIZE - off);
+}
+
+void scoutfs_block_set_lock_class(struct buffer_head *bh,
+			          struct lock_class_key *class)
+{
+	struct block_bh_private *bhp = bh->b_private;
+
+	if (bhp && !bhp->rwsem_class) {
+		lockdep_set_class(&bhp->rwsem, class);
+		bhp->rwsem_class = true;
+	}
+}
+
+void scoutfs_block_lock(struct buffer_head *bh, bool write, int subclass)
+{
+	struct block_bh_private *bhp = bh->b_private;
+
+	trace_printk("lock write %d bhp %p\n", write, bhp);
+
+	if (bhp) {
+		if (write)
+			down_write_nested(&bhp->rwsem, subclass);
+		else
+			down_read_nested(&bhp->rwsem, subclass);
+	}
+}
+
+void scoutfs_block_unlock(struct buffer_head *bh, bool write)
+{
+	struct block_bh_private *bhp = bh->b_private;
+
+	trace_printk("unlock write %d bhp %p\n", write, bhp);
+
+	if (bhp) {
+		if (write)
+			up_write(&bhp->rwsem);
+		else
+			up_read(&bhp->rwsem);
+	}
 }

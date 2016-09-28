@@ -18,6 +18,7 @@ int scoutfs_block_write_dirty(struct super_block *sb);
 
 void scoutfs_block_set_crc(struct buffer_head *bh);
 void scoutfs_block_zero(struct buffer_head *bh, size_t off);
+void scoutfs_block_zero_from(struct buffer_head *bh, void *ptr);
 
 void scoutfs_block_set_lock_class(struct buffer_head *bh,
 			          struct lock_class_key *class);

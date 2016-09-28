@@ -476,6 +476,9 @@ void scoutfs_block_set_crc(struct buffer_head *bh)
 	hdr->crc = cpu_to_le32(scoutfs_crc_block(hdr));
 }
 
+/*
+ * Zero the block from the given byte to the end of the block.
+ */
 void scoutfs_block_zero(struct buffer_head *bh, size_t off)
 {
 	if (WARN_ON_ONCE(off > SCOUTFS_BLOCK_SIZE))
@@ -483,6 +486,14 @@ void scoutfs_block_zero(struct buffer_head *bh, size_t off)
 
 	if (off < SCOUTFS_BLOCK_SIZE)
 		memset((char *)bh->b_data + off, 0, SCOUTFS_BLOCK_SIZE - off);
+}
+
+/*
+ * Zero the block from the given byte to the end of the block.
+ */
+void scoutfs_block_zero_from(struct buffer_head *bh, void *ptr)
+{
+	return scoutfs_block_zero(bh, (char *)ptr - (char *)bh->b_data);
 }
 
 void scoutfs_block_set_lock_class(struct buffer_head *bh,

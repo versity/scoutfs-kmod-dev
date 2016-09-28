@@ -469,6 +469,29 @@ struct buffer_head *scoutfs_block_dirty_alloc(struct super_block *sb)
 	return bh;
 }
 
+/*
+ * Make sure that we don't have a dirty block at the given blkno.  If we
+ * do we remove it from our tree of dirty blocks and clear the buffer
+ * dirty bit.
+ *
+ * XXX for now callers have only needed to forget blknos, maybe they'll
+ * have the bh some day.
+ */
+void scoutfs_block_forget(struct super_block *sb, u64 blkno)
+{
+	struct block_bh_private *bhp;
+	struct buffer_head *bh;
+
+	bh = sb_find_get_block(sb, blkno);
+	if (bh) {
+		bhp = bh->b_private;
+		if (bhp) {
+			erase_bhp(bh);
+			bforget(bh);
+		}
+	}
+}
+
 void scoutfs_block_set_crc(struct buffer_head *bh)
 {
 	struct scoutfs_block_header *hdr = bh_data(bh);

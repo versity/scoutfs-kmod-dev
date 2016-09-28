@@ -25,6 +25,8 @@ void scoutfs_block_set_lock_class(struct buffer_head *bh,
 void scoutfs_block_lock(struct buffer_head *bh, bool write, int subclass);
 void scoutfs_block_unlock(struct buffer_head *bh, bool write);
 
+void scoutfs_block_forget(struct super_block *sb, u64 blkno);
+
 /* XXX seems like this should be upstream :) */
 static inline void *bh_data(struct buffer_head *bh)
 {

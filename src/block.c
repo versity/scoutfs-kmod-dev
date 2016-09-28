@@ -511,8 +511,6 @@ void scoutfs_block_lock(struct buffer_head *bh, bool write, int subclass)
 {
 	struct block_bh_private *bhp = bh->b_private;
 
-	trace_printk("lock write %d bhp %p\n", write, bhp);
-
 	if (bhp) {
 		if (write)
 			down_write_nested(&bhp->rwsem, subclass);
@@ -524,8 +522,6 @@ void scoutfs_block_lock(struct buffer_head *bh, bool write, int subclass)
 void scoutfs_block_unlock(struct buffer_head *bh, bool write)
 {
 	struct block_bh_private *bhp = bh->b_private;
-
-	trace_printk("unlock write %d bhp %p\n", write, bhp);
 
 	if (bhp) {
 		if (write)

@@ -21,6 +21,8 @@
 #include "key.h"
 #include "btree.h"
 
+#include "scoutfs_trace.h"
+
 /*
  * scoutfs stores file system metadata in btrees whose items have fixed
  * sized keys and variable length values.
@@ -1166,8 +1168,7 @@ int scoutfs_btree_lookup(struct super_block *sb,
 	int cmp;
 	int ret;
 
-	trace_printk("key "CKF" val_len %d\n",
-		     CKA(key), scoutfs_btree_val_length(val));
+	trace_scoutfs_btree_lookup(sb, key, scoutfs_btree_val_length(val));
 
 	bh = btree_walk(sb, root, key, NULL, 0, 0, 0);
 	if (IS_ERR(bh))
@@ -1217,6 +1218,8 @@ int scoutfs_btree_insert(struct super_block *sb,
 	else
 		val_len = 0;
 
+	trace_scoutfs_btree_insert(sb, key, val_len);
+
 	if (WARN_ON_ONCE(val_len > SCOUTFS_MAX_ITEM_LEN))
 		return -EINVAL;
 
@@ -1255,6 +1258,8 @@ int scoutfs_btree_delete(struct super_block *sb,
 	int pos;
 	int cmp;
 	int ret;
+
+	trace_scoutfs_btree_delete(sb, key, 0);
 
 	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DELETE);
 	if (IS_ERR(bh)) {
@@ -1383,6 +1388,8 @@ int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *found,
 		       struct scoutfs_btree_val *val)
 {
+	trace_scoutfs_btree_next(sb, first, last);
+
 	return btree_next(sb, root, first, last, 0, WALK_NEXT,
 			  found, NULL, val);
 }
@@ -1393,6 +1400,8 @@ int scoutfs_btree_since(struct super_block *sb,
 			u64 seq, struct scoutfs_key *found, u64 *found_seq,
 		        struct scoutfs_btree_val *val)
 {
+	trace_scoutfs_btree_since(sb, first, last);
+
 	return btree_next(sb, root, first, last, seq, WALK_NEXT_SEQ,
 			  found, found_seq, val);
 }
@@ -1413,7 +1422,7 @@ int scoutfs_btree_dirty(struct super_block *sb,
 	int cmp;
 	int ret;
 
-	trace_printk("key "CKF"\n", CKA(key));
+	trace_scoutfs_btree_dirty(sb, key, 0);
 
 	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DIRTY);
 	if (IS_ERR(bh))
@@ -1453,6 +1462,9 @@ int scoutfs_btree_update(struct super_block *sb,
 	int pos;
 	int cmp;
 	int ret;
+
+	trace_scoutfs_btree_update(sb, key,
+				   val ? scoutfs_btree_val_length(val) : 0);
 
 	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DIRTY);
 	if (IS_ERR(bh))
@@ -1496,6 +1508,8 @@ int scoutfs_btree_hole(struct super_block *sb, struct scoutfs_btree_root *root,
 	struct scoutfs_key key = *first;
 	struct scoutfs_key found;
 	int ret;
+
+	trace_scoutfs_btree_hole(sb, first, last);
 
 	if (WARN_ON_ONCE(scoutfs_key_cmp(first, last) > 0)) {
 		scoutfs_key_set_zero(hole);

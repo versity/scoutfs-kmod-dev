@@ -31,3 +31,6 @@ ALL: module
 module:
 	make CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(PWD)/src
 	make C=2 CF="-D__CHECK_ENDIAN__" CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(PWD)/src
+
+clean:
+	make CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(PWD)/src clean

@@ -251,6 +251,7 @@ int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 				break;
 
 			bmap.blkno[i] = 0;
+			bmap.seq[i] = 0;
 			modified = true;
 		}
 		i = 0;
@@ -393,19 +394,11 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 	i = iblock & SCOUTFS_BLOCK_MAP_MASK;
 	old_blkno = le64_to_cpu(bmap.blkno[i]);
 
-	/*
-	 * If the existing block was free in stable then its dirty in
-	 * this trans and we can use it.
-	 */
-	if (old_blkno) {
-		ret = scoutfs_buddy_was_free(sb, old_blkno, 0);
-		if (ret < 0)
-			goto out;
-		if (ret > 0) {
-			*blkno_ret = old_blkno;
-			ret = 0;
-			goto out;
-		}
+	/* If the existing block is dirty then we can use it */
+	if (old_blkno && (bmap.seq[i] == super->hdr.seq)) {
+		*blkno_ret = old_blkno;
+		ret = 0;
+		goto out;
 	}
 
 	ret = alloc_file_block(sb, &new_blkno);
@@ -419,6 +412,7 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 	}
 
 	bmap.blkno[i] = cpu_to_le64(new_blkno);
+	bmap.seq[i] = super->hdr.seq;
 
 	/* dirtying guarantees success */
 	err = scoutfs_btree_update(sb, meta, &key, &val);

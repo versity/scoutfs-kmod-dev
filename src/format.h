@@ -302,8 +302,8 @@ struct scoutfs_xattr {
 #define SCOUTFS_BLOCK_MAP_MASK (SCOUTFS_BLOCK_MAP_COUNT - 1)
 
 struct scoutfs_block_map {
-	__le32 crc[SCOUTFS_BLOCK_MAP_COUNT];
 	__le64 blkno[SCOUTFS_BLOCK_MAP_COUNT];
+	__le64 seq[SCOUTFS_BLOCK_MAP_COUNT];
 };
 
 /*

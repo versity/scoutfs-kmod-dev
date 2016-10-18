@@ -233,6 +233,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sb->s_root)
 		return -ENOMEM;
 
+	scoutfs_scan_orphans(sb);
+
 	return 0;
 }
 

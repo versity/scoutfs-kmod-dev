@@ -568,19 +568,33 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		return ret;
 
 	set_lref_key(&lref_key, scoutfs_ino(inode), di->lref_counter);
-
-	ret = scoutfs_dirty_inode_item(dir) ?:
-	      scoutfs_dirty_inode_item(inode) ?:
-	      scoutfs_btree_dirty(sb, meta, &lref_key);
-	if (ret)
-		goto out;
-
 	scoutfs_set_key(&key, scoutfs_ino(dir), SCOUTFS_DIRENT_KEY, di->hash);
 
-	ret = scoutfs_btree_delete(sb, meta, &key);
+	/*
+	 * Dirty most of the metadata up front so that later btree
+	 * operations can't fail.
+	 */
+	ret = scoutfs_dirty_inode_item(dir) ?:
+	      scoutfs_dirty_inode_item(inode) ?:
+	      scoutfs_btree_dirty(sb, meta, &lref_key) ?:
+	      scoutfs_btree_dirty(sb, meta, &key);
 	if (ret)
 		goto out;
 
+	if ((inode->i_nlink == 1) ||
+	    (S_ISDIR(inode->i_mode) && inode->i_nlink == 2)) {
+		/*
+		 * Insert the orphan item before we modify any inode
+		 * metadata so we can gracefully exit should it
+		 * fail.
+		 */
+		ret = scoutfs_orphan_inode(inode);
+		if (ret)
+			goto out;
+	}
+
+	/* XXX: In thoery this can't fail but we should trap errors anyway */
+	scoutfs_btree_delete(sb, meta, &key);
 	scoutfs_btree_delete(sb, meta, &lref_key);
 
 	dir->i_ctime = ts;

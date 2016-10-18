@@ -25,12 +25,15 @@ struct inode *scoutfs_alloc_inode(struct super_block *sb);
 void scoutfs_destroy_inode(struct inode *inode);
 int scoutfs_drop_inode(struct inode *inode);
 void scoutfs_evict_inode(struct inode *inode);
+int scoutfs_orphan_inode(struct inode *inode);
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
 int scoutfs_dirty_inode_item(struct inode *inode);
 void scoutfs_update_inode_item(struct inode *inode);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev);
+
+int scoutfs_scan_orphans(struct super_block *sb);
 
 u64 scoutfs_last_ino(struct super_block *sb);
 

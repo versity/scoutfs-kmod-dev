@@ -27,6 +27,8 @@
 #include "scoutfs_trace.h"
 #include "xattr.h"
 #include "trans.h"
+#include "btree.h"
+#include "msg.h"
 
 /*
  * XXX
@@ -359,34 +361,29 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	return inode;
 }
 
-/*
- * Remove all the items associated with a given inode.
- */
-static void drop_inode_items(struct super_block *sb, u64 ino)
+static int remove_orphan_item(struct super_block *sb, u64 ino)
 {
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
-	struct scoutfs_inode sinode;
 	struct scoutfs_key key;
-	bool release = false;
-	umode_t mode;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	int ret;
 
-	/* sample the inode mode, XXX don't need to copy whole thing here */
-	scoutfs_set_key(&key, ino, SCOUTFS_INODE_KEY, 0);
-	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
+	scoutfs_set_key(&key, ino, SCOUTFS_ORPHAN_KEY, 0);
 
-	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
-	if (ret < 0)
-		goto out;
+	ret = scoutfs_btree_delete(sb, meta, &key);
+	if (ret == -ENOENT)
+		ret = 0;
 
-	/* XXX corruption */
-	if (ret != sizeof(sinode)) {
-		ret = -EIO;
-		goto out;
-	}
+	return ret;
+}
 
-	mode = le32_to_cpu(sinode.mode);
+static int __delete_inode(struct super_block *sb, struct scoutfs_key *key,
+			  u64 ino, umode_t mode)
+{
+	int ret;
+	bool release = false;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
+
+	trace_delete_inode(sb, ino, mode);
 
 	ret = scoutfs_hold_trans(sb);
 	if (ret)
@@ -404,12 +401,48 @@ static void drop_inode_items(struct super_block *sb, u64 ino)
 	if (ret)
 		goto out;
 
-	ret = scoutfs_btree_delete(sb, meta, &key);
+	ret = scoutfs_btree_delete(sb, meta, key);
+	if (ret)
+		goto out;
+
+	ret = remove_orphan_item(sb, ino);
+out:
+	if (release)
+		scoutfs_release_trans(sb);
+	return ret;
+}
+
+/*
+ * Remove all the items associated with a given inode.
+ */
+static void delete_inode(struct super_block *sb, u64 ino)
+{
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
+	struct scoutfs_btree_val val;
+	struct scoutfs_inode sinode;
+	struct scoutfs_key key;
+	umode_t mode;
+	int ret;
+
+	/* sample the inode mode, XXX don't need to copy whole thing here */
+	scoutfs_set_key(&key, ino, SCOUTFS_INODE_KEY, 0);
+	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
+
+	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
+	if (ret < 0)
+		goto out;
+
+	/* XXX corruption */
+	if (ret != sizeof(sinode)) {
+		ret = -EIO;
+		goto out;
+	}
+	mode = le32_to_cpu(sinode.mode);
+
+	ret = __delete_inode(sb, &key, ino, mode);
 out:
 	if (ret)
 		trace_printk("drop items failed ret %d ino %llu\n", ret, ino);
-	if (release)
-		scoutfs_release_trans(sb);
 }
 
 /*
@@ -429,7 +462,7 @@ void scoutfs_evict_inode(struct inode *inode)
 	truncate_inode_pages_final(&inode->i_data);
 
 	if (inode->i_nlink == 0)
-		drop_inode_items(inode->i_sb, scoutfs_ino(inode));
+		delete_inode(inode->i_sb, scoutfs_ino(inode));
 clear:
 	clear_inode(inode);
 }
@@ -440,6 +473,93 @@ int scoutfs_drop_inode(struct inode *inode)
 
 	trace_printk("ret %d nlink %d unhashed %d\n",
 		     ret, inode->i_nlink, inode_unhashed(inode));
+	return ret;
+}
+
+static int process_orphaned_inode(struct super_block *sb, u64 ino)
+{
+	int ret;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
+	struct scoutfs_btree_val val;
+	struct scoutfs_inode sinode;
+	struct scoutfs_key key;
+
+	scoutfs_set_key(&key, ino, SCOUTFS_INODE_KEY, 0);
+	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
+
+	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
+	if (ret < 0) {
+		if (ret == -ENOENT)
+			ret = 0;
+		return ret;
+	}
+
+	/* XXX corruption */
+	if (ret != sizeof(sinode)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (le32_to_cpu(sinode.nlink) == 0)
+		__delete_inode(sb, &key, ino, le32_to_cpu(sinode.mode));
+	else
+		scoutfs_warn(sb, "Dangling orphan item for inode %llu.", ino);
+
+out:
+	return ret;
+}
+
+/*
+ * Scan the metadata tree for orphan items and process each one.
+ *
+ * Runtime of this will be bounded by the number of orphans, which could
+ * theoretically be very large. If that becomes a problem we might want to push
+ * this work off to a thread.
+ */
+int scoutfs_scan_orphans(struct super_block *sb)
+{
+	int ret, err = 0;
+	struct scoutfs_key first, last, found;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
+
+	trace_scoutfs_scan_orphans(sb);
+
+	scoutfs_set_key(&first, 0, SCOUTFS_ORPHAN_KEY, 0);
+	scoutfs_set_key(&last, ~0ULL, SCOUTFS_ORPHAN_KEY, 0);
+
+	while (1) {
+		ret = scoutfs_btree_next(sb, meta, &first, &last, &found, NULL);
+		if (ret == -ENOENT) /* No more orphan items */
+			break;
+		if (ret < 0)
+			goto out;
+
+		ret = process_orphaned_inode(sb, le64_to_cpu(found.inode));
+		if (ret && ret != -ENOENT && !err)
+			err = ret;
+
+		first = found;
+		scoutfs_inc_key(&first);
+	}
+
+	ret = 0;
+out:
+	return err ? err : ret;
+}
+
+int scoutfs_orphan_inode(struct inode *inode)
+{
+	int ret;
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_key key;
+	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
+
+	trace_scoutfs_orphan_inode(sb, inode);
+
+	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_ORPHAN_KEY, 0);
+
+	ret = scoutfs_btree_insert(sb, meta, &key, NULL);
+
 	return ret;
 }
 

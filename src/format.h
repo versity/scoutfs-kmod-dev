@@ -108,6 +108,7 @@ struct scoutfs_key {
 #define SCOUTFS_LINK_BACKREF_KEY	6
 #define SCOUTFS_SYMLINK_KEY		7
 #define SCOUTFS_BMAP_KEY		8
+#define SCOUTFS_ORPHAN_KEY		9
 
 #define SCOUTFS_MAX_ITEM_LEN 512
 

@@ -125,6 +125,62 @@ TRACE_EVENT(scoutfs_update_inode,
 		__entry->ino, __entry->size)
 );
 
+TRACE_EVENT(scoutfs_orphan_inode,
+	TP_PROTO(struct super_block *sb, struct inode *inode),
+
+	TP_ARGS(sb, inode),
+
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__field(__u64, ino)
+	),
+
+	TP_fast_assign(
+		__entry->dev = sb->s_dev;
+		__entry->ino = scoutfs_ino(inode);
+	),
+
+	TP_printk("dev %d,%d ino %llu", MAJOR(__entry->dev),
+		  MINOR(__entry->dev), __entry->ino)
+);
+
+TRACE_EVENT(delete_inode,
+	TP_PROTO(struct super_block *sb, u64 ino, umode_t mode),
+
+	TP_ARGS(sb, ino, mode),
+
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__field(__u64, ino)
+		__field(umode_t, mode)
+	),
+
+	TP_fast_assign(
+		__entry->dev = sb->s_dev;
+		__entry->ino = ino;
+		__entry->mode = mode;
+	),
+
+	TP_printk("dev %d,%d ino %llu, mode 0x%x", MAJOR(__entry->dev),
+		  MINOR(__entry->dev), __entry->ino, __entry->mode)
+);
+
+TRACE_EVENT(scoutfs_scan_orphans,
+	TP_PROTO(struct super_block *sb),
+
+	TP_ARGS(sb),
+
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+	),
+
+	TP_fast_assign(
+		__entry->dev = sb->s_dev;
+	),
+
+	TP_printk("dev %d,%d", MAJOR(__entry->dev), MINOR(__entry->dev))
+);
+
 TRACE_EVENT(scoutfs_buddy_alloc,
 	TP_PROTO(u64 blkno, int order, int region, int ret),
 

@@ -54,4 +54,6 @@ struct scoutfs_ioctl_find_xattr {
 #define SCOUTFS_IOC_FIND_XATTR_VAL _IOW(SCOUTFS_IOCTL_MAGIC, 4, \
 				      struct scoutfs_ioctl_find_xattr)
 
+#define SCOUTFS_IOC_INODE_DATA_SINCE _IOW(SCOUTFS_IOCTL_MAGIC, 5, \
+					  struct scoutfs_ioctl_inodes_since)
 #endif

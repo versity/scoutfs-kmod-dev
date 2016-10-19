@@ -26,12 +26,22 @@
 #include "super.h"
 
 /*
- * Find all the inodes in the given inode range that have changed since
- * the given tree update sequence number.
+ * Find all the inodes that have had keys of a given type modified since
+ * a given sequence number.  The user's arg struct specifies the inode
+ * range to search within and the sequence value to return results from.
+ * Different ioctls call this for different key types.
  *
- * The inodes are returned in inode order, not sequence order.
+ * When this is used for file data items the user is trying to find
+ * inodes whose data has changed since a given time in the past.
+ *
+ * XXX We'll need to improve the walk and search to notice when file
+ * data items have been truncated away.
+ *
+ * Inodes and their sequence numbers are copied out to userspace in
+ * inode order, not sequence order.
  */
-static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg)
+static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
+				     u8 type)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
@@ -52,8 +62,8 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg)
 	if (args.buf_len < sizeof(iseq) || args.buf_len > INT_MAX)
 		return -EINVAL;
 
-	scoutfs_set_key(&key, args.first_ino, SCOUTFS_INODE_KEY, 0);
-	scoutfs_set_key(&last, args.last_ino, SCOUTFS_INODE_KEY, 0);
+	scoutfs_set_key(&key, args.first_ino, type, 0);
+	scoutfs_set_key(&last, args.last_ino, type, 0);
 
 	bytes = 0;
 	for (;;) {
@@ -80,7 +90,7 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg)
 			break;
 		}
 
-		scoutfs_inc_key(&key);
+		key.inode = cpu_to_le64(iseq.ino + 1);
 	}
 
 	if (bytes)
@@ -286,13 +296,15 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
 	case SCOUTFS_IOC_INODES_SINCE:
-		return scoutfs_ioc_inodes_since(file, arg);
+		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_INODE_KEY);
 	case SCOUTFS_IOC_INODE_PATHS:
 		return scoutfs_ioc_inode_paths(file, arg);
 	case SCOUTFS_IOC_FIND_XATTR_NAME:
 		return scoutfs_ioc_find_xattr(file, arg, true);
 	case SCOUTFS_IOC_FIND_XATTR_VAL:
 		return scoutfs_ioc_find_xattr(file, arg, false);
+	case SCOUTFS_IOC_INODE_DATA_SINCE:
+		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_BMAP_KEY);
 	}
 
 	return -ENOTTY;

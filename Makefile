@@ -28,6 +28,8 @@ ALL: module
 #
 #  #define _RH_KABI_REPLACE_UNSAFE(_orig, _new)   _new
 
+all: module
+
 module:
 	make CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src
 	make C=2 CF="-D__CHECK_ENDIAN__" CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src

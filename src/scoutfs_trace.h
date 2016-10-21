@@ -332,6 +332,13 @@ DEFINE_EVENT(scoutfs_btree_ranged_op, scoutfs_btree_next,
 	TP_ARGS(sb, first, last)
 );
 
+DEFINE_EVENT(scoutfs_btree_ranged_op, scoutfs_btree_prev,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *first,
+		 struct scoutfs_key *last),
+
+	TP_ARGS(sb, first, last)
+);
+
 DEFINE_EVENT(scoutfs_btree_ranged_op, scoutfs_btree_since,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key *first,
 		 struct scoutfs_key *last),

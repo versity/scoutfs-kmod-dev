@@ -53,6 +53,10 @@ int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *first, struct scoutfs_key *last,
 		       struct scoutfs_key *found,
 		       struct scoutfs_btree_val *val);
+int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
+		       struct scoutfs_key *first, struct scoutfs_key *last,
+		       struct scoutfs_key *found,
+		       struct scoutfs_btree_val *val);
 int scoutfs_btree_dirty(struct super_block *sb,
 			struct scoutfs_btree_root *root,
 			struct scoutfs_key *key);

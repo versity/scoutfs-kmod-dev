@@ -1033,13 +1033,16 @@ out:
  * operation.  The block is returned locked for either reading or
  * writing depending on the operation.
  *
- * As we descend through parent items we set next_key to the first key
- * in the next sibling's block.  This is used by iteration to advance to
- * the next block when they're done with the block this returns.
+ * As we descend through parent items we set prev_key or next_key to the
+ * last key in the previous sibling's block or to the first key in the
+ * next sibling's block, respectively.  This is used by iteration to
+ * keep searching sibling blocks if their search key falls at the end of
+ * a leaf in their search direction.
  */
 static struct buffer_head *btree_walk(struct super_block *sb,
 					struct scoutfs_btree_root *root,
 					struct scoutfs_key *key,
+					struct scoutfs_key *prev_key,
 					struct scoutfs_key *next_key,
 					unsigned int val_len, u64 seq, int op)
 {
@@ -1059,6 +1062,8 @@ static struct buffer_head *btree_walk(struct super_block *sb,
 	/* no sibling blocks if we don't have parent blocks */
 	if (next_key)
 		scoutfs_set_max_key(next_key);
+	if (prev_key)
+		scoutfs_key_set_zero(prev_key);
 
 	lock_root(sb, root, dirty);
 
@@ -1138,17 +1143,21 @@ static struct buffer_head *btree_walk(struct super_block *sb,
 		ref = (void *)item->val;
 
 		/*
-		 * Update the next key an iterator should read from.
-		 * Keep in mind that iteration is read only so the
-		 * parent item won't be changed splitting or merging.
+		 * Update the keys that iterators should continue
+		 * searching from.  Keep in mind that iteration is read
+		 * only so the parent item won't be changed splitting or
+		 * merging.
 		 */
 		if (next_key) {
 			*next_key = item->key;
 			scoutfs_inc_key(next_key);
 		}
 
-		if (pos)
+		if (pos) {
 			small = pos_item(parent, pos - 1)->key;
+			if (prev_key)
+				*prev_key = small;
+		}
 		large = item->key;
 	}
 
@@ -1179,7 +1188,7 @@ int scoutfs_btree_lookup(struct super_block *sb,
 
 	trace_scoutfs_btree_lookup(sb, key, scoutfs_btree_val_length(val));
 
-	bh = btree_walk(sb, root, key, NULL, 0, 0, 0);
+	bh = btree_walk(sb, root, key, NULL, NULL, 0, 0, 0);
 	if (IS_ERR(bh))
 		return PTR_ERR(bh);
 	bt = bh_data(bh);
@@ -1232,7 +1241,7 @@ int scoutfs_btree_insert(struct super_block *sb,
 	if (WARN_ON_ONCE(val_len > SCOUTFS_MAX_ITEM_LEN))
 		return -EINVAL;
 
-	bh = btree_walk(sb, root, key, NULL, val_len, 0, WALK_INSERT);
+	bh = btree_walk(sb, root, key, NULL, NULL, val_len, 0, WALK_INSERT);
 	if (IS_ERR(bh))
 		return PTR_ERR(bh);
 	bt = bh_data(bh);
@@ -1270,7 +1279,7 @@ int scoutfs_btree_delete(struct super_block *sb,
 
 	trace_scoutfs_btree_delete(sb, key, 0);
 
-	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DELETE);
+	bh = btree_walk(sb, root, key, NULL, NULL, 0, 0, WALK_DELETE);
 	if (IS_ERR(bh)) {
 		ret = PTR_ERR(bh);
 		goto out;
@@ -1346,7 +1355,7 @@ static int btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 	ret = -ENOENT;
 	while (scoutfs_key_cmp(&key, last) <= 0) {
 
-		bh = btree_walk(sb, root, &key, &next_key, 0, seq, op);
+		bh = btree_walk(sb, root, &key, NULL, &next_key, 0, seq, op);
 
 		/* next seq walks can terminate in parents with old seqs */
 		if (op == WALK_NEXT_SEQ && bh == ERR_PTR(-ENOENT)) {
@@ -1415,6 +1424,78 @@ int scoutfs_btree_since(struct super_block *sb,
 }
 
 /*
+ * Find the greatest key that is >= first and <= last, starting at last.
+ * For each search cursor key we descend to the leaf and find its
+ * position in the items.  The item binary search returns the position
+ * that the key would be inserted into, so if we didn't find the key
+ * specifically we go to the previous position.  The btree walk gives us
+ * the previous key to search from if we fall off the front of the
+ * block.
+ *
+ * This doesn't support filtering the tree traversal by seqs.
+ */
+int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
+		       struct scoutfs_key *first, struct scoutfs_key *last,
+		       struct scoutfs_key *found,
+		       struct scoutfs_btree_val *val)
+{
+	struct scoutfs_btree_item *item;
+	struct scoutfs_btree_block *bt;
+	struct scoutfs_key key = *last;
+	struct scoutfs_key prev_key;
+	struct buffer_head *bh;
+	int pos;
+	int cmp;
+	int ret;
+
+	trace_scoutfs_btree_prev(sb, first, last);
+
+	/* find the leaf that contains the next item after the key */
+	ret = -ENOENT;
+	while (scoutfs_key_cmp(&key, first) >= 0) {
+
+		bh = btree_walk(sb, root, &key, NULL, &prev_key, 0, 0, 0);
+		if (IS_ERR(bh)) {
+			ret = PTR_ERR(bh);
+			break;
+		}
+		bt = bh_data(bh);
+
+		pos = find_pos(bt, &key, &cmp);
+
+		/* walk to the prev leaf if we hit the front of this leaf */
+		if (pos == 0 && cmp != 0) {
+			unlock_level(sb, root, bh, false);
+			scoutfs_block_put(bh);
+			if (scoutfs_key_is_zero(&key))
+				break;
+			key = prev_key;
+			continue;
+		}
+
+		/* we want the item before a non-matching position */
+		if (pos && cmp)
+			pos--;
+
+		/* return the item if it's still within our first bound */
+		item = pos_item(bt, pos);
+		if (cmp == 0 || scoutfs_key_cmp(&item->key, first) >= 0) {
+			*found = item->key;
+			if (val)
+				ret = copy_to_val(val, item);
+			else
+				ret = 0;
+		}
+
+		unlock_level(sb, root, bh, false);
+		scoutfs_block_put(bh);
+		break;
+	}
+
+	return ret;
+}
+
+/*
  * Ensure that the blocks that lead to the item with the given key are
  * dirty.  caller can hold a transaction to pin the dirty blocks and
  * guarantee that later updates of the item will succeed.
@@ -1432,7 +1513,7 @@ int scoutfs_btree_dirty(struct super_block *sb,
 
 	trace_scoutfs_btree_dirty(sb, key, 0);
 
-	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DIRTY);
+	bh = btree_walk(sb, root, key, NULL, NULL, 0, 0, WALK_DIRTY);
 	if (IS_ERR(bh))
 		return PTR_ERR(bh);
 	bt = bh_data(bh);
@@ -1474,7 +1555,7 @@ int scoutfs_btree_update(struct super_block *sb,
 	trace_scoutfs_btree_update(sb, key,
 				   val ? scoutfs_btree_val_length(val) : 0);
 
-	bh = btree_walk(sb, root, key, NULL, 0, 0, WALK_DIRTY);
+	bh = btree_walk(sb, root, key, NULL, NULL, 0, 0, WALK_DIRTY);
 	if (IS_ERR(bh))
 		return PTR_ERR(bh);
 	bt = bh_data(bh);

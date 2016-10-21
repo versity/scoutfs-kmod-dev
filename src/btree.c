@@ -879,7 +879,6 @@ static struct buffer_head *try_merge(struct super_block *sb,
 enum {
 	WALK_INSERT = 1,
 	WALK_DELETE,
-	WALK_NEXT,
 	WALK_NEXT_SEQ,
 	WALK_DIRTY,
 };
@@ -1400,8 +1399,7 @@ int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 {
 	trace_scoutfs_btree_next(sb, first, last);
 
-	return btree_next(sb, root, first, last, 0, WALK_NEXT,
-			  found, NULL, val);
+	return btree_next(sb, root, first, last, 0, 0, found, NULL, val);
 }
 
 int scoutfs_btree_since(struct super_block *sb,

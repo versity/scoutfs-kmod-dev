@@ -44,7 +44,7 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
 				     u8 type)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
+	struct scoutfs_btree_root *meta = SCOUTFS_STABLE_META(sb);
 	struct scoutfs_ioctl_inodes_since __user *uargs = (void __user *)arg;
 	struct scoutfs_ioctl_inodes_since args;
 	struct scoutfs_ioctl_ino_seq __user *uiseq;
@@ -218,7 +218,7 @@ static long scoutfs_ioc_find_xattr(struct file *file, unsigned long arg,
 				   bool find_name)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
+	struct scoutfs_btree_root *meta = SCOUTFS_STABLE_META(sb);
 	struct scoutfs_ioctl_find_xattr args;
 	struct scoutfs_key key;
 	struct scoutfs_key last;

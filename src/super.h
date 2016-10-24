@@ -61,6 +61,11 @@ static inline struct scoutfs_btree_root *SCOUTFS_META(struct super_block *sb)
 	return &SCOUTFS_SB(sb)->super.btree_root;
 }
 
+static inline struct scoutfs_btree_root *SCOUTFS_STABLE_META(struct super_block *sb)
+{
+	return &SCOUTFS_SB(sb)->stable_super.btree_root;
+}
+
 void scoutfs_advance_dirty_super(struct super_block *sb);
 int scoutfs_write_dirty_super(struct super_block *sb);
 

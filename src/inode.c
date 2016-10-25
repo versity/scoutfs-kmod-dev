@@ -276,6 +276,34 @@ void scoutfs_update_inode_item(struct inode *inode)
 }
 
 /*
+ * sop->dirty_inode() can't return failure.  Our use of it has to be
+ * careful to pin the inode during a transaction.  The generic write
+ * paths pin the inode in write_begin and get called to update the inode
+ * in write_end.
+ *
+ * The caller should have a trans but it's cheap for us to grab it
+ * ourselves to make sure.
+ *
+ * This will holler at us if a caller didn't pin the inode and we
+ * couldn't dirty the inode ourselves.
+ */
+void scoutfs_dirty_inode(struct inode *inode, int flags)
+{
+	struct super_block *sb = inode->i_sb;
+	int ret;
+
+	ret = scoutfs_hold_trans(sb);
+	if (ret == 0) {
+		ret = scoutfs_dirty_inode_item(inode);
+		if (ret == 0)
+			scoutfs_update_inode_item(inode);
+		scoutfs_release_trans(sb);
+	}
+
+	WARN_ON_ONCE(ret);
+}
+
+/*
  * A quick atomic sample of the last inode number that's been allocated.
  */
 u64 scoutfs_last_ino(struct super_block *sb)

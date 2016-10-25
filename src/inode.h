@@ -29,6 +29,7 @@ int scoutfs_orphan_inode(struct inode *inode);
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
 int scoutfs_dirty_inode_item(struct inode *inode);
+void scoutfs_dirty_inode(struct inode *inode, int flags);
 void scoutfs_update_inode_item(struct inode *inode);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev);

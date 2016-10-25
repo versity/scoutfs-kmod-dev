@@ -625,6 +625,11 @@ retry:
 	/* can't re-enter fs, have trans */
 	flags |= AOP_FLAG_NOFS;
 
+	/* generic write_end updates i_size and calls dirty_inode */
+	ret = scoutfs_dirty_inode_item(inode);
+	if (ret)
+		goto out;
+
 	/* make sure our get_block gets a chance to alloc */
 	clear_mapped_page_buffers(page);
 

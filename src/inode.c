@@ -427,16 +427,12 @@ static void delete_inode(struct super_block *sb, u64 ino)
 	/* sample the inode mode, XXX don't need to copy whole thing here */
 	scoutfs_set_key(&key, ino, SCOUTFS_INODE_KEY, 0);
 	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
+	val.check_size_eq = 1;
 
 	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
 	if (ret < 0)
 		goto out;
 
-	/* XXX corruption */
-	if (ret != sizeof(sinode)) {
-		ret = -EIO;
-		goto out;
-	}
 	mode = le32_to_cpu(sinode.mode);
 
 	ret = __delete_inode(sb, &key, ino, mode);
@@ -486,6 +482,7 @@ static int process_orphaned_inode(struct super_block *sb, u64 ino)
 
 	scoutfs_set_key(&key, ino, SCOUTFS_INODE_KEY, 0);
 	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
+	val.check_size_eq = 1;
 
 	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
 	if (ret < 0) {
@@ -494,18 +491,11 @@ static int process_orphaned_inode(struct super_block *sb, u64 ino)
 		return ret;
 	}
 
-	/* XXX corruption */
-	if (ret != sizeof(sinode)) {
-		ret = -EIO;
-		goto out;
-	}
-
 	if (le32_to_cpu(sinode.nlink) == 0)
 		__delete_inode(sb, &key, ino, le32_to_cpu(sinode.mode));
 	else
 		scoutfs_warn(sb, "Dangling orphan item for inode %llu.", ino);
 
-out:
 	return ret;
 }
 

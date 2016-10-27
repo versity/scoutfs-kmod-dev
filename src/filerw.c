@@ -223,18 +223,13 @@ int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 	trace_printk("iblock %llu i %d\n", iblock, i);
 
 	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
+	val.check_size_eq = 1;
 
 	for (;;) {
 		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
-			break;
-		}
-
-		/* XXX corruption */
-		if (ret != sizeof(bmap)) {
-			ret = -EIO;
 			break;
 		}
 
@@ -374,6 +369,7 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 
 	set_bmap_key(&key, inode, iblock);
 	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
+	val.check_size_eq = 1;
 
 	/* see if there's an existing mapping */
 	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
@@ -389,12 +385,6 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 		inserted = true;
 
 	} else {
-		/* XXX corruption */
-		if (ret != sizeof(bmap)) {
-			ret = -EIO;
-			goto out;
-		}
-
 		ret = scoutfs_btree_dirty(sb, meta, &key);
 		if (ret)
 			goto out;

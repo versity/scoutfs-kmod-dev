@@ -654,18 +654,13 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 				SCOUTFS_SYMLINK_KEY, k);
 		bytes = min_t(int, size - off, SCOUTFS_MAX_ITEM_LEN);
 		scoutfs_btree_init_val(&val, path + off, bytes);
+		val.check_size_eq = 1;
 
 		ret = scoutfs_btree_lookup(sb, meta, &key, &val);
 		if (ret < 0) {
 			/* XXX corruption */
 			if (ret == -ENOENT)
 				ret = -EIO;
-			break;
-		}
-
-		/* XXX corruption */
-		if (ret != bytes) {
-			ret = -EIO;
 			break;
 		}
 
@@ -858,17 +853,12 @@ retry:
 	scoutfs_set_key(&last, ino, SCOUTFS_LINK_BACKREF_KEY, ~0ULL);
 
 	scoutfs_btree_init_val(&val, &lref, sizeof(lref));
+	val.check_size_eq = 1;
 
 	ret = scoutfs_btree_next(sb, meta, &first, &last, &key, &val);
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;
-		goto out;
-	}
-
-	/* XXX corruption */
-	if (ret != sizeof(lref)) {
-		ret = -EIO;
 		goto out;
 	}
 

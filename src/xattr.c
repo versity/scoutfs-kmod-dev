@@ -230,6 +230,7 @@ static int insert_xattr(struct inode *inode, const char *name,
 
 	/* increment the val hash item for find_xattr, inserting if first */
 	scoutfs_btree_init_val(&val, &refcount, sizeof(refcount));
+	val.check_size_eq = 1;
 
 	ret = scoutfs_btree_lookup(sb, meta, &val_key, &val);
 	if (ret < 0 && ret != -ENOENT)
@@ -239,12 +240,6 @@ static int insert_xattr(struct inode *inode, const char *name,
 		refcount = cpu_to_le64(1);
 		ret = scoutfs_btree_insert(sb, meta, &val_key, &val);
 	} else {
-		/* XXX corruption */
-		if (ret != sizeof(refcount)) {
-			ret = -EIO;
-			goto out;
-		}
-
 		le64_add_cpu(&refcount, 1);
 		ret = scoutfs_btree_update(sb, meta, &val_key, &val);
 	}
@@ -277,15 +272,10 @@ static int delete_xattr(struct super_block *sb, struct scoutfs_key *key,
 
 	/* update the val_hash refcount, making sure it's not nonsense */
 	scoutfs_btree_init_val(&val, &refcount, sizeof(refcount));
+	val.check_size_eq = 1;
 	ret = scoutfs_btree_lookup(sb, meta, &val_key, &val);
 	if (ret < 0)
 		goto out;
-
-	/* XXX corruption */
-	if (ret != sizeof(refcount)) {
-		ret = -EIO;
-		goto out;
-	}
 
 	le64_add_cpu(&refcount, -1ULL);
 

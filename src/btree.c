@@ -550,7 +550,10 @@ static struct buffer_head *alloc_tree_block(struct super_block *sb)
 /* the caller has ensured that the free must succeed */
 static void free_tree_block(struct super_block *sb, __le64 blkno)
 {
-	int err = scoutfs_buddy_free(sb, le64_to_cpu(blkno), 0);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	int err = scoutfs_buddy_free(sb, sbi->super.hdr.seq,
+				     le64_to_cpu(blkno), 0);
 	WARN_ON_ONCE(err);
 }
 

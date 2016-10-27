@@ -12,6 +12,7 @@
  */
 #include <linux/kernel.h>
 #include <linux/statfs.h>
+#include <linux/slab.h>
 
 #include "super.h"
 #include "format.h"
@@ -20,117 +21,139 @@
 #include "scoutfs_trace.h"
 
 /*
- * scoutfs uses buddy bitmaps to allocate block regions.  The buddy
- * allocator is nice because it uses one index for allocating by size
- * and freeing and merging by location.  The index is dense and has a
- * predictable worst case size that we can preallocate.  As described
- * below, it also makes it easy to find unions of free regions between
- * two indexes.
+ * scoutfs uses buddy bitmaps in an augmented radix to index free space.
  *
- * The buddy allocator is built from a hierarchy of bitmaps for each
- * power of two order of blocks that we can allocate.  If a high order
- * buddy bit is set then all the lower order bits that it covers are
- * clear.  The bits are stored in blocks that are stored in a fixed
- * depth radix with a single parent indirect block.  The super block
- * references the indirect block.  The block references in the indirect
- * block also include a bitmap of orders that are free in the referenced
- * block.
+ * At the heart of the allocator are the buddy bitmaps in the radix
+ * leaves.  For a given region of blocks there are bitmaps for each
+ * power of two order of blocks that can be allocated.  N bits record
+ * whether each order 0 size block region is allocated or freed, then
+ * N/2 bits describe order 1 regions that span pairs of order 0 blocks,
+ * and so on.  This ends up using two bits in the bitmaps for each
+ * device block that's managed.
  *
- * The blknos for the buddy blocks themselves are allocated out of a
- * single bitmap block that is referenced by the super.
+ * An order bit is set when it is free.  All of its lower order bits
+ * will be clear.  To allocate we clear a bit.  A partial allocation
+ * clears the higher order bit and each buddy for each lower order until
+ * the allocated order.  Freeing sets an order bit.  Then if it's buddy
+ * order is also set we clear both and set their higher order bit.  This
+ * proceeds to the highest order.
  *
- * All the blocks are read and cowed with the usual block layer routines
- * so that we reuse the same code to evict and retry stale cached
- * blocks, cow, etc.  The allocator in the block code gives us the
- * source blkno for a cow operation so we can use the correct allocator
- * (none for bitmap blocks, bitmap for buddy blocks, buddy for btree
- * blocks and extents).
+ * Each buddy block records the first set bit in each order bitmap.  As
+ * bits are set they update these first set records if they're before
+ * the previous value.  As bits are cleared we find the next set if it
+ * was the first.
  *
- * The trickiest part of the allocator is due to the cow nature of our
- * consistent updates.  We can't satisfy an allocation with a region
- * that's been freed in this transaction and is still referenced by the
- * old stable transaction.  We solve this by only returning regions that
- * are free in both the stable and currently dirty allocator structures.
+ * These buddy bitmap blocks that each fully describe a region of blocks
+ * are assembled into a radix tree.  Each reference to a leaf block in
+ * parent blocks have a bitmap of the orders that are free in its leaf
+ * block.  The parent blocks then also record the first slot that has
+ * each order bit set in its child references.  This indexing holds all
+ * the way to the root.  This lets us quickly determine an order that
+ * will satisfy an allocation and descend to the leaf that contains the
+ * first free region of that order.
  *
- * The single indirect block in the radix limits the number of blocks
- * that can be described by the radix to just under a TB.  The device
- * will be managed by multiple radix trees some day.
+ * These buddy blocks themselves are located in preallocated space. Each
+ * logical position in the tree occupies two blocks on the device.  In
+ * each transaction we use the currently referenced block to cow into
+ * its partner.   Since the block positions are calculated the block
+ * references only need a bit to specify which of the pair is being
+ * referenced.  The number of blocks needed is precisely calculated by
+ * taking the number of leaf blocks needed to track the device blocks
+ * and dividing by the radix fanout until we have a single root block.
  *
- * XXX:
- *  - verify blocks on read?
- *  - more rigorously test valid blkno/order inputs
- *  - detect corruption/errors when trying to free free extents
- *  - mkfs should initialize all the slots
- *  - shrink and grow
- *  - metadata and data regions
- *  - worry about testing for free buddies outside device during free?
- *  - we could track the first set in order bitmaps, dunno if it'd be worth it
+ * Each aligned block allocation order is stored in a path down the
+ * radix to a leaf that's a function of the block offset.  This lets us
+ * ensure that we can allocate or free a given allocation order by
+ * dirtying those blocks.  If we've allocated an order in a transaction
+ * it can always be freed (or re-allocated) while the transaction holds
+ * the dirty buddy blocks.
+ *
+ * We use that property to ensure that frees of stable data don't
+ * satisfy allocation until the next transaction.  When we free stable
+ * data we dirty the path to its position in the radix and record the
+ * free in an rbtree.  We can then apply these frees as we commit the
+ * transaction.  If the transaction fails we can undo the frees and let
+ * the file system carry on.  We'll try to reapply the frees before the
+ * next transaction commits.  The allocator never introduces
+ * unrecoverable errors.
+ *
+ * The radix isn't fully populated when it's created.  mkfs only
+ * initializes the two paths down the tree that have partially
+ * initialized parent slots and leaf bitmaps.  The path down the left
+ * spine has the initial file system blocks allocated.  The path down
+ * the right spine can have partial parent slots and bits set in the
+ * leaf when device sizes aren't multiples of the leaf block bit count
+ * and radix fanout.  The kernel then only has to initialize the rest of
+ * the buddy blocks blocks which have fully populated parent slots and
+ * leaf bitmaps.
+ *
+ * XXX
+ *  - resize is going to be a thing.  figure out that thing.
  */
 
-enum {
-	REGION_PAIR,	/* two bitmap blocks at known blknos */
-	REGION_BM,	/* buddy blocks in the bitmap block off the super */
-	REGION_BUDDY,	/* btree blocks and extents in the buddy bitmaps */
+struct buddy_info {
+	struct mutex mutex;
+
+	atomic_t alloc_count;
+	struct rb_root pending_frees;
+
+	/* max height given total blocks */
+	u8 max_height;
+	/* the device blkno of the first block of a given level */
+	u64 level_blkno[SCOUTFS_BUDDY_MAX_HEIGHT];
+	/* blk divisor to find slot index at each level */
+	u64 level_div[SCOUTFS_BUDDY_MAX_HEIGHT];
+
+	struct buddy_stack {
+		struct buffer_head *bh[SCOUTFS_BUDDY_MAX_HEIGHT];
+		u16 sl[SCOUTFS_BUDDY_MAX_HEIGHT];
+		int nr;
+	} stack;
 };
-
-static int blkno_region(struct scoutfs_super_block *super, u64 blkno)
-{
-	u64 end;
-
-	end = SCOUTFS_BUDDY_BM_BLKNO + SCOUTFS_BUDDY_BM_NR;
-	if (blkno < end)
-		return REGION_PAIR;
-
-	end += le32_to_cpu(super->buddy_blocks);
-	if (blkno < end)
-		return REGION_BM;
-
-	return REGION_BUDDY;
-}
 
 /* the first device blkno covered by the buddy allocator */
 static u64 first_blkno(struct scoutfs_super_block *super)
 {
-	return SCOUTFS_BUDDY_BM_BLKNO + SCOUTFS_BUDDY_BM_NR +
-	       le32_to_cpu(super->buddy_blocks);
+	return SCOUTFS_BUDDY_BLKNO + le64_to_cpu(super->buddy_blocks);
 }
 
-/* the slot in the indirect block of a given blkno */
-static int indirect_slot(struct scoutfs_super_block *super, u64 blkno)
+/* the last device blkno covered by the buddy allocator */
+static u64 last_blkno(struct scoutfs_super_block *super)
 {
-	return (u32)(blkno - first_blkno(super)) / SCOUTFS_BUDDY_ORDER0_BITS;
+	return le64_to_cpu(super->total_blocks) - 1;
 }
 
-/* device blkno of order bit in slot */
-static u64 slot_buddy_blkno(struct scoutfs_super_block *super, int sl,
-			    int order, int nr)
+/* the last relative blkno covered by the buddy allocator */
+static u64 last_blk(struct scoutfs_super_block *super)
 {
-	return first_blkno(super) + ((u64)sl * SCOUTFS_BUDDY_ORDER0_BITS) +
-	       ((u64)nr << order);
+	return last_blkno(super) - first_blkno(super);
 }
 
-/* number of blocks managed by the buddy block referenced by the given slot */
-static int slot_count(struct scoutfs_super_block *super, int sl)
+/* true when the device blkno is covered by the allocator */
+static bool device_blkno(struct scoutfs_super_block *super, u64 blkno)
 {
-	u64 first = first_blkno(super) + ((u64)sl * SCOUTFS_BUDDY_ORDER0_BITS);
-
-	return min_t(int, le64_to_cpu(super->total_blocks) - first,
-		     SCOUTFS_BUDDY_ORDER0_BITS);
+	return blkno >= first_blkno(super) && blkno <= last_blkno(super);
 }
 
-/* the order 0 bit offset of blkno */
-static int buddy_bit(struct scoutfs_super_block *super, u64 blkno)
+/* true when the device blkno is used for buddy blocks */
+static bool buddy_blkno(struct scoutfs_super_block *super, u64 blkno)
 {
-	return (u32)(blkno - first_blkno(super)) % SCOUTFS_BUDDY_ORDER0_BITS;
+	return blkno < first_blkno(super);
 }
 
-/* true if the blkno could be the start of an allocation of the order */
-static bool valid_order(struct scoutfs_super_block *super, u64 blkno, int order)
+/* the order 0 bit offset in a buddy block of a given relative blk */
+static int buddy_bit(u64 blk)
 {
-	return (buddy_bit(super, blkno) & ((1 << order) - 1)) == 0;
+	return do_div(blk, SCOUTFS_BUDDY_ORDER0_BITS);
 }
 
-/* the starting bit offset in the block bitmap of an order's bitmap */
+/* true if the rel blk could be the start of an allocation of the order */
+static bool valid_order(u64 blk, int order)
+{
+	return (buddy_bit(blk) & ((1 << order) - 1)) == 0;
+}
+
+/* the block bit offset of the first bit of the given order's bitmap */
 static int order_off(int order)
 {
 	if (order == 0)
@@ -146,733 +169,893 @@ static int order_nr(int order, int nr)
 	return order_off(order) + nr;
 }
 
+static void stack_push(struct buddy_stack *sta, struct buffer_head *bh, u16 sl)
+{
+	sta->bh[sta->nr] = bh;
+	sta->sl[sta->nr++] = sl;
+}
+
+/* sl isn't returned because callers peek the leaf where sl is meaningless */ 
+static struct buffer_head *stack_peek(struct buddy_stack *sta)
+{
+	if (sta->nr)
+		return sta->bh[sta->nr - 1];
+
+	return NULL;
+}
+
+static struct buffer_head *stack_pop(struct buddy_stack *sta, u16 *sl)
+{
+	if (sta->nr) {
+		*sl = sta->sl[--sta->nr];
+		return sta->bh[sta->nr];
+	}
+
+	return NULL;
+}
+
+/* update first_set if the caller set an earlier nr for the given order */
+static void set_order_nr(struct scoutfs_buddy_block *bud, int order, u16 nr)
+{
+	u16 first = le16_to_cpu(bud->first_set[order]);
+
+	trace_printk("set level %u order %d nr %u first %u\n",
+		     bud->level, order, nr, first);
+
+	if (nr <= first)
+		bud->first_set[order] = cpu_to_le16(nr);
+}
+
+/* find the next first set if the caller just cleared the current first_set */
+static void clear_order_nr(struct scoutfs_buddy_block *bud, int order, u16 nr)
+{
+	u16 first = le16_to_cpu(bud->first_set[order]);
+	int size;
+	int i;
+
+	trace_printk("cleared level %u order %d nr %u first %u\n",
+		     bud->level, order, nr, first);
+
+	if (nr != first)
+		return;
+
+	if (bud->level) {
+		for (i = nr + 1; i < SCOUTFS_BUDDY_SLOTS; i++) {
+			if (le16_to_cpu(bud->slots[i].free_orders) &
+			    (1 << order))
+				break;
+		}
+		if (i == SCOUTFS_BUDDY_SLOTS)
+			i = U16_MAX;
+
+	} else {
+		size = order_off(order + 1);
+		i = find_next_bit_le(bud->bits, size,
+				       order_nr(order, first) + 1);
+		if (i >= size)
+			i = U16_MAX;
+		else
+			i -= order_off(order);
+	}
+
+	bud->first_set[order] = cpu_to_le16(i);
+
+}
+
+#define for_each_changed_bit(nr, bit, old, new, tmp)		\
+	for (tmp = old ^ new;					\
+	     tmp && (nr = ffs(tmp) - 1, bit = 1 << nr, 1);	\
+	     tmp ^= bit)
+
+/*
+ * Set a slot's free_orders value and update first_set for each order
+ * that it changes.  Returns true of the slot's free_orders was changed.
+ */
+static bool set_slot_free_orders(struct scoutfs_buddy_block *bud, u16 sl,
+				 u16 free_orders)
+{
+	u16 old = le16_to_cpu(bud->slots[sl].free_orders);
+	int order;
+	int tmp;
+	int bit;
+
+	if (old == free_orders)
+		return false;
+
+	for_each_changed_bit(order, bit, old, free_orders, tmp) {
+		if (old & bit)
+			clear_order_nr(bud, order, sl);
+		else
+			set_order_nr(bud, order, sl);
+	}
+
+	bud->slots[sl].free_orders = cpu_to_le16(free_orders);
+	return true;
+}
+
+/*
+ * The block at the top of the stack has changed its bits or slots and
+ * updated its first set.  We propagate those changes up through
+ * free_orders in parents slots and their first_set up through the tree
+ * to free_orders in the root.  We can stop when a block's first_set
+ * values don't change free_orders in their parent's slot.
+ */
+static void stack_cleanup(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
+	struct buddy_stack *sta = &binf->stack;
+	struct scoutfs_buddy_root *root = &sbi->super.buddy_root;
+	struct scoutfs_buddy_block *bud;
+	struct buffer_head *bh;
+	u16 free_orders = 0;
+	bool parent;
+	u16 sl;
+	int i;
+
+	parent = false;
+	while ((bh = stack_pop(sta, &sl))) {
+
+		bud = bh_data(bh);
+		if (parent && !set_slot_free_orders(bud, sl, free_orders))
+			break;
+
+		free_orders = 0;
+		for (i = 0; i < ARRAY_SIZE(bud->first_set); i++) {
+			if (bud->first_set[i] != cpu_to_le16(U16_MAX))
+				free_orders |= 1 << i;
+		}
+
+		scoutfs_block_put(bh);
+		parent = true;
+	}
+
+	/* set root if we got that far */
+	if (bh == NULL)
+		root->slot.free_orders = cpu_to_le16(free_orders);
+
+	/* put any remaining blocks */
+	while ((bh = stack_pop(sta, &sl)))
+		scoutfs_block_put(bh);
+
+}
+
 static int test_buddy_bit(struct scoutfs_buddy_block *bud, int order, int nr)
 {
 	return !!test_bit_le(order_nr(order, nr), bud->bits);
 }
 
-static int test_buddy_bit_or_higher(struct scoutfs_buddy_block *bud, int order,
-				    int nr)
+static void set_buddy_bit(struct scoutfs_buddy_block *bud, int order, int nr)
 {
-	int i;
-
-	for (i = order; i < SCOUTFS_BUDDY_ORDERS; i++) {
-		if (test_buddy_bit(bud, i, nr))
-			return true;
-		nr >>= 1;
-	}
-
-	return false;
+	if (!test_and_set_bit_le(order_nr(order, nr), bud->bits))
+		set_order_nr(bud, order, nr);
 }
 
-static void set_buddy_bit(struct scoutfs_buddy_indirect *ind,
-			  struct scoutfs_buddy_block *bud, int order, int nr)
+static void clear_buddy_bit(struct scoutfs_buddy_block *bud, int order, int nr)
 {
-	if (!test_and_set_bit_le(order_nr(order, nr), bud->bits)) {
-		le64_add_cpu(&ind->order_totals[order], 1);
-		le32_add_cpu(&bud->order_counts[order], 1);
-	}
-}
-
-static void clear_buddy_bit(struct scoutfs_buddy_indirect *ind,
-			    struct scoutfs_buddy_block *bud, int order, int nr)
-{
-	if (test_and_clear_bit_le(order_nr(order, nr), bud->bits)) {
-		le64_add_cpu(&ind->order_totals[order], -1);
-		le32_add_cpu(&bud->order_counts[order], -1);
-	}
-}
-
-/* returns INT_MAX when there are no bits set */
-static int find_next_buddy_bit(struct scoutfs_buddy_block *bud, int order,
-			       int nr)
-{
-	int size = order_off(order + 1);
-
-	nr = find_next_bit_le(bud->bits, size, order_nr(order, nr));
-	if (nr >= size)
-		return INT_MAX;
-
-	return nr - order_off(order);
-}
-
-static void update_free_orders(struct scoutfs_buddy_slot *slot,
-			       struct scoutfs_buddy_block *bud)
-{
-	u8 free = 0;
-	int i;
-
-	for (i = 0; i < SCOUTFS_BUDDY_ORDERS; i++)
-		free |= (!!bud->order_counts[i]) << i;
-
-	slot->free_orders = free;
+	if (test_and_clear_bit_le(order_nr(order, nr), bud->bits))
+		clear_order_nr(bud, order, nr);
 }
 
 /*
- * Allocate a buddy block blkno from the super's dirty bitmap block.
- * Stable buddy blocks are freed as they're cowed so we have to make
- * sure that we only return blknos that were free in the previous stable
- * bitmap block.
+ * mkfs always writes the paths down the sides of the radix that have
+ * partially populated blocks.  We only have to initialize full blocks
+ * in the middle of the tree.
  */
-static int bitmap_alloc(struct super_block *sb, u64 *blkno)
+static void init_buddy_block(struct buddy_info *binf,
+			     struct scoutfs_super_block *super,
+			     struct buffer_head *bh, int level)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_bitmap_block *st_bm;
-	struct scoutfs_bitmap_block *bm;
-	struct buffer_head *st_bh;
-	struct buffer_head *bm_bh;
-	int size;
-	int ret;
-	int d;
-	int s;
-
-	/* mkfs should have ensured that there's bitmap blocks */
-	/* XXX corruption */
-	if (sbi->super.buddy_bm_ref.blkno == 0 ||
-	    sbi->stable_super.buddy_bm_ref.blkno == 0)
-		return -EIO;
-
-	/* dirty the bitmap block */
-	bm_bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_bm_ref);
-	if (IS_ERR(bm_bh))
-		return PTR_ERR(bm_bh);
-	bm = bh_data(bm_bh);
-
-	/* read the stable bitmap block */
-	st_bh = scoutfs_block_read_ref(sb, &sbi->stable_super.buddy_bm_ref);
-	if (IS_ERR(st_bh)) {
-		ret = PTR_ERR(st_bh);
-		goto out;
-	}
-	st_bm = bh_data(st_bh);
-
-	/* find the first bit that is set in both dirty and stable bitmaps */
-	size = le32_to_cpu(sbi->super.buddy_blocks);
-	s = 0;
-	do {
-		d = find_next_bit_le(bm->bits, size, s);
-		s = find_next_bit_le(st_bm->bits, size, d);
-	} while (d != s);
-	if (d >= size) {
-		ret = -ENOSPC;
-		goto out;
-	}
-
-	*blkno = SCOUTFS_BUDDY_BM_BLKNO + SCOUTFS_BUDDY_BM_NR + d;
-	clear_bit_le(d, &bm->bits);
-	ret = 0;
-out:
-	scoutfs_block_put(st_bh);
-	scoutfs_block_put(bm_bh);
-	return ret;
-}
-
-/* Free a buddy block blkno in the super's bitmap block. */
-static int bitmap_free(struct super_block *sb, u64 blkno)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_bitmap_block *bm;
-	struct buffer_head *bh;
+	struct scoutfs_buddy_block *bud = bh_data(bh);
+	u16 count;
 	int nr;
+	int i;
 
-	/* mkfs should have ensured that there's bitmap blocks */
-	/* XXX corruption */
-	if (sbi->super.buddy_bm_ref.blkno == 0)
-		return -EIO;
+	scoutfs_block_zero(bh, sizeof(bud->hdr));
 
-	bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_bm_ref);
-	if (IS_ERR(bh))
-		return PTR_ERR(bh);
-	bm = bh_data(bh);
+	for (i = 0; i < ARRAY_SIZE(bud->first_set); i++)
+		bud->first_set[i] = cpu_to_le16(U16_MAX);
 
-	nr = blkno - (SCOUTFS_BUDDY_BM_BLKNO + SCOUTFS_BUDDY_BM_NR);
-	set_bit_le(nr, bm->bits);
-	scoutfs_block_put(bh);
+	bud->level = level;
 
-	return 0;
+	if (level) {
+		for (i = 0; i < SCOUTFS_BUDDY_SLOTS; i++)
+			set_slot_free_orders(bud, i, SCOUTFS_BUDDY_ORDER0_BITS);
+	} else {
+		/* ensure that there aren't multiple highest orders */
+		BUILD_BUG_ON((SCOUTFS_BUDDY_ORDER0_BITS /
+			      (1 << (SCOUTFS_BUDDY_ORDERS - 1))) > 1);
+
+		count = SCOUTFS_BUDDY_ORDER0_BITS;
+		nr = 0;
+		for (i = SCOUTFS_BUDDY_ORDERS - 1; i >= 0; i--) {
+			if (count & (1 << i)) {
+				set_buddy_bit(bud, i, nr);
+				nr = (nr + 1) << 1;
+			} else {
+				nr <<= 1;
+			}
+		}
+	}
 }
 
 /*
- * Give the caller a dirty buddy block.  If the slot hasn't been used
- * yet then we need to allocate and initialize a new block.
+ * Give the caller the block referenced by the given slot.  They've
+ * calculated the blkno of the pair of blocks while walking the tree.
+ * The slot describes which of the pair its referencing.  The caller is
+ * always going to modify the block so we always try and cow it.  We
+ * construct a fake ref so we can re-use the block ref cow code.  When
+ * we initialize the first use of a block we use the first of the pair.
  */
-static struct buffer_head *dirty_buddy_block(struct super_block *sb,
-					     struct scoutfs_buddy_indirect *ind,
-					     int sl,
-					     struct scoutfs_buddy_slot *slot)
+static struct buffer_head *get_buddy_block(struct super_block *sb,
+					   struct scoutfs_buddy_slot *slot,
+					   u64 blkno, int level)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
+	struct buddy_info *binf = sbi->buddy_info;
 	struct scoutfs_buddy_block *bud;
+	struct scoutfs_block_ref ref;
 	struct buffer_head *bh;
-	u64 blkno;
-	int count;
-	int order;
-	int size;
-	int ret;
-	int nr;
 
-	/* the fast path is to dirty an existing block */
-	if (slot->ref.blkno)
-		return scoutfs_block_dirty_ref(sb, &slot->ref);
+	trace_printk("getting block level %d blkno %llu slot seq %llu off %u\n",
+		     level, blkno, le64_to_cpu(slot->seq), slot->blkno_off);
 
-	ret = bitmap_alloc(sb, &blkno);
-	if (ret)
-		return ERR_PTR(ret);
-
-	bh = scoutfs_block_dirty(sb, blkno);
-	if (IS_ERR(bh)) {
-		bitmap_free(sb, blkno);
-		return bh;
-	}
-	bud = bh_data(bh);
-	scoutfs_block_zero(bh, sizeof(bud->hdr));
-
-	/* mark the initial run of highest orders free */
-	count = slot_count(super, sl);
-	order = SCOUTFS_BUDDY_ORDERS - 1;
-	size = 1 << order;
-	nr = 0;
-	while (count > size) {
-		set_buddy_bit(ind, bud, order, nr);
-		nr++;
-		count -= size;
+	/* init a new block for an unused slot */
+	if (slot->seq == 0) {
+		bh = scoutfs_block_dirty(sb, blkno);
+		if (!IS_ERR(bh))
+			init_buddy_block(binf, super, bh, level);
+	} else {
+		/* construct block ref from tree walk blkno and slot ref */
+		ref.blkno = cpu_to_le64(blkno + slot->blkno_off);
+		ref.seq = slot->seq;
+		bh = scoutfs_block_dirty_ref(sb, &ref);
 	}
 
-	/* set order bits for each of the bits set in the remaining count */
-	do {
-		if (count & (1 << order)) {
-			set_buddy_bit(ind, bud, order, nr);
-			nr = (nr + 1) << 1;
-		} else {
-			nr <<= 1;
+	if (!IS_ERR(bh)) {
+		bud = bh_data(bh);
+
+		trace_printk("got blkno %llu\n", (u64)bh->b_blocknr);
+
+		/* rebuild slot ref to blkno */
+		if (slot->seq != bud->hdr.seq) {
+			slot->blkno_off = le64_to_cpu(bud->hdr.blkno) - blkno;
+			/* alloc_same only xors low bit */
+			BUG_ON(slot->blkno_off > 1);
+			slot->seq = bud->hdr.seq;
 		}
-	} while (order--);
-
-	slot->ref.blkno = bud->hdr.blkno;
-	slot->ref.seq = bud->hdr.seq;
-
-	update_free_orders(slot, bud);
+	}
 
 	return bh;
 }
 
 /*
- * Return the order bitmap offset and order of the first allocation
- * that fits the desired order.
+ * Walk the buddy block radix to the leaf that contains either the given
+ * relative blk or the first free given order.  The radix is of a fixed
+ * depth and we initialize new blocks as we descend through
+ * uninitialized refs.
  *
- * Returns INT_MAX if there are no free orders.
+ * If order is -1 then we search for the blk.
+ *
+ * As we descend we calculate the base blk offset of the path we're
+ * taking down the tree.  This is used to find the blkno of the next
+ * block relative to the blkno of the given level.  It's then used by
+ * the caller to calculate the total blk offset by adding the bit they
+ * find in the block.
+ *
+ * The path through the tree is recorded in the stack in the buddy info.
+ * The caller is responsible for cleaning up the stack and must do so
+ * even if we return an error.
  */
-static int find_first_fit(struct scoutfs_super_block *super, int sl,
-			  struct scoutfs_buddy_block *bud,
-			  struct scoutfs_buddy_block *st_bud,
-			  int order, int *order_ret)
+static int buddy_walk(struct super_block *sb, u64 blk, int order, u64 *base)
 {
-	int nrs[SCOUTFS_BUDDY_ORDERS] = {0,};
-	u64 blkno = U64_MAX;
-	bool made_progress;
-	int ret = INT_MAX;
-	u64 bno;
-	int nr;
-	int i;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct buddy_info *binf = sbi->buddy_info;
+	struct buddy_stack *sta = &binf->stack;
+	struct scoutfs_buddy_root *root = &sbi->super.buddy_root;
+	struct scoutfs_buddy_block *bud;
+	struct scoutfs_buddy_slot *slot;
+	struct buffer_head *bh;
+	u64 blkno;
+	int level;
+	int ret = 0;
+	int sl = 0;
 
-	do {
-		made_progress = false;
-		for (i = order; i < SCOUTFS_BUDDY_ORDERS; i++) {
-			/* find the next bit in each order */
-			nr = find_next_buddy_bit(bud, i, nrs[i]);
-			nrs[i] = nr;
-			if (nr == INT_MAX) {
-				continue;
-			}
-			made_progress = true;
+	/* XXX corruption? */
+	if (blk > last_blk(super) || root->height == 0 ||
+	    root->height > SCOUTFS_BUDDY_MAX_HEIGHT)
+		return -EIO;
 
-			/* advance to next bit if it's not free in stable */
-			if (st_bud &&
-			    !test_buddy_bit_or_higher(st_bud, i, nr)) {
-				nrs[i] = nr + 1;
-				continue;
-			}
+	slot = &root->slot;
+	level = root->height;
+	blkno = SCOUTFS_BUDDY_BLKNO;
+	*base = 0;
 
-			/* use the first lowest order blkno */
-			bno = slot_buddy_blkno(super, sl, i, nr);
-			if (bno < blkno) {
-				blkno = bno;
-				*order_ret = i;
-				ret = nr;
-			}
+	while (level--) {
+		/* XXX do base and level make sense here? */
+		bh = get_buddy_block(sb, slot, blkno, level);
+		if (IS_ERR(bh)) {
+			ret = PTR_ERR(bh);
+			break;
 		}
 
-	} while (ret == INT_MAX && made_progress);
+		trace_printk("before blk %llu order %d level %d blkno %llu base %llu sl %d\n",
+			     blk, order, level, blkno, *base, sl);
+
+		bud = bh_data(bh);
+
+		if (level) {
+			if (order >= 0) {
+				/* find first slot with order free */
+				sl = le16_to_cpu(bud->first_set[order]);
+				/* XXX corruption */
+				if (sl == U16_MAX) {
+					ret = -EIO;
+					break;
+				}
+			} else {
+				/* find slot based on blk */
+				sl = div64_u64_rem(blk, binf->level_div[level],
+						   &blk);
+			}
+
+			/* shouldn't be sl * 2, right? */
+			*base = (*base * SCOUTFS_BUDDY_SLOTS) + sl;
+			/* this is the only place we * 2 */
+			blkno = binf->level_blkno[level - 1] + (*base * 2);
+			slot = &bud->slots[sl];
+		} else {
+			*base *= SCOUTFS_BUDDY_ORDER0_BITS;
+			/* sl in stack is 0 for final leaf block */
+			sl = 0;
+		}
+
+		trace_printk("after blk %llu order %d level %d blkno %llu base %llu sl %d\n",
+			     blk, order, level, blkno, *base, sl);
+
+
+		stack_push(sta, bh, sl);
+	}
+
+	trace_printk("walking ret %d\n", ret);
 
 	return ret;
 }
 
 /*
- * Find the first free region that satisfies the given order that is
- * also free in the stable buddy bitmaps.  This can return an allocation
- * that breaks up a larger order.  Higher level callers iterate over
- * smaller orders to provide partial allocations.
+ * Find the order to search for to allocate a requested order.  We try
+ * to use the smallest greater or equal order and then the largest
+ * smaller order.
  */
-static int alloc_slot(struct super_block *sb,
-		      struct scoutfs_buddy_indirect *ind, int sl,
-		      struct scoutfs_buddy_slot *slot,
-		      struct scoutfs_block_ref *stable_ref,
-		      u64 *blkno, int order)
+static int find_free_order(struct scoutfs_buddy_root *root, int order)
+{
+	u16 free = le16_to_cpu(root->slot.free_orders);
+	u16 smaller_mask = (1 << order) - 1;
+	u16 larger = free & ~smaller_mask;
+	u16 smaller = free & smaller_mask;
+
+	if (larger)
+		return ffs(larger) - 1;
+	if (smaller)
+		return fls(smaller) - 1;
+
+	return -ENOSPC;
+}
+
+/*
+ * Walk to the leaf that contains the found order and allocate a region
+ * of the given order, returning the relative blk to the caller.
+ */
+static int buddy_alloc(struct super_block *sb, u64 *blk, int order, int found)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
+	struct buddy_info *binf = sbi->buddy_info;
+	struct buddy_stack *sta = &binf->stack;
 	struct scoutfs_buddy_block *bud;
-	struct scoutfs_buddy_block *st_bud;
-	struct buffer_head *st_bh;
 	struct buffer_head *bh;
-	int found;
+	u64 base;
 	int ret;
 	int nr;
 	int i;
 
-	/* initialize or dirty the slot's buddy block */
-	bh = dirty_buddy_block(sb, ind, sl, slot);
-	if (IS_ERR(bh))
-		return PTR_ERR(bh);
+	trace_printk("alloc order %d found %d\n", order, found);
+
+	if (WARN_ON_ONCE(found >= 0 && order > found))
+		return -EINVAL;
+
+	ret = buddy_walk(sb, *blk, found, &base);
+	if (ret)
+		goto out;
+
+	bh = stack_peek(sta);
 	bud = bh_data(bh);
 
-	/* read stable slots's buddy block if there is one */
-	if (stable_ref->blkno) {
-		st_bh = scoutfs_block_read_ref(sb, stable_ref);
-		if (IS_ERR(st_bh)) {
-			ret = PTR_ERR(st_bh);
+	if (found >= 0) {
+		nr = le16_to_cpu(bud->first_set[found]);
+		/* XXX corruption */
+		if (nr == U16_MAX) {
+			ret = -EIO;
 			goto out;
 		}
-		st_bud = bh_data(st_bh);
+
+		/* give caller the found blk for the order */
+		*blk = base + (nr << found);
 	} else {
-		st_bh = NULL;
-		st_bud = NULL;
+		nr = buddy_bit(*blk) >> found;
 	}
 
-	nr = find_first_fit(super, sl, bud, st_bud, order, &found);
-	if (nr == INT_MAX) {
-		ret = -ENOSPC;
-		goto out;
+	/* always allocate the higher or equal found order */
+	clear_buddy_bit(bud, found, nr);
+
+	/* and maybe free our buddies between smaller order and larger found */
+	nr = buddy_bit(*blk) >> order;
+	for (i = order; i < found; i++) {
+		set_buddy_bit(bud, i, nr ^ 1);
+		nr >>= 1;
 	}
 
-	/* we'll succeed from this point on, use nr before mangling it */
-	*blkno = slot_buddy_blkno(super, sl, found, nr);
-
-	/* always clear the found order */
-	clear_buddy_bit(ind, bud, found, nr);
-
-	/* free right buddies if we're breaking up a larger order */
-	for (nr <<= 1, i = found - 1; i >= order; i--, nr <<= 1)
-		set_buddy_bit(ind, bud, i, nr | 1);
-
-	update_free_orders(slot, bud);
 	ret = 0;
 out:
-	scoutfs_block_put(st_bh);
-	scoutfs_block_put(bh);
+	trace_printk("alloc order %d found %d blk %llu ret %d\n",
+		     order, found, *blk, ret);
+	stack_cleanup(sb);
 	return ret;
 }
 
 /*
- * Try and find a free block extent of the given order.  We can fail to
- * find a free order when none of the slots have free orders as the
- * volume fills or gets fragmented.
+ * Free a given order by setting its order bit.  If the order's buddy
+ * isn't set then it isn't free and we can't merge so we set our order
+ * and are done.  If the buddy is free then we can clear it and ascend
+ * up to try and set the next higher order.  That performs the same
+ * buddy merging test.  Eventually we make it to the highest order which
+ * doesn't have a buddy so we can always set it.
  *
- * We also have to be careful to only return free extents that were free
- * in the old stable buddy allocator so that we don't allocate and write
- * over referenced data.  This can cause us to skip otherwise available
- * extents but it should be rare.  There can only be a transaction's
- * worth of difference between the dirty allocator and the stable
- * allocator.  This is one of the motivations to cap the size of
- * transactions.
+ * As we're freeing orders in the final buddy bitmap that only partially
+ * covers the end of the device we might try to test buddies which are
+ * past the end of the device.  The test will still fall within the leaf
+ * block bitmap and those bits past the device will never be set so we
+ * will fail the merge and correctly set the orders free.
  */
-static int alloc_order(struct super_block *sb, u64 *blkno, int order)
+static int buddy_free(struct super_block *sb, u64 blk, int order)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_buddy_indirect *st_ind;
-	struct scoutfs_buddy_indirect *ind;
-	struct buffer_head *st_bh = NULL;
-	struct buffer_head *bh = NULL;
-	u8 mask;
-	int ret;
-	int i;
-
-	/* mkfs should have ensured that there's indirect blocks */
-	if (sbi->super.buddy_ind_ref.blkno == 0 ||
-	    sbi->stable_super.buddy_ind_ref.blkno == 0) {
-		ret = -EIO;
-		goto out;
-	}
-
-	/* get the dirty indirect block */
-	bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_ind_ref);
-	if (IS_ERR(bh)) {
-		ret = PTR_ERR(bh);
-		goto out;
-	}
-	ind = bh_data(bh);
-
-	/* get the stable indirect block */
-	st_bh = scoutfs_block_read_ref(sb, &sbi->stable_super.buddy_ind_ref);
-	if (IS_ERR(st_bh)) {
-		ret = PTR_ERR(st_bh);
-		goto out;
-	}
-	st_ind = bh_data(st_bh);
-
-	mask = ~0U << order;
-
-	/*
-	 * try to alloc from each slot that has at least the order free
-	 * in both the dirty and stable buddy blocks.
-	 */
-	for (i = 0; i < SCOUTFS_BUDDY_SLOTS; i++) {
-		if (!((mask & ind->slots[i].free_orders) &&
-		      (mask & st_ind->slots[i].free_orders))) {
-			ret = -ENOSPC;
-			continue;
-		}
-
-		ret = alloc_slot(sb, ind, i, &ind->slots[i],
-				 &st_ind->slots[i].ref, blkno, order);
-		if (ret != -ENOSPC)
-			break;
-	}
-
-out:
-	scoutfs_block_put(st_bh);
-	scoutfs_block_put(bh);
-
-	return ret;
-}
-
-/*
- * The buddy allocator keeps trying smaller orders until it finds an
- * allocation.
- *
- * The order of the allocation is returned.
- */
-static int buddy_alloc(struct super_block *sb, u64 *blkno, int order)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	int ret;
-
-	if (WARN_ON_ONCE(order < 0 || order >= SCOUTFS_BUDDY_ORDERS))
-		return -EINVAL;
-
-	mutex_lock(&sbi->buddy_mutex);
-
-	do {
-		ret = alloc_order(sb, blkno, order);
-	} while (ret == -ENOSPC && order--);
-
-	mutex_unlock(&sbi->buddy_mutex);
-
-	return ret ?: order;
-}
-
-/*
- * Allocate a block from the given region.  The caller has the buddy
- * mutex if we're called for either of the pair or bitmap internal
- * regions.
- */
-static int alloc_region(struct super_block *sb, u64 *blkno, int order,
-			u64 existing, int region)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	int ret;
-
-	switch(region) {
-		case REGION_PAIR:
-			*blkno = existing ^ 1;
-			ret = 0;
-			break;
-		case REGION_BM:
-			ret = bitmap_alloc(sb, blkno);
-			break;
-		case REGION_BUDDY:
-			ret = buddy_alloc(sb, blkno, order);
-			break;
-		default:
-			WARN_ON_ONCE(1);
-			ret = -EINVAL;
-	}
-
-	/* this misses other direct calls to bitmap_alloc, but that's minor */
-	if (ret >= 0)
-		atomic_add(1 << ret, &sbi->buddy_count);
-
-	trace_scoutfs_buddy_alloc(*blkno, order, region, ret);
-	return ret;
-}
-
-int scoutfs_buddy_alloc(struct super_block *sb, u64 *blkno, int order)
-{
-	return alloc_region(sb, blkno, order, 0, REGION_BUDDY);
-}
-
-/*
- * The block layer allocates from the same region as an existing blkno
- * when it's allocating for cow.
- */
-int scoutfs_buddy_alloc_same(struct super_block *sb, u64 *blkno, int order,
-			     u64 existing)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-
-	return alloc_region(sb, blkno, order, existing,
-			    blkno_region(super, existing));
-}
-
-/*
- * Free the aligned allocation of the given order at the given blkno to
- * the allocator.  We merge it into adjoining free space by looking for
- * free buddies as we increase the order.
- */
-static int buddy_free(struct super_block *sb, u64 blkno, int order)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_buddy_indirect *ind;
+	struct buddy_info *binf = sbi->buddy_info;
+	struct buddy_stack *sta = &binf->stack;
 	struct scoutfs_buddy_block *bud;
-	struct buffer_head *ind_bh = NULL;
-	struct buffer_head *bh = NULL;
+	struct buffer_head *bh;
+	u64 unused;
 	int ret;
-	int sl;
 	int nr;
 	int i;
 
-	if (WARN_ON_ONCE(order < 0 || order >= SCOUTFS_BUDDY_ORDERS) ||
-	    WARN_ON_ONCE(!valid_order(super, blkno, order)))
-		return -EINVAL;
-
-	mutex_lock(&sbi->buddy_mutex);
-
-	/* mkfs should have ensured that there's indirect blocks */
-	if (sbi->super.buddy_ind_ref.blkno == 0) {
-		ret = -EIO;
+	ret = buddy_walk(sb, blk, -1, &unused);
+	if (ret)
 		goto out;
-	}
 
-	ind_bh = scoutfs_block_dirty_ref(sb, &sbi->super.buddy_ind_ref);
-	if (IS_ERR(ind_bh)) {
-		ret = PTR_ERR(ind_bh);
-		goto out;
-	}
-	ind = bh_data(ind_bh);
-
-	sl = indirect_slot(super, blkno);
-	bh = scoutfs_block_dirty_ref(sb, &ind->slots[sl].ref);
-	if (IS_ERR(bh)) {
-		ret = PTR_ERR(bh);
-		goto out;
-	}
+	bh = stack_peek(sta);
 	bud = bh_data(bh);
 
-	/*
-	 * Merge our region with its free buddy and then try to merge
-	 * that higher order region with its buddy, and so on, until the
-	 * highest order.  The highest order doesn't have buddies.
-	 */
-	nr = buddy_bit(super, blkno) >> order;
-	for (i = order; i < SCOUTFS_BUDDY_ORDERS - 1; i++) {
+	nr = buddy_bit(blk) >> order;
+	for (i = order; i < SCOUTFS_BUDDY_ORDERS - 2; i++) {
 
 		if (!test_buddy_bit(bud, i, nr ^ 1))
 			break;
 
-		clear_buddy_bit(ind, bud, i, nr ^ 1);
+		clear_buddy_bit(bud, i, nr ^ 1);
 		nr >>= 1;
 	}
 
-	set_buddy_bit(ind, bud, i, nr);
+	set_buddy_bit(bud, i, nr);
 
-	update_free_orders(&ind->slots[sl], bud);
-	scoutfs_block_put(bh);
 	ret = 0;
 out:
-	mutex_unlock(&sbi->buddy_mutex);
-	scoutfs_block_put(ind_bh);
-
+	stack_cleanup(sb);
 	return ret;
 }
 
-int scoutfs_buddy_free(struct super_block *sb, u64 blkno, int order)
+/*
+ * Try to allocate an extent with the size number of blocks.  blkno is
+ * set to the start of the extent and the order of the block count is
+ * returned.
+ */
+int scoutfs_buddy_alloc(struct super_block *sb, u64 *blkno, int order)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	int region;
+	struct buddy_info *binf = sbi->buddy_info;
+	int found;
+	u64 blk;
 	int ret;
 
-	region = blkno_region(super, blkno);
-	switch(blkno_region(super, blkno)) {
-		case REGION_PAIR:
-			ret = 0;
-			break;
-		case REGION_BM:
-			ret = bitmap_free(sb, blkno);
-			break;
-		case REGION_BUDDY:
-			ret = buddy_free(sb, blkno, order);
-			break;
+	trace_printk("order %d\n", order);
+
+	mutex_lock(&binf->mutex);
+
+	found = find_free_order(&super->buddy_root, order);
+	if (found < 0) {
+		ret = found;
+		goto out;
 	}
 
-	trace_scoutfs_buddy_free(blkno, order, region, ret);
+	if (found < order)
+		order = found;
+
+	blk = 0;
+	ret = buddy_alloc(sb, &blk, order, found);
+	if (ret)
+		goto out;
+
+	*blkno = first_blkno(super) + blk;
+	le64_add_cpu(&super->free_blocks, -(1ULL << order));
+	atomic_add((1ULL << order), &binf->alloc_count);
+	ret = order;
+
+out:
+	trace_printk("blkno %llu order %d ret %d\n", *blkno, order, ret);
+	mutex_unlock(&binf->mutex);
 	return ret;
+}
+
+/*
+ * We use the block _ref() routines to dirty existing blocks to reuse
+ * all the block verification and cow machinery.  During cow this is
+ * called to allocate a new blkno to cow an existing buddy block.  We
+ * use the existing blkno to see if we have to return the other mirrored
+ * buddy blkno or do a real allocation for every other kind of block
+ * being cowed.
+ */
+int scoutfs_buddy_alloc_same(struct super_block *sb, u64 *blkno, u64 existing)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+
+	if (buddy_blkno(super, existing)) {
+		*blkno = existing ^ 1;
+		trace_printk("existing %llu ret blkno %llu\n",
+			     existing, *blkno);
+		return 0;
+	}
+
+	return scoutfs_buddy_alloc(sb, blkno, 0);
+}
+
+struct extent_node {
+	struct rb_node node;
+	u64 start;
+	u64 len;
+};
+
+static int add_enode_extent(struct rb_root *root, u64 start, u64 len)
+{
+	struct rb_node **node = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct extent_node *left = NULL;
+	struct extent_node *right = NULL;
+	struct extent_node *enode;
+
+	trace_printk("adding enode [%llu,%llu]\n", start, len);
+
+	while (*node && !(left && right)) {
+		parent = *node;
+		enode = container_of(*node, struct extent_node, node);
+
+		if (start < enode->start) {
+			if (!right && start + len == enode->start)
+				right = enode;
+			node = &(*node)->rb_left;
+		} else {
+			if (!left && enode->start + enode->len == start)
+				left = enode;
+			node = &(*node)->rb_right;
+		}
+	}
+
+	if (right) {
+		right->start = start;
+		right->len += len;
+		trace_printk("right now [%llu, %llu]\n",
+			     right->start, right->len);
+	}
+
+	if (left) {
+		if (right) {
+			left->len += right->len;
+			rb_erase(&right->node, root);
+			kfree(right);
+		} else {
+			left->len += len;
+		}
+		trace_printk("left now [%llu, %llu]\n", left->start, left->len);
+	}
+
+	if (left || right)
+		return 0;
+
+	enode = kmalloc(sizeof(struct extent_node), GFP_NOFS);
+	if (!enode)
+		return -ENOMEM;
+
+	enode->start = start;
+	enode->len = len;
+
+	trace_printk("inserted new [%llu, %llu]\n", enode->start, enode->len);
+
+	rb_link_node(&enode->node, parent, node);
+	rb_insert_color(&enode->node, root);
+
+	return 0;
+}
+
+static void destroy_pending_frees(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
+	struct extent_node *enode;
+	struct rb_node *node;
+
+	for (node = rb_first(&binf->pending_frees); node;) {
+		enode = rb_entry(node, struct extent_node, node);
+		node = rb_next(node);
+
+		rb_erase(&enode->node, &binf->pending_frees);
+		kfree(enode);
+	}
 }
 
 /* XXX this should be generic */
 #define min3_t(t, a, b, c) min3((t)(a), (t)(b), (t)(c))
 
 /*
- * Free all the order allocations that make up the given unaligned block
- * extent.  Think of it as figuring out the largest aligned allocation
- * that starts at the blkno and then clamping it by the count.
+ * Allocate or free all the orders that make up a given arbitrary block
+ * extent.  Today this is used by callers who know that the blocks for
+ * the extent have already been pinned so we BUG on error.
+ */
+static void apply_extent(struct super_block *sb, bool alloc, u64 blk, u64 len)
+{
+	unsigned int blk_order;
+	unsigned int blk_bit;
+	unsigned int size;
+	int order;
+	int ret;
+
+	trace_printk("applying extent blk %llu len %llu\n", blk, len);
+
+	while (len) {
+		/* buddy bit might be 0, len always has a bit set */
+		blk_bit = buddy_bit(blk);
+		blk_order = blk_bit ? ffs(blk_bit) - 1  : 0;
+		order = min3_t(int, blk_order, fls64(len) - 1,
+			       SCOUTFS_BUDDY_ORDERS - 1);
+		size = 1 << order;
+
+		trace_printk("applying blk %llu order %d\n", blk, order);
+
+		if (alloc)
+			ret = buddy_alloc(sb, &blk, order, -1);
+		else
+			ret = buddy_free(sb, blk, order);
+		BUG_ON(ret);
+
+		blk += size;
+		len -= size;
+	}
+}
+
+/*
+ * The pending rbtree has recorded frees of stable data that we had to
+ * wait until transaction commit to record.  Once these are tracked in
+ * the allocator we can't use the allocator until the commit succeeds.
+ * This is called by transaction commit to get these pending frees into
+ * the current commit.  If it fails they pull them back out.
+ */
+int scoutfs_buddy_apply_pending(struct super_block *sb, bool alloc)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
+	struct extent_node *enode;
+	struct rb_node *node;
+
+	for (node = rb_first(&binf->pending_frees); node;) {
+		enode = rb_entry(node, struct extent_node, node);
+		node = rb_next(node);
+
+		apply_extent(sb, alloc, enode->start, enode->len);
+	}
+
+	return 0;
+}
+
+/*
+ * Free a given allocated extent.  The seq tells us which transaction
+ * first allocated the extent.  If it was allocated in this transaction
+ * then we can return it to the free buddy and that must succeed.
  *
- * For now this is only used by callers who have pinned the blocks that
- * provided the allocation that they're now freeing from.  It can't
- * fail.  If it could we would ensure that we re-alloc partial frees
- * before returning an error.
+ * If it was allocated in a previous transaction then we dirty the
+ * blocks it will take to free it then record it in an rbtree.  The
+ * rbtree entries are replayed into the dirty blocks as the transaction
+ * commits.
+ *
+ * Buddy block numbers are preallocated and calculated from the radix
+ * tree structure so we can ignore the block layer's calls to free buddy
+ * blocks during cow.
+ */
+int scoutfs_buddy_free(struct super_block *sb, __le64 seq, u64 blkno, int order)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct buddy_info *binf = sbi->buddy_info;
+	u64 unused;
+	u64 blk;
+	int ret;
+
+	trace_printk("seq %llu blkno %llu order %d rsv %u\n",
+		     le64_to_cpu(seq), blkno, order, buddy_blkno(super, blkno));
+
+	/* no specific free tracking for buddy blocks */
+	if (buddy_blkno(super, blkno))
+		return 0;
+
+	/* XXX corruption? */
+	if (!device_blkno(super, blkno))
+		return -EINVAL;
+
+	blk = blkno - first_blkno(super);
+
+	if (!valid_order(blk, order))
+		return -EINVAL;
+
+	mutex_lock(&binf->mutex);
+
+	if (seq == super->hdr.seq) {
+		ret = buddy_free(sb, blk, order);
+		/*
+		 * If this order was allocated in this transaction then its
+		 * blocks should be pinned and we should always be able
+		 * to free it.
+		 */
+		BUG_ON(ret);
+	} else {
+		ret = buddy_walk(sb, blk, -1, &unused) ?:
+		      add_enode_extent(&binf->pending_frees, blk, 1 << order);
+		if (ret == 0)
+			trace_printk("added blk %llu order %d\n", blk, order);
+		stack_cleanup(sb);
+	}
+
+	if (ret == 0)
+		le64_add_cpu(&super->free_blocks, 1ULL << order);
+
+	mutex_unlock(&binf->mutex);
+
+	return ret;
+}
+
+/*
+ * This is current only used to return partial extents from larger
+ * allocations in this transaction.
  */
 void scoutfs_buddy_free_extent(struct super_block *sb, u64 blkno, u64 count)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
 	struct scoutfs_super_block *super = &sbi->stable_super;
-	int order;
-	int size;
-	int ret;
+	u64 blk;
 
-	while (count) {
-		/* both blkno and count have to have bits set */
-		order = min3_t(int, __ffs64(buddy_bit(super, blkno)),
-			       fls64(count) - 1,
-			       SCOUTFS_BUDDY_ORDERS - 1);
-		size = 1 << order;
+	BUG_ON(!device_blkno(super, blkno));
 
-		ret = scoutfs_buddy_free(sb, blkno, order);
-		BUG_ON(ret);
+	blk = blkno - first_blkno(super);
 
-		blkno += size;
-		count -= size;
-	}
-}
+	mutex_lock(&binf->mutex);
 
-/*
- * Return > 1 if the given order allocation was free in the old stable
- * transaction, 0 if it wasn't, and -errno if errors prevented us from
- * finding out.
- *
- * XXX I bet we could get away without using the buddy mutex
- */
-int scoutfs_buddy_was_free(struct super_block *sb, u64 blkno, int order)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->stable_super;
-	struct buffer_head *ind_bh = NULL;
-	struct buffer_head *bh = NULL;
-	struct scoutfs_buddy_indirect *ind;
-	struct scoutfs_buddy_block *bud;
-	struct scoutfs_block_ref *ref;
-	int ret;
-	int nr;
-	int sl;
+	apply_extent(sb, false, blkno - first_blkno(super), count);
+	le64_add_cpu(&super->free_blocks, count);
 
-	/* mkfs should have ensured that there's bitmap blocks */
-	/* XXX corruption */
-	if (sbi->super.buddy_bm_ref.blkno == 0 ||
-	    sbi->stable_super.buddy_bm_ref.blkno == 0)
-		return -EIO;
-
-	mutex_lock(&sbi->buddy_mutex);
-
-	/* get the stable indirect block */
-	ind_bh = scoutfs_block_read_ref(sb, &super->buddy_ind_ref);
-	if (IS_ERR(ind_bh)) {
-		ret = PTR_ERR(ind_bh);
-		goto out;
-	}
-	ind = bh_data(ind_bh);
-
-	/* allocation was free if it's slot wasn't populated */
-	sl = indirect_slot(super, blkno);
-	ref = &ind->slots[sl].ref;
-	if (!ref->blkno) {
-		ret = 1;
-		goto out;
-	}
-
-	/* check the allocation bit in the old stable bitmap block */
-	bh = scoutfs_block_read_ref(sb, ref);
-	if (IS_ERR(bh)) {
-		ret = PTR_ERR(bh);
-		goto out;
-	}
-	bud = bh_data(bh);
-
-	nr = buddy_bit(super, blkno) >> order;
-	ret = !!test_buddy_bit_or_higher(bud, order, nr);
-
-out:
-	mutex_unlock(&sbi->buddy_mutex);
-	scoutfs_block_put(ind_bh);
-	scoutfs_block_put(bh);
-
-	trace_printk("blkno %llu order %d ret %d\n", blkno, order, ret);
-	return ret;
-}
-
-/*
- * For now we only have one indirect block off the super.  When we grow
- * multiple commit block pairs that reference root and indirect blocks
- * then we'll need to iterate over those.  These results will only ever
- * be approximate so we can simply use racey valid ref reads to be able
- * to sample while others are writing.
- */
-int scoutfs_buddy_bfree(struct super_block *sb, u64 *bfree)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_buddy_indirect *ind;
-	struct buffer_head *bh;
-	int ret;
-	int i;
-
-	*bfree = 0;
-
-	bh = scoutfs_block_read_ref(sb, &super->buddy_ind_ref);
-	if (IS_ERR(bh)) {
-		ret = PTR_ERR(bh);
-		goto out;
-	}
-	ind = bh_data(bh);
-
-	for (i = 0; i < SCOUTFS_BUDDY_ORDERS; i++)
-		*bfree += le64_to_cpu(ind->order_totals[i]) << i;
-
-	scoutfs_block_put(bh);
-	ret = 0;
-out:
-	return ret;
-
+	mutex_unlock(&binf->mutex);
 }
 
 /*
  * Return the number of block allocations since the last time the
- * counter was reset.  This count doesn't include some internal bitmap
- * block allocations but that should be a small fraction of the main
- * allocations.
+ * counter was reset.  This count doesn't include dirty buddy blocks.
  */
 unsigned int scoutfs_buddy_alloc_count(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
 
-	return atomic_read(&sbi->buddy_count);
+	return atomic_read(&binf->alloc_count);
 }
 
-void scoutfs_buddy_reset_count(struct super_block *sb)
+u64 scoutfs_buddy_bfree(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
+	struct scoutfs_super_block *super = &sbi->super;
+	u64 ret;
 
-	return atomic_set(&sbi->buddy_count, 0);
+	mutex_lock(&binf->mutex);
+	ret = le64_to_cpu(super->free_blocks);
+	mutex_unlock(&binf->mutex);
+
+	return ret;
 }
+
+void scoutfs_buddy_committed(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
+
+	atomic_set(&binf->alloc_count, 0);
+	destroy_pending_frees(sb);
+}
+
+int scoutfs_buddy_setup(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct buddy_info *binf = sbi->buddy_info;
+	u64 level_blocks[SCOUTFS_BUDDY_MAX_HEIGHT];
+	u64 blocks;
+	int i;
+
+	/* first bit offsets in blocks are __le16 */
+	BUILD_BUG_ON(SCOUTFS_BUDDY_ORDER0_BITS >= U16_MAX);
+
+	/* bits need to be naturally aligned to long for _le bitops */
+	BUILD_BUG_ON(offsetof(struct scoutfs_buddy_block, bits) &
+		     (sizeof(long) - 1));
+
+	binf = kzalloc(sizeof(struct buddy_info), GFP_KERNEL);
+	if (!binf)
+		return -ENOMEM;
+	sbi->buddy_info = binf;
+
+	mutex_init(&binf->mutex);
+	atomic_set(&binf->alloc_count, 0);
+	binf->pending_frees = RB_ROOT;
+
+	/* calculate blocks at each level */
+	blocks = DIV_ROUND_UP_ULL(last_blk(super) + 1,
+				  SCOUTFS_BUDDY_ORDER0_BITS);
+	for (i = 0; i < SCOUTFS_BUDDY_MAX_HEIGHT; i++) {
+		level_blocks[i] = (blocks * 2);
+		if (blocks == 1) {
+			binf->max_height = i + 1;
+			break;
+		}
+		blocks = DIV_ROUND_UP_ULL(blocks, SCOUTFS_BUDDY_SLOTS);
+	}
+
+	/* calculate device blkno of first block in each level */
+	binf->level_blkno[binf->max_height - 1] = SCOUTFS_BUDDY_BLKNO;
+	for (i = (binf->max_height - 2); i >= 0; i--) {
+		binf->level_blkno[i] = binf->level_blkno[i + 1] +
+				       level_blocks[i + 1];
+	}
+
+	/* calculate blk divisor to find slot at a given level */
+	binf->level_div[1] = SCOUTFS_BUDDY_ORDER0_BITS;
+	for (i = 2; i < binf->max_height; i++) {
+		binf->level_div[i] = binf->level_div[i - 1] *
+				     SCOUTFS_BUDDY_SLOTS;
+	}
+
+	for (i = 0; i < binf->max_height; i++)
+		trace_printk("level %d div %llu blkno %llu blocks %llu\n",
+			     i, binf->level_div[i], binf->level_blkno[i],
+			     level_blocks[i]);
+
+	return 0;
+}
+
+void scoutfs_buddy_destroy(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct buddy_info *binf = sbi->buddy_info;
+
+	if (binf)
+		WARN_ON_ONCE(!RB_EMPTY_ROOT(&binf->pending_frees));
+	kfree(binf);
+}
+

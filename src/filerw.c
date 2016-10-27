@@ -147,7 +147,7 @@ static int alloc_file_block(struct super_block *sb, u64 *blkno)
 	spin_unlock(&sbi->file_alloc_lock);
 
 	if (order > 0)
-		scoutfs_buddy_free(sb, alloc_blkno, order);
+		scoutfs_buddy_free(sb, sbi->super.hdr.seq, alloc_blkno, order);
 
 out:
 	trace_printk("allocated blkno %llu ret %d\n", *blkno, ret);
@@ -246,7 +246,7 @@ int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
 			if (blkno == 0)
 				continue;
 
-			ret = scoutfs_buddy_free(sb, blkno, 0);
+			ret = scoutfs_buddy_free(sb, bmap.seq[i], blkno, 0);
 			if (ret)
 				break;
 
@@ -357,6 +357,8 @@ static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 {
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->stable_super;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_block_map bmap;
 	struct scoutfs_btree_val val;
@@ -406,7 +408,7 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 		goto out;
 
 	if (old_blkno) {
-		ret = scoutfs_buddy_free(sb, old_blkno, 0);
+		ret = scoutfs_buddy_free(sb, bmap.seq[i], old_blkno, 0);
 		if (ret)
 			goto out;
 	}

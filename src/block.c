@@ -372,7 +372,7 @@ struct buffer_head *scoutfs_block_dirty_ref(struct super_block *sb,
 	if (IS_ERR(bh) || ref->seq == sbi->super.hdr.seq)
 		return bh;
 
-	ret = scoutfs_buddy_alloc_same(sb, &blkno, 0, le64_to_cpu(ref->blkno));
+	ret = scoutfs_buddy_alloc_same(sb, &blkno, le64_to_cpu(ref->blkno));
 	if (ret < 0)
 		goto out;
 
@@ -382,7 +382,7 @@ struct buffer_head *scoutfs_block_dirty_ref(struct super_block *sb,
 		goto out;
 	}
 
-	ret = scoutfs_buddy_free(sb, bh->b_blocknr, 0);
+	ret = scoutfs_buddy_free(sb, ref->seq, bh->b_blocknr, 0);
 	if (ret)
 		goto out;
 
@@ -399,7 +399,8 @@ out:
 	scoutfs_block_put(bh);
 	if (ret) {
 		if (!IS_ERR_OR_NULL(copy_bh)) {
-			err = scoutfs_buddy_free(sb, copy_bh->b_blocknr, 0);
+			err = scoutfs_buddy_free(sb, sbi->super.hdr.seq,
+						 copy_bh->b_blocknr, 0);
 			WARN_ON_ONCE(err); /* freeing dirty must work */
 		}
 		scoutfs_block_put(copy_bh);
@@ -452,6 +453,8 @@ out:
  */
 struct buffer_head *scoutfs_block_dirty_alloc(struct super_block *sb)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->stable_super;
 	struct buffer_head *bh;
 	u64 blkno;
 	int ret;
@@ -463,7 +466,7 @@ struct buffer_head *scoutfs_block_dirty_alloc(struct super_block *sb)
 
 	bh = scoutfs_block_dirty(sb, blkno);
 	if (IS_ERR(bh)) {
-		err = scoutfs_buddy_free(sb, blkno, 0);
+		err = scoutfs_buddy_free(sb, super->hdr.seq, blkno, 0);
 		WARN_ON_ONCE(err); /* freeing dirty must work */
 	}
 	return bh;

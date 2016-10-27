@@ -19,8 +19,7 @@
  */
 #define SCOUTFS_SUPER_BLKNO ((64 * 1024) >> SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_SUPER_NR 2
-#define SCOUTFS_BUDDY_BM_BLKNO (SCOUTFS_SUPER_BLKNO + SCOUTFS_SUPER_NR)
-#define SCOUTFS_BUDDY_BM_NR 2
+#define SCOUTFS_BUDDY_BLKNO (SCOUTFS_SUPER_BLKNO + SCOUTFS_SUPER_NR)
 
 #define SCOUTFS_MAX_TRANS_BLOCKS  (128 * 1024 * 1024 / SCOUTFS_BLOCK_SIZE)
 
@@ -48,42 +47,49 @@ struct scoutfs_block_ref {
 	__le64 seq;
 } __packed;
 
-struct scoutfs_bitmap_block {
-	struct scoutfs_block_header hdr;
-	__le64 bits[0];
-} __packed;
-
 /*
- * Track allocations from BLOCK_SIZE to (BLOCK_SIZE << ..._ORDERS).
+ * If the block was full of bits the largest possible order would be
+ * the block size shift + 3 (BITS_PER_BYTE).  But the header uses
+ * up some space and then the buddy bits mean two bits per block.
+ * Then +1 for this being the number, not the greatest order.
  */
-#define SCOUTFS_BUDDY_ORDERS 8
+#define SCOUTFS_BUDDY_ORDERS (SCOUTFS_BLOCK_SHIFT + 3 - 2 + 1)
 
 struct scoutfs_buddy_block {
 	struct scoutfs_block_header hdr;
-	__le32 order_counts[SCOUTFS_BUDDY_ORDERS];
-	__le64 bits[0];
+	__le16 first_set[SCOUTFS_BUDDY_ORDERS];
+	__u8 level;
+	__u8 __pad[3]; /* naturally align bits */
+	union {
+		struct scoutfs_buddy_slot {
+			__le64 seq;
+			__le16 free_orders;
+			/* XXX seems like we could hide a bit somewhere */
+			__u8 blkno_off;
+		} __packed slots[0];
+		__le64 bits[0];
+	} __packed;
 } __packed;
 
 /*
- * If we had log2(raw bits) orders we'd fully use all of the raw bits in
- * the block.  We're close enough that the amount of space wasted at the
- * end (~1/256th of the block, ~64 bytes) isn't worth worrying about.
+ * Each buddy leaf block references order 0 blocks with half of its
+ * bitmap.  The other half of the bits are used for the higher order
+ * bits.
  */
 #define SCOUTFS_BUDDY_ORDER0_BITS \
 	(((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_block)) * 8) / 2)
 
-struct scoutfs_buddy_indirect {
-	struct scoutfs_block_header hdr;
-	__le64 order_totals[SCOUTFS_BUDDY_ORDERS];
-	struct scoutfs_buddy_slot {
-		__u8 free_orders;
-		struct scoutfs_block_ref ref;
-	} slots[0];
+#define SCOUTFS_BUDDY_SLOTS						\
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_block)) /	\
+		sizeof(struct scoutfs_buddy_slot))
+
+struct scoutfs_buddy_root {
+	struct scoutfs_buddy_slot slot;
+	__u8 height;
 } __packed;
 
-#define SCOUTFS_BUDDY_SLOTS						\
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_indirect)) /	\
-		sizeof(struct scoutfs_buddy_slot))
+/* ((SCOUTFS_BUDDY_SLOTS^5) * SCOUTFS_BUDDY_ORDER0_BITS) > 2^52 */
+#define SCOUTFS_BUDDY_MAX_HEIGHT 6
 
 /*
  * We should be able to make the offset smaller if neither dirents nor
@@ -180,10 +186,10 @@ struct scoutfs_super_block {
 	__u8 uuid[SCOUTFS_UUID_BYTES];
 	__le64 next_ino;
 	__le64 total_blocks;
-	__le32 buddy_blocks;
+	__le64 free_blocks;
+	__le64 buddy_blocks;
+        struct scoutfs_buddy_root buddy_root;
         struct scoutfs_btree_root btree_root;
-        struct scoutfs_block_ref buddy_ind_ref;
-        struct scoutfs_block_ref buddy_bm_ref;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1

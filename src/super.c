@@ -48,12 +48,8 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	__le32 * __packed uuid = (void *)super->uuid;
-	int ret;
 
-	ret = scoutfs_buddy_bfree(sb, &kst->f_bfree);
-	if (ret)
-		return ret;
-
+	kst->f_bfree =  scoutfs_buddy_bfree(sb);
 	kst->f_type = SCOUTFS_SUPER_MAGIC;
 	kst->f_bsize = SCOUTFS_BLOCK_SIZE;
 	kst->f_blocks = le64_to_cpu(super->total_blocks);
@@ -198,8 +194,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->block_dirty_tree = RB_ROOT;
 	init_waitqueue_head(&sbi->block_wq);
 	atomic_set(&sbi->block_writes, 0);
-	mutex_init(&sbi->buddy_mutex);
-	atomic_set(&sbi->buddy_count, 0);
 	init_rwsem(&sbi->btree_rwsem);
 	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);
@@ -220,6 +214,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	ret = scoutfs_setup_counters(sb) ?:
 	      read_supers(sb) ?:
+	      scoutfs_buddy_setup(sb) ?:
 	      scoutfs_setup_trans(sb);
 	if (ret)
 		return ret;
@@ -252,6 +247,7 @@ static void scoutfs_kill_sb(struct super_block *sb)
 	kill_block_super(sb);
 	if (sbi) {
 		scoutfs_shutdown_trans(sb);
+		scoutfs_buddy_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)
 			kset_unregister(sbi->kset);

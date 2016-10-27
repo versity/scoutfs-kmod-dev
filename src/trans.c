@@ -90,17 +90,20 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 		scoutfs_filerw_free_alloc(sb);
 
-		ret = scoutfs_block_write_dirty(sb) ?:
+		ret = scoutfs_buddy_apply_pending(sb, false) ?:
+		      scoutfs_block_write_dirty(sb) ?:
 		      scoutfs_write_dirty_super(sb);
-		if (!ret)
+		if (ret) {
+			scoutfs_buddy_apply_pending(sb, true);
+		} else {
+			scoutfs_buddy_committed(sb);
 			advance = 1;
+		}
 	}
 
 	spin_lock(&sbi->trans_write_lock);
-	if (advance) {
+	if (advance)
 		scoutfs_advance_dirty_super(sb);
-		scoutfs_buddy_reset_count(sb);
-	}
 	sbi->trans_write_count++;
 	sbi->trans_write_ret = ret;
 	spin_unlock(&sbi->trans_write_lock);

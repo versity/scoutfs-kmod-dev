@@ -8,7 +8,7 @@
 #include "buddy.h"
 
 struct scoutfs_counters;
-struct buddy_alloc;
+struct buddy_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -24,8 +24,7 @@ struct scoutfs_sb_info {
 	atomic_t block_writes;
 	int block_write_err;
 
-	struct mutex buddy_mutex;
-	atomic_t buddy_count;
+	struct buddy_info *buddy_info;
 
 	struct rw_semaphore btree_rwsem;
 

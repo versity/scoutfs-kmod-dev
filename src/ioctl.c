@@ -286,7 +286,7 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case SCOUTFS_IOC_FIND_XATTR_VAL:
 		return scoutfs_ioc_find_xattr(file, arg, false);
 	case SCOUTFS_IOC_INODE_DATA_SINCE:
-		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_BMAP_KEY);
+		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_EXTENT_KEY);
 	}
 
 	return -ENOTTY;

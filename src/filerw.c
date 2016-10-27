@@ -27,8 +27,8 @@
 #include "ioctl.h"
 
 /*
- * scoutfs uses simple fixed size block mapping items to map aligned
- * groups of logical file data blocks to physical block locations.
+ * scoutfs uses an extent item to map logical file data blocks to
+ * physical block locations.
  *
  * The small block size is set to the smallest supported page size.
  * This means that our file IO code never has to worry about the
@@ -40,7 +40,7 @@
  * is, and have a 1:1 relationship between block writes and block
  * mapping item entries.
  *
- * Dirty blocks are only written to free space.  The first time a block
+ * Dirty extents are only written to free space.  The first time a block
  * hits write_page in a transaction it gets a newly allocated block.  We
  * get decent contiguous allocations by having per-task preallocation
  * streams.  These are trimmed back as the transaction is committed.  We
@@ -64,7 +64,7 @@
  *  - need to wire up dirty inode?
  *  - enforce writing to free blknos
  *  - per-task allocation regions
- *  - tear down dirty blocks left by write errors on unmount
+ *  - tear down dirty extents left by write errors on unmount
  *  - should invalidate dirty blocks if freed
  *  - data block checksumming (stable pages)
  *  - mmap creating dirty unmapped pages at writepage
@@ -177,96 +177,72 @@ static void return_file_block(struct super_block *sb, u64 blkno)
 	spin_unlock(&sbi->file_alloc_lock);
 }
 
-static bool bmap_has_blocks(struct scoutfs_block_map *bmap)
-{
-	int i;
-
-	for (i = 0; i < SCOUTFS_BLOCK_MAP_COUNT; i++) {
-		if (bmap->blkno[i])
-			return true;
-	}
-
-	return false;
-}
-
 /*
- * Free mapped blocks whose entire contents are past the new specified
- * size.  The caller holds a transaction.  If we truncate all the blocks
- * in a mapping item then we remove the item.
+ * Free mapped extents whose entire contents are past the new
+ * specified size.  The caller holds a transaction.
  *
- * This is the low level block allocation and bmap item manipulation.
+ * This is the low level extent item truncate code.
  * Callers manage higher order truncation and orphan cleanup.
  *
- * XXX what to do about leaving items past i_size?
  * XXX probably should be a range
  */
-int scoutfs_truncate_block_items(struct super_block *sb, u64 ino, u64 size)
+int scoutfs_truncate_extent_items(struct super_block *sb, u64 ino, u64 size)
 {
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_block_map bmap;
+	struct scoutfs_extent extent;
 	struct scoutfs_btree_val val;
-	struct scoutfs_key last;
 	struct scoutfs_key key;
-	bool modified;
+	struct scoutfs_key first;
 	u64 iblock;
-	u64 blkno;
+	u64 len;
+	u64 loff;
+	u64 seq;
 	int ret;
-	int i;
 
 	iblock = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SIZE);
-	i = iblock & SCOUTFS_BLOCK_MAP_MASK;
 
-	scoutfs_set_key(&key, ino, SCOUTFS_BMAP_KEY,
-			iblock & ~(u64)SCOUTFS_BLOCK_MAP_MASK);
-	scoutfs_set_key(&last, ino, SCOUTFS_BMAP_KEY, ~0ULL);
+	scoutfs_set_key(&first, ino, SCOUTFS_EXTENT_KEY, 0);
+	scoutfs_set_key(&key, ino, SCOUTFS_EXTENT_KEY, ~0ULL);
 
-	trace_printk("iblock %llu i %d\n", iblock, i);
+	trace_printk("iblock %llu\n", iblock);
 
-	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
+	scoutfs_btree_init_val(&val, &extent, sizeof(extent));
 	val.check_size_eq = 1;
 
 	for (;;) {
-		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		ret = scoutfs_btree_prev(sb, meta, &first, &key, &key, &seq,
+					 &val);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		/* XXX check bmap sanity */
+		loff = le64_to_cpu(key.offset);
+		len = le64_to_cpu(extent.len);
 
-		/* make sure we can update bmap after freeing */
+		if (WARN_ON_ONCE(len != 1)) {
+			ret = -EIO;
+			break;
+		}
+
+		if ((loff + len) <= iblock)
+			break;
+
+		/* make sure we can delete the extent after freeing */
 		ret = scoutfs_btree_dirty(sb, meta, &key);
 		if (ret)
 			break;
 
-		modified = false;
-		for (; i < SCOUTFS_BLOCK_MAP_COUNT; i++) {
-			blkno = le64_to_cpu(bmap.blkno[i]);
-			if (blkno == 0)
-				continue;
-
-			ret = scoutfs_buddy_free(sb, bmap.seq[i], blkno, 0);
-			if (ret)
-				break;
-
-			bmap.blkno[i] = 0;
-			bmap.seq[i] = 0;
-			modified = true;
-		}
-		i = 0;
-
-		/* dirtying should have prevented these from failing */
-		if (!bmap_has_blocks(&bmap))
-			scoutfs_btree_delete(sb, meta, &key);
-		else if (modified)
-			scoutfs_btree_update(sb, meta, &key, &val);
-
+		ret = scoutfs_buddy_free(sb, cpu_to_le64(seq),
+					 le64_to_cpu(extent.blkno), 0);
 		if (ret)
 			break;
 
+		scoutfs_btree_delete(sb, meta, &key);
+
 		/* XXX sync transaction if it's enormous */
-		scoutfs_inc_key(&key);
+		scoutfs_dec_key(&key);
 	}
 
 	return ret;
@@ -291,44 +267,27 @@ void scoutfs_filerw_free_alloc(struct super_block *sb)
 	sbi->file_alloc_count = 0;
 }
 
-static void set_bmap_key(struct scoutfs_key *key, struct inode *inode,
-			 u64 iblock)
-{
-	scoutfs_set_key(key, scoutfs_ino(inode), SCOUTFS_BMAP_KEY,
-			iblock >> SCOUTFS_BLOCK_MAP_SHIFT);
-}
-
 /*
  * Return the number of contiguously mapped blocks starting from the
- * given logical block in the inode.  We only return the number
- * contained in one block map item.  We walk through more items if it
- * makes a difference.
+ * given logical block in the inode.
  */
 static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_btree_val val;
-	struct scoutfs_block_map bmap;
+	struct scoutfs_extent extent;
 	struct scoutfs_key key;
 	int ret;
-	int i;
 
 	*blkno = 0;
-
-	set_bmap_key(&key, inode, iblock);
-	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
+	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_EXTENT_KEY, iblock);
+	scoutfs_btree_init_val(&val, &extent, sizeof(extent));
 
 	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
-	if (ret == sizeof(bmap)) {
-		i = iblock & SCOUTFS_BLOCK_MAP_MASK;
-		*blkno = le64_to_cpu(bmap.blkno[i]);
-
-		ret = 0;
-		while (i < SCOUTFS_BLOCK_MAP_COUNT && bmap.blkno[i]) {
-			ret++;
-			i++;
-		}
+	if (ret == sizeof(extent)) {
+		*blkno = le64_to_cpu(extent.blkno);
+		ret = min_t(u64, le64_to_cpu(extent.len), INT_MAX);
 	} else if (ret >= 0) {
 		/* XXX corruption */
 		ret = -EIO;
@@ -360,44 +319,47 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->stable_super;
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_block_map bmap;
+	struct scoutfs_extent extent;
 	struct scoutfs_btree_val val;
+	struct scoutfs_key first;
 	struct scoutfs_key key;
 	bool inserted = false;
 	u64 old_blkno = 0;
 	u64 new_blkno = 0;
+	u64 seq;
 	int ret;
 	int err;
-	int i;
 
-	set_bmap_key(&key, inode, iblock);
-	scoutfs_btree_init_val(&val, &bmap, sizeof(bmap));
+	scoutfs_set_key(&first, scoutfs_ino(inode), SCOUTFS_EXTENT_KEY, 0);
+	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_EXTENT_KEY, iblock);
+	scoutfs_btree_init_val(&val, &extent, sizeof(extent));
 	val.check_size_eq = 1;
 
 	/* see if there's an existing mapping */
-	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
+	ret = scoutfs_btree_prev(sb, meta, &first, &key, &key, &seq, &val);
+	if (ret == 0 && ((le64_to_cpu(key.offset) +
+			  le64_to_cpu(extent.len)) <= iblock))
+		ret = -ENOENT;
 	if (ret < 0 && ret != -ENOENT)
 		goto out;
 
-	/* make sure that updating the bmap item won't fail */
+	/* make sure that updating the extent item won't fail */
 	if (ret == -ENOENT) {
-		memset(&bmap, 0, sizeof(bmap));
+		memset(&extent, 0, sizeof(extent));
 		ret = scoutfs_btree_insert(sb, meta, &key, &val);
 		if (ret)
 			goto out;
 		inserted = true;
-
 	} else {
 		ret = scoutfs_btree_dirty(sb, meta, &key);
 		if (ret)
 			goto out;
 	}
 
-	i = iblock & SCOUTFS_BLOCK_MAP_MASK;
-	old_blkno = le64_to_cpu(bmap.blkno[i]);
+	old_blkno = le64_to_cpu(extent.blkno);
 
 	/* If the existing block is dirty then we can use it */
-	if (old_blkno && (bmap.seq[i] == super->hdr.seq)) {
+	if (old_blkno && cpu_to_le64(seq) == super->hdr.seq) {
 		*blkno_ret = old_blkno;
 		ret = 0;
 		goto out;
@@ -408,13 +370,13 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 		goto out;
 
 	if (old_blkno) {
-		ret = scoutfs_buddy_free(sb, bmap.seq[i], old_blkno, 0);
+		ret = scoutfs_buddy_free(sb, cpu_to_le64(seq), old_blkno, 0);
 		if (ret)
 			goto out;
 	}
 
-	bmap.blkno[i] = cpu_to_le64(new_blkno);
-	bmap.seq[i] = super->hdr.seq;
+	extent.blkno = cpu_to_le64(new_blkno);
+	extent.len = cpu_to_le64(1);
 
 	/* dirtying guarantees success */
 	err = scoutfs_btree_update(sb, meta, &key, &val);
@@ -448,7 +410,8 @@ static int scoutfs_readpage_get_block(struct inode *inode, sector_t iblock,
 	ret = contig_mapped_blocks(inode, iblock, &blkno);
 	if (ret > 0) {
 		map_bh(bh, inode->i_sb, blkno);
-		bh->b_size = min_t(int, bh->b_size, ret << inode->i_blkbits);
+		bh->b_size = min_t(u64, bh->b_size,
+				   (u64)ret << inode->i_blkbits);
 		ret = 0;
 	}
 
@@ -486,7 +449,7 @@ static int scoutfs_writepage_get_block(struct inode *inode, sector_t iblock,
 }
 
 /*
- * Dirty file blocks can be written to their newly allocated free blocks
+ * Dirty file pages can be written to their newly allocated free extents
  * at any time.  They won't be referenced by metadata until the current
  * transaction is committed.  They can be re-read and re-dirtied at
  * their free block number in this transaction.
@@ -507,8 +470,8 @@ static int scoutfs_writepages(struct address_space *mapping,
 }
 
 /*
- * Block allocation during buffered writes needs to make sure that the
- * dirty block will be written to free space.
+ * Extent allocation during buffered writes needs to make sure that the
+ * dirty blocks will be written to free space.
  */
 static int scoutfs_write_begin_get_block(struct inode *inode, sector_t iblock,
 					 struct buffer_head *bh, int create)

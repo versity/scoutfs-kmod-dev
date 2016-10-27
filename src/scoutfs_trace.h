@@ -39,7 +39,7 @@ struct scoutfs_sb_info;
 		{ SCOUTFS_DIRENT_KEY,		"DIRENT" },		       \
 		{ SCOUTFS_LINK_BACKREF_KEY,	"LINK_BACKREF"},	       \
 		{ SCOUTFS_SYMLINK_KEY,		"SYMLINK" },		       \
-		{ SCOUTFS_BMAP_KEY,		"BMAP" })
+		{ SCOUTFS_EXTENT_KEY,		"EXTENT" })
 
 #define	TRACE_KEYF	"%llu.%s.%llu"
 

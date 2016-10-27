@@ -113,7 +113,7 @@ struct scoutfs_key {
 #define SCOUTFS_DIRENT_KEY		5
 #define SCOUTFS_LINK_BACKREF_KEY	6
 #define SCOUTFS_SYMLINK_KEY		7
-#define SCOUTFS_BMAP_KEY		8
+#define SCOUTFS_EXTENT_KEY		8
 #define SCOUTFS_ORPHAN_KEY		9
 
 #define SCOUTFS_MAX_ITEM_LEN 512
@@ -288,23 +288,11 @@ struct scoutfs_xattr {
 	__u8 name[0];
 } __packed;
 
-/*
- * We use simple block map items to map a aligned fixed group of logical
- * block offsets to physical blocks.  We make them a decent size to
- * reduce the item storage overhead per block referenced, but we don't
- * want them so large that they start to take up an extraordinary amount
- * of space for small files.  8 block items ranges from around 3% to .3%
- * overhead for files that use only one or all of the blocks in the
- * mapping item.
- */
-#define SCOUTFS_BLOCK_MAP_SHIFT 3
-#define SCOUTFS_BLOCK_MAP_COUNT (1 << SCOUTFS_BLOCK_MAP_SHIFT)
-#define SCOUTFS_BLOCK_MAP_MASK (SCOUTFS_BLOCK_MAP_COUNT - 1)
-
-struct scoutfs_block_map {
-	__le64 blkno[SCOUTFS_BLOCK_MAP_COUNT];
-	__le64 seq[SCOUTFS_BLOCK_MAP_COUNT];
-};
+struct scoutfs_extent {
+	__le64	blkno;
+	__le64	len;
+	__u8	flags;
+} __packed;
 
 /*
  * link backrefs give us a way to find all the hard links that refer

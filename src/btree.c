@@ -959,8 +959,9 @@ static int verify_btree_block(struct scoutfs_btree_block *bt, int level,
 	bad = 0;
 out:
 	if (bad) {
-		printk("bt %p small "CKF" large "CKF" end %u reclaim %u nr %u (max %lu after %u bytes %u)\n",
-			bt, CKA(small), CKA(large), le16_to_cpu(bt->free_end),
+		printk("bt %p blkno %llu level %d small "CKF" large "CKF" end %u reclaim %u nr %u (max %lu after %u bytes %u)\n",
+			bt, le64_to_cpu(bt->hdr.blkno), level,
+			CKA(small), CKA(large), le16_to_cpu(bt->free_end),
 			le16_to_cpu(bt->free_reclaim), bt->nr_items,
 			SCOUTFS_BTREE_MAX_ITEMS, after_offs, bytes);
 		for (i = 0; i < nr; i++) {

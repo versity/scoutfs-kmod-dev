@@ -512,7 +512,7 @@ static void unlock_tree_block(struct super_block *sb,
  * Allocate and initialize a new tree block. The caller adds references
  * to it.
  */
-static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
+static struct scoutfs_block *alloc_tree_block(struct super_block *sb, int level)
 {
 	struct scoutfs_btree_block *bt;
 	struct scoutfs_block *bl;
@@ -524,6 +524,8 @@ static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
 		bt->free_end = cpu_to_le16(SCOUTFS_BLOCK_SIZE);
 		bt->free_reclaim = 0;
 		bt->nr_items = 0;
+
+		set_block_lock_class(bl, level);
 	}
 
 	return bl;
@@ -555,7 +557,7 @@ static struct scoutfs_block *grow_tree(struct super_block *sb,
 	struct scoutfs_block_header *hdr;
 	struct scoutfs_block *bl;
 
-	bl = alloc_tree_block(sb);
+	bl = alloc_tree_block(sb, root->height);
 	if (!IS_ERR(bl)) {
 		hdr = scoutfs_block_data(bl);
 
@@ -652,7 +654,7 @@ static struct scoutfs_block *try_split(struct super_block *sb,
 	}
 
 	/* alloc split neighbour first to avoid unwinding tree growth */
-	left_bl = alloc_tree_block(sb);
+	left_bl = alloc_tree_block(sb, level);
 	if (IS_ERR(left_bl)) {
 		unlock_tree_block(sb, root, right_bl, true);
 		scoutfs_block_put(right_bl);

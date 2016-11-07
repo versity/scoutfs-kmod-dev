@@ -108,23 +108,25 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
+	struct scoutfs_block *bl;
 	struct buffer_head *bh;
 	int ret;
 
-	/* XXX prealloc? */
+	/* XXX hack is immediately repaired in the coming patches */
 	bh = sb_getblk(sb, le64_to_cpu(sbi->super.hdr.blkno));
 	if (!bh)
 		return -ENOMEM;
-	super = bh_data(bh);
+	bl = (void *)bh;
+	super = scoutfs_block_data(bl);
 
 	*super = sbi->super;
-	scoutfs_block_zero(bh, sizeof(struct scoutfs_super_block));
-	scoutfs_block_set_crc(bh);
+	scoutfs_block_zero(bl, sizeof(struct scoutfs_super_block));
+	scoutfs_block_set_crc(bl);
 
 	mark_buffer_dirty(bh);
 	ret = sync_dirty_buffer(bh);
 
-	scoutfs_block_put(bh);
+	scoutfs_block_put(bl);
 	return ret;
 }
 
@@ -132,18 +134,18 @@ static int read_supers(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
-	struct buffer_head *bh = NULL;
+	struct scoutfs_block *bl = NULL;
 	int found = -1;
 	int i;
 
 	for (i = 0; i < SCOUTFS_SUPER_NR; i++) {
-		scoutfs_block_put(bh);
-		bh = scoutfs_block_read(sb, SCOUTFS_SUPER_BLKNO + i);
-		if (IS_ERR(bh)) {
+		scoutfs_block_put(bl);
+		bl = scoutfs_block_read(sb, SCOUTFS_SUPER_BLKNO + i);
+		if (IS_ERR(bl)) {
 			scoutfs_warn(sb, "couldn't read super block %u", i);
 			continue;
 		}
-		super = bh_data(bh);
+		super = scoutfs_block_data(bl);
 
 		if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
 			scoutfs_warn(sb, "super block %u has invalid id %llx",
@@ -158,7 +160,7 @@ static int read_supers(struct super_block *sb)
 		}
 	}
 
-	scoutfs_block_put(bh);
+	scoutfs_block_put(bl);
 
 	if (found < 0) {
 		scoutfs_err(sb, "unable to read valid super block");

@@ -105,7 +105,7 @@ struct buddy_info {
 	u64 level_div[SCOUTFS_BUDDY_MAX_HEIGHT];
 
 	struct buddy_stack {
-		struct buffer_head *bh[SCOUTFS_BUDDY_MAX_HEIGHT];
+		struct scoutfs_block *bl[SCOUTFS_BUDDY_MAX_HEIGHT];
 		u16 sl[SCOUTFS_BUDDY_MAX_HEIGHT];
 		int nr;
 	} stack;
@@ -169,26 +169,27 @@ static int order_nr(int order, int nr)
 	return order_off(order) + nr;
 }
 
-static void stack_push(struct buddy_stack *sta, struct buffer_head *bh, u16 sl)
+static void stack_push(struct buddy_stack *sta, struct scoutfs_block *bl,
+		       u16 sl)
 {
-	sta->bh[sta->nr] = bh;
+	sta->bl[sta->nr] = bl;
 	sta->sl[sta->nr++] = sl;
 }
 
 /* sl isn't returned because callers peek the leaf where sl is meaningless */ 
-static struct buffer_head *stack_peek(struct buddy_stack *sta)
+static struct scoutfs_block *stack_peek(struct buddy_stack *sta)
 {
 	if (sta->nr)
-		return sta->bh[sta->nr - 1];
+		return sta->bl[sta->nr - 1];
 
 	return NULL;
 }
 
-static struct buffer_head *stack_pop(struct buddy_stack *sta, u16 *sl)
+static struct scoutfs_block *stack_pop(struct buddy_stack *sta, u16 *sl)
 {
 	if (sta->nr) {
 		*sl = sta->sl[--sta->nr];
-		return sta->bh[sta->nr];
+		return sta->bl[sta->nr];
 	}
 
 	return NULL;
@@ -287,16 +288,16 @@ static void stack_cleanup(struct super_block *sb)
 	struct buddy_stack *sta = &binf->stack;
 	struct scoutfs_buddy_root *root = &sbi->super.buddy_root;
 	struct scoutfs_buddy_block *bud;
-	struct buffer_head *bh;
+	struct scoutfs_block *bl;
 	u16 free_orders = 0;
 	bool parent;
 	u16 sl;
 	int i;
 
 	parent = false;
-	while ((bh = stack_pop(sta, &sl))) {
+	while ((bl = stack_pop(sta, &sl))) {
 
-		bud = bh_data(bh);
+		bud = scoutfs_block_data(bl);
 		if (parent && !set_slot_free_orders(bud, sl, free_orders))
 			break;
 
@@ -306,17 +307,17 @@ static void stack_cleanup(struct super_block *sb)
 				free_orders |= 1 << i;
 		}
 
-		scoutfs_block_put(bh);
+		scoutfs_block_put(bl);
 		parent = true;
 	}
 
 	/* set root if we got that far */
-	if (bh == NULL)
+	if (bl == NULL)
 		root->slot.free_orders = cpu_to_le16(free_orders);
 
 	/* put any remaining blocks */
-	while ((bh = stack_pop(sta, &sl)))
-		scoutfs_block_put(bh);
+	while ((bl = stack_pop(sta, &sl)))
+		scoutfs_block_put(bl);
 
 }
 
@@ -344,14 +345,14 @@ static void clear_buddy_bit(struct scoutfs_buddy_block *bud, int order, int nr)
  */
 static void init_buddy_block(struct buddy_info *binf,
 			     struct scoutfs_super_block *super,
-			     struct buffer_head *bh, int level)
+			     struct scoutfs_block *bl, int level)
 {
-	struct scoutfs_buddy_block *bud = bh_data(bh);
+	struct scoutfs_buddy_block *bud = scoutfs_block_data(bl);
 	u16 count;
 	int nr;
 	int i;
 
-	scoutfs_block_zero(bh, sizeof(bud->hdr));
+	scoutfs_block_zero(bl, sizeof(bud->hdr));
 
 	for (i = 0; i < ARRAY_SIZE(bud->first_set); i++)
 		bud->first_set[i] = cpu_to_le16(U16_MAX);
@@ -387,36 +388,34 @@ static void init_buddy_block(struct buddy_info *binf,
  * construct a fake ref so we can re-use the block ref cow code.  When
  * we initialize the first use of a block we use the first of the pair.
  */
-static struct buffer_head *get_buddy_block(struct super_block *sb,
-					   struct scoutfs_buddy_slot *slot,
-					   u64 blkno, int level)
+static struct scoutfs_block *get_buddy_block(struct super_block *sb,
+					     struct scoutfs_buddy_slot *slot,
+					     u64 blkno, int level)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct buddy_info *binf = sbi->buddy_info;
 	struct scoutfs_buddy_block *bud;
 	struct scoutfs_block_ref ref;
-	struct buffer_head *bh;
+	struct scoutfs_block *bl;
 
 	trace_printk("getting block level %d blkno %llu slot seq %llu off %u\n",
 		     level, blkno, le64_to_cpu(slot->seq), slot->blkno_off);
 
 	/* init a new block for an unused slot */
 	if (slot->seq == 0) {
-		bh = scoutfs_block_dirty(sb, blkno);
-		if (!IS_ERR(bh))
-			init_buddy_block(binf, super, bh, level);
+		bl = scoutfs_block_dirty(sb, blkno);
+		if (!IS_ERR(bl))
+			init_buddy_block(binf, super, bl, level);
 	} else {
 		/* construct block ref from tree walk blkno and slot ref */
 		ref.blkno = cpu_to_le64(blkno + slot->blkno_off);
 		ref.seq = slot->seq;
-		bh = scoutfs_block_dirty_ref(sb, &ref);
+		bl = scoutfs_block_dirty_ref(sb, &ref);
 	}
 
-	if (!IS_ERR(bh)) {
-		bud = bh_data(bh);
-
-		trace_printk("got blkno %llu\n", (u64)bh->b_blocknr);
+	if (!IS_ERR(bl)) {
+		bud = scoutfs_block_data(bl);
 
 		/* rebuild slot ref to blkno */
 		if (slot->seq != bud->hdr.seq) {
@@ -427,7 +426,7 @@ static struct buffer_head *get_buddy_block(struct super_block *sb,
 		}
 	}
 
-	return bh;
+	return bl;
 }
 
 /*
@@ -457,7 +456,7 @@ static int buddy_walk(struct super_block *sb, u64 blk, int order, u64 *base)
 	struct scoutfs_buddy_root *root = &sbi->super.buddy_root;
 	struct scoutfs_buddy_block *bud;
 	struct scoutfs_buddy_slot *slot;
-	struct buffer_head *bh;
+	struct scoutfs_block *bl;
 	u64 blkno;
 	int level;
 	int ret = 0;
@@ -475,16 +474,16 @@ static int buddy_walk(struct super_block *sb, u64 blk, int order, u64 *base)
 
 	while (level--) {
 		/* XXX do base and level make sense here? */
-		bh = get_buddy_block(sb, slot, blkno, level);
-		if (IS_ERR(bh)) {
-			ret = PTR_ERR(bh);
+		bl = get_buddy_block(sb, slot, blkno, level);
+		if (IS_ERR(bl)) {
+			ret = PTR_ERR(bl);
 			break;
 		}
 
 		trace_printk("before blk %llu order %d level %d blkno %llu base %llu sl %d\n",
 			     blk, order, level, blkno, *base, sl);
 
-		bud = bh_data(bh);
+		bud = scoutfs_block_data(bl);
 
 		if (level) {
 			if (order >= 0) {
@@ -516,7 +515,7 @@ static int buddy_walk(struct super_block *sb, u64 blk, int order, u64 *base)
 			     blk, order, level, blkno, *base, sl);
 
 
-		stack_push(sta, bh, sl);
+		stack_push(sta, bl, sl);
 	}
 
 	trace_printk("walking ret %d\n", ret);
@@ -554,7 +553,7 @@ static int buddy_alloc(struct super_block *sb, u64 *blk, int order, int found)
 	struct buddy_info *binf = sbi->buddy_info;
 	struct buddy_stack *sta = &binf->stack;
 	struct scoutfs_buddy_block *bud;
-	struct buffer_head *bh;
+	struct scoutfs_block *bl;
 	u64 base;
 	int ret;
 	int nr;
@@ -569,8 +568,8 @@ static int buddy_alloc(struct super_block *sb, u64 *blk, int order, int found)
 	if (ret)
 		goto out;
 
-	bh = stack_peek(sta);
-	bud = bh_data(bh);
+	bl = stack_peek(sta);
+	bud = scoutfs_block_data(bl);
 
 	if (found >= 0) {
 		nr = le16_to_cpu(bud->first_set[found]);
@@ -624,7 +623,7 @@ static int buddy_free(struct super_block *sb, u64 blk, int order)
 	struct buddy_info *binf = sbi->buddy_info;
 	struct buddy_stack *sta = &binf->stack;
 	struct scoutfs_buddy_block *bud;
-	struct buffer_head *bh;
+	struct scoutfs_block *bl;
 	u64 unused;
 	int ret;
 	int nr;
@@ -634,8 +633,8 @@ static int buddy_free(struct super_block *sb, u64 blk, int order)
 	if (ret)
 		goto out;
 
-	bh = stack_peek(sta);
-	bud = bh_data(bh);
+	bl = stack_peek(sta);
+	bud = scoutfs_block_data(bl);
 
 	nr = buddy_bit(blk) >> order;
 	for (i = order; i < SCOUTFS_BUDDY_ORDERS - 2; i++) {

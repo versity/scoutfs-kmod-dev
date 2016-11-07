@@ -38,6 +38,8 @@
  *  - should invalidate dirty blocks if freed
  */
 
+struct scoutfs_block;
+
 struct block_bh_private {
 	struct super_block *sb;
 	struct buffer_head *bh;
@@ -183,7 +185,7 @@ static void erase_bhp(struct buffer_head *bh)
  * Read an existing block from the device and verify its metadata header.
  * The buffer head is returned unlocked and uptodate.
  */
-struct buffer_head *scoutfs_block_read(struct super_block *sb, u64 blkno)
+struct scoutfs_block *scoutfs_block_read(struct super_block *sb, u64 blkno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct buffer_head *bh;
@@ -206,13 +208,13 @@ struct buffer_head *scoutfs_block_read(struct super_block *sb, u64 blkno)
 		}
 		unlock_buffer(bh);
 		if (ret < 0) {
-			scoutfs_block_put(bh);
+			scoutfs_block_put((void *)bh);
 			bh = ERR_PTR(ret);
 		}
 	}
 
 out:
-	return bh;
+	return (void *)bh;
 }
 
 /*
@@ -228,23 +230,23 @@ out:
  *  - reads that span transactions?
  *  - writers creating a new dirty block?
  */
-struct buffer_head *scoutfs_block_read_ref(struct super_block *sb,
-					   struct scoutfs_block_ref *ref)
+struct scoutfs_block *scoutfs_block_read_ref(struct super_block *sb,
+					     struct scoutfs_block_ref *ref)
 {
 	struct scoutfs_block_header *hdr;
-	struct buffer_head *bh;
+	struct scoutfs_block *bl;
 
-	bh = scoutfs_block_read(sb, le64_to_cpu(ref->blkno));
-	if (!IS_ERR(bh)) {
-		hdr = bh_data(bh);
+	bl = scoutfs_block_read(sb, le64_to_cpu(ref->blkno));
+	if (!IS_ERR(bl)) {
+		hdr = scoutfs_block_data(bl);
 		if (WARN_ON_ONCE(hdr->seq != ref->seq)) {
-			clear_buffer_uptodate(bh);
-			brelse(bh);
-			bh = ERR_PTR(-EAGAIN);
+			clear_buffer_uptodate(bl);
+			scoutfs_block_put(bl);
+			bl = ERR_PTR(-EAGAIN);
 		}
 	}
 
-	return bh;
+	return bl;
 }
 
 /*
@@ -309,7 +311,7 @@ int scoutfs_block_write_dirty(struct super_block *sb)
 		spin_unlock_irqrestore(&sbi->block_lock, flags);
 
 		atomic_inc(&sbi->block_writes);
-		scoutfs_block_set_crc(bh);
+		scoutfs_block_set_crc((void *)bh);
 
 		lock_buffer(bh);
 
@@ -357,38 +359,40 @@ int scoutfs_block_has_dirty(struct super_block *sb)
  * Callers are responsible for serializing modification to the reference
  * which is probably embedded in some other dirty persistent structure.
  */
-struct buffer_head *scoutfs_block_dirty_ref(struct super_block *sb,
-					    struct scoutfs_block_ref *ref)
+struct scoutfs_block *scoutfs_block_dirty_ref(struct super_block *sb,
+					      struct scoutfs_block_ref *ref)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_block_header *hdr;
-	struct buffer_head *copy_bh = NULL;
-	struct buffer_head *bh;
+	struct scoutfs_block *copy_bl = NULL;
+	struct scoutfs_block *bl;
 	u64 blkno = 0;
 	int ret;
 	int err;
 
-	bh = scoutfs_block_read(sb, le64_to_cpu(ref->blkno));
-	if (IS_ERR(bh) || ref->seq == sbi->super.hdr.seq)
-		return bh;
+	bl = scoutfs_block_read(sb, le64_to_cpu(ref->blkno));
+	if (IS_ERR(bl) || ref->seq == sbi->super.hdr.seq)
+		return bl;
 
 	ret = scoutfs_buddy_alloc_same(sb, &blkno, le64_to_cpu(ref->blkno));
 	if (ret < 0)
 		goto out;
 
-	copy_bh = scoutfs_block_dirty(sb, blkno);
-	if (IS_ERR(copy_bh)) {
-		ret = PTR_ERR(copy_bh);
+	copy_bl = scoutfs_block_dirty(sb, blkno);
+	if (IS_ERR(copy_bl)) {
+		ret = PTR_ERR(copy_bl);
 		goto out;
 	}
 
-	ret = scoutfs_buddy_free(sb, ref->seq, bh->b_blocknr, 0);
+	hdr = scoutfs_block_data(bl);
+	ret = scoutfs_buddy_free(sb, hdr->seq, le64_to_cpu(hdr->blkno), 0);
 	if (ret)
 		goto out;
 
-	memcpy(copy_bh->b_data, bh->b_data, SCOUTFS_BLOCK_SIZE);
+	memcpy(scoutfs_block_data(copy_bl), scoutfs_block_data(bl),
+	       SCOUTFS_BLOCK_SIZE);
 
-	hdr = bh_data(copy_bh);
+	hdr = scoutfs_block_data(copy_bl);
 	hdr->blkno = cpu_to_le64(blkno);
 	hdr->seq = sbi->super.hdr.seq;
 	ref->blkno = hdr->blkno;
@@ -396,18 +400,18 @@ struct buffer_head *scoutfs_block_dirty_ref(struct super_block *sb,
 
 	ret = 0;
 out:
-	scoutfs_block_put(bh);
+	scoutfs_block_put(bl);
 	if (ret) {
-		if (!IS_ERR_OR_NULL(copy_bh)) {
+		if (!IS_ERR_OR_NULL(copy_bl)) {
 			err = scoutfs_buddy_free(sb, sbi->super.hdr.seq,
-						 copy_bh->b_blocknr, 0);
+						 blkno, 0);
 			WARN_ON_ONCE(err); /* freeing dirty must work */
 		}
-		scoutfs_block_put(copy_bh);
-		copy_bh = ERR_PTR(ret);
+		scoutfs_block_put(copy_bl);
+		copy_bl = ERR_PTR(ret);
 	}
 
-	return copy_bh;
+	return copy_bl;
 }
 
 /*
@@ -415,7 +419,7 @@ out:
  * the current dirty seq.  Callers are responsible for serializing
  * access to the block and for zeroing unwritten block contents.
  */
-struct buffer_head *scoutfs_block_dirty(struct super_block *sb, u64 blkno)
+struct scoutfs_block *scoutfs_block_dirty(struct super_block *sb, u64 blkno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_block_header *hdr;
@@ -431,12 +435,12 @@ struct buffer_head *scoutfs_block_dirty(struct super_block *sb, u64 blkno)
 
 	ret = insert_bhp(sb, bh);
 	if (ret < 0) {
-		scoutfs_block_put(bh);
+		scoutfs_block_put((void *)bh);
 		bh = ERR_PTR(ret);
 		goto out;
 	}
 
-	hdr = bh_data(bh);
+	hdr = scoutfs_block_data((void *)bh);
 	*hdr = sbi->super.hdr;
 	hdr->blkno = cpu_to_le64(blkno);
 	hdr->seq = sbi->super.hdr.seq;
@@ -444,18 +448,18 @@ struct buffer_head *scoutfs_block_dirty(struct super_block *sb, u64 blkno)
 	set_buffer_uptodate(bh);
 	set_buffer_scoutfs_verified(bh);
 out:
-	return bh;
+	return (void *)bh;
 }
 
 /*
  * Allocate a new dirty writable block.  The caller must be in a
  * transaction so that we can assign the dirty seq.
  */
-struct buffer_head *scoutfs_block_dirty_alloc(struct super_block *sb)
+struct scoutfs_block *scoutfs_block_dirty_alloc(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->stable_super;
-	struct buffer_head *bh;
+	struct scoutfs_block *bl;
 	u64 blkno;
 	int ret;
 	int err;
@@ -464,12 +468,12 @@ struct buffer_head *scoutfs_block_dirty_alloc(struct super_block *sb)
 	if (ret < 0)
 		return ERR_PTR(ret);
 
-	bh = scoutfs_block_dirty(sb, blkno);
-	if (IS_ERR(bh)) {
+	bl = scoutfs_block_dirty(sb, blkno);
+	if (IS_ERR(bl)) {
 		err = scoutfs_buddy_free(sb, super->hdr.seq, blkno, 0);
 		WARN_ON_ONCE(err); /* freeing dirty must work */
 	}
-	return bh;
+	return bl;
 }
 
 /*
@@ -495,9 +499,9 @@ void scoutfs_block_forget(struct super_block *sb, u64 blkno)
 	}
 }
 
-void scoutfs_block_set_crc(struct buffer_head *bh)
+void scoutfs_block_set_crc(struct scoutfs_block *bl)
 {
-	struct scoutfs_block_header *hdr = bh_data(bh);
+	struct scoutfs_block_header *hdr = scoutfs_block_data(bl);
 
 	hdr->crc = cpu_to_le32(scoutfs_crc_block(hdr));
 }
@@ -505,26 +509,29 @@ void scoutfs_block_set_crc(struct buffer_head *bh)
 /*
  * Zero the block from the given byte to the end of the block.
  */
-void scoutfs_block_zero(struct buffer_head *bh, size_t off)
+void scoutfs_block_zero(struct scoutfs_block *bl, size_t off)
 {
 	if (WARN_ON_ONCE(off > SCOUTFS_BLOCK_SIZE))
 		return;
 
 	if (off < SCOUTFS_BLOCK_SIZE)
-		memset((char *)bh->b_data + off, 0, SCOUTFS_BLOCK_SIZE - off);
+		memset(scoutfs_block_data(bl) + off, 0,
+		       SCOUTFS_BLOCK_SIZE - off);
 }
 
 /*
  * Zero the block from the given byte to the end of the block.
  */
-void scoutfs_block_zero_from(struct buffer_head *bh, void *ptr)
+void scoutfs_block_zero_from(struct scoutfs_block *bl, void *ptr)
 {
-	return scoutfs_block_zero(bh, (char *)ptr - (char *)bh->b_data);
+	return scoutfs_block_zero(bl, (char *)ptr -
+				  (char *)scoutfs_block_data(bl));
 }
 
-void scoutfs_block_set_lock_class(struct buffer_head *bh,
+void scoutfs_block_set_lock_class(struct scoutfs_block *bl,
 			          struct lock_class_key *class)
 {
+	struct buffer_head *bh = (void *)bl;
 	struct block_bh_private *bhp = bh->b_private;
 
 	if (bhp && !bhp->rwsem_class) {
@@ -533,8 +540,9 @@ void scoutfs_block_set_lock_class(struct buffer_head *bh,
 	}
 }
 
-void scoutfs_block_lock(struct buffer_head *bh, bool write, int subclass)
+void scoutfs_block_lock(struct scoutfs_block *bl, bool write, int subclass)
 {
+	struct buffer_head *bh = (void *)bl;
 	struct block_bh_private *bhp = bh->b_private;
 
 	if (bhp) {
@@ -545,8 +553,9 @@ void scoutfs_block_lock(struct buffer_head *bh, bool write, int subclass)
 	}
 }
 
-void scoutfs_block_unlock(struct buffer_head *bh, bool write)
+void scoutfs_block_unlock(struct scoutfs_block *bl, bool write)
 {
+	struct buffer_head *bh = (void *)bl;
 	struct block_bh_private *bhp = bh->b_private;
 
 	if (bhp) {
@@ -555,4 +564,19 @@ void scoutfs_block_unlock(struct buffer_head *bh, bool write)
 		else
 			up_read(&bhp->rwsem);
 	}
+}
+
+void *scoutfs_block_data(struct scoutfs_block *bl)
+{
+	struct buffer_head *bh = (void *)bl;
+
+	return (void *)bh->b_data;
+}
+
+void scoutfs_block_put(struct scoutfs_block *bl)
+{
+	struct buffer_head *bh = (void *)bl;
+
+	if (!IS_ERR_OR_NULL(bh))
+		brelse(bh);
 }

@@ -573,6 +573,13 @@ void *scoutfs_block_data(struct scoutfs_block *bl)
 	return (void *)bh->b_data;
 }
 
+void *scoutfs_block_data_from_contents(const void *ptr)
+{
+	unsigned long addr = (unsigned long)ptr;
+
+	return (void *)(addr & ~((unsigned long)SCOUTFS_BLOCK_MASK));
+}
+
 void scoutfs_block_put(struct scoutfs_block *bl)
 {
 	struct buffer_head *bh = (void *)bl;

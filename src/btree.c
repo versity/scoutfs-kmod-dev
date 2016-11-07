@@ -335,16 +335,9 @@ static void move_items(struct scoutfs_btree_block *dst,
 	}
 }
 
-static struct scoutfs_btree_block *aligned_bt(const void *ptr)
-{
-	unsigned long addr = (unsigned long)ptr;
-
-	return (void *)(addr & ~((unsigned long)SCOUTFS_BLOCK_MASK));
-}
-
 static int sort_key_cmp(const void *A, const void *B)
 {
-	struct scoutfs_btree_block *bt = aligned_bt(A);
+	struct scoutfs_btree_block *bt = scoutfs_block_data_from_contents(A);
 	const __le16 * __packed a = A;
 	const __le16 * __packed b = B;
 
@@ -507,21 +500,6 @@ static void unlock_tree_block(struct super_block *sb,
 	}
 }
 
-/* sorting relies on masking pointers to find the containing block */
-static inline struct scoutfs_block *check_bl_alignment(struct scoutfs_block *bl)
-{
-	if (!IS_ERR_OR_NULL(bl)) {
-		struct scoutfs_btree_block *bt = scoutfs_block_data(bl);
-
-		if (WARN_ON_ONCE(aligned_bt(bt) != bt)) {
-			scoutfs_block_put(bl);
-			return ERR_PTR(-EIO);
-		}
-	}
-
-	return bl;
-}
-
 /*
  * Allocate and initialize a new tree block. The caller adds references
  * to it.
@@ -540,7 +518,7 @@ static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
 		bt->nr_items = 0;
 	}
 
-	return check_bl_alignment(bl);
+	return bl;
 }
 
 /* the caller has ensured that the free must succeed */
@@ -591,7 +569,7 @@ static struct scoutfs_block *get_block_ref(struct super_block *sb, int level,
 	if (!IS_ERR(bl))
 		set_block_lock_class(bl, level);
 
-	return check_bl_alignment(bl);
+	return bl;
 }
 
 /*

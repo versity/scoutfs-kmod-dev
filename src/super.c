@@ -15,7 +15,6 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/magic.h>
-#include <linux/buffer_head.h>
 #include <linux/random.h>
 #include <linux/statfs.h>
 
@@ -109,23 +108,19 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
 	struct scoutfs_block *bl;
-	struct buffer_head *bh;
 	int ret;
 
-	/* XXX hack is immediately repaired in the coming patches */
-	bh = sb_getblk(sb, le64_to_cpu(sbi->super.hdr.blkno));
-	if (!bh)
-		return -ENOMEM;
-	bl = (void *)bh;
+	/* XXX prealloc? */
+	bl = scoutfs_block_dirty(sb, le64_to_cpu(sbi->super.hdr.blkno));
+	if (WARN_ON_ONCE(IS_ERR(bl)))
+		return PTR_ERR(bl);
 	super = scoutfs_block_data(bl);
 
-	*super = sbi->super;
-	scoutfs_block_zero(bl, sizeof(struct scoutfs_super_block));
+	memcpy(super, &sbi->super, sizeof(*super));
+	scoutfs_block_zero(bl, sizeof(*super));
 	scoutfs_block_set_crc(bl);
 
-	mark_buffer_dirty(bh);
-	ret = sync_dirty_buffer(bh);
-
+	ret = scoutfs_block_write_sync(bl);
 	scoutfs_block_put(bl);
 	return ret;
 }
@@ -193,7 +188,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	spin_lock_init(&sbi->next_ino_lock);
 	spin_lock_init(&sbi->block_lock);
-	sbi->block_dirty_tree = RB_ROOT;
+	/* radix only inserted with NOFS _preload */
+	INIT_RADIX_TREE(&sbi->block_radix, GFP_ATOMIC);
 	init_waitqueue_head(&sbi->block_wq);
 	atomic_set(&sbi->block_writes, 0);
 	init_rwsem(&sbi->btree_rwsem);
@@ -203,11 +199,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
 	spin_lock_init(&sbi->file_alloc_lock);
-
-	if (!sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE)) {
-		printk(KERN_ERR "couldn't set blocksize\n");
-		return -EINVAL;
-	}
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
@@ -250,12 +241,10 @@ static void scoutfs_kill_sb(struct super_block *sb)
 	if (sbi) {
 		scoutfs_shutdown_trans(sb);
 		scoutfs_buddy_destroy(sb);
+		scoutfs_block_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)
 			kset_unregister(sbi->kset);
-
-		/* XXX write errors can leave dirty blocks */
-		WARN_ON_ONCE(!RB_EMPTY_ROOT(&sbi->block_dirty_tree));
 		kfree(sbi);
 	}
 }

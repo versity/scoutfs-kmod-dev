@@ -136,7 +136,7 @@ struct scoutfs_btree_block {
 	struct scoutfs_block_header hdr;
 	__le16 free_end;
 	__le16 free_reclaim;
-	__u8 nr_items;
+	__le16 nr_items;
 	__le16 item_offs[0];
 } __packed;
 

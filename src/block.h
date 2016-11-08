@@ -29,6 +29,7 @@ void scoutfs_block_unlock(struct scoutfs_block *bl, bool write);
 
 void *scoutfs_block_data(struct scoutfs_block *bl);
 void *scoutfs_block_data_from_contents(const void *ptr);
+void scoutfs_block_forget(struct scoutfs_block *bl);
 void scoutfs_block_put(struct scoutfs_block *bl);
 
 void scoutfs_block_destroy(struct super_block *sb);

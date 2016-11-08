@@ -577,6 +577,30 @@ struct scoutfs_block *scoutfs_block_dirty_alloc(struct super_block *sb)
 	return bl;
 }
 
+/*
+ * Forget the given block by removing it from the radix and clearing its
+ * dirty tag.  It will not be found by future lookups and will not be
+ * written out.  The caller can still use it until it drops its
+ * reference.
+ */
+void scoutfs_block_forget(struct scoutfs_block *bl)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(bl->sb);
+	struct scoutfs_block *found;
+	unsigned long flags;
+	u64 blkno = bl->blkno;
+
+	spin_lock_irqsave(&sbi->block_lock, flags);
+	found = radix_tree_lookup(&sbi->block_radix, blkno);
+	if (found == bl) {
+		radix_tree_delete(&sbi->block_radix, blkno);
+		radix_tree_tag_clear(&sbi->block_radix, blkno, DIRTY_RADIX_TAG);
+		scoutfs_block_put(found);
+	}
+
+	spin_unlock_irqrestore(&sbi->block_lock, flags);
+}
+
 void scoutfs_block_set_crc(struct scoutfs_block *bl)
 {
 	struct scoutfs_block_header *hdr = scoutfs_block_data(bl);

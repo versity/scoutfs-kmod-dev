@@ -530,13 +530,19 @@ static struct scoutfs_block *alloc_tree_block(struct super_block *sb)
 }
 
 /* the caller has ensured that the free must succeed */
-static void free_tree_block(struct super_block *sb, __le64 blkno)
+static void free_tree_block(struct super_block *sb, struct scoutfs_block *bl)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_btree_block *bt = scoutfs_block_data(bl);
+	int err;
 
-	int err = scoutfs_buddy_free(sb, sbi->super.hdr.seq,
-				     le64_to_cpu(blkno), 0);
-	WARN_ON_ONCE(err);
+	BUG_ON(bt->hdr.seq != super->hdr.seq);
+
+	scoutfs_block_forget(bl);
+	err = scoutfs_buddy_free(sb, bt->hdr.seq,
+				 le64_to_cpu(bt->hdr.blkno), 0);
+	BUG_ON(err);
 }
 
 /*
@@ -657,7 +663,7 @@ static struct scoutfs_block *try_split(struct super_block *sb,
 	if (!parent) {
 		par_bl = grow_tree(sb, root);
 		if (IS_ERR(par_bl)) {
-			free_tree_block(sb, left->hdr.blkno);
+			free_tree_block(sb, left_bl);
 			scoutfs_block_put(left_bl);
 			unlock_tree_block(sb, root, right_bl, true);
 			scoutfs_block_put(right_bl);
@@ -717,10 +723,11 @@ static struct scoutfs_block *try_split(struct super_block *sb,
  */
 static struct scoutfs_block *try_merge(struct super_block *sb,
 				     struct scoutfs_btree_root *root,
-				     struct scoutfs_btree_block *parent,
+				     struct scoutfs_block *par_bl,
 				     int level, unsigned int pos,
 				     struct scoutfs_block *bl)
 {
+	struct scoutfs_btree_block *parent = scoutfs_block_data(par_bl);
 	struct scoutfs_btree_block *bt = scoutfs_block_data(bl);
 	struct scoutfs_btree_item *sib_item;
 	struct scoutfs_btree_block *sib_bt;
@@ -791,7 +798,7 @@ static struct scoutfs_block *try_merge(struct super_block *sb,
 	/* delete an empty sib or update if we changed its greatest key */
 	if (le16_to_cpu(sib_bt->nr_items) == 0) {
 		delete_item(parent, sib_pos);
-		free_tree_block(sb, sib_bt->hdr.blkno);
+		free_tree_block(sb, sib_bl);
 	} else if (move_right) {
 		sib_item->key = *greatest_key(sib_bt);
 	}
@@ -801,7 +808,8 @@ static struct scoutfs_block *try_merge(struct super_block *sb,
 		root->height--;
 		root->ref.blkno = bt->hdr.blkno;
 		root->ref.seq = bt->hdr.seq;
-		free_tree_block(sb, parent->hdr.blkno);
+		free_tree_block(sb, par_bl);
+		/* caller just unlocks and drops parent */
 	}
 
 	unlock_tree_block(sb, root, sib_bl, true);
@@ -1049,7 +1057,7 @@ static struct scoutfs_block *btree_walk(struct super_block *sb,
 			bl = try_split(sb, root, level, key, val_len, parent,
 				       pos, bl);
 		if ((op == WALK_DELETE) && parent)
-			bl = try_merge(sb, root, parent, level, pos, bl);
+			bl = try_merge(sb, root, par_bl, level, pos, bl);
 		if (IS_ERR(bl))
 			break;
 
@@ -1239,7 +1247,7 @@ int scoutfs_btree_delete(struct super_block *sb,
 			root->ref.blkno = 0;
 			root->ref.seq = 0;
 
-			free_tree_block(sb, bt->hdr.blkno);
+			free_tree_block(sb, bl);
 		}
 	} else {
 		ret = -ENOENT;

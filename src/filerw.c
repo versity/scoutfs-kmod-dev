@@ -582,41 +582,9 @@ static int scoutfs_write_begin(struct file *file,
         struct page *page;
 	int ret;
 
-retry:
-        page = grab_cache_page_write_begin(mapping, index, flags);
-        if (!page)
-                return -ENOMEM;
-
-	trace_printk(PGF" pos %llu len %u\n", PGA(page), (u64)pos, len);
-
-	/*
-	 * read in the page if we're going to be dirtying part of the
-	 * page.  readpage catches when this is a read past i_size or
-	 * from a hole and zeros the buffer.
-	 */
-	if (!PageUptodate(page) && !IS_ALIGNED(pos | len, SCOUTFS_BLOCK_SIZE)) {
-		ClearPageError(page);
-		ret = scoutfs_readpage(NULL, page);
-		if (ret) {
-			page_cache_release(page);
-			goto out;
-		}
-
-		wait_on_page_locked(page);
-		if (!PageUptodate(page)) {
-			page_cache_release(page);
-			ret = -EIO;
-			goto out;
-		}
-
-		/* let grabbing deal with weird page states */
-		page_cache_release(page);
-		goto retry;
-	}
-
 	ret = scoutfs_hold_trans(sb);
 	if (ret)
-		goto out;
+		return ret;
 
 	/* can't re-enter fs, have trans */
 	flags |= AOP_FLAG_NOFS;
@@ -626,14 +594,38 @@ retry:
 	if (ret)
 		goto out;
 
+retry:
+	page = grab_cache_page_write_begin(mapping, index, flags);
+	if (!page) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/*
+	 * read in the page if we're going to be dirtying part of the
+	 * page.  readpage catches when this is a read past i_size or
+	 * from a hole and zeros the buffer.  We try to grab the page
+	 * again to let it deal with locking and races.
+	 */
+	if (!PageUptodate(page) && !IS_ALIGNED(pos | len, SCOUTFS_BLOCK_SIZE)) {
+		ClearPageError(page);
+		ret = scoutfs_readpage(file, page);
+		if (!ret) {
+			wait_on_page_locked(page);
+			if (!PageUptodate(page))
+				ret = -EIO;
+		}
+		page_cache_release(page);
+		if (ret)
+			goto out;
+		goto retry;
+	}
+
 	/* make sure our get_block gets a chance to alloc */
 	clear_mapped_page_buffers(page);
 
         ret = __block_write_begin(page, pos, len,
 				  scoutfs_write_begin_get_block);
-out:
-	trace_printk(PGF" pos %llu len %u ret %d\n",
-		     PGA(page), (u64)pos, len, ret);
         if (ret < 0) {
 		/* XXX handle truncating? */
                 unlock_page(page);
@@ -642,6 +634,9 @@ out:
         }
 
         *pagep = page;
+out:
+	if (ret)
+		scoutfs_release_trans(sb);
         return ret;
 }
 

@@ -641,28 +641,18 @@ void scoutfs_block_set_lock_class(struct scoutfs_block *bl,
 
 void scoutfs_block_lock(struct scoutfs_block *bl, bool write, int subclass)
 {
-	struct scoutfs_block_header *hdr = scoutfs_block_data(bl);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(bl->sb);
-
-	if (hdr->seq == sbi->super.hdr.seq) {
-		if (write)
-			down_write_nested(&bl->rwsem, subclass);
-		else
-			down_read_nested(&bl->rwsem, subclass);
-	}
+	if (write)
+		down_write_nested(&bl->rwsem, subclass);
+	else
+		down_read_nested(&bl->rwsem, subclass);
 }
 
 void scoutfs_block_unlock(struct scoutfs_block *bl, bool write)
 {
-	struct scoutfs_block_header *hdr = scoutfs_block_data(bl);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(bl->sb);
-
-	if (hdr->seq == sbi->super.hdr.seq) {
-		if (write)
-			up_write(&bl->rwsem);
-		else
-			up_read(&bl->rwsem);
-	}
+	if (write)
+		up_write(&bl->rwsem);
+	else
+		up_read(&bl->rwsem);
 }
 
 void *scoutfs_block_data(struct scoutfs_block *bl)

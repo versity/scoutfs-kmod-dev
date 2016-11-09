@@ -47,6 +47,7 @@
 struct scoutfs_block {
 	struct rw_semaphore rwsem;
 	atomic_t refcount;
+	struct list_head lru_entry;
 	u64 blkno;
 
 	unsigned long bits;
@@ -80,6 +81,7 @@ static struct scoutfs_block *alloc_block(struct super_block *sb, u64 blkno)
 		if (page) {
 			init_rwsem(&bl->rwsem);
 			atomic_set(&bl->refcount, 1);
+			INIT_LIST_HEAD(&bl->lru_entry);
 			bl->blkno = blkno;
 			bl->sb = sb;
 			bl->page = page;
@@ -98,10 +100,58 @@ void scoutfs_block_put(struct scoutfs_block *bl)
 {
 	if (!IS_ERR_OR_NULL(bl) && atomic_dec_and_test(&bl->refcount)) {
 		trace_printk("freeing bl %p\n", bl);
+		WARN_ON_ONCE(!list_empty(&bl->lru_entry));
 		__free_pages(bl->page, SCOUTFS_BLOCK_PAGE_ORDER);
 		kfree(bl);
 		scoutfs_inc_counter(bl->sb, block_mem_free);
 	}
+}
+
+static void lru_add(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl)
+{
+	if (list_empty(&bl->lru_entry)) {
+		list_add_tail(&bl->lru_entry, &sbi->block_lru_list);
+		sbi->block_lru_nr++;
+	}
+}
+
+static void lru_del(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl)
+{
+	if (!list_empty(&bl->lru_entry)) {
+		list_del_init(&bl->lru_entry);
+		sbi->block_lru_nr--;
+	}
+}
+
+/*
+ * The caller is referencing a block but doesn't know if its in the LRU
+ * or not.  If it is move it to the tail so it's last to be dropped by
+ * the shrinker.
+ */
+static void lru_move(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl)
+{
+	if (!list_empty(&bl->lru_entry))
+		list_move_tail(&bl->lru_entry, &sbi->block_lru_list);
+}
+
+static void radix_insert(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl,
+			 bool dirty)
+{
+	radix_tree_insert(&sbi->block_radix, bl->blkno, bl);
+	if (dirty)
+		radix_tree_tag_set(&sbi->block_radix, bl->blkno,
+				   DIRTY_RADIX_TAG);
+	else
+		lru_add(sbi, bl);
+	atomic_inc(&bl->refcount);
+}
+
+/* deleting the blkno from the radix also clears the dirty tag if it was set */
+static void radix_delete(struct scoutfs_sb_info *sbi, struct scoutfs_block *bl)
+{
+	lru_del(sbi, bl);
+	radix_tree_delete(&sbi->block_radix, bl->blkno);
+	scoutfs_block_put(bl);
 }
 
 static int verify_block_header(struct super_block *sb, struct scoutfs_block *bl)
@@ -165,6 +215,7 @@ static void block_write_end_io(struct bio *bio, int err)
 		spin_lock_irqsave(&sbi->block_lock, flags);
 		radix_tree_tag_clear(&sbi->block_radix,
 				     bl->blkno, DIRTY_RADIX_TAG);
+		lru_add(sbi, bl);
 		spin_unlock_irqrestore(&sbi->block_lock, flags);
 	}
 
@@ -227,10 +278,10 @@ struct scoutfs_block *scoutfs_block_read(struct super_block *sb, u64 blkno)
 	bl = radix_tree_lookup(&sbi->block_radix, blkno);
 	if (bl) {
 		if (test_bit(BLOCK_BIT_ERROR, &bl->bits)) {
-			radix_tree_delete(&sbi->block_radix, bl->blkno);
-			scoutfs_block_put(bl);
+			radix_delete(sbi, bl);
 			bl = NULL;
 		} else {
+			lru_move(sbi, bl);
 			atomic_inc(&bl->refcount);
 		}
 	}
@@ -255,10 +306,10 @@ struct scoutfs_block *scoutfs_block_read(struct super_block *sb, u64 blkno)
 	if (found) {
 		scoutfs_block_put(bl);
 		bl = found;
+		lru_move(sbi, bl);
 		atomic_inc(&bl->refcount);
 	} else {
-		radix_tree_insert(&sbi->block_radix, blkno, bl);
-		atomic_inc(&bl->refcount);
+		radix_insert(sbi, bl, false);
 	}
 
 	spin_unlock_irqrestore(&sbi->block_lock, flags);
@@ -531,14 +582,9 @@ struct scoutfs_block *scoutfs_block_dirty(struct super_block *sb, u64 blkno)
 
 	spin_lock_irqsave(&sbi->block_lock, flags);
 	found = radix_tree_lookup(&sbi->block_radix, blkno);
-	if (found) {
-		radix_tree_delete(&sbi->block_radix, blkno);
-		scoutfs_block_put(found);
-	}
-
-	radix_tree_insert(&sbi->block_radix, blkno, bl);
-	radix_tree_tag_set(&sbi->block_radix, blkno, DIRTY_RADIX_TAG);
-	atomic_inc(&bl->refcount);
+	if (found)
+		radix_delete(sbi, found);
+	radix_insert(sbi, bl, true);
 	spin_unlock_irqrestore(&sbi->block_lock, flags);
 
 	radix_tree_preload_end();
@@ -592,13 +638,65 @@ void scoutfs_block_forget(struct scoutfs_block *bl)
 
 	spin_lock_irqsave(&sbi->block_lock, flags);
 	found = radix_tree_lookup(&sbi->block_radix, blkno);
-	if (found == bl) {
-		radix_tree_delete(&sbi->block_radix, blkno);
-		radix_tree_tag_clear(&sbi->block_radix, blkno, DIRTY_RADIX_TAG);
-		scoutfs_block_put(found);
+	if (found == bl)
+		radix_delete(sbi, bl);
+	spin_unlock_irqrestore(&sbi->block_lock, flags);
+}
+
+/*
+ * We maintain an LRU of blocks so that the shrinker can free the oldest
+ * under memory pressure.  We can't reclaim dirty blocks so only clean
+ * blocks are kept in the LRU.  Blocks are only in the LRU while their
+ * presence in the radix holds a reference.  We don't care if a reader
+ * has an active ref on a clean block that gets reclaimed.  All we're
+ * doing is removing from the radix.  The caller can still work with the
+ * block and it will be freed once they drop their ref.
+ *
+ * If this is called with nr_to_scan == 0 then it only returns the nr.
+ * We avoid acquiring the lock in that case.
+ *
+ * Lookup code only moves blocks around in the LRU while they're in the
+ * radix. Once we remove the block from the radix we're able to use the
+ * lru_entry to drop all the blocks outside the lock.
+ *
+ * XXX:
+ *  - are sc->nr_to_scan and our return meant to be in units of pages?
+ *  - should we sync a transaction here?
+ */
+int scoutfs_block_shrink(struct shrinker *shrink, struct shrink_control *sc)
+{
+	struct scoutfs_sb_info *sbi = container_of(shrink,
+						   struct scoutfs_sb_info,
+						   block_shrinker);
+	struct scoutfs_block *tmp;
+	struct scoutfs_block *bl;
+	unsigned long flags;
+	unsigned long nr;
+	LIST_HEAD(list);
+
+	nr = sc->nr_to_scan;
+	if (!nr)
+		goto out;
+
+	spin_lock_irqsave(&sbi->block_lock, flags);
+
+	list_for_each_entry_safe(bl, tmp, &sbi->block_lru_list, lru_entry) {
+		if (nr-- == 0)
+			break;
+		atomic_inc(&bl->refcount);
+		radix_delete(sbi, bl);
+		list_add(&bl->lru_entry, &list);
 	}
 
 	spin_unlock_irqrestore(&sbi->block_lock, flags);
+
+	list_for_each_entry_safe(bl, tmp, &list, lru_entry) {
+		list_del_init(&bl->lru_entry);
+		scoutfs_block_put(bl);
+	}
+
+out:
+	return min_t(unsigned long, sbi->block_lru_nr, INT_MAX);
 }
 
 void scoutfs_block_set_crc(struct scoutfs_block *bl)
@@ -681,9 +779,8 @@ void scoutfs_block_destroy(struct super_block *sb)
 					    blkno, ARRAY_SIZE(blocks));
 		for (i = 0; i < nr; i++) {
 			bl = blocks[i];
-			radix_tree_delete(&sbi->block_radix, bl->blkno);
 			blkno = bl->blkno + 1;
-			scoutfs_block_put(bl);
+			radix_delete(sbi, bl);
 		}
 	} while (nr);
 }

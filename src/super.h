@@ -23,6 +23,10 @@ struct scoutfs_sb_info {
 	wait_queue_head_t block_wq;
 	atomic_t block_writes;
 	int block_write_err;
+	/* block cache lru */
+	struct shrinker block_shrinker;
+	struct list_head block_lru_list;
+	unsigned long block_lru_nr;
 
 	struct buddy_info *buddy_info;
 

@@ -32,6 +32,7 @@ void *scoutfs_block_data_from_contents(const void *ptr);
 void scoutfs_block_forget(struct scoutfs_block *bl);
 void scoutfs_block_put(struct scoutfs_block *bl);
 
+int scoutfs_block_shrink(struct shrinker *shrink, struct shrink_control *sc);
 void scoutfs_block_destroy(struct super_block *sb);
 
 #endif

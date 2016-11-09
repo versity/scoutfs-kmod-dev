@@ -192,6 +192,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	INIT_RADIX_TREE(&sbi->block_radix, GFP_ATOMIC);
 	init_waitqueue_head(&sbi->block_wq);
 	atomic_set(&sbi->block_writes, 0);
+	INIT_LIST_HEAD(&sbi->block_lru_list);
 	init_rwsem(&sbi->btree_rwsem);
 	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);
@@ -199,6 +200,10 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
 	spin_lock_init(&sbi->file_alloc_lock);
+
+	sbi->block_shrinker.shrink = scoutfs_block_shrink;
+	sbi->block_shrinker.seeks = DEFAULT_SEEKS;
+	register_shrinker(&sbi->block_shrinker);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
@@ -241,6 +246,8 @@ static void scoutfs_kill_sb(struct super_block *sb)
 	if (sbi) {
 		scoutfs_shutdown_trans(sb);
 		scoutfs_buddy_destroy(sb);
+		if (sbi->block_shrinker.shrink == scoutfs_block_shrink)
+			unregister_shrinker(&sbi->block_shrinker);
 		scoutfs_block_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)

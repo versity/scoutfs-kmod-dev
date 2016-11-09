@@ -298,8 +298,10 @@ static void stack_cleanup(struct super_block *sb)
 	while ((bl = stack_pop(sta, &sl))) {
 
 		bud = scoutfs_block_data(bl);
-		if (parent && !set_slot_free_orders(bud, sl, free_orders))
+		if (parent && !set_slot_free_orders(bud, sl, free_orders)) {
+			scoutfs_block_put(bl);
 			break;
+		}
 
 		free_orders = 0;
 		for (i = 0; i < ARRAY_SIZE(bud->first_set); i++) {
@@ -491,6 +493,7 @@ static int buddy_walk(struct super_block *sb, u64 blk, int order, u64 *base)
 				sl = le16_to_cpu(bud->first_set[order]);
 				/* XXX corruption */
 				if (sl == U16_MAX) {
+					scoutfs_block_put(bl);
 					ret = -EIO;
 					break;
 				}

@@ -34,6 +34,7 @@ struct scoutfs_sb_info {
 
 	atomic_t trans_holds;
 	wait_queue_head_t trans_hold_wq;
+	struct task_struct *trans_task;
 
 	spinlock_t trans_write_lock;
 	u64 trans_write_count;

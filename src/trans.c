@@ -51,6 +51,10 @@
  * holding a transaction so it doesn't have to worry about blocks being
  * dirtied while it is working.
  *
+ * In the course of doing its work this task might need to use write
+ * functions that would try to hold the transaction.  We record the task
+ * whose committing the transaction so that holding won't deadlock.
+ *
  * Any dirty block had to have allocated a new blkno which would have
  * created dirty allocator metadata blocks.  We can avoid writing
  * entirely if we don't have any dirty metadata blocks.  This is
@@ -73,6 +77,8 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	bool advance = false;
 	int ret = 0;
 	bool have_umount;
+
+	sbi->trans_task = current;
 
 	wait_event(sbi->trans_hold_wq,
 		   atomic_cmpxchg(&sbi->trans_holds, 0, -1) == 0);
@@ -111,6 +117,8 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 	atomic_set(&sbi->trans_holds, 0);
 	wake_up(&sbi->trans_hold_wq);
+
+	sbi->trans_task = NULL;
 }
 
 struct write_attempt {
@@ -173,6 +181,9 @@ int scoutfs_hold_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 
+	if (current == sbi->trans_task)
+		return 0;
+
 	return wait_event_interruptible(sbi->trans_hold_wq,
 				  atomic_add_unless(&sbi->trans_holds, 1, -1));
 }
@@ -187,6 +198,9 @@ int scoutfs_hold_trans(struct super_block *sb)
 void scoutfs_release_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	if (current == sbi->trans_task)
+		return;
 
 	if (atomic_sub_return(1, &sbi->trans_holds) == 0) {
 		if (scoutfs_buddy_alloc_count(sb) >= SCOUTFS_MAX_TRANS_BLOCKS)

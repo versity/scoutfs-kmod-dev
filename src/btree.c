@@ -151,6 +151,8 @@ static int copy_to_val(struct scoutfs_btree_val *val,
 	/* XXX corruption */
 	if (val->check_size_eq && val_len != scoutfs_btree_val_length(val))
 		return -EIO;
+	if (val->check_size_lte && val_len > scoutfs_btree_val_length(val))
+		return -EOVERFLOW;
 
 	for (i = 0, off = 0; val_len > 0 && i < ARRAY_SIZE(val->vec); i++) {
 		kv = &val->vec[i];

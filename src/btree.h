@@ -6,6 +6,7 @@
 struct scoutfs_btree_val {
 	struct kvec vec[3];
 	unsigned int check_size_eq:1;
+	unsigned int check_size_lte:1;
 };
 
 static inline void __scoutfs_btree_init_val(struct scoutfs_btree_val *val,

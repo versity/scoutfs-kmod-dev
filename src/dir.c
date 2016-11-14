@@ -810,8 +810,8 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino)
 }
 
 /*
- * Add an allocated path component to the callers list which links to
- * the target inode at a counter past the given counter.
+ * Store the null terminated path component that links to the inode at
+ * the given counter in the callers buffer.
  *
  * This is implemented by searching for link backrefs on the inode
  * starting from the given counter.  Those contain references to the
@@ -827,11 +827,10 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino)
  * Backref counters are never reused and rename only modifies the
  * existing backref counter under the dir's mutex.
  */
-static int add_linkref_name(struct super_block *sb, u64 *dir_ino, u64 ino,
-			    u64 *ctr, struct list_head *list)
+static int append_linkref_name(struct super_block *sb, u64 *dir_ino, u64 ino,
+			       u64 *ctr, char *path, unsigned int bytes)
 {
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_path_component *comp;
 	struct scoutfs_link_backref lref;
 	struct scoutfs_btree_val val;
 	struct scoutfs_dirent dent;
@@ -843,10 +842,6 @@ static int add_linkref_name(struct super_block *sb, u64 *dir_ino, u64 ino,
 	u64 off;
 	int len;
 	int ret;
-
-	comp = kmalloc(sizeof(struct scoutfs_path_component), GFP_KERNEL);
-	if (!comp)
-		return -ENOMEM;
 
 retry:
 	scoutfs_set_key(&first, ino, SCOUTFS_LINK_BACKREF_KEY, *ctr);
@@ -900,69 +895,52 @@ retry:
 	}
 
 	scoutfs_set_key(&key, *dir_ino, SCOUTFS_DIRENT_KEY, off);
-	scoutfs_btree_init_val(&val, &dent, sizeof(dent),
-			       comp->name, SCOUTFS_NAME_LEN);
+	scoutfs_btree_init_val(&val, &dent, sizeof(dent), path, bytes - 1);
+	val.check_size_lte = 1;
 
 	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
 	if (ret < 0) {
 		/* XXX corruption, should always have dirent for backref */
 		if (ret == -ENOENT)
 			ret = -EIO;
+		else if (ret == -EOVERFLOW)
+			ret = -ENAMETOOLONG;
 		goto out;
 	}
 
 	/* XXX corruption */
-	if (ret < sizeof(dent)) {
+	if (ret <= sizeof(dent)) {
 		ret = -EIO;
 		goto out;
 	}
 
-	len = ret - sizeof(dent);
+	len = ret - sizeof(dent); /* just name len, no null term */
+
+	/* XXX corruption */
+	if (len > SCOUTFS_NAME_LEN || le64_to_cpu(dent.ino) != ino) {
+		ret = -EIO;
+		goto out;
+	}
+
 	trace_printk("dent ino %llu len %d\n", le64_to_cpu(dent.ino), len);
 
-	/* XXX corruption */
-	if (len < 1 || len > SCOUTFS_NAME_LEN) {
-		ret = -EIO;
-		goto out;
-	}
-
-	/* XXX corruption, dirents should always match link backref */
-	if (le64_to_cpu(dent.ino) != ino) {
-		ret = -EIO;
-		goto out;
-	}
-
 	(*ctr)++;
-	comp->len = len;
-	list_add(&comp->head, list);
-	comp = NULL; /* won't be freed */
-
-	ret = 1;
+	path[len] = '\0';
+	ret = len + 1;
 out:
 	if (inode) {
 		mutex_unlock(&inode->i_mutex);
 		iput(inode);
 	}
 
-	kfree(comp);
 	return ret;
 }
 
-void scoutfs_dir_free_path(struct list_head *list)
-{
-	struct scoutfs_path_component *comp;
-	struct scoutfs_path_component *tmp;
-
-	list_for_each_entry_safe(comp, tmp, list, head) {
-		list_del_init(&comp->head);
-		kfree(comp);
-	}
-}
-
 /*
- * Fill the list with the allocated path components that link the root
- * to the target inode.  The caller's ctr gives the link counter to
- * start from.
+ * Fill the caller's buffer with the null terminated path components
+ * from the target inode to the root.  These will be in the opposite
+ * order of a typical slash delimited path.  The caller's ctr gives the
+ * specific link to start from.
  *
  * This is racing with modification of components in the path.  We can
  * traverse a partial path only to find that it's been blown away
@@ -970,44 +948,53 @@ void scoutfs_dir_free_path(struct list_head *list)
  * the final link to the inode should prevent repeatedly traversing
  * paths that no longer exist.
  *
- * Returns > 0 and *ctr is updated if an allocated name was added to the
- * list, 0 if no name past *ctr was found, or -errno on errors.
+ * Returns > 0 and *ctr is updated if a full path from the link to the
+ * root dir was filled, 0 if no name past *ctr was found, or -errno on
+ * errors.
  */
-int scoutfs_dir_next_path(struct super_block *sb, u64 ino, u64 *ctr,
-			  struct list_head *list)
+int scoutfs_dir_get_ino_path(struct super_block *sb, u64 ino, u64 *ctr,
+			     char *path, unsigned int bytes)
 {
-	u64 our_ctr;
+	u64 final_ctr;
 	u64 par_ctr;
 	u64 par_ino;
 	int ret;
+	int nr;
 
 	if (*ctr == U64_MAX)
 		return 0;
 
 retry:
-	our_ctr = *ctr;
+	final_ctr = *ctr;
+	ret = 0;
+
 	/* get the next link name to the given inode */
-	ret = add_linkref_name(sb, &par_ino, ino, &our_ctr, list);
-	if (ret <= 0)
+	nr = append_linkref_name(sb, &par_ino, ino, &final_ctr, path, bytes);
+	if (nr <= 0) {
+		ret = nr;
 		goto out;
+	}
+	ret += nr;
 
 	/* then get the names of all the parent dirs */
 	while (par_ino != SCOUTFS_ROOT_INO) {
 		par_ctr = 0;
-		ret = add_linkref_name(sb, &par_ino, par_ino, &par_ctr, list);
-		if (ret < 0)
+		nr = append_linkref_name(sb, &par_ino, par_ino, &par_ctr,
+					 path + ret, bytes - ret);
+		if (nr < 0) {
+			ret = nr;
 			goto out;
+		}
 
 		/* restart if there was no parent component */
-		if (ret == 0) {
-			scoutfs_dir_free_path(list);
+		if (nr == 0)
 			goto retry;
-		}
+
+		ret += nr;
 	}
 
 out:
-	if (ret > 0)
-		*ctr = our_ctr;
+	*ctr = final_ctr;
 	return ret;
 }
 

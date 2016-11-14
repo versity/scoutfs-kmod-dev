@@ -26,18 +26,17 @@ struct scoutfs_ioctl_inodes_since {
 #define SCOUTFS_IOC_INODES_SINCE _IOW(SCOUTFS_IOCTL_MAGIC, 1, \
 				      struct scoutfs_ioctl_inodes_since)
 
-struct scoutfs_ioctl_inode_paths {
+/* returns bytes of path buffer set starting at _off, including null */
+struct scoutfs_ioctl_ino_path {
 	__u64 ino;
-	__u64 buf_ptr;
-	__u32 buf_len;
+	__u64 ctr;		/* init to 0, set to next */
+	__u64 path_ptr;
+	__u16 path_bytes;	/* total buffer space, including null term */
 } __packed;
 
-/*
- * Fills the callers buffer with all the paths from the root to the
- * target inode.
- */
-#define SCOUTFS_IOC_INODE_PATHS _IOW(SCOUTFS_IOCTL_MAGIC, 2, \
-				      struct scoutfs_ioctl_inode_paths)
+/* Get a single path from the root to the given inode number */
+#define SCOUTFS_IOC_INO_PATH _IOW(SCOUTFS_IOCTL_MAGIC, 2, \
+				      struct scoutfs_ioctl_ino_path)
 
 /* XXX might as well include a seq?  0 for current behaviour? */
 struct scoutfs_ioctl_find_xattr {

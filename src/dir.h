@@ -16,9 +16,8 @@ struct scoutfs_path_component {
 	char name[SCOUTFS_NAME_LEN];
 };
 
-int scoutfs_dir_next_path(struct super_block *sb, u64 ino, u64 *ctr,
-			  struct list_head *list);
-void scoutfs_dir_free_path(struct list_head *list);
+int scoutfs_dir_get_ino_path(struct super_block *sb, u64 ino, u64 *ctr,
+			     char *path, unsigned int bytes);
 
 int scoutfs_symlink_drop(struct super_block *sb, u64 ino);
 

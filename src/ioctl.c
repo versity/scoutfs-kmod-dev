@@ -99,26 +99,13 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
 	return ret;
 }
 
-static int copy_to_ptr(char __user **to, const void *from,
-		       unsigned long n, int space)
-{
-	if (n > space)
-		return -EOVERFLOW;
-
-	if (copy_to_user(*to, from, n))
-		return -EFAULT;
-
-	*to += n;
-	return space - n;
-}
-
 /*
- * Fill the caller's buffer with all the paths from the on-disk root
- * directory to the target inode.  It will provide as many full paths as
- * there are final links to the target inode.
+ * Fill the caller's buffer with one of the paths from the on-disk root
+ * directory to the target inode.
  *
- * The null terminated paths are stored consecutively in the buffer.  A
- * final zero length null terminated string follows the last path.
+ * Userspace provides a u64 counter used to chose which path to return.
+ * It should be initialized to zero to start iterating.  After each path
+ * it is set to the next counter to search from.
  *
  * This only walks back through full hard links.  None of the returned
  * paths will reflect symlinks to components in the path.
@@ -127,35 +114,32 @@ static int copy_to_ptr(char __user **to, const void *from,
  * returned paths to the inode.  It requires CAP_DAC_READ_SEARCH which
  * bypasses permissions checking.
  *
- * If the provided buffer isn't large enough EOVERFLOW will be returned.
- * The buffer can be approximately sized by multiplying the inode's
- * nlink by PATH_MAX.
+ * ENAMETOOLONG is returned when the next path from the given counter
+ * doesn't fit in the buffer.  Providing a buffer of PATH_MAX should
+ * succeed.
  *
  * This call is not serialized with any modification (create, rename,
  * unlink) of the path components.  It will return all the paths that
  * were stable both before and after the call.  It may or may not return
  * paths which are created or unlinked during the call.
  *
- * This will return failure if it fails to read any path.  An empty
- * buffer is returned if the target inode doesn't exist or is
- * disconnected from the root.
+ * The number of bytes in the path, including the null terminator, are
+ * returned when a path is found.  0 is returned when there are no more
+ * paths to the link from the given counter.  -errno is returned on
+ * errors.
  *
  * XXX
- *  - we may want to support partial failure
  *  - can dir renaming trick us into returning garbage paths?  seems likely.
  */
-static long scoutfs_ioc_inode_paths(struct file *file, unsigned long arg)
+static long scoutfs_ioc_ino_path(struct file *file, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_ioctl_inode_paths __user *uargs = (void __user *)arg;
-	struct scoutfs_ioctl_inode_paths args;
-	struct scoutfs_path_component *comp;
-	struct scoutfs_path_component *tmp;
-	static char slash = '/';
-	static char null = '\0';
-	char __user *ptr;
-	LIST_HEAD(list);
-	u64 ctr;
+	struct scoutfs_ioctl_ino_path __user *uargs = (void __user *)arg;
+	struct scoutfs_ioctl_ino_path args;
+	unsigned int bytes;
+	char __user *upath;
+	char *comp;
+	char *path;
 	int ret;
 	int len;
 
@@ -165,42 +149,40 @@ static long scoutfs_ioc_inode_paths(struct file *file, unsigned long arg)
 	if (copy_from_user(&args, uargs, sizeof(args)))
 		return -EFAULT;
 
-	if (args.buf_len > INT_MAX)
+	if (args.path_bytes <= 1)
 		return -EINVAL;
 
-	ptr = (void __user *)(unsigned long)args.buf_ptr;
-	len = args.buf_len;
+	bytes = min_t(unsigned int, args.path_bytes, PATH_MAX);
+	path = kmalloc(bytes, GFP_KERNEL);
+	if (path == NULL)
+		return -ENOMEM;
 
-	ctr = 0;
-	while ((ret = scoutfs_dir_next_path(sb, args.ino, &ctr, &list)) > 0) {
-		ret = 0;
+	/* positive ret is len of all components including null terminators */
+	ret = scoutfs_dir_get_ino_path(sb, args.ino, &args.ctr, path, bytes);
+	if (ret <= 0)
+		goto out;
 
-		/* copy the components out as a path */
-		list_for_each_entry_safe(comp, tmp, &list, head) {
-			len = copy_to_ptr(&ptr, comp->name, comp->len, len);
-			if (len < 0)
-				goto out;
+	/* reverse the components from backref order to path/ order */
+	comp = path;
+	upath = (void __user *)((unsigned long)args.path_ptr + ret);
+	while (comp < (path + ret)) {
+		len = strlen(comp);
+		if (comp != path)
+			comp[len] = '/';
+		len++;
 
-			list_del_init(&comp->head);
-			kfree(comp);
-
-			if (!list_empty(&list)) {
-				len = copy_to_ptr(&ptr, &slash, 1, len);
-				if (len < 0)
-					goto out;
-			}
+		upath -= len;
+		if (copy_to_user(upath, comp, len)) {
+			ret = -EFAULT;
+			break;
 		}
-		len = copy_to_ptr(&ptr, &null, 1, len);
-		if (len < 0)
-			goto out;
+		comp += len;
 	}
 
-	len = copy_to_ptr(&ptr, &null, 1, len);
+	if (ret > 0 && put_user(args.ctr, &uargs->ctr))
+		ret = -EFAULT;
 out:
-	scoutfs_dir_free_path(&list);
-
-	if (ret == 0 && len < 0)
-		ret = len;
+	kfree(path);
 	return ret;
 }
 
@@ -297,8 +279,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case SCOUTFS_IOC_INODES_SINCE:
 		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_INODE_KEY);
-	case SCOUTFS_IOC_INODE_PATHS:
-		return scoutfs_ioc_inode_paths(file, arg);
+	case SCOUTFS_IOC_INO_PATH:
+		return scoutfs_ioc_ino_path(file, arg);
 	case SCOUTFS_IOC_FIND_XATTR_NAME:
 		return scoutfs_ioc_find_xattr(file, arg, true);
 	case SCOUTFS_IOC_FIND_XATTR_VAL:

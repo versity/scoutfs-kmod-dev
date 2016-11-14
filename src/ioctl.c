@@ -24,6 +24,7 @@
 #include "name.h"
 #include "ioctl.h"
 #include "super.h"
+#include "inode.h"
 
 /*
  * Find all the inodes that have had keys of a given type modified since
@@ -274,6 +275,21 @@ out:
 	return copied ?: ret;
 }
 
+/*
+ * Sample the inode's data_version.  It is not strictly serialized with
+ * writes that are in flight.
+ */
+static long scoutfs_ioc_data_version(struct file *file, unsigned long arg)
+{
+	u64 __user *uvers = (void __user *)arg;
+	u64 vers = scoutfs_inode_get_data_version(file_inode(file));
+
+	if (put_user(vers, uvers))
+		return -EFAULT;
+
+	return 0;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -287,6 +303,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_find_xattr(file, arg, false);
 	case SCOUTFS_IOC_INODE_DATA_SINCE:
 		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_EXTENT_KEY);
+	case SCOUTFS_IOC_DATA_VERSION:
+		return scoutfs_ioc_data_version(file, arg);
 	}
 
 	return -ENOTTY;

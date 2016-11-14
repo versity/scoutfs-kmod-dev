@@ -299,6 +299,8 @@ struct scoutfs_extent {
 	__u8	flags;
 } __packed;
 
+#define SCOUTFS_EXTENT_FLAG_OFFLINE (1 << 0)
+
 /*
  * link backrefs give us a way to find all the hard links that refer
  * to a target inode.  They're stored at an offset determined by an

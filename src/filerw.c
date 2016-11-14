@@ -178,31 +178,28 @@ static void return_file_block(struct super_block *sb, u64 blkno)
 }
 
 /*
- * Free mapped extents whose entire contents are past the new
- * specified size.  The caller holds a transaction.
+ * Free extents whose blocks fall inside the specified blocks.  The
+ * caller holds a transaction.
  *
- * This is the low level extent item truncate code.
- * Callers manage higher order truncation and orphan cleanup.
+ * If 'release' is given then blocks are freed inside i_size but the
+ * extent items are left behind and their _OFFLINE flag is set.
  *
- * XXX probably should be a range
+ * This is the low level extent item truncate code.  Callers manage
+ * higher order truncation and orphan cleanup.
  */
-int scoutfs_truncate_extent_items(struct super_block *sb, u64 ino, u64 size)
+int scoutfs_truncate_extent_items(struct super_block *sb, u64 ino, u64 iblock,
+				  u64 len, bool offline)
 {
 	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_extent extent;
 	struct scoutfs_btree_val val;
 	struct scoutfs_key key;
 	struct scoutfs_key first;
-	u64 iblock;
-	u64 len;
-	u64 loff;
 	u64 seq;
 	int ret;
 
-	iblock = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SIZE);
-
-	scoutfs_set_key(&first, ino, SCOUTFS_EXTENT_KEY, 0);
-	scoutfs_set_key(&key, ino, SCOUTFS_EXTENT_KEY, ~0ULL);
+	scoutfs_set_key(&first, ino, SCOUTFS_EXTENT_KEY, iblock);
+	scoutfs_set_key(&key, ino, SCOUTFS_EXTENT_KEY, iblock + len - 1);
 
 	trace_printk("iblock %llu\n", iblock);
 
@@ -218,28 +215,43 @@ int scoutfs_truncate_extent_items(struct super_block *sb, u64 ino, u64 size)
 			break;
 		}
 
-		loff = le64_to_cpu(key.offset);
 		len = le64_to_cpu(extent.len);
-
 		if (WARN_ON_ONCE(len != 1)) {
 			ret = -EIO;
 			break;
 		}
 
-		if ((loff + len) <= iblock)
+		/* XXX corruption: offline and allocation are exclusive */
+		if (!!extent.blkno ==
+		    !!(extent.flags & SCOUTFS_EXTENT_FLAG_OFFLINE)) {
+			ret = -EIO;
 			break;
+		}
+
+		if (offline && (extent.flags & SCOUTFS_EXTENT_FLAG_OFFLINE))
+			continue;
 
 		/* make sure we can delete the extent after freeing */
-		ret = scoutfs_btree_dirty(sb, meta, &key);
-		if (ret)
-			break;
+		if (extent.blkno) {
+			ret = scoutfs_btree_dirty(sb, meta, &key);
+			if (ret)
+				break;
 
-		ret = scoutfs_buddy_free(sb, cpu_to_le64(seq),
-					 le64_to_cpu(extent.blkno), 0);
-		if (ret)
-			break;
+			ret = scoutfs_buddy_free(sb, cpu_to_le64(seq),
+						 le64_to_cpu(extent.blkno), 0);
+			if (ret)
+				break;
+		}
 
-		scoutfs_btree_delete(sb, meta, &key);
+		if (offline) {
+			extent.blkno = 0;
+			extent.flags |= SCOUTFS_EXTENT_FLAG_OFFLINE;
+			scoutfs_btree_update(sb, meta, &key, &val);
+		} else {
+			ret = scoutfs_btree_delete(sb, meta, &key);
+			if (ret)
+				break;
+		}
 
 		/* XXX sync transaction if it's enormous */
 		scoutfs_dec_key(&key);
@@ -286,8 +298,12 @@ static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
 
 	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
 	if (ret == sizeof(extent)) {
-		*blkno = le64_to_cpu(extent.blkno);
-		ret = min_t(u64, le64_to_cpu(extent.len), INT_MAX);
+		if (extent.flags & SCOUTFS_EXTENT_FLAG_OFFLINE) {
+			ret = 0;
+		} else {
+			*blkno = le64_to_cpu(extent.blkno);
+			ret = min_t(u64, le64_to_cpu(extent.len), INT_MAX);
+		}
 	} else if (ret >= 0) {
 		/* XXX corruption */
 		ret = -EIO;
@@ -377,6 +393,7 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 
 	extent.blkno = cpu_to_le64(new_blkno);
 	extent.len = cpu_to_le64(1);
+	extent.flags &= ~SCOUTFS_EXTENT_FLAG_OFFLINE;
 
 	/* dirtying guarantees success */
 	err = scoutfs_btree_update(sb, meta, &key, &val);

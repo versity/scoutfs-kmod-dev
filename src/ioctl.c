@@ -16,6 +16,8 @@
 #include <linux/compiler.h>
 #include <linux/uio.h>
 #include <linux/slab.h>
+#include <linux/mount.h>
+#include <linux/mm.h>
 
 #include "format.h"
 #include "btree.h"
@@ -25,6 +27,8 @@
 #include "ioctl.h"
 #include "super.h"
 #include "inode.h"
+#include "trans.h"
+#include "filerw.h"
 
 /*
  * Find all the inodes that have had keys of a given type modified since
@@ -290,6 +294,85 @@ static long scoutfs_ioc_data_version(struct file *file, unsigned long arg)
 	return 0;
 }
 
+/*
+ * The caller has a version of the data available in the given byte
+ * range in an external archive.  As long as the data version still
+ * matches we free the blocks fully contained in the range and mark them
+ * offline.  Attempts to use the blocks in the future will trigger
+ * recall from the archive.
+ *
+ * XXX permissions?
+ * XXX a lot of this could be generic file write prep
+ */
+static long scoutfs_ioc_release(struct file *file, unsigned long arg)
+{
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_ioctl_release args;
+	loff_t start;
+	loff_t end_inc;
+	u64 iblock;
+	u64 end_block;
+	u64 len;
+	int ret;
+
+	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
+		return -EFAULT;
+
+	if (args.count == 0)
+		return 0;
+	if ((args.offset + args.count) < args.offset)
+		return -EINVAL;
+
+	start = round_up(args.offset, SCOUTFS_BLOCK_SIZE);
+	end_inc = round_down(args.offset + args.count, SCOUTFS_BLOCK_SIZE) - 1;
+	if (end_inc > start)
+		return 0;
+
+	iblock = start >> SCOUTFS_BLOCK_SHIFT;
+	end_block = end_inc >> SCOUTFS_BLOCK_SHIFT;
+	len = end_block - iblock + 1;
+
+	ret = mnt_want_write_file(file);
+	if (ret)
+		return ret;
+
+	mutex_lock(&inode->i_mutex);
+
+	if (!S_ISREG(inode->i_mode)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (!(file->f_mode & FMODE_WRITE)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (scoutfs_inode_get_data_version(inode) != args.data_version) {
+		ret = -ESTALE;
+		goto out;
+	}
+
+	inode_dio_wait(inode);
+
+	/* drop all clean and dirty cached blocks in the range */
+	truncate_inode_pages_range(&inode->i_data, start, end_inc);
+
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		goto out;
+
+	ret = scoutfs_truncate_extent_items(sb, scoutfs_ino(inode),
+					    iblock, len, true);
+	scoutfs_release_trans(sb);
+out:
+	mutex_unlock(&inode->i_mutex);
+	mnt_drop_write_file(file);
+
+	return ret;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -305,6 +388,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_EXTENT_KEY);
 	case SCOUTFS_IOC_DATA_VERSION:
 		return scoutfs_ioc_data_version(file, arg);
+	case SCOUTFS_IOC_RELEASE:
+		return scoutfs_ioc_release(file, arg);
 	}
 
 	return -ENOTTY;

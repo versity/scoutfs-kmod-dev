@@ -454,7 +454,7 @@ static int __delete_inode(struct super_block *sb, struct scoutfs_key *key,
 	if (S_ISLNK(mode))
 		ret = scoutfs_symlink_drop(sb, ino);
 	else if (S_ISREG(mode))
-		ret = scoutfs_truncate_extent_items(sb, ino, 0);
+		ret = scoutfs_truncate_extent_items(sb, ino, 0, ~0ULL, false);
 	if (ret)
 		goto out;
 

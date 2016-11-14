@@ -120,9 +120,10 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	inode->i_mtime.tv_nsec = le32_to_cpu(cinode->mtime.nsec);
 	inode->i_ctime.tv_sec = le64_to_cpu(cinode->ctime.sec);
 	inode->i_ctime.tv_nsec = le32_to_cpu(cinode->ctime.nsec);
-	
+
 	ci->salt = le32_to_cpu(cinode->salt);
 	atomic64_set(&ci->link_counter, le64_to_cpu(cinode->link_counter));
+	ci->data_version = le64_to_cpu(cinode->data_version);
 }
 
 static int scoutfs_read_locked_inode(struct inode *inode)
@@ -146,6 +147,31 @@ static int scoutfs_read_locked_inode(struct inode *inode)
 	}
 
 	return ret;
+}
+
+void scoutfs_inode_inc_data_version(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	preempt_disable();
+	write_seqcount_begin(&si->seqcount);
+	si->data_version++;
+	write_seqcount_end(&si->seqcount);
+	preempt_enable();
+}
+
+u64 scoutfs_inode_get_data_version(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+	unsigned int seq;
+	u64 vers;
+
+	do {
+		seq = read_seqcount_begin(&si->seqcount);
+		vers = si->data_version;
+	} while (read_seqcount_retry(&si->seqcount, seq));
+
+	return vers;
 }
 
 static int scoutfs_iget_test(struct inode *inode, void *arg)
@@ -210,6 +236,7 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 
 	cinode->salt = cpu_to_le32(ci->salt);
 	cinode->link_counter = cpu_to_le64(atomic64_read(&ci->link_counter));
+	cinode->data_version = cpu_to_le64(ci->data_version);
 }
 
 /*
@@ -366,6 +393,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	ci = SCOUTFS_I(inode);
 	ci->ino = ino;
+	seqcount_init(&ci->seqcount);
+	ci->data_version = 0;
 	get_random_bytes(&ci->salt, sizeof(ci->salt));
 	atomic64_set(&ci->link_counter, 0);
 

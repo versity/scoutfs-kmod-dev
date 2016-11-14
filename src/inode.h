@@ -5,6 +5,9 @@ struct scoutfs_inode_info {
 	u64 ino;
 	u32 salt;
 
+	seqcount_t seqcount;
+	u64 data_version;
+
 	atomic64_t link_counter;
 	struct rw_semaphore xattr_rwsem;
 
@@ -33,6 +36,8 @@ void scoutfs_dirty_inode(struct inode *inode, int flags);
 void scoutfs_update_inode_item(struct inode *inode);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev);
+void scoutfs_inode_inc_data_version(struct inode *inode);
+u64 scoutfs_inode_get_data_version(struct inode *inode);
 
 int scoutfs_scan_orphans(struct super_block *sb);
 

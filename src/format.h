@@ -200,6 +200,10 @@ struct scoutfs_timespec {
 } __packed;
 
 /*
+ * @data_version: incremented every time the contents of a file could
+ * have changed.  It is exposed via an ioctl and is then provided as an
+ * argument to data functions to protect racing modification.
+ *
  * XXX
  *	- otime?
  *	- compat flags?
@@ -211,6 +215,7 @@ struct scoutfs_inode {
 	__le64 size;
 	__le64 blocks;
 	__le64 link_counter;
+	__le64 data_version;
 	__le32 nlink;
 	__le32 uid;
 	__le32 gid;

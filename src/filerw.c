@@ -615,6 +615,11 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 		     scoutfs_ino(inode), PGA(page), (u64)pos, len, copied);
 
 	ret = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
+	if (ret > 0) {
+		scoutfs_inode_inc_data_version(inode);
+		/* XXX kind of a big hammer, inode life cycle needs work */
+		scoutfs_update_inode_item(inode);
+	}
 	scoutfs_release_trans(sb);
 	return ret;
 }

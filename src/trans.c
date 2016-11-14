@@ -177,6 +177,12 @@ int scoutfs_sync_fs(struct super_block *sb, int wait)
 	return ret;
 }
 
+int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
+		       int datasync)
+{
+	return scoutfs_sync_fs(file->f_inode->i_sb, 1);
+}
+
 int scoutfs_hold_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);

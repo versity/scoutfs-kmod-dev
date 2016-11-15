@@ -331,6 +331,7 @@ static int contig_mapped_blocks(struct inode *inode, u64 iblock, u64 *blkno)
  */
 static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 {
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->stable_super;
@@ -367,6 +368,12 @@ static int map_writable_block(struct inode *inode, u64 iblock, u64 *blkno_ret)
 			goto out;
 		inserted = true;
 	} else {
+		if ((extent.flags & SCOUTFS_EXTENT_FLAG_OFFLINE) &&
+		    !si->staging) {
+			ret = -EINVAL;
+			goto out;
+		}
+
 		ret = scoutfs_btree_dirty(sb, meta, &key);
 		if (ret)
 			goto out;

@@ -153,11 +153,13 @@ void scoutfs_inode_inc_data_version(struct inode *inode)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 
-	preempt_disable();
-	write_seqcount_begin(&si->seqcount);
-	si->data_version++;
-	write_seqcount_end(&si->seqcount);
-	preempt_enable();
+	if (!si->staging) {
+		preempt_disable();
+		write_seqcount_begin(&si->seqcount);
+		si->data_version++;
+		write_seqcount_end(&si->seqcount);
+		preempt_enable();
+	}
 }
 
 u64 scoutfs_inode_get_data_version(struct inode *inode)
@@ -395,6 +397,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->ino = ino;
 	seqcount_init(&ci->seqcount);
 	ci->data_version = 0;
+	ci->staging = false;
 	get_random_bytes(&ci->salt, sizeof(ci->salt));
 	atomic64_set(&ci->link_counter, 0);
 

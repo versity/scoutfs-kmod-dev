@@ -18,6 +18,8 @@
 #include <linux/slab.h>
 #include <linux/mount.h>
 #include <linux/mm.h>
+#include <linux/sched.h>
+#include <linux/aio.h>
 
 #include "format.h"
 #include "btree.h"
@@ -373,6 +375,103 @@ out:
 	return ret;
 }
 
+/*
+ * Write the archived contents of the file back if the data_version
+ * still matches.
+ *
+ * This is a data plane operation only.  We don't want the write to
+ * change any fields in the inode.  It only changes the file contents.
+ *
+ * Keep in mind that the staging writes can easily span transactions and
+ * can crash partway through.  If we called the normal write path and
+ * restored the inode afterwards the modified inode could be commited
+ * partway through by a transaction and then left that way by a crash
+ * before the write finishes and we restore the fields.  It also
+ * wouldn't be great if the temporarily updated inode was visible to
+ * paths that don't serialize with write.
+ *
+ * We're implementing the buffered write path down to the start of
+ * generic_file_buffered_writes() without all the stuff that would
+ * change the inode: file_remove_suid(), file_update_time().  The
+ * easiest way to do that is to call generic_file_buffered_write().
+ * We're careful to only allow staging writes inside i_size.
+ *
+ * We set a  bool on the inode which tells our code to update the
+ * offline extents and to not update the data_version counter.
+ *
+ * This doesn't support any fancy write modes or side-effects: aio,
+ * direct, append, sync, breaking suid, sending rlimit signals.
+ */
+static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
+{
+	struct inode *inode = file_inode(file);
+	struct address_space *mapping = inode->i_mapping;
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+	struct scoutfs_ioctl_stage args;
+	struct kiocb kiocb;
+	struct iovec iov;
+	size_t written;
+	loff_t pos;
+	int ret;
+
+	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
+		return -EFAULT;
+
+	if (args.count < 0 || (args.offset + args.count < args.offset))
+		return -EINVAL;
+	if (args.count == 0)
+		return 0;
+
+	/* the iocb is really only used for the file pointer :P */
+	init_sync_kiocb(&kiocb, file);
+	kiocb.ki_pos = args.offset;
+	kiocb.ki_left = args.count;
+	kiocb.ki_nbytes = args.count;
+	iov.iov_base = (void __user *)(unsigned long)args.buf_ptr;
+	iov.iov_len = args.count;
+
+	ret = mnt_want_write_file(file);
+	if (ret)
+		return ret;
+
+	mutex_lock(&inode->i_mutex);
+
+	if (!S_ISREG(inode->i_mode) ||
+	    !(file->f_mode & FMODE_WRITE) ||
+	    (file->f_flags & (O_APPEND | O_DIRECT | O_DSYNC)) ||
+	    IS_SYNC(file->f_mapping->host) ||
+	    (args.offset + args.count > i_size_read(inode))) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (scoutfs_inode_get_data_version(inode) != args.data_version) {
+		ret = -ESTALE;
+		goto out;
+	}
+
+	si->staging = true;
+	current->backing_dev_info = mapping->backing_dev_info;
+
+	pos = args.offset;
+	written = 0;
+	do {
+		ret = generic_file_buffered_write(&kiocb, &iov, 1, pos, &pos,
+						  args.count, written);
+		BUG_ON(ret == -EIOCBQUEUED);
+		if (ret > 0)
+			written += ret;
+	} while (ret > 0 && written < args.count);
+
+	si->staging = false;
+	current->backing_dev_info = NULL;
+out:
+	mutex_unlock(&inode->i_mutex);
+	mnt_drop_write_file(file);
+
+	return ret;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -390,6 +489,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_data_version(file, arg);
 	case SCOUTFS_IOC_RELEASE:
 		return scoutfs_ioc_release(file, arg);
+	case SCOUTFS_IOC_STAGE:
+		return scoutfs_ioc_stage(file, arg);
 	}
 
 	return -ENOTTY;

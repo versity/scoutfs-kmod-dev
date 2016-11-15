@@ -1388,7 +1388,7 @@ int scoutfs_btree_since(struct super_block *sb,
  */
 int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *first, struct scoutfs_key *last,
-		       struct scoutfs_key *found,
+		       struct scoutfs_key *found, u64 *found_seq,
 		       struct scoutfs_btree_val *val)
 {
 	struct scoutfs_btree_item *item;
@@ -1433,6 +1433,8 @@ int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
 		item = pos_item(bt, pos);
 		if (cmp == 0 || scoutfs_key_cmp(&item->key, first) >= 0) {
 			*found = item->key;
+			if (found_seq)
+				*found_seq = le64_to_cpu(item->seq);
 			if (val)
 				ret = copy_to_val(val, item);
 			else

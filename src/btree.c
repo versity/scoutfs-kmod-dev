@@ -1406,7 +1406,7 @@ int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
 	ret = -ENOENT;
 	while (scoutfs_key_cmp(&key, first) >= 0) {
 
-		bl = btree_walk(sb, root, &key, NULL, &prev_key, 0, 0, 0);
+		bl = btree_walk(sb, root, &key, &prev_key, NULL, 0, 0, 0);
 		if (IS_ERR(bl)) {
 			ret = PTR_ERR(bl);
 			break;

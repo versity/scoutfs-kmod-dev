@@ -21,6 +21,7 @@
 #include "format.h"
 #include "dir.h"
 #include "inode.h"
+#include "ioctl.h"
 #include "key.h"
 #include "super.h"
 #include "trans.h"
@@ -941,6 +942,7 @@ out:
 
 const struct file_operations scoutfs_dir_fops = {
 	.readdir	= scoutfs_readdir,
+	.unlocked_ioctl	= scoutfs_ioctl,
 	.fsync		= scoutfs_file_fsync,
 	.llseek		= generic_file_llseek,
 };

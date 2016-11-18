@@ -942,6 +942,7 @@ out:
 const struct file_operations scoutfs_dir_fops = {
 	.readdir	= scoutfs_readdir,
 	.fsync		= scoutfs_file_fsync,
+	.llseek		= generic_file_llseek,
 };
 
 const struct inode_operations scoutfs_dir_iops = {

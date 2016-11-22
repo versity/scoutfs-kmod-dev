@@ -89,6 +89,13 @@ static const struct inode_operations scoutfs_file_iops = {
 	.removexattr	= scoutfs_removexattr,
 };
 
+static const struct inode_operations scoutfs_special_iops = {
+	.setxattr	= scoutfs_setxattr,
+	.getxattr	= scoutfs_getxattr,
+	.listxattr	= scoutfs_listxattr,
+	.removexattr	= scoutfs_removexattr,
+};
+
 /*
  * Called once new inode allocation or inode reading has initialized
  * enough of the inode for us to set the ops based on the mode.
@@ -109,7 +116,7 @@ static void set_inode_ops(struct inode *inode)
 		inode->i_op = &scoutfs_symlink_iops;
 		break;
 	default:
-//		inode->i_op = &scoutfs_special_iops;
+		inode->i_op = &scoutfs_special_iops;
 		init_special_inode(inode, inode->i_mode, inode->i_rdev);
 		break;
 	}

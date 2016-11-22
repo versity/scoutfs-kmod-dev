@@ -320,7 +320,11 @@ void scoutfs_update_inode_item(struct inode *inode)
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	err = scoutfs_item_update(sb, &key, val);
-	BUG_ON(err);
+	if (err) {
+		scoutfs_err(sb, "inode %llu update err %d",
+			    scoutfs_ino(inode), err);
+		BUG_ON(err);
+	}
 
 	trace_scoutfs_update_inode(inode);
 }

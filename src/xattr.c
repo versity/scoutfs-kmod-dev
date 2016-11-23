@@ -129,13 +129,12 @@ static void set_xattr_key_part(struct scoutfs_key_buf *key, u8 part)
 		 1);							     \
 	     part++, off += bytes)
 
-/*
- * This will grow to have all the supported prefixes (then will turn
- * into xattr_handlers with prefixes upstream).
- */
 static int unknown_prefix(const char *name)
 {
-	return strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN);
+	return strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN) &&
+	       strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN) &&
+	       strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN) &&
+	       strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN);
 }
 
 /*

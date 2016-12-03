@@ -28,6 +28,10 @@
 #include "counters.h"
 #include "trans.h"
 #include "buddy.h"
+#include "ring.h"
+#include "item.h"
+#include "manifest.h"
+#include "seg.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -212,7 +216,11 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	ret = scoutfs_setup_counters(sb) ?:
 	      read_supers(sb) ?:
-	      scoutfs_buddy_setup(sb) ?:
+	      scoutfs_seg_setup(sb) ?:
+	      scoutfs_manifest_setup(sb) ?:
+	      scoutfs_item_setup(sb) ?:
+	      scoutfs_ring_read(sb) ?:
+//	      scoutfs_buddy_setup(sb) ?:
 	      scoutfs_setup_trans(sb);
 	if (ret)
 		return ret;
@@ -227,7 +235,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sb->s_root)
 		return -ENOMEM;
 
-	scoutfs_scan_orphans(sb);
+//	scoutfs_scan_orphans(sb);
 
 	return 0;
 }
@@ -248,6 +256,9 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		scoutfs_buddy_destroy(sb);
 		if (sbi->block_shrinker.shrink == scoutfs_block_shrink)
 			unregister_shrinker(&sbi->block_shrinker);
+		scoutfs_item_destroy(sb);
+		scoutfs_manifest_destroy(sb);
+		scoutfs_seg_destroy(sb);
 		scoutfs_block_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)

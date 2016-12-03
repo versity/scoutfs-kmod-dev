@@ -29,6 +29,8 @@
 #include "trans.h"
 #include "btree.h"
 #include "msg.h"
+#include "kvec.h"
+#include "item.h"
 
 /*
  * XXX
@@ -126,25 +128,28 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	ci->data_version = le64_to_cpu(cinode->data_version);
 }
 
+static void set_inode_key(struct scoutfs_inode_key *ikey, u64 ino)
+{
+	ikey->type = SCOUTFS_INODE_KEY;
+	ikey->ino = cpu_to_be64(ino);
+}
+
 static int scoutfs_read_locked_inode(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
+	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
-	struct scoutfs_key key;
+	SCOUTFS_DECLARE_KVEC(key);
+	SCOUTFS_DECLARE_KVEC(val);
 	int ret;
 
-	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
-	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
+	set_inode_key(&ikey, scoutfs_ino(inode));
+	scoutfs_kvec_init(key, &ikey, sizeof(ikey));
+	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_btree_lookup(sb, meta, &key, &val);
-	if (ret == sizeof(sinode)) {
+	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(sinode));
+	if (ret == 0)
 		load_inode(inode, &sinode);
-		ret = 0;
-	} else if (ret >= 0) {
-		ret = -EIO;
-	}
 
 	return ret;
 }

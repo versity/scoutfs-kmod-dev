@@ -9,6 +9,9 @@
 
 struct scoutfs_counters;
 struct buddy_info;
+struct item_cache;
+struct manifest;
+struct segment_cache;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -27,6 +30,10 @@ struct scoutfs_sb_info {
 	struct shrinker block_shrinker;
 	struct list_head block_lru_list;
 	unsigned long block_lru_nr;
+
+	struct manifest *manifest;
+	struct item_cache *item_cache;
+	struct segment_cache *segment_cache;
 
 	struct buddy_info *buddy_info;
 

@@ -49,4 +49,7 @@ u64 scoutfs_last_ino(struct super_block *sb);
 void scoutfs_inode_exit(void);
 int scoutfs_inode_init(void);
 
+int scoutfs_item_setup(struct super_block *sb);
+void scoutfs_item_destroy(struct super_block *sb);
+
 #endif

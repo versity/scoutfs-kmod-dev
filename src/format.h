@@ -6,9 +6,23 @@
 /* super block id */
 #define SCOUTFS_SUPER_ID	0x2e736674756f6373ULL	/* "scoutfs." */
 
+/*
+ * The super block and ring blocks are fixed 4k.
+ */
 #define SCOUTFS_BLOCK_SHIFT 12
 #define SCOUTFS_BLOCK_SIZE (1 << SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_BLOCK_MASK (SCOUTFS_BLOCK_SIZE - 1)
+#define SCOUTFS_BLOCKS_PER_PAGE (PAGE_SIZE / SCOUTFS_BLOCK_SIZE)
+
+/*
+ * FS data is stored in segments, for now they're fixed size. They'll
+ * be dynamic.
+ */
+#define SCOUTFS_SEGMENT_SHIFT 20
+#define SCOUTFS_SEGMENT_SIZE (1 << SCOUTFS_SEGMENT_SHIFT)
+#define SCOUTFS_SEGMENT_MASK (SCOUTFS_SEGMENT_SIZE - 1)
+#define SCOUTFS_SEGMENT_PAGES (SCOUTFS_SEGMENT_SIZE / PAGE_SIZE)
+#define SCOUTFS_SEGMENT_BLOCKS (SCOUTFS_SEGMENT_SIZE / BLOCK_SIZE)
 
 #define SCOUTFS_PAGES_PER_BLOCK (SCOUTFS_BLOCK_SIZE / PAGE_SIZE)
 #define SCOUTFS_BLOCK_PAGE_ORDER (SCOUTFS_BLOCK_SHIFT - PAGE_SHIFT)
@@ -36,6 +50,67 @@ struct scoutfs_block_header {
 	__le64 seq;
 	__le64 blkno;
 } __packed;
+
+struct scoutfs_ring_entry_header {
+	__u8 type;
+	__le16 len;
+} __packed;
+
+#define SCOUTFS_RING_ADD_MANIFEST 1
+
+struct scoutfs_ring_add_manifest {
+	struct scoutfs_ring_entry_header eh;
+	__le64 segno;
+	__le64 seq;
+	__le16 first_key_len;
+	__le16 last_key_len;
+	__u8 level;
+	/* first and last key bytes */
+} __packed;
+
+/*
+ * This is absurdly huge.  If there was only ever 1 item per segment and
+ * 2^64 items the tree could get this deep.
+ */
+#define SCOUTFS_MANIFEST_MAX_LEVEL 20
+
+struct scoutfs_ring_block {
+	struct scoutfs_block_header hdr;
+	__le32 nr_entries;
+	struct scoutfs_ring_entry_header entries[0];
+} __packed;
+
+struct scoutfs_segment_item {
+	__le64 seq;
+	__le32 key_off;
+	__le32 val_off;
+	__le16 key_len;
+	__le16 val_len;
+} __packed;
+
+/*
+ * Each large segment starts with a segment block that describes the
+ * rest of the blocks that make up the segment.
+ */
+struct scoutfs_segment_block {
+	__le32 crc;
+	__le32 _padding;
+	__le64 segno;
+	__le64 max_seq;
+	__le32 nr_items;
+	/* item array with gaps so they don't cross 4k blocks */
+	/* packed keys */
+	/* packed vals */
+} __packed;
+
+/* the first block in the segment has the header and items */
+#define SCOUTFS_SEGMENT_FIRST_BLOCK_ITEMS \
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_segment_block)) / \
+	 sizeof(struct scoutfs_segment_item))
+
+/* the rest of the header blocks are full of items */
+#define SCOUTFS_SEGMENT_ITEMS_PER_BLOCK \
+	(SCOUTFS_BLOCK_SIZE / sizeof(struct scoutfs_segment_item))
 
 /*
  * Block references include the sequence number so that we can detect
@@ -118,6 +193,11 @@ struct scoutfs_key {
 
 #define SCOUTFS_MAX_ITEM_LEN 512
 
+struct scoutfs_inode_key {
+	__u8 type;
+	__be64 ino;
+} __packed;
+
 struct scoutfs_btree_root {
 	u8 height;
 	struct scoutfs_block_ref ref;
@@ -180,6 +260,11 @@ struct scoutfs_btree_item {
 
 #define SCOUTFS_UUID_BYTES 16
 
+/*
+ * The ring fields describe the statically allocated ring log.  The
+ * head and tail indexes are logical 4k blocks offsets inside the ring.
+ * The head block should contain the seq.
+ */
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
@@ -187,6 +272,11 @@ struct scoutfs_super_block {
 	__le64 next_ino;
 	__le64 total_blocks;
 	__le64 free_blocks;
+	__le64 ring_blkno;
+	__le64 ring_blocks;
+	__le64 ring_head_index;
+	__le64 ring_tail_index;
+	__le64 ring_head_seq;
 	__le64 buddy_blocks;
         struct scoutfs_buddy_root buddy_root;
         struct scoutfs_btree_root btree_root;

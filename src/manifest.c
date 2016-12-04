@@ -175,7 +175,7 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 		return -ENOMEM;
 
 	ret = scoutfs_kvec_dup_flatten(ment->first, first) ?:
-	      scoutfs_kvec_dup_flatten(ment->first, last);
+	      scoutfs_kvec_dup_flatten(ment->last, last);
 	if (ret) {
 		free_ment(ment);
 		return -ENOMEM;

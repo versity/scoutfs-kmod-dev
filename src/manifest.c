@@ -295,6 +295,7 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key)
 	int err;
 	int nr_refs;
 	int cmp;
+	int last;
 	int i;
 	int n;
 
@@ -314,9 +315,10 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key)
 
 		refs[i].seg = seg;
 	}
+	last = i;
 
 	/* wait for submitted segments and search if we haven't seen failure */
-	for (n = 0; n < i; n++) {
+	for (i = 0; i < last; i++) {
 		seg = refs[i].seg;
 
 		err = scoutfs_seg_wait(sb, seg);

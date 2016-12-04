@@ -126,6 +126,8 @@ int scoutfs_item_lookup(struct super_block *sb, struct kvec *key,
  * match.  This isn't the fast path so we don't mind the copying
  * overhead that comes from only detecting the size mismatch after the
  * copy by reusing the more permissive _lookup().
+ *
+ * Returns 0 or -errno.
  */
 int scoutfs_item_lookup_exact(struct super_block *sb, struct kvec *key,
 			      struct kvec *val, int size)
@@ -133,7 +135,9 @@ int scoutfs_item_lookup_exact(struct super_block *sb, struct kvec *key,
 	int ret;
 
 	ret = scoutfs_item_lookup(sb, key, val);
-	if (ret >= 0 && ret != size)
+	if (ret == size)
+		ret = 0;
+	else if (ret >= 0 && ret != size)
 		ret = -EIO;
 
 	return ret;

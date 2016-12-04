@@ -41,8 +41,8 @@ struct manifest_entry {
 		struct rb_node node;
 	};
 
-	struct kvec *first;
-	struct kvec *last;
+	SCOUTFS_DECLARE_KVEC(first);
+	SCOUTFS_DECLARE_KVEC(last);
 	u64 segno;
 	u64 seq;
 	u8 level;

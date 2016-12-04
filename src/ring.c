@@ -227,7 +227,7 @@ int scoutfs_ring_read(struct super_block *sb)
 	tail = le64_to_cpu(super->ring_tail_index);
 	seq = le64_to_cpu(super->ring_head_seq);
 
-	do {
+	for(;;) {
 		blkno = le64_to_cpu(super->ring_blkno) + index;
 
 		if (index <= tail)
@@ -236,7 +236,7 @@ int scoutfs_ring_read(struct super_block *sb)
 			nr = le64_to_cpu(super->ring_blocks) - index;
 		nr = min_t(int, nr, NR_BLOCKS);
 
-		ret = scoutfs_bio_read(sb, pages, index, nr);
+		ret = scoutfs_bio_read(sb, pages, blkno, nr);
 		if (ret)
 			goto out;
 
@@ -249,10 +249,13 @@ int scoutfs_ring_read(struct super_block *sb)
 				goto out;
 		}
 
+		if (index == tail)
+			break;
+
 		index += nr;
 		if (index == le64_to_cpu(super->ring_blocks))
 			index = 0;
-	} while (index != tail);
+	}
 
 out:
 	for (i = 0; i < NR_PAGES && pages && pages[i]; i++)

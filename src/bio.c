@@ -148,10 +148,9 @@ static void end_io_complete(struct super_block *sb, void *data, int err)
 int scoutfs_bio_read(struct super_block *sb, struct page **pages,
 		     u64 blkno, unsigned int nr_blocks)
 {
-	struct end_io_completion comp = {
-		.comp = COMPLETION_INITIALIZER(comp.comp),
-	};
+	struct end_io_completion comp;
 
+	init_completion(&comp.comp);
 	scoutfs_bio_submit(sb, READ, pages, blkno, nr_blocks,
 			   end_io_complete, &comp);
 	wait_for_completion(&comp.comp);

@@ -42,6 +42,8 @@ static void bio_end_io(struct bio *bio, int err)
 {
 	struct bio_end_io_args *args = bio->bi_private;
 
+	trace_printk("bio %p end io\n", bio);
+
 	dec_end_io(args, bio->bi_size, err);
 	bio_put(bio);
 }
@@ -113,6 +115,8 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 			i--;
 			continue;
 		}
+
+		trace_printk("added page %p to bio %p\n", page, bio);
 
 		blkno += SCOUTFS_BLOCKS_PER_PAGE;
 		nr_blocks -= SCOUTFS_BLOCKS_PER_PAGE;

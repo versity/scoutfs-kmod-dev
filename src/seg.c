@@ -71,6 +71,8 @@ static struct scoutfs_segment *alloc_seg(u64 segno)
 
 	for (i = 0; i < SCOUTFS_SEGMENT_PAGES; i++) {
 		page = alloc_page(GFP_NOFS);
+		trace_printk("seg %p segno %llu page %u %p\n",
+			     seg, segno, i, page);
 		if (!page) {
 			scoutfs_seg_put(seg);
 			return ERR_PTR(-ENOMEM);
@@ -216,6 +218,8 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 	struct scoutfs_segment *existing;
 	struct scoutfs_segment *seg;
 	unsigned long flags;
+
+	trace_printk("segno %llu\n", segno);
 
 	spin_lock_irqsave(&cac->lock, flags);
 	seg = find_seg(&cac->root, segno);

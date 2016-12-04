@@ -127,6 +127,8 @@ static int add_ment(struct manifest *mani, struct manifest_entry *ment)
 {
 	int ret;
 
+	trace_printk("adding ment %p level %u\n", ment, ment->level);
+
 	if (ment->level) {
 		ret = insert_ment(&mani->level_roots[ment->level], ment);
 		if (!ret)
@@ -218,6 +220,8 @@ static struct manifest_ref *get_key_refs(struct manifest *mani,
 	unsigned int nr;
 	int i;
 
+	trace_printk("getting refs\n");
+
 	spin_lock_irqsave(&mani->lock, flags);
 
 	total = mani->level0_nr + mani->last_level;
@@ -227,6 +231,7 @@ static struct manifest_ref *get_key_refs(struct manifest *mani,
 
 		kfree(refs);
 		refs = kcalloc(total, sizeof(struct manifest_ref), GFP_NOFS);
+		trace_printk("alloc refs %p total %u\n", refs, total);
 		if (!refs)
 			return ERR_PTR(-ENOMEM);
 
@@ -236,6 +241,7 @@ static struct manifest_ref *get_key_refs(struct manifest *mani,
 	nr = 0;
 
 	list_for_each_entry(ment, &mani->level0_list, level0_entry) {
+		trace_printk("trying l0 ment %p\n", ment);
 		if (scoutfs_kvec_cmp_overlap(key, key,
 					     ment->first, ment->last))
 			continue;
@@ -260,6 +266,9 @@ static struct manifest_ref *get_key_refs(struct manifest *mani,
 		kfree(refs);
 		refs = NULL;
 	}
+
+	trace_printk("refs %p (err %ld)\n",
+		     refs, IS_ERR(refs) ? PTR_ERR(refs) : 0);
 
 	return refs;
 }
@@ -298,6 +307,8 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key)
 	int last;
 	int i;
 	int n;
+
+	trace_printk("reading items\n");
 
 	refs = get_key_refs(mani, key, &nr_refs);
 	if (IS_ERR(refs))

@@ -116,6 +116,8 @@ int scoutfs_item_lookup(struct super_block *sb, struct kvec *key,
 
 	} while (!item && ((ret = scoutfs_manifest_read_items(sb, key)) == 0));
 
+	trace_printk("ret %d\n", ret);
+
 	return ret;
 }
 

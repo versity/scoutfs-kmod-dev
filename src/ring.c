@@ -138,9 +138,15 @@ static int read_one_entry(struct super_block *sb,
 	SCOUTFS_DECLARE_KVEC(last);
 	int ret;
 
+	trace_printk("type %u len %u\n", eh->type, le16_to_cpu(eh->len));
+
 	switch(eh->type) {
 	case SCOUTFS_RING_ADD_MANIFEST:
 		am = container_of(eh, struct scoutfs_ring_add_manifest, eh);
+
+		trace_printk("lens %u %u\n",
+				  le16_to_cpu(am->first_key_len),
+				  le16_to_cpu(am->last_key_len));
 
 		scoutfs_kvec_init(first, am + 1,
 				  le16_to_cpu(am->first_key_len));
@@ -166,6 +172,8 @@ static int read_entries(struct super_block *sb,
 	struct scoutfs_ring_entry_header *eh;
 	int ret = 0;
 	int i;
+
+	trace_printk("reading %u entries\n", le32_to_cpu(ring->nr_entries));
 
 	eh = ring->entries;
 
@@ -235,6 +243,8 @@ int scoutfs_ring_read(struct super_block *sb)
 		else
 			nr = le64_to_cpu(super->ring_blocks) - index;
 		nr = min_t(int, nr, NR_BLOCKS);
+
+		trace_printk("index %llu tail %llu nr %u\n", index, tail, nr);
 
 		ret = scoutfs_bio_read(sb, pages, blkno, nr);
 		if (ret)

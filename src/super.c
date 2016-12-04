@@ -32,6 +32,7 @@
 #include "item.h"
 #include "manifest.h"
 #include "seg.h"
+#include "bio.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -133,18 +134,24 @@ static int read_supers(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
-	struct scoutfs_block *bl = NULL;
+	struct page *page;
 	int found = -1;
+	int ret;
 	int i;
 
+	page = alloc_page(GFP_KERNEL);
+	if (!page)
+		return -ENOMEM;
+
 	for (i = 0; i < SCOUTFS_SUPER_NR; i++) {
-		scoutfs_block_put(bl);
-		bl = scoutfs_block_read(sb, SCOUTFS_SUPER_BLKNO + i);
-		if (IS_ERR(bl)) {
+
+		ret = scoutfs_bio_read(sb, &page, SCOUTFS_SUPER_BLKNO + i, 1);
+		if (ret) {
 			scoutfs_warn(sb, "couldn't read super block %u", i);
 			continue;
 		}
-		super = scoutfs_block_data(bl);
+
+		super = scoutfs_page_block_address(&page, 0);
 
 		if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
 			scoutfs_warn(sb, "super block %u has invalid id %llx",
@@ -159,7 +166,7 @@ static int read_supers(struct super_block *sb)
 		}
 	}
 
-	scoutfs_block_put(bl);
+	__free_page(page);
 
 	if (found < 0) {
 		scoutfs_err(sb, "unable to read valid super block");

@@ -27,7 +27,6 @@
 #include "scoutfs_trace.h"
 #include "xattr.h"
 #include "trans.h"
-#include "btree.h"
 #include "msg.h"
 #include "kvec.h"
 #include "item.h"
@@ -269,13 +268,17 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 int scoutfs_dirty_inode_item(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_key key;
+	struct scoutfs_inode_key ikey;
+	struct scoutfs_inode sinode;
+	SCOUTFS_DECLARE_KVEC(key);
 	int ret;
 
-	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
+	store_inode(&sinode, inode);
 
-	ret = scoutfs_btree_dirty(sb, meta, &key);
+	set_inode_key(&ikey, scoutfs_ino(inode));
+	scoutfs_kvec_init(key, &ikey, sizeof(ikey));
+
+	ret = scoutfs_item_dirty(sb, key);
 	if (!ret)
 		trace_scoutfs_dirty_inode(inode);
 	return ret;
@@ -283,8 +286,8 @@ int scoutfs_dirty_inode_item(struct inode *inode)
 
 /*
  * Every time we modify the inode in memory we copy it to its inode
- * item.  This lets us write out blocks of items without having to track
- * down dirty vfs inodes and safely copy them into items before writing.
+ * item.  This lets us write out items without having to track down
+ * dirty vfs inodes.
  *
  * The caller makes sure that the item is dirty and pinned so they don't
  * have to deal with errors and unwinding after they've modified the
@@ -293,17 +296,19 @@ int scoutfs_dirty_inode_item(struct inode *inode)
 void scoutfs_update_inode_item(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
+	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
-	struct scoutfs_key key;
+	SCOUTFS_DECLARE_KVEC(key);
+	SCOUTFS_DECLARE_KVEC(val);
 	int err;
 
-	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
-	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
 	store_inode(&sinode, inode);
 
-	err = scoutfs_btree_update(sb, meta, &key, &val);
+	set_inode_key(&ikey, scoutfs_ino(inode));
+	scoutfs_kvec_init(key, &ikey, sizeof(ikey));
+	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+
+	err = scoutfs_item_update(sb, key, val);
 	BUG_ON(err);
 
 	trace_scoutfs_update_inode(inode);
@@ -381,11 +386,11 @@ static int alloc_ino(struct super_block *sb, u64 *ino)
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev)
 {
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_inode_info *ci;
-	struct scoutfs_btree_val val;
+	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
-	struct scoutfs_key key;
+	SCOUTFS_DECLARE_KVEC(key);
+	SCOUTFS_DECLARE_KVEC(val);
 	struct inode *inode;
 	u64 ino;
 	int ret;
@@ -413,11 +418,12 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	inode->i_rdev = rdev;
 	set_inode_ops(inode);
 
-	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_INODE_KEY, 0);
-	scoutfs_btree_init_val(&val, &sinode, sizeof(sinode));
 	store_inode(&sinode, inode);
+	set_inode_key(&ikey, scoutfs_ino(inode));
+	scoutfs_kvec_init(key, &ikey, sizeof(ikey));
+	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_btree_insert(inode->i_sb, meta, &key, &val);
+	ret = scoutfs_item_create(sb, key, val);
 	if (ret) {
 		iput(inode);
 		return ERR_PTR(ret);

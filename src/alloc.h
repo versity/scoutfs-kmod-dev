@@ -1,0 +1,16 @@
+#ifndef _SCOUTFS_ALLOC_H_
+#define _SCOUTFS_ALLOC_H_
+
+struct scoutfs_alloc_region;
+
+int scoutfs_alloc_segno(struct super_block *sb, u64 *segno);
+int scoutfs_alloc_free(struct super_block *sb, u64 segno);
+
+int scoutfs_alloc_add(struct super_block *sb,
+		      struct scoutfs_ring_alloc_region *ins);
+int scoutfs_alloc_dirty_ring(struct super_block *sb);
+
+int scoutfs_alloc_setup(struct super_block *sb);
+void scoutfs_alloc_destroy(struct super_block *sb);
+
+#endif

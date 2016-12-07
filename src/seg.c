@@ -21,6 +21,8 @@
 #include "seg.h"
 #include "bio.h"
 #include "kvec.h"
+#include "manifest.h"
+#include "alloc.h"
 
 /*
  * seg.c should just be about the cache and io, and maybe
@@ -127,8 +129,9 @@ static struct scoutfs_segment *find_seg(struct rb_root *root, u64 segno)
 
 /*
  * This always inserts the segment into the rbtree.  If there's already
- * a segment at the given seg then it is removed and returned.  The caller
- * doesn't have to erase it from the tree if it's returned.
+ * a segment at the given seg then it is removed and returned.  The
+ * caller doesn't have to erase it from the tree if it's returned but it
+ * does have to put the reference that it's given.
  */
 static struct scoutfs_segment *replace_seg(struct rb_root *root,
 					   struct scoutfs_segment *ins)
@@ -205,6 +208,45 @@ static u64 segno_to_blkno(u64 blkno)
 	return blkno << (SCOUTFS_SEGMENT_SHIFT - SCOUTFS_BLOCK_SHIFT);
 }
 
+int scoutfs_seg_alloc(struct super_block *sb, struct scoutfs_segment **seg_ret)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct segment_cache *cac = sbi->segment_cache;
+	struct scoutfs_segment *existing;
+	struct scoutfs_segment *seg;
+	unsigned long flags;
+	u64 segno;
+	int ret;
+
+	*seg_ret = NULL;
+
+	ret = scoutfs_alloc_segno(sb, &segno);
+	if (ret)
+		goto out;
+
+	seg = alloc_seg(segno);
+	if (!seg) {
+		ret = scoutfs_alloc_free(sb, segno);
+		BUG_ON(ret); /* XXX could make pending when allocating */
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/* XXX always remove existing segs, is that necessary? */
+	spin_lock_irqsave(&cac->lock, flags);
+	atomic_inc(&seg->refcount);
+	existing = replace_seg(&cac->root, seg);
+	spin_unlock_irqrestore(&cac->lock, flags);
+	if (existing)
+		scoutfs_seg_put(existing);
+
+	*seg_ret = seg;
+	ret = 0;
+out:
+	return ret;
+
+}
+
 /*
  * The bios submitted by this don't have page references themselves.  If
  * this succeeds then the caller must call _wait before putting their
@@ -248,6 +290,19 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 	return seg;
 }
 
+int scoutfs_seg_submit_write(struct super_block *sb,
+			     struct scoutfs_segment *seg,
+			     struct scoutfs_bio_completion *comp)
+{
+	trace_printk("submitting segno %llu\n", seg->segno);
+
+	scoutfs_bio_submit_comp(sb, WRITE, seg->pages,
+				segno_to_blkno(seg->segno),
+				SCOUTFS_SEGMENT_BLOCKS, comp);
+
+	return 0;
+}
+
 int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -270,29 +325,67 @@ static void *off_ptr(struct scoutfs_segment *seg, u32 off)
 	return page_address(seg->pages[pg]) + pg_off;
 }
 
-/*
- * Return a pointer to the item in the array at the given position.
- *
- * The item structs fill the first block in the segment after the
- * initial segment block struct.  Item structs don't cross block
- * boundaries so the final bytes that would make up a partial item
- * struct are skipped.
- */
-static struct scoutfs_segment_item *pos_item(struct scoutfs_segment *seg,
-					     int pos)
+static u32 pos_off(struct scoutfs_segment *seg, u32 pos)
 {
-	u32 off;
+	/* items need of be a power of two */
+	BUILD_BUG_ON(!is_power_of_2(sizeof(struct scoutfs_segment_item)));
+	/* and the first item has to be naturally aligned */
+	BUILD_BUG_ON(offsetof(struct scoutfs_segment_block, items) &
+		     sizeof(struct scoutfs_segment_item));
 
-	if (pos < SCOUTFS_SEGMENT_FIRST_BLOCK_ITEMS) {
-		off = sizeof(struct scoutfs_segment_block);
-	} else {
-		pos -= SCOUTFS_SEGMENT_FIRST_BLOCK_ITEMS;
-		off = (1 + (pos / SCOUTFS_SEGMENT_ITEMS_PER_BLOCK)) *
-			SCOUTFS_BLOCK_SIZE;
-		pos %= SCOUTFS_SEGMENT_ITEMS_PER_BLOCK;
-	}
+	return offsetof(struct scoutfs_segment_block, items[pos]);
+}
 
-	return off_ptr(seg, off + (pos * sizeof(struct scoutfs_segment_item)));
+static void *pos_ptr(struct scoutfs_segment *seg, u32 pos)
+{
+	return off_ptr(seg, pos_off(seg, pos));
+}
+
+/*
+ * The persistent item fields that are stored in the segment are packed
+ * with funny precision.  We translate those to and from a much more
+ * natural native representation of the fields.
+ */
+struct native_item {
+	u64 seq;
+	u32 key_off;
+	u32 val_off;
+	u16 key_len;
+	u16 val_len;
+};
+
+static void load_item(struct scoutfs_segment *seg, u32 pos,
+		      struct native_item *item)
+{
+	struct scoutfs_segment_item *sitem = pos_ptr(seg, pos);
+	u32 packed;
+
+	item->seq = le64_to_cpu(sitem->seq);
+
+	packed = le32_to_cpu(sitem->key_off_len);
+	item->key_off = packed >> SCOUTFS_SEGMENT_ITEM_OFF_SHIFT;
+	item->key_len = packed & SCOUTFS_SEGMENT_ITEM_LEN_MASK;
+
+	packed = le32_to_cpu(sitem->val_off_len);
+	item->val_off = packed >> SCOUTFS_SEGMENT_ITEM_OFF_SHIFT;
+	item->val_len = packed & SCOUTFS_SEGMENT_ITEM_LEN_MASK;
+}
+
+static void store_item(struct scoutfs_segment *seg, u32 pos,
+		       struct native_item *item)
+{
+	struct scoutfs_segment_item *sitem = pos_ptr(seg, pos);
+	u32 packed;
+
+	sitem->seq = cpu_to_le64(item->seq);
+
+	packed = (item->key_off << SCOUTFS_SEGMENT_ITEM_OFF_SHIFT) |
+		 (item->key_len & SCOUTFS_SEGMENT_ITEM_LEN_MASK);
+	sitem->key_off_len = cpu_to_le32(packed);
+
+	packed = (item->val_off << SCOUTFS_SEGMENT_ITEM_OFF_SHIFT) |
+		 (item->val_len & SCOUTFS_SEGMENT_ITEM_LEN_MASK);
+	sitem->val_off_len = cpu_to_le32(packed);
 }
 
 static void kvec_from_pages(struct scoutfs_segment *seg,
@@ -313,19 +406,17 @@ int scoutfs_seg_item_kvecs(struct scoutfs_segment *seg, int pos,
 			   struct kvec *key, struct kvec *val)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_segment_item *item;
+	struct native_item item;
 
 	if (pos < 0 || pos >= le32_to_cpu(sblk->nr_items))
 		return -ENOENT;
 
-	item = pos_item(seg, pos);
+	load_item(seg, pos, &item);
 
 	if (key)
-		kvec_from_pages(seg, key, le32_to_cpu(item->key_off),
-				le16_to_cpu(item->key_len));
+		kvec_from_pages(seg, key, item.key_off, item.key_len);
 	if (val)
-		kvec_from_pages(seg, val, le32_to_cpu(item->val_off),
-				le16_to_cpu(item->val_len));
+		kvec_from_pages(seg, val, item.val_off, item.val_len);
 
 	return 0;
 }
@@ -365,6 +456,90 @@ int scoutfs_seg_find_pos(struct scoutfs_segment *seg, struct kvec *key)
 	return find_key_pos(seg, key);
 }
 
+/*
+ * Store the first item in the segment.  The caller knows the number
+ * of items and bytes of keys that determine where the keys and values
+ * start.  Future items are appended by looking at the last item.
+ *
+ * This should never fail because any item must always fit in a segment.
+ */
+void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
+			    struct kvec *key, struct kvec *val,
+			    unsigned int nr_items, unsigned int key_bytes)
+{
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	struct native_item item;
+	SCOUTFS_DECLARE_KVEC(item_key);
+	SCOUTFS_DECLARE_KVEC(item_val);
+	u32 key_off;
+	u32 val_off;
+
+	key_off = pos_off(seg, nr_items);
+	val_off = key_off + key_bytes;
+
+	sblk->nr_items = cpu_to_le32(1);
+
+	item.seq = 1;
+	item.key_off = key_off;
+	item.val_off = val_off;
+	item.key_len = scoutfs_kvec_length(key);
+	item.val_len = scoutfs_kvec_length(val);
+	store_item(seg, 0, &item);
+
+	scoutfs_seg_item_kvecs(seg, 0, key, val);
+	scoutfs_kvec_memcpy(item_key, key);
+	scoutfs_kvec_memcpy(item_val, val);
+}
+
+void scoutfs_seg_append_item(struct super_block *sb,
+			     struct scoutfs_segment *seg,
+			     struct kvec *key, struct kvec *val)
+{
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	struct native_item item;
+	struct native_item prev;
+	SCOUTFS_DECLARE_KVEC(item_key);
+	SCOUTFS_DECLARE_KVEC(item_val);
+	u32 nr;
+
+	nr = le32_to_cpu(sblk->nr_items);
+	sblk->nr_items = cpu_to_le32(nr + 1);
+
+	load_item(seg, nr - 1, &prev);
+
+	item.seq = 1;
+	item.key_off = prev.key_off + prev.key_len;
+	item.key_len = scoutfs_kvec_length(key);
+	item.val_off = prev.val_off + prev.val_len;
+	item.val_len = scoutfs_kvec_length(val);
+	store_item(seg, 0, &item);
+
+	scoutfs_seg_item_kvecs(seg, nr, key, val);
+	scoutfs_kvec_memcpy(item_key, key);
+	scoutfs_kvec_memcpy(item_val, val);
+}
+
+/*
+ * Add a dirty manifest entry for the given segment at the given level.
+ */
+int scoutfs_seg_add_ment(struct super_block *sb, struct scoutfs_segment *seg,
+			 u8 level)
+{
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	struct native_item item;
+	SCOUTFS_DECLARE_KVEC(first);
+	SCOUTFS_DECLARE_KVEC(last);
+
+	load_item(seg, 0, &item);
+	kvec_from_pages(seg, first, item.key_off, item.key_len);
+
+	load_item(seg, le32_to_cpu(sblk->nr_items) - 1, &item);
+	kvec_from_pages(seg, last, item.key_off, item.key_len);
+
+	return scoutfs_manifest_add(sb, first, last, le64_to_cpu(sblk->segno),
+				    le64_to_cpu(sblk->max_seq), level, true);
+}
+
 int scoutfs_seg_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -400,4 +575,3 @@ void scoutfs_seg_destroy(struct super_block *sb)
 		kfree(cac);
 	}
 }
-

@@ -113,6 +113,28 @@ int scoutfs_kvec_memcpy(struct kvec *dst, struct kvec *src)
 }
 
 /*
+ * Copy bytes in src into dst, stopping if dst is full.  The number of copied
+ * bytes is returned and the lengths of dst are updated if the size changes.
+ * The pointers in dst are not changed.
+ */
+int scoutfs_kvec_memcpy_truncate(struct kvec *dst, struct kvec *src)
+{
+	int copied = scoutfs_kvec_memcpy(dst, src);
+	size_t bytes;
+	int i;
+
+	if (copied < scoutfs_kvec_length(dst)) {
+		bytes = copied;
+		for (i = 0; i < SCOUTFS_KVEC_NR; i++) {
+			dst[i].iov_len = min(dst[i].iov_len, bytes);
+			bytes -= dst[i].iov_len;
+		}
+	}
+
+	return copied;
+}
+
+/*
  * Copy the src key vector into one new allocation in the dst.  The existing
  * dst is clobbered.  The source isn't changed.
  */
@@ -138,4 +160,18 @@ void scoutfs_kvec_kfree(struct kvec *kvec)
 {
 	while (kvec->iov_base)
 		kfree((kvec++)->iov_base);
+}
+
+void scoutfs_kvec_init_null(struct kvec *kvec)
+{
+	memset(kvec, 0, SCOUTFS_KVEC_NR * sizeof(kvec[0]));
+}
+
+void scoutfs_kvec_swap(struct kvec *a, struct kvec *b)
+{
+	SCOUTFS_DECLARE_KVEC(tmp);
+
+	memcpy(tmp, a, sizeof(tmp));
+	memcpy(a, b, sizeof(tmp));
+	memcpy(b, tmp, sizeof(tmp));
 }

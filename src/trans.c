@@ -22,6 +22,12 @@
 #include "trans.h"
 #include "buddy.h"
 #include "filerw.h"
+#include "bio.h"
+#include "item.h"
+#include "manifest.h"
+#include "seg.h"
+#include "alloc.h"
+#include "ring.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -74,37 +80,43 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	struct scoutfs_sb_info *sbi = container_of(work, struct scoutfs_sb_info,
 						   trans_write_work);
 	struct super_block *sb = sbi->sb;
+	struct scoutfs_bio_completion comp;
+	struct scoutfs_segment *seg;
 	bool advance = false;
 	int ret = 0;
-	bool have_umount;
 
-	sbi->trans_task = current;
+	scoutfs_bio_init_comp(&comp);
+	sbi->trans_task = NULL;
 
 	wait_event(sbi->trans_hold_wq,
 		   atomic_cmpxchg(&sbi->trans_holds, 0, -1) == 0);
 
-	if (scoutfs_block_has_dirty(sb)) {
-		/* XXX need writeback errors from inode address spaces? */
+	/* XXX file data needs to be updated to the new item api */
+#if 0
+	scoutfs_filerw_free_alloc(sb);
+#endif
 
-		/* XXX definitely don't understand this */
-		have_umount = down_read_trylock(&sb->s_umount);
+	/*
+	 * We only have to check if there are dirty items or manifest
+	 * entries.  You can't have dirty alloc regions without having
+	 * changed references to the allocated segments which produces
+	 * dirty manfiest entries.
+	 */
+	if (scoutfs_item_dirty_bytes(sb) || scoutfs_manifest_has_dirty(sb)) {
 
-		sync_inodes_sb(sb);
-
-		if (have_umount)
-			up_read(&sb->s_umount);
-
-		scoutfs_filerw_free_alloc(sb);
-
-		ret = scoutfs_buddy_apply_pending(sb, false) ?:
-		      scoutfs_block_write_dirty(sb) ?:
+		ret = scoutfs_seg_alloc(sb, &seg) ?:
+		      scoutfs_item_dirty_seg(sb, seg);
+		      scoutfs_seg_add_ment(sb, seg, 0) ?:
+		      scoutfs_manifest_dirty_ring(sb) ?:
+		      scoutfs_alloc_dirty_ring(sb) ?:
+		      scoutfs_ring_submit_write(sb, &comp) ?:
+		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
+		      scoutfs_bio_wait_comp(sb, &comp) ?:
 		      scoutfs_write_dirty_super(sb);
-		if (ret) {
-			scoutfs_buddy_apply_pending(sb, true);
-		} else {
-			scoutfs_buddy_committed(sb);
-			advance = 1;
-		}
+		BUG_ON(ret);
+
+		scoutfs_seg_put(seg);
+		advance = true;
 	}
 
 	spin_lock(&sbi->trans_write_lock);
@@ -183,6 +195,10 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 	return scoutfs_sync_fs(file->f_inode->i_sb, 1);
 }
 
+/*
+ * The first holders race to try and allocate the segment that will be
+ * written by the next commit.
+ */
 int scoutfs_hold_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -195,21 +211,28 @@ int scoutfs_hold_trans(struct super_block *sb)
 }
 
 /*
- * As we release we ask the allocator how many blocks have been
- * allocated since the last transaction was successfully committed.  If
- * it's large enough we kick off a write.  This is mostly to reduce the
- * commit latency.  We also don't want to let the IO pipeline sit idle.
- * Once we have enough blocks to write efficiently we should do so.
+ * As we release we kick off a commit if we have a segment's worth of
+ * dirty items.
+ *
+ * Right now it's conservatively kicking off writes at ~95% full blocks.
+ * This leaves a lot of slop for the largest item bytes created by a
+ * holder and overrun by concurrent holders (who aren't accounted
+ * today).
+ *
+ * It should more precisely know the worst case item byte consumption of
+ * holders and only kick off a write when someone tries to hold who
+ * might fill the segment.
  */
 void scoutfs_release_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	unsigned int target = (SCOUTFS_SEGMENT_SIZE * 95 / 100);
 
 	if (current == sbi->trans_task)
 		return;
 
 	if (atomic_sub_return(1, &sbi->trans_holds) == 0) {
-		if (scoutfs_buddy_alloc_count(sb) >= SCOUTFS_MAX_TRANS_BLOCKS)
+		if (scoutfs_item_dirty_bytes(sb) >= target)
 			scoutfs_sync_fs(sb, 0);
 
 		wake_up(&sbi->trans_hold_wq);

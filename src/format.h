@@ -56,7 +56,8 @@ struct scoutfs_ring_entry_header {
 	__le16 len;
 } __packed;
 
-#define SCOUTFS_RING_ADD_MANIFEST 1
+#define SCOUTFS_RING_ADD_MANIFEST	1
+#define SCOUTFS_RING_ADD_ALLOC		2
 
 struct scoutfs_ring_add_manifest {
 	struct scoutfs_ring_entry_header eh;
@@ -68,25 +69,54 @@ struct scoutfs_ring_add_manifest {
 	/* first and last key bytes */
 } __packed;
 
+#define SCOUTFS_ALLOC_REGION_SHIFT 8
+#define SCOUTFS_ALLOC_REGION_BITS (1 << SCOUTFS_ALLOC_REGION_SHIFT)
+#define SCOUTFS_ALLOC_REGION_MASK (SCOUTFS_ALLOC_REGION_BITS - 1)
+
+/*
+ * The bits need to be aligned so that the host can use native long
+ * bitops on the bits in memory.
+ */
+struct scoutfs_ring_alloc_region {
+	struct scoutfs_ring_entry_header eh;
+	__le64 index;
+	__u8 pad[5];
+	__le64 bits[SCOUTFS_ALLOC_REGION_BITS / 64];
+} __packed;
+
 /*
  * This is absurdly huge.  If there was only ever 1 item per segment and
  * 2^64 items the tree could get this deep.
  */
 #define SCOUTFS_MANIFEST_MAX_LEVEL 20
 
+/*
+ * The packed entries in the block are terminated by a header with a 0 length.
+ */
 struct scoutfs_ring_block {
 	struct scoutfs_block_header hdr;
-	__le32 nr_entries;
 	struct scoutfs_ring_entry_header entries[0];
 } __packed;
 
+/*
+ * We really want these to be a power of two size so that they're naturally
+ * aligned.  This ensures that they won't cross page boundaries and we
+ * can use pointers to them in the page vecs that make up segments without
+ * funny business.
+ *
+ * We limit segment sizes to 8 megs (23 bits) and value lengths to 512 bytes
+ * (9 bits).  The item offsets and lengths then take up 64 bits.
+ *
+ * We then operate on the items in on-stack nice native structs.
+ */
 struct scoutfs_segment_item {
 	__le64 seq;
-	__le32 key_off;
-	__le32 val_off;
-	__le16 key_len;
-	__le16 val_len;
+	__le32 key_off_len;
+	__le32 val_off_len;
 } __packed;
+
+#define SCOUTFS_SEGMENT_ITEM_OFF_SHIFT 9
+#define SCOUTFS_SEGMENT_ITEM_LEN_MASK ((1 << SCOUTFS_SEGMENT_ITEM_OFF_SHIFT)-1)
 
 /*
  * Each large segment starts with a segment block that describes the
@@ -98,19 +128,11 @@ struct scoutfs_segment_block {
 	__le64 segno;
 	__le64 max_seq;
 	__le32 nr_items;
-	/* item array with gaps so they don't cross 4k blocks */
+	__le32 _moar_pads;
+	struct scoutfs_segment_item items[0];
 	/* packed keys */
 	/* packed vals */
 } __packed;
-
-/* the first block in the segment has the header and items */
-#define SCOUTFS_SEGMENT_FIRST_BLOCK_ITEMS \
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_segment_block)) / \
-	 sizeof(struct scoutfs_segment_item))
-
-/* the rest of the header blocks are full of items */
-#define SCOUTFS_SEGMENT_ITEMS_PER_BLOCK \
-	(SCOUTFS_BLOCK_SIZE / sizeof(struct scoutfs_segment_item))
 
 /*
  * Block references include the sequence number so that we can detect
@@ -186,16 +208,32 @@ struct scoutfs_key {
 #define SCOUTFS_XATTR_NAME_HASH_KEY	3
 #define SCOUTFS_XATTR_VAL_HASH_KEY	4
 #define SCOUTFS_DIRENT_KEY		5
-#define SCOUTFS_LINK_BACKREF_KEY	6
-#define SCOUTFS_SYMLINK_KEY		7
-#define SCOUTFS_EXTENT_KEY		8
-#define SCOUTFS_ORPHAN_KEY		9
+#define SCOUTFS_READDIR_KEY		6
+#define SCOUTFS_LINK_BACKREF_KEY	7
+#define SCOUTFS_SYMLINK_KEY		8
+#define SCOUTFS_EXTENT_KEY		9
+#define SCOUTFS_ORPHAN_KEY		10
 
 #define SCOUTFS_MAX_ITEM_LEN 512
 
+/* value is struct scoutfs_inode */
 struct scoutfs_inode_key {
 	__u8 type;
 	__be64 ino;
+} __packed;
+
+/* value is struct scoutfs_dirent without the name */
+struct scoutfs_dirent_key {
+	__u8 type;
+	__be64 ino;
+	__u8 name[0];
+} __packed;
+
+/* value is struct scoutfs_dirent with the name */
+struct scoutfs_readdir_key {
+	__u8 type;
+	__be64 ino;
+	__be64 pos;
 } __packed;
 
 struct scoutfs_btree_root {
@@ -270,6 +308,8 @@ struct scoutfs_super_block {
 	__le64 id;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
 	__le64 next_ino;
+	__le64 alloc_uninit;
+	__le64 total_segs;
 	__le64 total_blocks;
 	__le64 free_blocks;
 	__le64 ring_blkno;

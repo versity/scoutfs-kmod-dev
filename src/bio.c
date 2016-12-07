@@ -131,17 +131,40 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 	dec_end_io(args, 1, ret);
 }
 
-struct end_io_completion {
-	struct completion comp;
-	int err;
-};
-
-static void end_io_complete(struct super_block *sb, void *data, int err)
+void scoutfs_bio_init_comp(struct scoutfs_bio_completion *comp)
 {
-	struct end_io_completion *comp = data;
+	/* this initial pending is dropped by wait */
+	atomic_set(&comp->pending, 1);
+	init_completion(&comp->comp);
+	comp->err = 0;
+}
 
-	comp->err = err;
-	complete(&comp->comp);
+static void comp_end_io(struct super_block *sb, void *data, int err)
+{
+	struct scoutfs_bio_completion *comp = data;
+
+	if (err && !comp->err)
+		comp->err = err;
+
+	if (atomic_dec_and_test(&comp->pending))
+		complete(&comp->comp);
+}
+
+void scoutfs_bio_submit_comp(struct super_block *sb, int rw,
+			     struct page **pages, u64 blkno,
+			     unsigned int nr_blocks,
+			     struct scoutfs_bio_completion *comp)
+{
+	atomic_inc(&comp->pending);
+	scoutfs_bio_submit(sb, rw, pages, blkno, nr_blocks, comp_end_io, comp);
+}
+
+int scoutfs_bio_wait_comp(struct super_block *sb,
+			  struct scoutfs_bio_completion *comp)
+{
+	comp_end_io(sb, comp, 0);
+	wait_for_completion(&comp->comp);
+	return comp->err;
 }
 
 /*
@@ -152,13 +175,11 @@ static void end_io_complete(struct super_block *sb, void *data, int err)
 int scoutfs_bio_read(struct super_block *sb, struct page **pages,
 		     u64 blkno, unsigned int nr_blocks)
 {
-	struct end_io_completion comp;
+	struct scoutfs_bio_completion comp;
 
-	init_completion(&comp.comp);
-	scoutfs_bio_submit(sb, READ, pages, blkno, nr_blocks,
-			   end_io_complete, &comp);
-	wait_for_completion(&comp.comp);
-	return comp.err;
+	scoutfs_bio_init_comp(&comp);
+	scoutfs_bio_submit_comp(sb, READ, pages, blkno, nr_blocks, &comp);
+	return scoutfs_bio_wait_comp(sb, &comp);
 }
 
 /* return pointer to the blk 4k block offset amongst the pages */

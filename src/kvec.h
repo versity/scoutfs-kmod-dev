@@ -61,7 +61,10 @@ int scoutfs_kvec_memcmp(struct kvec *a, struct kvec *b);
 int scoutfs_kvec_cmp_overlap(struct kvec *a, struct kvec *b,
 			     struct kvec *c, struct kvec *d);
 int scoutfs_kvec_memcpy(struct kvec *dst, struct kvec *src);
+int scoutfs_kvec_memcpy_truncate(struct kvec *dst, struct kvec *src);
 int scoutfs_kvec_dup_flatten(struct kvec *dst, struct kvec *src);
 void scoutfs_kvec_kfree(struct kvec *kvec);
+void scoutfs_kvec_init_null(struct kvec *kvec);
+void scoutfs_kvec_swap(struct kvec *a, struct kvec *b);
 
 #endif

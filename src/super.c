@@ -33,6 +33,7 @@
 #include "manifest.h"
 #include "seg.h"
 #include "bio.h"
+#include "alloc.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -226,6 +227,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_manifest_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
+	      scoutfs_alloc_setup(sb) ?:
+	      scoutfs_ring_setup(sb) ?:
 	      scoutfs_ring_read(sb) ?:
 //	      scoutfs_buddy_setup(sb) ?:
 	      scoutfs_setup_trans(sb);
@@ -264,8 +267,10 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		if (sbi->block_shrinker.shrink == scoutfs_block_shrink)
 			unregister_shrinker(&sbi->block_shrinker);
 		scoutfs_item_destroy(sb);
+		scoutfs_alloc_destroy(sb);
 		scoutfs_manifest_destroy(sb);
 		scoutfs_seg_destroy(sb);
+		scoutfs_ring_destroy(sb);
 		scoutfs_block_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)
@@ -285,7 +290,6 @@ static struct file_system_type scoutfs_fs_type = {
 /* safe to call at any failure point in _init */
 static void teardown_module(void)
 {
-	scoutfs_dir_exit();
 	scoutfs_inode_exit();
 	if (scoutfs_kset)
 		kset_unregister(scoutfs_kset);
@@ -302,7 +306,6 @@ static int __init scoutfs_module_init(void)
 		return -ENOMEM;
 
 	ret = scoutfs_inode_init() ?:
-	      scoutfs_dir_init() ?:
 	      register_filesystem(&scoutfs_fs_type);
 	if (ret)
 		teardown_module();

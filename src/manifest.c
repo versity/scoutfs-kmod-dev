@@ -67,7 +67,7 @@ static void init_ment_keys(struct manifest_entry *ment, struct kvec *first,
 {
 	scoutfs_kvec_init(first, &ment->am + 1,
 			  le16_to_cpu(ment->am.first_key_len));
-	scoutfs_kvec_init(last, &ment->am + 1 +
+	scoutfs_kvec_init(last, (void *)(&ment->am + 1) +
 			  le16_to_cpu(ment->am.first_key_len),
 			  le16_to_cpu(ment->am.last_key_len));
 }
@@ -209,6 +209,8 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 {
 	DECLARE_MANIFEST(sb, mani);
 	struct manifest_entry *ment;
+	SCOUTFS_DECLARE_KVEC(ment_first);
+	SCOUTFS_DECLARE_KVEC(ment_last);
 	unsigned long flags;
 	int bytes;
 	int ret;
@@ -229,7 +231,13 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 	ment->am.eh.len = cpu_to_le16(bytes);
 	ment->am.segno = cpu_to_le64(segno);
 	ment->am.seq = cpu_to_le64(seq);
+	ment->am.first_key_len = cpu_to_le16(scoutfs_kvec_length(first));
+	ment->am.last_key_len = cpu_to_le16(scoutfs_kvec_length(last));
 	ment->am.level = level;
+
+	init_ment_keys(ment, ment_first, ment_last);
+	scoutfs_kvec_memcpy(ment_first, first);
+	scoutfs_kvec_memcpy(ment_last, last);
 
 	/* XXX think about where to insert level 0 */
 	spin_lock_irqsave(&mani->lock, flags);

@@ -232,6 +232,9 @@ int scoutfs_seg_alloc(struct super_block *sb, struct scoutfs_segment **seg_ret)
 		goto out;
 	}
 
+	/* reads shouldn't wait for this */
+	set_bit(SF_END_IO, &seg->flags);
+
 	/* XXX always remove existing segs, is that necessary? */
 	spin_lock_irqsave(&cac->lock, flags);
 	atomic_inc(&seg->refcount);

@@ -57,7 +57,7 @@ struct ring_info {
  */
 static void finish_block(struct scoutfs_ring_block *ring, unsigned int tail)
 {
-	memset((char *)ring + tail, 0, SCOUTFS_BLOCK_SIZE - tail);
+	memset((char *)ring + SCOUTFS_BLOCK_SIZE - tail, 0, tail);
 	scoutfs_crc_block(&ring->hdr);
 }
 

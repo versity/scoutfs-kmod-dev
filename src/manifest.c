@@ -212,12 +212,11 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 	SCOUTFS_DECLARE_KVEC(ment_first);
 	SCOUTFS_DECLARE_KVEC(ment_last);
 	unsigned long flags;
-	int bytes;
+	int key_bytes;
 	int ret;
 
-	bytes = sizeof(struct manifest_entry) + scoutfs_kvec_length(first),
-		scoutfs_kvec_length(last);
-	ment = kmalloc(bytes, GFP_NOFS);
+	key_bytes = scoutfs_kvec_length(first) + scoutfs_kvec_length(last);
+	ment = kmalloc(sizeof(struct manifest_entry) + key_bytes, GFP_NOFS);
 	if (!ment)
 		return -ENOMEM;
 
@@ -228,7 +227,8 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 	INIT_LIST_HEAD(&ment->dirty_entry);
 
 	ment->am.eh.type = SCOUTFS_RING_ADD_MANIFEST;
-	ment->am.eh.len = cpu_to_le16(bytes);
+	ment->am.eh.len = cpu_to_le16(sizeof(struct scoutfs_ring_add_manifest) +
+				      key_bytes);
 	ment->am.segno = cpu_to_le64(segno);
 	ment->am.seq = cpu_to_le64(seq);
 	ment->am.first_key_len = cpu_to_le16(scoutfs_kvec_length(first));

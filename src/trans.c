@@ -106,7 +106,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 		ret = scoutfs_seg_alloc(sb, &seg) ?:
 		      scoutfs_item_dirty_seg(sb, seg);
-		      scoutfs_seg_add_ment(sb, seg, 0) ?:
+		      scoutfs_seg_manifest_add(sb, seg, 0) ?:
 		      scoutfs_manifest_dirty_ring(sb) ?:
 		      scoutfs_alloc_dirty_ring(sb) ?:
 		      scoutfs_ring_submit_write(sb, &comp) ?:

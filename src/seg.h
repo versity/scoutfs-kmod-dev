@@ -22,8 +22,8 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 void scoutfs_seg_append_item(struct super_block *sb,
 			     struct scoutfs_segment *seg,
 			     struct kvec *key, struct kvec *val);
-int scoutfs_seg_add_ment(struct super_block *sb, struct scoutfs_segment *seg,
-			 u8 level);
+int scoutfs_seg_manifest_add(struct super_block *sb,
+			     struct scoutfs_segment *seg, u8 level);
 
 int scoutfs_seg_submit_write(struct super_block *sb,
 			     struct scoutfs_segment *seg,

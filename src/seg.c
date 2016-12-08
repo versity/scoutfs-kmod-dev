@@ -522,8 +522,8 @@ void scoutfs_seg_append_item(struct super_block *sb,
 /*
  * Add a dirty manifest entry for the given segment at the given level.
  */
-int scoutfs_seg_add_ment(struct super_block *sb, struct scoutfs_segment *seg,
-			 u8 level)
+int scoutfs_seg_manifest_add(struct super_block *sb,
+			     struct scoutfs_segment *seg, u8 level)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct native_item item;

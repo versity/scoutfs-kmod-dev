@@ -27,9 +27,9 @@ struct item_cache {
 	spinlock_t lock;
 	struct rb_root root;
 
-	unsigned long nr_dirty_items;
-	unsigned long dirty_key_bytes;
-	unsigned long dirty_val_bytes;
+	long nr_dirty_items;
+	long dirty_key_bytes;
+	long dirty_val_bytes;
 };
 
 /*
@@ -100,8 +100,63 @@ static long compute_item_dirty(struct cached_item *item)
 	       node_dirty_bit(item->node.rb_right, RIGHT_DIRTY);
 }
 
-RB_DECLARE_CALLBACKS(static, scoutfs_item_rb_cb, struct cached_item, node,
-		     long, dirty, compute_item_dirty);
+static void scoutfs_item_rb_propagate(struct rb_node *node,
+				      struct rb_node *stop)
+{
+	struct cached_item *item;
+	long dirty;
+
+	while (node != stop) {
+		item = container_of(node, struct cached_item, node);
+		dirty = compute_item_dirty(item);
+
+		if (item->dirty == dirty)
+			break;
+
+		item->dirty = dirty;
+		node = rb_parent(&item->node);
+	}
+}
+
+static void scoutfs_item_rb_copy(struct rb_node *old, struct rb_node *new)
+{
+	struct cached_item *o = container_of(old, struct cached_item, node);
+	struct cached_item *n = container_of(new, struct cached_item, node);
+
+	n->dirty = o->dirty;
+}
+
+/* calculate the new parent last as it depends on the old parent */
+static void scoutfs_item_rb_rotate(struct rb_node *old, struct rb_node *new)
+{
+	struct cached_item *o = container_of(old, struct cached_item, node);
+	struct cached_item *n = container_of(new, struct cached_item, node);
+
+	BUG_ON(rb_parent(old) != new);
+
+	o->dirty = compute_item_dirty(o);
+	n->dirty = compute_item_dirty(n);
+}
+
+/*
+ * The generic RB_DECLARE_CALLBACKS() helpers are built for augmented
+ * values that are simple commutative function of the left and right
+ * children's augmented values.  During rotation the new parent just
+ * gets the old parent's augmented value and then the old parent's value
+ * is calculated.
+ *
+ * Our dirty bits don't work that way.  They are not just an or of the
+ * child's bits, the bits depend on the left and right children
+ * specifically.  During rotation both parents need to be specifically
+ * recalculated.  (They could be masked and asigned based on the
+ * direction of the rotation but that's annoying, let's just
+ * recalculate.)
+ */
+static const struct rb_augment_callbacks scoutfs_item_rb_cb  = {
+	.propagate = scoutfs_item_rb_propagate,
+	.copy = scoutfs_item_rb_copy,
+	.rotate = scoutfs_item_rb_rotate,
+};
 
 /*
  * Always insert the given item.  If there's an existing item it is
@@ -293,28 +348,6 @@ static void free_item(struct cached_item *item)
 	}
 }
 
-/*
- * The caller might have modified the item's dirty flags.  Ascend
- * through parents updating their dirty flags until there's no change.
- */
-static void update_dirty_parents(struct cached_item *item)
-{
-	struct cached_item *parent;
-	struct rb_node *node;
-	long dirty;
-
-	while ((node = rb_parent(&item->node))) {
-		parent = container_of(node, struct cached_item, node);
-		dirty = compute_item_dirty(parent);
-
-		if (parent->dirty == dirty)
-			break;
-
-		parent->dirty = dirty;
-		item = parent;
-	}
-}
-
 static void mark_item_dirty(struct item_cache *cac,
 			    struct cached_item *item)
 {
@@ -329,7 +362,7 @@ static void mark_item_dirty(struct item_cache *cac,
 	cac->dirty_key_bytes += scoutfs_kvec_length(item->key);
 	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
 
-	update_dirty_parents(item);
+	scoutfs_item_rb_propagate(&item->node, NULL);
 }
 
 static void clear_item_dirty(struct item_cache *cac,
@@ -346,7 +379,10 @@ static void clear_item_dirty(struct item_cache *cac,
 	cac->dirty_key_bytes -= scoutfs_kvec_length(item->key);
 	cac->dirty_val_bytes -= scoutfs_kvec_length(item->val);
 
-	update_dirty_parents(item);
+	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||
+		     cac->dirty_val_bytes < 0);
+
+	scoutfs_item_rb_propagate(&item->node, NULL);
 }
 
 /*
@@ -381,7 +417,8 @@ static int add_item(struct super_block *sb, struct kvec *key, struct kvec *val,
 		rb_erase_augmented(&existing->node, &cac->root,
 				   &scoutfs_item_rb_cb);
 	}
-	mark_item_dirty(cac, item);
+	if (dirty)
+		mark_item_dirty(cac, item);
 	spin_unlock_irqrestore(&cac->lock, flags);
 	free_item(existing);
 
@@ -468,6 +505,8 @@ int scoutfs_item_update(struct super_block *sb, struct kvec *key,
 	/* XXX update seq */
 	item = find_item(&cac->root, key);
 	if (item) {
+		/* keep dirty counters in sync */
+		clear_item_dirty(cac, item);
 		scoutfs_kvec_swap(up_val, item->val);
 		mark_item_dirty(cac, item);
 	} else {

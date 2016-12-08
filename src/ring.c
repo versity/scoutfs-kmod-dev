@@ -116,10 +116,9 @@ int scoutfs_ring_submit_write(struct super_block *sb,
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_RING_INFO(sb, rinf);
-	u64 first_blocks;
-	u64 head_blocks;
-	u64 first;
-	u64 last;
+	u64 wrapped_blocks;
+	u64 index_blocks;
+	u64 index;
 
 	if (!rinf->nr_blocks)
 		return 0;
@@ -128,30 +127,25 @@ int scoutfs_ring_submit_write(struct super_block *sb,
 		finish_block(rinf->ring, rinf->space);
 
 	/* first and last ring block indexes that will be written */
-	first = ring_ind_wrap(super, le64_to_cpu(super->ring_tail_index) + 1);
-	last = ring_ind_wrap(super, first + rinf->nr_blocks - 1);
+	index = ring_ind_wrap(super, le64_to_cpu(super->ring_index) +
+				     le64_to_cpu(super->ring_nr));
+	index_blocks = min_t(u64, rinf->nr_blocks,
+				  le64_to_cpu(super->ring_blocks) - index);
+	wrapped_blocks = rinf->nr_blocks - index_blocks;
 
-	/* number of blocks to write from first index and from head of ring */
-	first_blocks = min(last - first + 1,
-		           le64_to_cpu(super->ring_blocks) - first);
-	if (last < first)
-		head_blocks = last + 1;
-	else
-		head_blocks = 0;
-
-	if (head_blocks) {
+	if (wrapped_blocks) {
 		BUILD_BUG_ON(SCOUTFS_BLOCK_SIZE != PAGE_SIZE);
-		scoutfs_bio_submit_comp(sb, WRITE, rinf->pages + first_blocks,
+		scoutfs_bio_submit_comp(sb, WRITE, rinf->pages + index_blocks,
 					le64_to_cpu(super->ring_blkno),
-					head_blocks, comp);
+					wrapped_blocks, comp);
 	}
 
 	scoutfs_bio_submit_comp(sb, WRITE, rinf->pages,
-				le64_to_cpu(super->ring_blkno) + first,
-				first_blocks, comp);
+				le64_to_cpu(super->ring_blkno) + index,
+				index_blocks, comp);
 
 	/* record new tail index in super and reset for next trans */
-	super->ring_tail_index = cpu_to_le64(last);
+	le64_add_cpu(&super->ring_nr, rinf->nr_blocks);
 	rinf->nr_blocks = 0;
 	rinf->space = 0;
 
@@ -232,10 +226,10 @@ int scoutfs_ring_read(struct super_block *sb)
 	struct page *page;
 	u64 index;
 	u64 blkno;
-	u64 tail;
+	u64 part;
 	u64 seq;
+	u64 nr;
 	int ret;
-	int nr;
 	int i;
 
 	/* nr_blocks/pages calc doesn't handle multiple pages per block */
@@ -255,20 +249,17 @@ int scoutfs_ring_read(struct super_block *sb)
 		pages[i] = page;
 	}
 
-	index = le64_to_cpu(super->ring_head_index);
-	tail = le64_to_cpu(super->ring_tail_index);
-	seq = le64_to_cpu(super->ring_head_seq);
+	index = le64_to_cpu(super->ring_index);
+	nr = le64_to_cpu(super->ring_nr);
+	seq = le64_to_cpu(super->ring_seq);
 
-	for(;;) {
+	while (nr) {
 		blkno = le64_to_cpu(super->ring_blkno) + index;
+		/* XXX min3_t should be a thing */
+		part = min3(nr, (u64)NR_BLOCKS,
+			   le64_to_cpu(super->ring_blocks) - index);
 
-		if (index <= tail)
-			nr = tail - index + 1;
-		else
-			nr = le64_to_cpu(super->ring_blocks) - index;
-		nr = min_t(int, nr, NR_BLOCKS);
-
-		trace_printk("index %llu tail %llu nr %u\n", index, tail, nr);
+		trace_printk("index %llu nr %llu\n", index, nr);
 
 		ret = scoutfs_bio_read(sb, pages, blkno, nr);
 		if (ret)
@@ -283,12 +274,8 @@ int scoutfs_ring_read(struct super_block *sb)
 				goto out;
 		}
 
-		if (index == tail)
-			break;
-
-		index += nr;
-		if (index == le64_to_cpu(super->ring_blocks))
-			index = 0;
+		index = ring_ind_wrap(super, index + part);
+		nr -= part;
 	}
 
 out:

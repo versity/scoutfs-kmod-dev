@@ -314,9 +314,9 @@ struct scoutfs_super_block {
 	__le64 free_blocks;
 	__le64 ring_blkno;
 	__le64 ring_blocks;
-	__le64 ring_head_index;
-	__le64 ring_tail_index;
-	__le64 ring_head_seq;
+	__le64 ring_index;
+	__le64 ring_nr;
+	__le64 ring_seq;
 	__le64 buddy_blocks;
         struct scoutfs_buddy_root buddy_root;
         struct scoutfs_btree_root btree_root;

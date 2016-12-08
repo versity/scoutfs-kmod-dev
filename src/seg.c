@@ -490,7 +490,7 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 	item.val_len = scoutfs_kvec_length(val);
 	store_item(seg, 0, &item);
 
-	scoutfs_seg_item_kvecs(seg, 0, key, val);
+	scoutfs_seg_item_kvecs(seg, 0, item_key, item_val);
 	scoutfs_kvec_memcpy(item_key, key);
 	scoutfs_kvec_memcpy(item_val, val);
 }
@@ -504,21 +504,21 @@ void scoutfs_seg_append_item(struct super_block *sb,
 	struct native_item prev;
 	SCOUTFS_DECLARE_KVEC(item_key);
 	SCOUTFS_DECLARE_KVEC(item_val);
-	u32 nr;
+	u32 pos;
 
-	nr = le32_to_cpu(sblk->nr_items);
-	sblk->nr_items = cpu_to_le32(nr + 1);
+	pos = le32_to_cpu(sblk->nr_items);
+	sblk->nr_items = cpu_to_le32(pos + 1);
 
-	load_item(seg, nr - 1, &prev);
+	load_item(seg, pos - 1, &prev);
 
 	item.seq = 1;
 	item.key_off = prev.key_off + prev.key_len;
 	item.key_len = scoutfs_kvec_length(key);
 	item.val_off = prev.val_off + prev.val_len;
 	item.val_len = scoutfs_kvec_length(val);
-	store_item(seg, 0, &item);
+	store_item(seg, pos, &item);
 
-	scoutfs_seg_item_kvecs(seg, nr, key, val);
+	scoutfs_seg_item_kvecs(seg, pos, item_key, item_val);
 	scoutfs_kvec_memcpy(item_key, key);
 	scoutfs_kvec_memcpy(item_val, val);
 }

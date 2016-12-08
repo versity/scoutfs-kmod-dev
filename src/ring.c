@@ -69,7 +69,7 @@ void scoutfs_ring_append(struct super_block *sb,
 	unsigned int len = le16_to_cpu(eh->len);
 
 	if (rinf->space < len) {
-		if (ring)
+		if (rinf->space)
 			finish_block(ring, rinf->space);
 		ring = scoutfs_page_block_address(rinf->pages, rinf->nr_blocks);
 		rinf->ring = ring;
@@ -84,23 +84,42 @@ void scoutfs_ring_append(struct super_block *sb,
 	}
 
 	memcpy(rinf->next_eh, eh, len);
-	rinf->next_eh = (void *)((char *)eh + len);
+	rinf->next_eh = (void *)rinf->next_eh + len;
 	rinf->space -= len;
 }
 
+static u64 ring_ind_wrap(struct scoutfs_super_block *super, u64 ind)
+{
+	u64 ring_blocks = le64_to_cpu(super->ring_blocks);
+
+	while (ind >= ring_blocks)
+		ind -= ring_blocks;
+
+	return ind;
+}
+
 /*
- * Kick off the writes to update the ring.  Update the dirty super to
- * reference the written ring.
+ * Submit writes for all the dirty ring blocks that accumulated as dirty
+ * entries were appended.  The dirty ring blocks are contiguous in the
+ * page array but can wrap in the block ring on disk.
+ *
+ * If it wraps then we submit the earlier fragment at the head of the
+ * ring first.
+ *
+ * The wrapped fragment starts at some block offset in the page array.
+ * The hacky page array math only works when our fixed 4k block size ==
+ * page_size.  To fix it we'd add a offset block to the bio submit loop
+ * which could add an initial partial page vec to the bios.
  */
 int scoutfs_ring_submit_write(struct super_block *sb,
 			      struct scoutfs_bio_completion *comp)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_RING_INFO(sb, rinf);
+	u64 first_blocks;
 	u64 head_blocks;
-	u64 blocks;
-	u64 blkno;
-	u64 ind;
+	u64 first;
+	u64 last;
 
 	if (!rinf->nr_blocks)
 		return 0;
@@ -108,37 +127,33 @@ int scoutfs_ring_submit_write(struct super_block *sb,
 	if (rinf->space)
 		finish_block(rinf->ring, rinf->space);
 
-	ind = le64_to_cpu(super->ring_tail_index) + 1;
-	blocks = rinf->nr_blocks;
-	blkno = le64_to_cpu(super->ring_blkno) + ind;
+	/* first and last ring block indexes that will be written */
+	first = ring_ind_wrap(super, le64_to_cpu(super->ring_tail_index) + 1);
+	last = ring_ind_wrap(super, first + rinf->nr_blocks - 1);
 
-	/*
-	 * If the log wrapped then we have to write two fragments to the
-	 * tail and head of the ring.  We submit the head fragment
-	 * first.
-	 *
-	 * The head fragment starts at some block offset in the
-	 * preallocated pages.  This hacky page math only works when our
-	 * 4k blocks size == page_size.  To fix it we'd add a offset
-	 * block to the bio submit loop which could add an initial
-	 * partial page vec to the bios.
-	 */
-	BUILD_BUG_ON(SCOUTFS_BLOCK_SIZE != PAGE_SIZE);
+	/* number of blocks to write from first index and from head of ring */
+	first_blocks = min(last - first + 1,
+		           le64_to_cpu(super->ring_blocks) - first);
+	if (last < first)
+		head_blocks = last + 1;
+	else
+		head_blocks = 0;
 
-	if (ind + blocks > le64_to_cpu(super->ring_blocks)) {
-		head_blocks = (ind + blocks) - le64_to_cpu(super->ring_blocks);
-		blocks -= head_blocks;
-		scoutfs_bio_submit_comp(sb, WRITE, rinf->pages + blocks,
+	if (head_blocks) {
+		BUILD_BUG_ON(SCOUTFS_BLOCK_SIZE != PAGE_SIZE);
+		scoutfs_bio_submit_comp(sb, WRITE, rinf->pages + first_blocks,
 					le64_to_cpu(super->ring_blkno),
 					head_blocks, comp);
 	}
 
-	scoutfs_bio_submit_comp(sb, WRITE, rinf->pages, blkno, blocks, comp);
+	scoutfs_bio_submit_comp(sb, WRITE, rinf->pages,
+				le64_to_cpu(super->ring_blkno) + first,
+				first_blocks, comp);
 
-	ind += blocks;
-	if (ind == le64_to_cpu(super->ring_blocks))
-		ind = 0;
-	super->ring_tail_index = cpu_to_le64(ind);
+	/* record new tail index in super and reset for next trans */
+	super->ring_tail_index = cpu_to_le64(last);
+	rinf->nr_blocks = 0;
+	rinf->space = 0;
 
 	return 0;
 }

@@ -50,11 +50,15 @@ int scoutfs_kvec_memcmp(struct kvec *a, struct kvec *b)
 			return ret;
 
 		b_off += len;
-		if (b_off == b->iov_len)
+		if (b_off == b->iov_len) {
 			b++;
+			b_off = 0;
+		}
 		a_off += len;
-		if (a_off == a->iov_len)
+		if (a_off == a->iov_len) {
 			a++;
+			a_off = 0;
+		}
 	}
 
 	return a->iov_base ? 1 : b->iov_base ? -1 : 0;
@@ -102,11 +106,15 @@ int scoutfs_kvec_memcpy(struct kvec *dst, struct kvec *src)
 		copied += len;
 
 		src_off += len;
-		if (src_off == src->iov_len)
+		if (src_off == src->iov_len) {
 			src++;
+			src_off = 0;
+		}
 		dst_off += len;
-		if (dst_off == dst->iov_len)
+		if (dst_off == dst->iov_len) {
 			dst++;
+			dst_off = 0;
+		}
 	}
 
 	return copied;

@@ -549,6 +549,8 @@ static struct cached_item *first_dirty(struct rb_node *node)
 			break;
 		} else if (item->dirty & RIGHT_DIRTY) {
 			node = item->node.rb_right;
+		} else {
+			break;
 		}
 	}
 

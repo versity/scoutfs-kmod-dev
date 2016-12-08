@@ -122,17 +122,19 @@ static struct cached_item *insert_item(struct rb_root *root,
 		item = container_of(*node, struct cached_item, node);
 
 		cmp = scoutfs_kvec_memcmp(ins->key, item->key);
+		if (cmp == 0) {
+			BUG_ON(existing);
+			existing = item;
+		}
+
 		if (cmp < 0) {
 			if (ins->dirty)
 				item->dirty |= LEFT_DIRTY;
 			node = &(*node)->rb_left;
-		} else if (cmp > 0) {
+		} else {
 			if (ins->dirty)
 				item->dirty |= RIGHT_DIRTY;
 			node = &(*node)->rb_right;
-		} else {
-			existing = item;
-			break;
 		}
 	}
 
@@ -376,7 +378,7 @@ static int add_item(struct super_block *sb, struct kvec *key, struct kvec *val,
 	existing = insert_item(&cac->root, item);
 	if (existing) {
 		clear_item_dirty(cac, existing);
-		rb_erase_augmented(&item->node, &cac->root,
+		rb_erase_augmented(&existing->node, &cac->root,
 				   &scoutfs_item_rb_cb);
 	}
 	mark_item_dirty(cac, item);

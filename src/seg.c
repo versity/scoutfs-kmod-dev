@@ -474,6 +474,10 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 	u32 key_off;
 	u32 val_off;
 
+	/* XXX the segment block header is a mess, be better */
+	sblk->segno = cpu_to_le64(seg->segno);
+	sblk->max_seq = cpu_to_le64(1);
+
 	key_off = pos_off(seg, nr_items);
 	val_off = key_off + key_bytes;
 

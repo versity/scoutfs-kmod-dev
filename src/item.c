@@ -706,6 +706,7 @@ void scoutfs_item_destroy(struct super_block *sb)
 		for (node = rb_first(&cac->root); node; ) {
 			item = container_of(node, struct cached_item, node);
 			node = rb_next(node);
+			rb_erase(&item->node, &cac->root);
 			free_item(item);
 		}
 

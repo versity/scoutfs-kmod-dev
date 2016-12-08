@@ -285,8 +285,8 @@ int scoutfs_item_next_same_min(struct super_block *sb, struct kvec *key,
 static void free_item(struct cached_item *item)
 {
 	if (!IS_ERR_OR_NULL(item)) {
-		scoutfs_kvec_kfree(item->val);
 		scoutfs_kvec_kfree(item->key);
+		scoutfs_kvec_kfree(item->val);
 		kfree(item);
 	}
 }

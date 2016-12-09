@@ -625,8 +625,8 @@ long scoutfs_item_dirty_bytes(struct super_block *sb)
 
 	spin_unlock_irqrestore(&cac->lock, flags);
 
-	bytes += DIV_ROUND_UP(bytes, sizeof(struct scoutfs_segment_block)) *
-			sizeof(struct scoutfs_segment_block);
+	bytes += DIV_ROUND_UP(bytes, SCOUTFS_SEGMENT_SIZE) *
+		 sizeof(struct scoutfs_segment_block);
 
 	return bytes;
 }

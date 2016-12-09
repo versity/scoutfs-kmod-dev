@@ -83,7 +83,7 @@ struct scoutfs_ioctl_ino_path {
 #define SCOUTFS_IOC_INODE_DATA_SINCE _IOW(SCOUTFS_IOCTL_MAGIC, 3, \
 					  struct scoutfs_ioctl_inodes_since)
 
-#define SCOUTFS_IOC_DATA_VERSION _IOW(SCOUTFS_IOCTL_MAGIC, 4, u64)
+#define SCOUTFS_IOC_DATA_VERSION _IOW(SCOUTFS_IOCTL_MAGIC, 4, __u64)
 
 struct scoutfs_ioctl_release {
 	__u64 offset;

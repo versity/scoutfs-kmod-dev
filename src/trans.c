@@ -157,6 +157,11 @@ static int write_attempted(struct scoutfs_sb_info *sbi,
 	return done;
 }
 
+static void queue_trans_work(struct scoutfs_sb_info *sbi)
+{
+	queue_work(sbi->trans_write_workq, &sbi->trans_write_work);
+}
+
 /*
  * sync records the current dirty seq and write count and waits for
  * either to change.  If there's nothing to write or the write returned
@@ -170,7 +175,7 @@ int scoutfs_sync_fs(struct super_block *sb, int wait)
 	int ret;
 
 	if (!wait) {
-		schedule_work(&sbi->trans_write_work);
+		queue_trans_work(sbi);
 		return 0;
 	}
 
@@ -179,7 +184,7 @@ int scoutfs_sync_fs(struct super_block *sb, int wait)
 	attempt.count = sbi->trans_write_count;
 	spin_unlock(&sbi->trans_write_lock);
 
-	schedule_work(&sbi->trans_write_work);
+	queue_trans_work(sbi);
 
 	ret = wait_event_interruptible(sbi->trans_write_wq,
 				       write_attempted(sbi, &attempt));

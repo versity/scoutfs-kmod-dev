@@ -425,7 +425,7 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key)
 			}
 
 			/* remember new least key */
-			scoutfs_kvec_clone(found_key, key);
+			scoutfs_kvec_clone(found_key, item_key);
 			scoutfs_kvec_clone(found_val, item_val);
 			found = true;
 			had_found = 0;

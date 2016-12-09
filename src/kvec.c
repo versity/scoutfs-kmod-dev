@@ -31,6 +31,48 @@
 #include "kvec.h"
 #include "scoutfs_trace.h"
 
+struct iter {
+	struct kvec *kvec;
+	size_t off;
+	size_t i;
+};
+
+static void iter_advance(struct iter *iter, size_t len)
+{
+	iter->off += len;
+
+	while (iter->i < SCOUTFS_KVEC_NR && iter->off >= iter->kvec->iov_len) {
+		iter->off -= iter->kvec->iov_len;
+		iter->kvec++;
+		iter->i++;
+	}
+}
+
+static void iter_init(struct iter *iter, struct kvec *kvec)
+{
+	iter->kvec = kvec;
+	iter->i = 0;
+	iter->off = 0;
+
+	iter_advance(iter, 0);
+}
+
+static void *iter_ptr(struct iter *iter)
+{
+	if (iter->i < SCOUTFS_KVEC_NR)
+		return iter->kvec->iov_base + iter->off;
+	else
+		return NULL;
+}
+
+static size_t iter_contig(struct iter *iter)
+{
+	if (iter->i < SCOUTFS_KVEC_NR)
+		return iter->kvec->iov_len - iter->off;
+	else
+		return 0;
+}
+
 /*
  * Return the result of memcmp between the min of the two total lengths.
  * If their shorter lengths are equal than the shorter length is considered
@@ -38,30 +80,24 @@
  */
 int scoutfs_kvec_memcmp(struct kvec *a, struct kvec *b)
 {
-	int b_off = 0;
-	int a_off = 0;
-	int len;
+	struct iter a_iter;
+	struct iter b_iter;
+	size_t len;
 	int ret;
 
-	while (a->iov_base && b->iov_base) {
-		len = min(a->iov_len - a_off, b->iov_len - b_off);
-		ret = memcmp(a->iov_base + a_off, b->iov_base + b_off, len);
+	iter_init(&a_iter, a);
+	iter_init(&b_iter, b);
+
+	while ((len = min(iter_contig(&a_iter), iter_contig(&b_iter)))) {
+		ret = memcmp(iter_ptr(&a_iter), iter_ptr(&b_iter), len);
 		if (ret)
 			return ret;
 
-		b_off += len;
-		if (b_off == b->iov_len) {
-			b++;
-			b_off = 0;
-		}
-		a_off += len;
-		if (a_off == a->iov_len) {
-			a++;
-			a_off = 0;
-		}
+		iter_advance(&a_iter, len);
+		iter_advance(&b_iter, len);
 	}
 
-	return a->iov_base ? 1 : b->iov_base ? -1 : 0;
+	return iter_contig(&a_iter) ? 1 : iter_contig(&b_iter) ? -1 : 0;
 }
 
 /*
@@ -84,7 +120,7 @@ void scoutfs_kvec_clone(struct kvec *dst, struct kvec *src)
 	int i;
 
 	for (i = 0; i < SCOUTFS_KVEC_NR; i++)
-		*(dst++) = *(src++);
+		dst[i] = src[i];
 }
 
 /*
@@ -94,27 +130,20 @@ void scoutfs_kvec_clone(struct kvec *dst, struct kvec *src)
  */
 int scoutfs_kvec_memcpy(struct kvec *dst, struct kvec *src)
 {
-	int src_off = 0;
-	int dst_off = 0;
-	int copied = 0;
-	int len;
+	struct iter dst_iter;
+	struct iter src_iter;
+	size_t copied = 0;
+	size_t len;
 
-	while (dst->iov_base && src->iov_base) {
-		len = min(dst->iov_len - dst_off, src->iov_len - src_off);
-		memcpy(dst->iov_base + dst_off, src->iov_base + src_off, len);
+	iter_init(&dst_iter, dst);
+	iter_init(&src_iter, src);
+
+	while ((len = min(iter_contig(&dst_iter), iter_contig(&src_iter)))) {
+		memcpy(iter_ptr(&dst_iter), iter_ptr(&src_iter), len);
 
 		copied += len;
-
-		src_off += len;
-		if (src_off == src->iov_len) {
-			src++;
-			src_off = 0;
-		}
-		dst_off += len;
-		if (dst_off == dst->iov_len) {
-			dst++;
-			dst_off = 0;
-		}
+		iter_advance(&dst_iter, len);
+		iter_advance(&src_iter, len);
 	}
 
 	return copied;
@@ -161,25 +190,28 @@ int scoutfs_kvec_dup_flatten(struct kvec *dst, struct kvec *src)
 }
 
 /*
- * Free all the set pointers in the kvec.  The pointer values aren't modified
- * if they're freed.
+ * Free all the set pointers in the kvec.
  */
 void scoutfs_kvec_kfree(struct kvec *kvec)
 {
-	while (kvec->iov_base)
-		kfree((kvec++)->iov_base);
+	int i;
+
+	for (i = 0; i < SCOUTFS_KVEC_NR; i++) {
+		kfree(kvec[i].iov_base);
+		kvec[i].iov_base = NULL;
+	}
 }
 
 void scoutfs_kvec_init_null(struct kvec *kvec)
 {
-	memset(kvec, 0, SCOUTFS_KVEC_NR * sizeof(kvec[0]));
+	memset(kvec, 0, SCOUTFS_KVEC_BYTES);
 }
 
 void scoutfs_kvec_swap(struct kvec *a, struct kvec *b)
 {
 	SCOUTFS_DECLARE_KVEC(tmp);
 
-	memcpy(tmp, a, sizeof(tmp));
-	memcpy(a, b, sizeof(tmp));
-	memcpy(b, tmp, sizeof(tmp));
+	memcpy(tmp, a, SCOUTFS_KVEC_BYTES);
+	memcpy(a, b, SCOUTFS_KVEC_BYTES);
+	memcpy(b, tmp, SCOUTFS_KVEC_BYTES);
 }

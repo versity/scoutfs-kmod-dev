@@ -11,7 +11,8 @@
 /*
  * This ends up defining the max item size as nr - 1 * page _size.
  */
-#define SCOUTFS_KVEC_NR 4
+#define SCOUTFS_KVEC_NR 2
+#define SCOUTFS_KVEC_BYTES (SCOUTFS_KVEC_NR * sizeof(struct kvec))
 
 #define SCOUTFS_DECLARE_KVEC(name) \
 	struct kvec name[SCOUTFS_KVEC_NR]
@@ -19,19 +20,14 @@
 static inline void scoutfs_kvec_init_all(struct kvec *kvec,
 					 void *ptr0, size_t len0,
 					 void *ptr1, size_t len1,
-					 void *ptr2, size_t len2,
-					 void *ptr3, size_t len3, ...)
+					 void *ptr2, ...)
 {
-	BUG_ON(ptr3 != NULL);
+	BUG_ON(ptr2 != NULL);
 
 	kvec[0].iov_base = ptr0;
 	kvec[0].iov_len = len0;
 	kvec[1].iov_base = ptr1;
 	kvec[1].iov_len = len1;
-	kvec[2].iov_base = ptr2;
-	kvec[2].iov_len = len2;
-	kvec[3].iov_base = ptr3;
-	kvec[3].iov_len = len3;
 }
 
 /*
@@ -43,7 +39,7 @@ static inline void scoutfs_kvec_init_all(struct kvec *kvec,
  * arguments in the static inline.
  */
 #define scoutfs_kvec_init(val, ...) \
-	scoutfs_kvec_init_all(val, __VA_ARGS__, NULL, 0, NULL, 0, NULL, 0)
+	scoutfs_kvec_init_all(val, __VA_ARGS__, NULL, 0, NULL, 0)
 
 static inline int scoutfs_kvec_length(struct kvec *kvec)
 {

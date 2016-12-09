@@ -71,8 +71,8 @@ int scoutfs_kvec_memcmp(struct kvec *a, struct kvec *b)
 int scoutfs_kvec_cmp_overlap(struct kvec *a, struct kvec *b,
 			     struct kvec *c, struct kvec *d)
 {
-	return scoutfs_kvec_memcmp(a, c) < 0 ? -1 :
-	       scoutfs_kvec_memcmp(b, d) > 0 ? 1 : 0;
+	return scoutfs_kvec_memcmp(b, c) < 0 ? -1 :
+	       scoutfs_kvec_memcmp(a, d) > 0 ? 1 : 0;
 }
 
 /*

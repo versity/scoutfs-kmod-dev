@@ -68,7 +68,7 @@ void scoutfs_ring_append(struct super_block *sb,
 	struct scoutfs_ring_block *ring = rinf->ring;
 	unsigned int len = le16_to_cpu(eh->len);
 
-	if (rinf->space < len) {
+	if (rinf->space < (len + sizeof(struct scoutfs_ring_entry_header))) {
 		if (rinf->space)
 			finish_block(ring, rinf->space);
 		ring = scoutfs_page_block_address(rinf->pages, rinf->nr_blocks);
@@ -79,8 +79,7 @@ void scoutfs_ring_append(struct super_block *sb,
 		rinf->nr_blocks++;
 		rinf->next_eh = ring->entries;
 		rinf->space = SCOUTFS_BLOCK_SIZE -
-			      offsetof(struct scoutfs_ring_block, entries) -
-			      sizeof(struct scoutfs_ring_entry_header);
+			      offsetof(struct scoutfs_ring_block, entries);
 	}
 
 	memcpy(rinf->next_eh, eh, len);

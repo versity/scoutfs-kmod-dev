@@ -258,15 +258,15 @@ int scoutfs_ring_read(struct super_block *sb)
 		part = min3(nr, (u64)NR_BLOCKS,
 			   le64_to_cpu(super->ring_blocks) - index);
 
-		trace_printk("index %llu nr %llu\n", index, nr);
+		trace_printk("index %llu part %llu\n", index, part);
 
-		ret = scoutfs_bio_read(sb, pages, blkno, nr);
+		ret = scoutfs_bio_read(sb, pages, blkno, part);
 		if (ret)
 			goto out;
 
 		/* XXX verify block header */
 
-		for (i = 0; i < nr; i++) {
+		for (i = 0; i < part; i++) {
 			ring = scoutfs_page_block_address(pages, i);
 			ret = read_entries(sb, ring);
 			if (ret)

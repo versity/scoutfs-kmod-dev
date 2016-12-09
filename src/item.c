@@ -348,6 +348,17 @@ static void free_item(struct cached_item *item)
 	}
 }
 
+/*
+ * The caller has changed an item's dirty bit.  Its child dirty bits are
+ * still consistent.  But its parent's bits might need to be updated.
+ * Its bits are consistent so we don't propagate from the node itself
+ * because it would immediately terminate.
+ */
+static void update_dirty_parents(struct cached_item *item)
+{
+	scoutfs_item_rb_propagate(rb_parent(&item->node), NULL);
+}
+
 static void mark_item_dirty(struct item_cache *cac,
 			    struct cached_item *item)
 {
@@ -362,7 +373,7 @@ static void mark_item_dirty(struct item_cache *cac,
 	cac->dirty_key_bytes += scoutfs_kvec_length(item->key);
 	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
 
-	scoutfs_item_rb_propagate(&item->node, NULL);
+	update_dirty_parents(item);
 }
 
 static void clear_item_dirty(struct item_cache *cac,
@@ -382,7 +393,7 @@ static void clear_item_dirty(struct item_cache *cac,
 	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||
 		     cac->dirty_val_bytes < 0);
 
-	scoutfs_item_rb_propagate(&item->node, NULL);
+	update_dirty_parents(item);
 }
 
 /*

@@ -213,6 +213,7 @@ struct scoutfs_key {
 #define SCOUTFS_SYMLINK_KEY		8
 #define SCOUTFS_EXTENT_KEY		9
 #define SCOUTFS_ORPHAN_KEY		10
+#define SCOUTFS_MAX_UNUSED_KEY		255
 
 #define SCOUTFS_MAX_ITEM_LEN 512
 
@@ -440,5 +441,8 @@ struct scoutfs_link_backref {
 	__le64 ino;
 	__le64 offset;
 } __packed;
+
+#define SCOUTFS_MAX_KEY_SIZE \
+	offsetof(struct scoutfs_dirent_key, name[SCOUTFS_NAME_LEN])
 
 #endif

@@ -62,5 +62,11 @@ int scoutfs_kvec_dup_flatten(struct kvec *dst, struct kvec *src);
 void scoutfs_kvec_kfree(struct kvec *kvec);
 void scoutfs_kvec_init_null(struct kvec *kvec);
 void scoutfs_kvec_swap(struct kvec *a, struct kvec *b);
+int scoutfs_kvec_alloc_key(struct kvec *kvec);
+void scoutfs_kvec_init_key(struct kvec *kvec);
+void scoutfs_kvec_set_max_key(struct kvec *kvec);
+void scoutfs_kvec_clone_less(struct kvec *dst, struct kvec *src);
+unsigned scoutfs_kvec_key_strlen(struct kvec *key);
+void scoutfs_kvec_key_sprintf(char *buf, struct kvec *key);
 
 #endif

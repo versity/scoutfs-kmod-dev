@@ -22,10 +22,22 @@
 #include "manifest.h"
 #include "item.h"
 #include "seg.h"
+#include "scoutfs_trace.h"
+
+/*
+ * A simple rbtree of cached items isolates the item API callers from
+ * the relatively expensive segment searches.
+ *
+ * The item cache uses an rbtree of key ranges to record regions of keys
+ * that are completely described by the items.  This lets it return
+ * negative lookups cache hits for items that don't exist without having
+ * to constantly perform expensive segment searches.
+ */
 
 struct item_cache {
 	spinlock_t lock;
-	struct rb_root root;
+	struct rb_root items;
+	struct rb_root ranges;
 
 	long nr_dirty_items;
 	long dirty_key_bytes;
@@ -35,36 +47,75 @@ struct item_cache {
 /*
  * The dirty bits track if the given item is dirty and if its child
  * subtrees contain any dirty items.
+ *
+ * The entry is only used when the items are in a private batch list
+ * before insertion.
  */
 struct cached_item {
-	struct rb_node node;
+	union {
+		struct rb_node node;
+		struct list_head entry;
+	};
 	long dirty;
 
 	SCOUTFS_DECLARE_KVEC(key);
 	SCOUTFS_DECLARE_KVEC(val);
 };
 
-static struct cached_item *find_item(struct rb_root *root, struct kvec *key)
+struct cached_range {
+	struct rb_node node;
+
+	SCOUTFS_DECLARE_KVEC(start);
+	SCOUTFS_DECLARE_KVEC(end);
+};
+
+/*
+ * Walk the item rbtree and return the item found and the next and
+ * prev items.
+ */
+static struct cached_item *walk_items(struct rb_root *root, struct kvec *key,
+				      struct cached_item **prev,
+				      struct cached_item **next)
 {
 	struct rb_node *node = root->rb_node;
-	struct rb_node *parent = NULL;
 	struct cached_item *item;
 	int cmp;
 
+	*prev = NULL;
+	*next = NULL;
+
 	while (node) {
-		parent = node;
 		item = container_of(node, struct cached_item, node);
 
 		cmp = scoutfs_kvec_memcmp(key, item->key);
-		if (cmp < 0)
+		if (cmp < 0) {
+			*next = item;
 			node = node->rb_left;
-		else if (cmp > 0)
+		} else if (cmp > 0) {
+			*prev = item;
 			node = node->rb_right;
-		else
+		} else {
 			return item;
+		}
 	}
 
 	return NULL;
+}
+
+static struct cached_item *find_item(struct rb_root *root, struct kvec *key)
+{
+	struct cached_item *prev;
+	struct cached_item *next;
+
+	return walk_items(root, key, &prev, &next);
+}
+
+static struct cached_item *next_item(struct rb_root *root, struct kvec *key)
+{
+	struct cached_item *prev;
+	struct cached_item *next;
+
+	return walk_items(root, key, &prev, &next) ?: next;
 }
 
 /*
@@ -159,16 +210,13 @@ static const struct rb_augment_callbacks scoutfs_item_rb_cb  = {
 };
 
 /*
- * Always insert the given item.  If there's an existing item it is
- * returned.  This can briefly leave duplicate items in the tree until
- * the caller removes the existing item.
+ * Try to insert the given item.  If there's already an item with the
+ * insertion key then return -EEXIST.
  */
-static struct cached_item *insert_item(struct rb_root *root,
-				       struct cached_item *ins)
+static int insert_item(struct rb_root *root, struct cached_item *ins)
 {
 	struct rb_node **node = &root->rb_node;
 	struct rb_node *parent = NULL;
-	struct cached_item *existing = NULL;
 	struct cached_item *item;
 	int cmp;
 
@@ -177,57 +225,176 @@ static struct cached_item *insert_item(struct rb_root *root,
 		item = container_of(*node, struct cached_item, node);
 
 		cmp = scoutfs_kvec_memcmp(ins->key, item->key);
-		if (cmp == 0) {
-			BUG_ON(existing);
-			existing = item;
-		}
-
 		if (cmp < 0) {
 			if (ins->dirty)
 				item->dirty |= LEFT_DIRTY;
 			node = &(*node)->rb_left;
-		} else {
+		} else if (cmp > 0) {
 			if (ins->dirty)
 				item->dirty |= RIGHT_DIRTY;
 			node = &(*node)->rb_right;
+		} else {
+			return -EEXIST;
 		}
 	}
 
 	rb_link_node(&ins->node, parent, node);
 	rb_insert_augmented(&ins->node, root, &scoutfs_item_rb_cb);
 
-	return existing;
+	return 0;
+}
+
+/*
+ * Return true if the given key is covered by a cached range.  end is
+ * set to the end of the cached range.
+ *
+ * Return false if the given key isn't covered by a cached range and is
+ * instead in an uncached hole.  end is set to the start of the next
+ * cached range.
+ */
+static bool check_range(struct rb_root *root, struct kvec *key,
+		        struct kvec *end)
+{
+	struct rb_node *node = root->rb_node;
+	struct cached_range *next = NULL;
+	struct cached_range *rng;
+	int cmp;
+
+	while (node) {
+		rng = container_of(node, struct cached_range, node);
+
+		cmp = scoutfs_kvec_cmp_overlap(key, key,
+					       rng->start, rng->end);
+		if (cmp < 0) {
+			next = rng;
+			node = node->rb_left;
+		} else if (cmp > 0) {
+			node = node->rb_right;
+		} else {
+			scoutfs_kvec_memcpy_truncate(end, rng->end);
+			return true;
+		}
+	}
+
+	if (next)
+		scoutfs_kvec_memcpy_truncate(end, next->start);
+	else
+		scoutfs_kvec_set_max_key(end);
+
+	return false;
+}
+
+static void free_range(struct cached_range *rng)
+{
+	if (!IS_ERR_OR_NULL(rng)) {
+		scoutfs_kvec_kfree(rng->start);
+		scoutfs_kvec_kfree(rng->end);
+		kfree(rng);
+	}
+}
+
+/*
+ * Insert a new cached range.  It might overlap with any number of
+ * existing cached ranges.  As we descend we combine with and free any
+ * overlapping ranges before restarting the descent.
+ *
+ * We're responsible for the ins allocation.  We free it if we don't
+ * insert it in the tree.
+ */
+static void insert_range(struct rb_root *root, struct cached_range *ins)
+{
+	struct cached_range *rng;
+	struct rb_node *parent;
+	struct rb_node **node;
+	int start_cmp;
+	int end_cmp;
+	int cmp;
+
+restart:
+	parent = NULL;
+	node = &root->rb_node;
+	while (*node) {
+		parent = *node;
+		rng = container_of(*node, struct cached_range, node);
+
+		cmp = scoutfs_kvec_cmp_overlap(ins->start, ins->end,
+					       rng->start, rng->end);
+		/* simple iteration until we overlap */
+		if (cmp < 0) {
+			node = &(*node)->rb_left;
+			continue;
+		} else if (cmp > 0) {
+			node = &(*node)->rb_right;
+			continue;
+		}
+
+		start_cmp = scoutfs_kvec_memcmp(ins->start, rng->start);
+		end_cmp = scoutfs_kvec_memcmp(ins->end, rng->end);
+
+		/* free our insertion if we're entirely within an existing */
+		if (start_cmp >= 0 && end_cmp <= 0) {
+			free_range(ins);
+			return;
+		}
+
+		/* expand to cover partial overlap before freeing */
+		if (start_cmp < 0 && end_cmp < 0)
+			scoutfs_kvec_swap(ins->end, rng->end);
+		else if (start_cmp > 0 && end_cmp > 0)
+			scoutfs_kvec_swap(ins->start, rng->start);
+
+		/* remove and free all overlaps and restart the descent */
+		rb_erase(&rng->node, root);
+		free_range(rng);
+		goto restart;
+	}
+
+	rb_link_node(&ins->node, parent, node);
+	rb_insert_color(&ins->node, root);
 }
 
 /*
  * Find an item with the given key and copy its value into the caller's
- * value vector.  The amount of bytes copied is returned which can be
- * 0 or truncated if the caller's buffer isn't big enough.
+ * value vector.  The amount of bytes copied is returned which can be 0
+ * or truncated if the caller's buffer isn't big enough.
  */
 int scoutfs_item_lookup(struct super_block *sb, struct kvec *key,
 			struct kvec *val)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
+	SCOUTFS_DECLARE_KVEC(end);
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
 
+	trace_scoutfs_item_lookup(sb, key, val);
+
+	ret = scoutfs_kvec_alloc_key(end);
+	if (ret)
+		goto out;
+
 	do {
+		scoutfs_kvec_init_key(end);
+
 		spin_lock_irqsave(&cac->lock, flags);
 
-		item = find_item(&cac->root, key);
+		item = find_item(&cac->items, key);
 		if (item)
 			ret = scoutfs_kvec_memcpy(val, item->val);
-		else
+		else if (check_range(&cac->ranges, key, end))
 			ret = -ENOENT;
+		else
+			ret = -ENODATA;
 
 		spin_unlock_irqrestore(&cac->lock, flags);
 
-	} while (!item && ((ret = scoutfs_manifest_read_items(sb, key)) == 0));
+	} while (ret == -ENODATA &&
+		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
+	scoutfs_kvec_kfree(end);
+out:
 	trace_printk("ret %d\n", ret);
-
 	return ret;
 }
 
@@ -256,59 +423,98 @@ int scoutfs_item_lookup_exact(struct super_block *sb, struct kvec *key,
 }
 
 /*
- * Return the next cached item starting with the given key.
+ * Return the next item starting with the given key, returning the last
+ * key at the most.
  *
- * -ENOENT is returned if there are no cached items past the given key.
- * If the last key is specified then -ENOENT is returned if there are no
- * cached items up until that last key, inclusive.
+ * -ENOENT is returned if there are no items between the given and last
+ * keys.
  *
- * The found key is copied to the caller's key.  -ENOBUFS is returned if
- * the found key didn't fit in the caller's key.
+ * The next item's key is copied to the caller's key.  -ENOBUFS is
+ * returned if the item's key didn't fit in the caller's key.
  *
- * The found value is copied into the callers value.  The number of
- * value bytes copied is returned.  The copied value can be truncated by
- * the caller's value buffer length.
+ * The next item's value is copied into the callers value.  The number
+ * of value bytes copied is returned.  The copied value can be truncated
+ * by the caller's value buffer length.
  */
 int scoutfs_item_next(struct super_block *sb, struct kvec *key,
 		      struct kvec *last, struct kvec *val)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
+	SCOUTFS_DECLARE_KVEC(read_start);
+	SCOUTFS_DECLARE_KVEC(read_end);
+	SCOUTFS_DECLARE_KVEC(range_end);
 	struct cached_item *item;
 	unsigned long flags;
+	bool cached;
 	int ret;
 
-	/*
-	 * This partial copy and paste of lookup is stubbed out for now.
-	 * we'll want the negative caching fixes to be able to iterate
-	 * without constantly searching the manifest between cached
-	 * items.
-	 */
-	return -EINVAL;
+	/* convenience to avoid searching if caller iterates past their last */
+	if (scoutfs_kvec_length(key) > scoutfs_kvec_length(last)) {
+		ret = -ENOENT;
+		goto out;
+	}
 
-	do {
-		spin_lock_irqsave(&cac->lock, flags);
+	ret = scoutfs_kvec_alloc_key(range_end);
+	if (ret)
+		goto out;
 
-		item = find_item(&cac->root, key);
-		if (!item) {
-			ret = -ENOENT;
-		} else if (scoutfs_kvec_length(item->key) >
-			   scoutfs_kvec_length(key)) {
-			ret = -ENOBUFS;
-		} else {
+	spin_lock_irqsave(&cac->lock, flags);
+
+	for(;;) {
+		scoutfs_kvec_init_key(range_end);
+
+		/* see if we have a usable item in cache and before last */
+		cached = check_range(&cac->ranges, key, range_end);
+
+		if (cached && (item = next_item(&cac->items, key)) &&
+		    scoutfs_kvec_memcmp(item->key, range_end) <= 0 &&
+		    scoutfs_kvec_memcmp(item->key, last) <= 0) {
+
+			if (scoutfs_kvec_length(item->key) >
+			    scoutfs_kvec_length(key)) {
+				ret = -ENOBUFS;
+				break;
+			}
+
 			scoutfs_kvec_memcpy_truncate(key, item->key);
 			if (val)
 				ret = scoutfs_kvec_memcpy(val, item->val);
 			else
 				ret = 0;
+			break;
+		}
+
+		if (!cached) {
+			/* missing cache starts at key */
+			scoutfs_kvec_clone(read_start, key);
+			scoutfs_kvec_clone(read_end, range_end);
+
+		} else if (scoutfs_kvec_memcmp(range_end, last) < 0) {
+			/* missing cache starts at range_end */
+			scoutfs_kvec_clone(read_start, range_end);
+			scoutfs_kvec_clone(read_end, last);
+
+		} else {
+			/* no items and we have cache between key and last */
+			ret = -ENOENT;
+			break;
 		}
 
 		spin_unlock_irqrestore(&cac->lock, flags);
 
-	} while (!item && ((ret = scoutfs_manifest_read_items(sb, key)) == 0));
+		ret = scoutfs_manifest_read_items(sb, read_start, read_end);
 
+		spin_lock_irqsave(&cac->lock, flags);
+		if (ret)
+			break;
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	scoutfs_kvec_kfree(range_end);
+out:
 	trace_printk("ret %d\n", ret);
-
 	return ret;
 }
 
@@ -396,94 +602,188 @@ static void clear_item_dirty(struct item_cache *cac,
 	update_dirty_parents(item);
 }
 
-/*
- * Add an item with the key and value to the item cache.  The new item
- * is clean.  Any existing item at the key will be removed and freed.
- */
-static int add_item(struct super_block *sb, struct kvec *key, struct kvec *val,
-		    bool dirty)
+static struct cached_item *alloc_item(struct kvec *key, struct kvec *val)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct item_cache *cac = sbi->item_cache;
-	struct cached_item *existing;
 	struct cached_item *item;
-	unsigned long flags;
-	int ret;
 
 	item = kzalloc(sizeof(struct cached_item), GFP_NOFS);
-	if (!item)
-		return -ENOMEM;
-
-	ret = scoutfs_kvec_dup_flatten(item->key, key) ?:
-	      scoutfs_kvec_dup_flatten(item->val, val);
-	if (ret) {
-		free_item(item);
-		return ret;
+	if (item) {
+		if (scoutfs_kvec_dup_flatten(item->key, key) ||
+		    scoutfs_kvec_dup_flatten(item->val, val)) {
+			free_item(item);
+			item = NULL;
+		}
 	}
 
-	spin_lock_irqsave(&cac->lock, flags);
-	existing = insert_item(&cac->root, item);
-	if (existing) {
-		clear_item_dirty(cac, existing);
-		rb_erase_augmented(&existing->node, &cac->root,
-				   &scoutfs_item_rb_cb);
-	}
-	if (dirty)
-		mark_item_dirty(cac, item);
-	spin_unlock_irqrestore(&cac->lock, flags);
-	free_item(existing);
-
-	return 0;
+	return item;
 }
 
 /*
- * Add a clean item to the cache.  This is used to populate items while
- * reading segments.
- */
-int scoutfs_item_insert(struct super_block *sb, struct kvec *key,
-		        struct kvec *val)
-{
-	return add_item(sb, key, val, false);
-}
-
-/*
- * Create a new dirty item in the cache.
+ * Create a new dirty item in the cache.  Returns -EEXIST if an item
+ * already exists with the given key.
+ *
+ * XXX but it doesn't read.. is that weird?  Seems weird.
  */
 int scoutfs_item_create(struct super_block *sb, struct kvec *key,
 		        struct kvec *val)
 {
-	return add_item(sb, key, val, true);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *item;
+	unsigned long flags;
+	int ret;
+
+	item = alloc_item(key, val);
+	if (!item)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&cac->lock, flags);
+	ret = insert_item(&cac->items, item);
+	if (!ret)
+		mark_item_dirty(cac, item);
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	if (ret)
+		free_item(item);
+
+	return ret;
 }
 
 /*
- * If the item with the key exists make sure it's cached and dirty.  -ENOENT
- * will be returned if it doesn't exist.
+ * Allocate an item with the key and value and add it to the list of
+ * items to be inserted as a batch later.  The caller adds in sort order
+ * and we add with _tail to maintain that order.
+ */
+int scoutfs_item_add_batch(struct super_block *sb, struct list_head *list,
+			   struct kvec *key, struct kvec *val)
+{
+	struct cached_item *item;
+	int ret;
+
+	item = alloc_item(key, val);
+	if (item) {
+		list_add_tail(&item->entry, list);
+		ret = 0;
+	} else {
+		ret = -ENOMEM;
+	}
+
+	return ret;
+}
+
+
+/*
+ * Insert a batch of clean read items from segments into the item cache.
+ *
+ * The caller hasn't been locked so the cached items could have changed
+ * since they were asked to read.  If there are duplicates in the item
+ * cache they might be newer than what was read so we must drop them on
+ * the floor.
+ *
+ * The batch atomically adds the items and updates the cached range to
+ * include the callers range that covers the items.
+ *
+ * It's safe to re-add items to the batch list after they aren't
+ * inserted because _safe iteration will always be past the head entry
+ * that will be inserted.
+ */
+int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
+			      struct kvec *start, struct kvec *end)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_range *rng;
+	struct cached_item *item;
+	struct cached_item *tmp;
+	unsigned long flags;
+	int ret;
+
+	trace_scoutfs_item_insert_batch(sb, start, end);
+
+	if (WARN_ON_ONCE(scoutfs_kvec_memcmp(start, end) > 0))
+		return -EINVAL;
+
+	rng = kzalloc(sizeof(struct cached_range), GFP_NOFS);
+	if (rng && (scoutfs_kvec_dup_flatten(rng->start, start) ||
+		    scoutfs_kvec_dup_flatten(rng->end, end))) {
+		free_range(rng);
+		rng = NULL;
+	}
+	if (!rng) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	insert_range(&cac->ranges, rng);
+
+	list_for_each_entry_safe(item, tmp, list, entry) {
+		list_del(&item->entry);
+		if (insert_item(&cac->items, item))
+			list_add(&item->entry, list);
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	ret = 0;
+out:
+	scoutfs_item_free_batch(list);
+	return ret;
+}
+
+void scoutfs_item_free_batch(struct list_head *list)
+{
+	struct cached_item *item;
+	struct cached_item *tmp;
+
+	list_for_each_entry_safe(item, tmp, list, entry) {
+		list_del_init(&item->entry);
+		free_item(item);
+	}
+}
+
+
+/*
+ * If the item exists make sure it's dirty and pinned.  It can be read
+ * if it wasn't cached.  -ENOENT is returned if the item doesn't exist.
  */
 int scoutfs_item_dirty(struct super_block *sb, struct kvec *key)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
+	SCOUTFS_DECLARE_KVEC(end);
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
 
+	ret = scoutfs_kvec_alloc_key(end);
+	if (ret)
+		goto out;
+
 	do {
+		scoutfs_kvec_init_key(end);
+
 		spin_lock_irqsave(&cac->lock, flags);
 
-		item = find_item(&cac->root, key);
+		item = find_item(&cac->items, key);
 		if (item) {
 			mark_item_dirty(cac, item);
 			ret = 0;
-		} else {
+		} else if (check_range(&cac->ranges, key, end)) {
 			ret = -ENOENT;
+		} else {
+			ret = -ENODATA;
 		}
 
 		spin_unlock_irqrestore(&cac->lock, flags);
 
-	} while (!item && ((ret = scoutfs_manifest_read_items(sb, key)) == 0));
+	} while (ret == -ENODATA &&
+		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
+	scoutfs_kvec_kfree(end);
+out:
 	trace_printk("ret %d\n", ret);
-
 	return ret;
 }
 
@@ -499,37 +799,49 @@ int scoutfs_item_update(struct super_block *sb, struct kvec *key,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	SCOUTFS_DECLARE_KVEC(up_val);
+	SCOUTFS_DECLARE_KVEC(end);
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
 
+	ret = scoutfs_kvec_alloc_key(end);
+	if (ret)
+		goto out;
+
 	if (val) {
 		ret = scoutfs_kvec_dup_flatten(up_val, val);
 		if (ret)
-			return -ENOMEM;
+			goto out;
 	} else {
 		scoutfs_kvec_init_null(up_val);
 	}
 
-	spin_lock_irqsave(&cac->lock, flags);
+	do {
+		scoutfs_kvec_init_key(end);
 
-	/* XXX update seq */
-	item = find_item(&cac->root, key);
-	if (item) {
-		/* keep dirty counters in sync */
-		clear_item_dirty(cac, item);
-		scoutfs_kvec_swap(up_val, item->val);
-		mark_item_dirty(cac, item);
-	} else {
-		ret = -ENOENT;
-	}
+		spin_lock_irqsave(&cac->lock, flags);
 
-	spin_unlock_irqrestore(&cac->lock, flags);
+		item = find_item(&cac->items, key);
+		if (item) {
+			clear_item_dirty(cac, item);
+			scoutfs_kvec_swap(up_val, item->val);
+			mark_item_dirty(cac, item);
+			ret = 0;
+		} else if (check_range(&cac->ranges, key, end)) {
+			ret = -ENOENT;
+		} else {
+			ret = -ENODATA;
+		}
 
+		spin_unlock_irqrestore(&cac->lock, flags);
+
+	} while (ret == -ENODATA &&
+		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
+out:
+	scoutfs_kvec_kfree(end);
 	scoutfs_kvec_kfree(up_val);
 
 	trace_printk("ret %d\n", ret);
-
 	return ret;
 }
 
@@ -645,7 +957,7 @@ static void count_seg_items(struct item_cache *cac, u32 *nr_items,
 	*key_bytes = 0;
 	total = sizeof(struct scoutfs_segment_block);
 
-	for (item = first_dirty(cac->root.rb_node); item;
+	for (item = first_dirty(cac->items.rb_node); item;
 	     item = next_dirty(item)) {
 
 		total += sizeof(struct scoutfs_segment_item) +
@@ -676,7 +988,7 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 
 	count_seg_items(cac, &nr_items, &key_bytes);
 	if (nr_items) {
-		item = first_dirty(cac->root.rb_node);
+		item = first_dirty(cac->items.rb_node);
 		scoutfs_seg_first_item(sb, seg, item->key, item->val,
 				       nr_items, key_bytes);
 		clear_item_dirty(cac, item);
@@ -701,7 +1013,8 @@ int scoutfs_item_setup(struct super_block *sb)
 	sbi->item_cache = cac;
 
 	spin_lock_init(&cac->lock);
-	cac->root = RB_ROOT;
+	cac->items = RB_ROOT;
+	cac->ranges = RB_ROOT;
 
 	return 0;
 }
@@ -711,14 +1024,22 @@ void scoutfs_item_destroy(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item;
+	struct cached_range *rng;
 	struct rb_node *node;
 
 	if (cac) {
-		for (node = rb_first(&cac->root); node; ) {
+		for (node = rb_first(&cac->items); node; ) {
 			item = container_of(node, struct cached_item, node);
 			node = rb_next(node);
-			rb_erase(&item->node, &cac->root);
+			rb_erase(&item->node, &cac->items);
 			free_item(item);
+		}
+
+		for (node = rb_first(&cac->ranges); node; ) {
+			rng = container_of(node, struct cached_range, node);
+			node = rb_next(node);
+			rb_erase(&rng->node, &cac->items);
+			free_range(rng);
 		}
 
 		kfree(cac);

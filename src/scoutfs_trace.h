@@ -27,6 +27,7 @@
 
 #include "key.h"
 #include "format.h"
+#include "kvec.h"
 
 struct scoutfs_sb_info;
 
@@ -344,6 +345,57 @@ DEFINE_EVENT(scoutfs_btree_ranged_op, scoutfs_btree_since,
 		 struct scoutfs_key *last),
 
 	TP_ARGS(sb, first, last)
+);
+
+TRACE_EVENT(scoutfs_manifest_add,
+        TP_PROTO(struct super_block *sb, struct kvec *first,
+		 struct kvec *last, u64 segno, u64 seq, u8 level, bool dirty),
+        TP_ARGS(sb, first, last, segno, seq, level, dirty),
+        TP_STRUCT__entry(
+                __dynamic_array(char, first, scoutfs_kvec_key_strlen(first))
+                __dynamic_array(char, last, scoutfs_kvec_key_strlen(last))
+		__field(u64, segno)
+		__field(u64, seq)
+		__field(u8, level)
+		__field(u8, dirty)
+        ),
+        TP_fast_assign(
+		scoutfs_kvec_key_sprintf(__get_dynamic_array(first), first);
+		scoutfs_kvec_key_sprintf(__get_dynamic_array(last), last);
+		__entry->segno = segno;
+		__entry->seq = seq;
+		__entry->level = level;
+		__entry->dirty = dirty;
+        ),
+        TP_printk("first %s last %s segno %llu seq %llu level %u dirty %u",
+		  __get_str(first), __get_str(last), __entry->segno,
+		  __entry->seq, __entry->level, __entry->dirty)
+);
+
+TRACE_EVENT(scoutfs_item_lookup,
+        TP_PROTO(struct super_block *sb, struct kvec *key, struct kvec *val),
+        TP_ARGS(sb, key, val),
+        TP_STRUCT__entry(
+                __dynamic_array(char, key, scoutfs_kvec_key_strlen(key))
+        ),
+        TP_fast_assign(
+		scoutfs_kvec_key_sprintf(__get_dynamic_array(key), key);
+        ),
+        TP_printk("key %s", __get_str(key))
+);
+
+TRACE_EVENT(scoutfs_item_insert_batch,
+        TP_PROTO(struct super_block *sb, struct kvec *start, struct kvec *end),
+        TP_ARGS(sb, start, end),
+        TP_STRUCT__entry(
+                __dynamic_array(char, start, scoutfs_kvec_key_strlen(start))
+                __dynamic_array(char, end, scoutfs_kvec_key_strlen(end))
+        ),
+        TP_fast_assign(
+		scoutfs_kvec_key_sprintf(__get_dynamic_array(start), start);
+		scoutfs_kvec_key_sprintf(__get_dynamic_array(end), end);
+        ),
+        TP_printk("start %s end %s", __get_str(start), __get_str(end))
 );
 
 #endif /* _TRACE_SCOUTFS_H */

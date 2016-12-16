@@ -22,6 +22,7 @@
 #include "item.h"
 #include "ring.h"
 #include "manifest.h"
+#include "scoutfs_trace.h"
 
 struct manifest {
 	spinlock_t lock;
@@ -51,15 +52,26 @@ struct manifest_entry {
 };
 
 /*
- * A path tracks all the segments from level 0 to the last level that
- * overlap with the search key.
+ * A reader uses references to segments copied from a walk of the
+ * manifest.  The references are a point in time sample of the manifest.
+ * The manifest and segments can change while the reader uses their
+ * references.  Locking ensures that the items they're reading will be
+ * stable while the manifest and segments change, and the segment
+ * allocator gives readers time to use immutable stale segments before
+ * their reallocated and reused.
  */
 struct manifest_ref {
+	struct list_head entry;
+
 	u64 segno;
 	u64 seq;
 	struct scoutfs_segment *seg;
+	int found_ctr;
 	int pos;
+	u16 first_key_len;
+	u16 last_key_len;
 	u8 level;
+	u8 keys[SCOUTFS_MAX_KEY_SIZE * 2];
 };
 
 static void init_ment_keys(struct manifest_entry *ment, struct kvec *first,
@@ -72,20 +84,25 @@ static void init_ment_keys(struct manifest_entry *ment, struct kvec *first,
 			  le16_to_cpu(ment->am.last_key_len));
 }
 
-/*
- * returns:
- *   < 0 : key < ment->first_key
- *   > 0 : key > ment->first_key
- *   == 0 : ment->first_key <= key <= ment->last_key
- */
-static bool cmp_key_ment(struct kvec *key, struct manifest_entry *ment)
+static void init_ref_keys(struct manifest_ref *ref, struct kvec *first,
+			  struct kvec *last)
+{
+	if (first)
+		scoutfs_kvec_init(first, ref->keys, ref->first_key_len);
+	if (last)
+		scoutfs_kvec_init(last, ref->keys + ref->first_key_len,
+				  ref->last_key_len);
+}
+
+static bool cmp_range_ment(struct kvec *key, struct kvec *end,
+			   struct manifest_entry *ment)
 {
 	SCOUTFS_DECLARE_KVEC(first);
 	SCOUTFS_DECLARE_KVEC(last);
 
 	init_ment_keys(ment, first, last);
 
-	return scoutfs_kvec_cmp_overlap(key, key, first, last);
+	return scoutfs_kvec_cmp_overlap(key, end, first, last);
 }
 
 static struct manifest_entry *find_ment(struct rb_root *root, struct kvec *key)
@@ -97,7 +114,7 @@ static struct manifest_entry *find_ment(struct rb_root *root, struct kvec *key)
 	while (node) {
 		ment = container_of(node, struct manifest_entry, node);
 
-		cmp = cmp_key_ment(key, ment);
+		cmp = cmp_range_ment(key, key, ment);
 		if (cmp < 0)
 			node = node->rb_left;
 		else if (cmp > 0)
@@ -119,16 +136,16 @@ static int insert_ment(struct rb_root *root, struct manifest_entry *ins)
 	struct rb_node *parent = NULL;
 	struct manifest_entry *ment;
 	SCOUTFS_DECLARE_KVEC(key);
+	SCOUTFS_DECLARE_KVEC(end);
 	int cmp;
 
-	/* either first or last works */
-	init_ment_keys(ins, key, key);
+	init_ment_keys(ins, key, end);
 
 	while (*node) {
 		parent = *node;
 		ment = container_of(*node, struct manifest_entry, node);
 
-		cmp = cmp_key_ment(key, ment);
+		cmp = cmp_range_ment(key, end, ment);
 		if (cmp < 0) {
 			node = &(*node)->rb_left;
 		} else if (cmp > 0) {
@@ -215,6 +232,8 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 	int key_bytes;
 	int ret;
 
+	trace_scoutfs_manifest_add(sb, first, last, segno, seq, level, dirty);
+
 	key_bytes = scoutfs_kvec_length(first) + scoutfs_kvec_length(last);
 	ment = kmalloc(sizeof(struct manifest_entry) + key_bytes, GFP_NOFS);
 	if (!ment)
@@ -249,57 +268,97 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 	return ret;
 }
 
-static void set_ref(struct manifest_ref *ref, struct manifest_entry *ment)
+/*
+ * Grab an allocated ref from the src list, fill it with the details
+ * from the ment, and add it to the dst list.  The ref is added to the
+ * tail of the dst list so that we maintain the caller's manifest walk
+ * order.
+ */
+static void fill_ref_tail(struct list_head *dst, struct list_head *src,
+			  struct manifest_entry *ment)
 {
+	SCOUTFS_DECLARE_KVEC(ment_first);
+	SCOUTFS_DECLARE_KVEC(ment_last);
+	SCOUTFS_DECLARE_KVEC(first);
+	SCOUTFS_DECLARE_KVEC(last);
+	struct manifest_ref *ref;
+
+	ref = list_first_entry(src, struct manifest_ref, entry);
+
 	ref->segno = le64_to_cpu(ment->am.segno);
 	ref->seq = le64_to_cpu(ment->am.seq);
 	ref->level = ment->am.level;
+	ref->first_key_len = le16_to_cpu(ment->am.first_key_len);
+	ref->last_key_len = le16_to_cpu(ment->am.last_key_len);
+
+	init_ment_keys(ment, ment_first, ment_last);
+	init_ref_keys(ref, first, last);
+
+	scoutfs_kvec_memcpy(first, ment_first);
+	scoutfs_kvec_memcpy(last, ment_last);
+
+	list_move_tail(&ref->entry, dst);
 }
 
 /*
- * Returns refs if intersecting segments are found, NULL if none intersect,
- * and PTR_ERR on failure.
+ * Get refs on all the segments in the manifest that we'll need to
+ * search to populate the cache with the given range.
+ *
+ * We have to get all the level 0 segments that intersect with the range
+ * of items that we want to search because the level 0 segments can
+ * arbitrarily overlap with each other.
+ *
+ * We only need to search for the starting key in all the higher order
+ * levels.  They do not overlap so we can iterate through the key space
+ * in each segment starting with the key.
  */
-static struct manifest_ref *get_key_refs(struct manifest *mani,
-					 struct kvec *key,
-					 unsigned int *nr_ret)
+static int get_range_refs(struct manifest *mani, struct kvec *key,
+			  struct kvec *end, struct list_head *ref_list)
 {
-	struct manifest_ref *refs = NULL;
 	struct manifest_entry *ment;
+	struct manifest_ref *ref;
+	struct manifest_ref *tmp;
 	struct rb_root *root;
 	unsigned long flags;
 	unsigned int total;
-	unsigned int nr;
+	unsigned int nr = 0;
+	LIST_HEAD(alloced);
+	int ret;
 	int i;
 
 	trace_printk("getting refs\n");
 
 	spin_lock_irqsave(&mani->lock, flags);
 
+	/* allocate enough refs for the of segments */
 	total = mani->level0_nr + mani->last_level;
-	while (nr != total) {
-		nr = total;
+	while (nr < total) {
 		spin_unlock_irqrestore(&mani->lock, flags);
 
-		kfree(refs);
-		refs = kcalloc(total, sizeof(struct manifest_ref), GFP_NOFS);
-		trace_printk("alloc refs %p total %u\n", refs, total);
-		if (!refs)
-			return ERR_PTR(-ENOMEM);
+		for (i = nr; i < total; i++) {
+			ref = kmalloc(sizeof(struct manifest_ref), GFP_NOFS);
+			if (!ref) {
+				ret = -ENOMEM;
+				goto out;
+			}
+
+			memset(ref, 0, offsetof(struct manifest_ref, keys));
+			list_add(&ref->entry, &alloced);
+		}
+		nr = total;
 
 		spin_lock_irqsave(&mani->lock, flags);
 	}
 
-	nr = 0;
-
+	/* find all the overlapping level 0 segments */
 	list_for_each_entry(ment, &mani->level0_list, level0_entry) {
-		trace_printk("trying l0 ment %p\n", ment);
-		if (cmp_key_ment(key, ment))
+		if (cmp_range_ment(key, end, ment))
 			continue;
 
-		set_ref(&refs[nr++], ment);
+		fill_ref_tail(ref_list, &alloced, ment);
 	}
 
+	/* find each segment containing the key at the higher orders */
 	for (i = 1; i <= mani->last_level; i++) {
 		root = &mani->level_roots[i];
 		if (RB_EMPTY_ROOT(root))
@@ -307,119 +366,151 @@ static struct manifest_ref *get_key_refs(struct manifest *mani,
 
 		ment = find_ment(root, key);
 		if (ment)
-			set_ref(&refs[nr++], ment);
+			fill_ref_tail(ref_list, &alloced, ment);
 	}
 
 	spin_unlock_irqrestore(&mani->lock, flags);
+	ret = 0;
 
-	*nr_ret = nr;
-	if (!nr) {
-		kfree(refs);
-		refs = NULL;
+out:
+	if (ret) {
+		list_splice_init(ref_list, &alloced);
+		list_for_each_entry_safe(ref, tmp, &alloced, entry) {
+			list_del_init(&ref->entry);
+			kfree(ref);
+		}
 	}
-
-	trace_printk("refs %p (err %ld)\n",
-		     refs, IS_ERR(refs) ? PTR_ERR(refs) : 0);
-
-	return refs;
+	trace_printk("ret %d\n", ret);
+	return ret;
 }
 
 /*
- * The caller didn't find an item for the given key in the item cache
- * and wants us to search for it in the lsm segments.  We search the
- * manifest for all the segments that contain the key.  We then read the
- * segments and iterate over their items looking for ours.  We insert it
- * and some number of other surrounding items to amortize the relatively
- * expensive multi-segment searches.
+ * The caller found a hole in the item cache that they'd like populated.
+ *
+ * We search the manifest for all the segments we'll need to iterate
+ * from the key to the end key.  We walk the segments and insert as many
+ * items as we can from the segments, trying to amortize the per-item
+ * cost of segment searching.
+ *
+ * As we insert the batch of items we give the item cache the range of
+ * keys that contain these items.  This lets the cache return negative
+ * cache lookups for missing items within the range.
+ *
+ * Returns 0 if we inserted items with a range covering the starting
+ * key.  The caller should be able to make progress.
+ *
+ * Returns -errno if we failed to make any change in the cache.
  *
  * This is asking the seg code to read each entire segment.  The seg
  * code could give it it helpers to submit and wait on blocks within the
- * segment so that we don't have wild bandwidth amplification in the
- * cold random read case.
+ * segment so that we don't have wild bandwidth amplification for cold
+ * random reads.
  *
  * The segments are immutable at this point so we can use their contents
  * as long as we hold refs.
  */
-int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key)
+#define MAX_ITEMS_READ 32
+
+int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
+				struct kvec *end)
 {
 	DECLARE_MANIFEST(sb, mani);
 	SCOUTFS_DECLARE_KVEC(item_key);
 	SCOUTFS_DECLARE_KVEC(item_val);
 	SCOUTFS_DECLARE_KVEC(found_key);
 	SCOUTFS_DECLARE_KVEC(found_val);
+	SCOUTFS_DECLARE_KVEC(batch_end);
+	SCOUTFS_DECLARE_KVEC(seg_end);
 	struct scoutfs_segment *seg;
-	struct manifest_ref *refs;
-	unsigned long had_found;
+	struct manifest_ref *ref;
+	struct manifest_ref *tmp;
+	LIST_HEAD(ref_list);
+	LIST_HEAD(batch);
+	int found_ctr;
 	bool found;
 	int ret = 0;
 	int err;
-	int nr_refs;
 	int cmp;
-	int last;
-	int i;
 	int n;
 
 	trace_printk("reading items\n");
 
-	refs = get_key_refs(mani, key, &nr_refs);
-	if (IS_ERR(refs))
-		return PTR_ERR(refs);
-	if (!refs)
-		return -ENOENT;
+	/* get refs on all the segments */
+	ret = get_range_refs(mani, key, end, &ref_list);
+	if (ret)
+		return ret;
 
 	/* submit reads for all the segments */
-	for (i = 0; i < nr_refs; i++) {
-		seg = scoutfs_seg_submit_read(sb, refs[i].segno);
+	list_for_each_entry(ref, &ref_list, entry) {
+		seg = scoutfs_seg_submit_read(sb, ref->segno);
 		if (IS_ERR(seg)) {
 			ret = PTR_ERR(seg);
 			break;
 		}
 
-		refs[i].seg = seg;
+		ref->seg = seg;
 	}
-	last = i;
 
-	/* wait for submitted segments and search if we haven't seen failure */
-	for (i = 0; i < last; i++) {
-		seg = refs[i].seg;
+	/* wait for submitted segments and search for starting pos */
+	list_for_each_entry(ref, &ref_list, entry) {
+		if (!ref->seg)
+			break;
 
-		err = scoutfs_seg_wait(sb, seg);
+		err = scoutfs_seg_wait(sb, ref->seg);
 		if (err && !ret)
 			ret = err;
 
-		if (!ret)
-			refs[i].pos = scoutfs_seg_find_pos(seg, key);
+		if (ret == 0)
+			ref->pos = scoutfs_seg_find_pos(ref->seg, key);
 	}
-
-	/* done if we saw errors */
 	if (ret)
 		goto out;
 
-	/* walk sorted items, resolving across segments, and insert */
-	for (n = 0; n < 16; n++) {
+	scoutfs_kvec_init_null(batch_end);
+	scoutfs_kvec_init_null(seg_end);
+	found_ctr = 0;
+
+	for (n = 0; n < MAX_ITEMS_READ; n++) {
 
 		found = false;
+		found_ctr++;
 
-		/* find the most recent least key */
-		for (i = 0; i < nr_refs; i++) {
-			seg = refs[i].seg;
-			if (!seg)
-				continue;
+		/* find the next least key from the pos in each segment */
+		list_for_each_entry_safe(ref, tmp, &ref_list, entry) {
 
-			/* get kvecs, removing if we ran out of items */
-			ret = scoutfs_seg_item_kvecs(seg, refs[i].pos,
+			/*
+			 * Check the next item in the segment.  We're
+			 * done with the segment if there are no more
+			 * items or if the next item is past the
+			 * caller's end.  We record either the caller's
+			 * end or the segment end if it's a l1+ segment for
+			 * use as the batch end if we don't see more items.
+			 */
+			ret = scoutfs_seg_item_kvecs(ref->seg, ref->pos,
 					             item_key, item_val);
+			if (ret < 0)  {
+				if (ref->level > 0) {
+					init_ref_keys(ref, NULL, item_key);
+					scoutfs_kvec_clone_less(seg_end,
+								item_key);
+				}
+			} else if (scoutfs_kvec_memcmp(item_key, end) > 0) {
+				scoutfs_kvec_clone_less(seg_end, end);
+				ret = -ENOENT;
+			}
 			if (ret < 0) {
-				scoutfs_seg_put(seg);
-				refs[i].seg = NULL;
+				list_del_init(&ref->entry);
+				scoutfs_seg_put(ref->seg);
+				kfree(ref);
 				continue;
 			}
 
+			/* see if it's the new least item */
 			if (found) {
 				cmp = scoutfs_kvec_memcmp(item_key, found_key);
 				if (cmp >= 0) {
 					if (cmp == 0)
-						set_bit(i, &had_found);
+						ref->found_ctr = found_ctr;
 					continue;
 				}
 			}
@@ -427,37 +518,58 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key)
 			/* remember new least key */
 			scoutfs_kvec_clone(found_key, item_key);
 			scoutfs_kvec_clone(found_val, item_val);
+			ref->found_ctr = ++found_ctr;
 			found = true;
-			had_found = 0;
-			set_bit(i, &had_found);
 		}
 
-		/* return -ENOENT if we didn't find any or the callers item */
-		if (n == 0 &&
-		    (!found || scoutfs_kvec_memcmp(key, found_key))) {
-			ret = -ENOENT;
-			break;
-		}
-
+		/* ran out of keys in segs, range extends to seg end */
 		if (!found) {
+			scoutfs_kvec_clone(batch_end, seg_end);
 			ret = 0;
 			break;
 		}
 
-		ret = scoutfs_item_insert(sb, item_key, item_val);
-		if (ret)
+		/*
+		 * If we fail to add an item we're done.  If we already
+		 * have items it's not a failure and the end of the cached
+		 * range is the last successfully added item.
+		 */
+		ret = scoutfs_item_add_batch(sb, &batch, found_key, found_val);
+		if (ret) {
+			if (n > 0)
+				ret = 0;
 			break;
+		}
 
-		/* advance all the positions past the found key */
-		for_each_set_bit(i, &had_found, BITS_PER_LONG)
-			refs[i].pos++;
+		/* the last successful key determines the range */
+		scoutfs_kvec_clone(batch_end, found_key);
+
+		/* if we just saw the end key then we're done */
+		if (scoutfs_kvec_memcmp(found_key, end) == 0) {
+			ret = 0;
+			break;
+		}
+
+		/* advance all the positions that had the found key */
+		list_for_each_entry(ref, &ref_list, entry) {
+			if (ref->found_ctr == found_ctr)
+				ref->pos++;
+		}
+
+		ret = 0;
 	}
 
+	if (ret)
+		scoutfs_item_free_batch(&batch);
+	else
+		ret = scoutfs_item_insert_batch(sb, &batch, key, batch_end);
 out:
-	for (i = 0; i < nr_refs; i++)
-		scoutfs_seg_put(refs[i].seg);
+	list_for_each_entry_safe(ref, tmp, &ref_list, entry) {
+		list_del_init(&ref->entry);
+		scoutfs_seg_put(ref->seg);
+		kfree(ref);
+	}
 
-	kfree(refs);
 	return ret;
 }
 

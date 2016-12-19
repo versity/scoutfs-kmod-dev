@@ -49,10 +49,17 @@ struct free_ino_pool {
 
 static struct kmem_cache *scoutfs_inode_cachep;
 
+/*
+ * This is called once before all the allocations and frees of a inode
+ * object within a slab.  It's for inode fields that don't need to be
+ * initialized for a given instance of an inode.
+ */
 static void scoutfs_inode_ctor(void *obj)
 {
 	struct scoutfs_inode_info *ci = obj;
 
+	seqcount_init(&ci->seqcount);
+	ci->staging = false;
 	init_rwsem(&ci->xattr_rwsem);
 
 	inode_init_once(&ci->inode);
@@ -501,10 +508,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	ci = SCOUTFS_I(inode);
 	ci->ino = ino;
-	seqcount_init(&ci->seqcount);
 	ci->data_version = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
-	ci->staging = false;
 
 	inode->i_ino = ino; /* XXX overflow */
 	inode_init_owner(inode, dir, mode);

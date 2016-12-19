@@ -4,15 +4,14 @@
 #include "key.h"
 
 struct scoutfs_inode_info {
+	/* read or initialized for each inode instance */
 	u64 ino;
-
-	seqcount_t seqcount;
 	u64 data_version;
 	u64 next_readdir_pos;
 
-	/* holder of i_mutex is staging */
-	bool staging;
-
+	/* initialized once for slab object */
+	seqcount_t seqcount;
+	bool staging;			/* holder of i_mutex is staging */
 	struct rw_semaphore xattr_rwsem;
 
 	struct inode inode;

@@ -21,6 +21,7 @@
 #include "seg.h"
 #include "bio.h"
 #include "kvec.h"
+#include "cmp.h"
 #include "manifest.h"
 #include "alloc.h"
 
@@ -99,11 +100,6 @@ void scoutfs_seg_put(struct scoutfs_segment *seg)
 	}
 }
 
-static int cmp_u64s(u64 a, u64 b)
-{
-	return a < b ? -1 : a > b ? 1 : 0;
-}
-
 static struct scoutfs_segment *find_seg(struct rb_root *root, u64 segno)
 {
 	struct rb_node *node = root->rb_node;
@@ -115,7 +111,7 @@ static struct scoutfs_segment *find_seg(struct rb_root *root, u64 segno)
 		parent = node;
 		seg = container_of(node, struct scoutfs_segment, node);
 
-		cmp = cmp_u64s(segno, seg->segno);
+		cmp = scoutfs_cmp_u64s(segno, seg->segno);
 		if (cmp < 0)
 			node = node->rb_left;
 		else if (cmp > 0)
@@ -146,7 +142,7 @@ static struct scoutfs_segment *replace_seg(struct rb_root *root,
 		parent = *node;
 		seg = container_of(*node, struct scoutfs_segment, node);
 
-		cmp = cmp_u64s(ins->segno, seg->segno);
+		cmp = scoutfs_cmp_u64s(ins->segno, seg->segno);
 		if (cmp < 0) {
 			node = &(*node)->rb_left;
 		} else if (cmp > 0) {

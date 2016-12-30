@@ -51,22 +51,63 @@ struct scoutfs_block_header {
 	__le64 blkno;
 } __packed;
 
-struct scoutfs_ring_entry_header {
-	__u8 type;
-	__le16 len;
+struct scoutfs_treap_ref {
+	__le64 off;
+	__le64 gen;
+	__u8 aug_bits;
 } __packed;
 
-#define SCOUTFS_RING_ADD_MANIFEST	1
-#define SCOUTFS_RING_ADD_ALLOC		2
+/*
+ * The lesser and greater bits are persistent on disk so that we can migrate
+ * nodes from the older half of the ring.
+ *
+ * The dirty bit is only used for in-memory nodes.
+ */
+#define SCOUTFS_TREAP_AUG_LESSER	(1 << 0)
+#define SCOUTFS_TREAP_AUG_GREATER	(1 << 1)
+#define SCOUTFS_TREAP_AUG_HALVES	(SCOUTFS_TREAP_AUG_LESSER | \
+					 SCOUTFS_TREAP_AUG_GREATER)
+#define SCOUTFS_TREAP_AUG_DIRTY		(1 << 2)
 
-struct scoutfs_ring_add_manifest {
-	struct scoutfs_ring_entry_header eh;
+/*
+ * Treap nodes are stored at byte offset in the ring of blocks described
+ * by the super block.  Each reference contains the off and gen that it
+ * will find in the node for verification.  Each node has the header
+ * and data payload covered by a crc.
+ */
+struct scoutfs_treap_node {
+	__le32 crc;
+	__le64 off;
+	__le64 gen;
+	__le64 prio;
+	struct scoutfs_treap_ref left;
+	struct scoutfs_treap_ref right;
+	__le16 bytes;
+	u8 data[0];
+} __packed;
+
+struct scoutfs_treap_root {
+	struct scoutfs_treap_ref ref;
+} __packed;
+
+/*
+ * This is absurdly huge.  If there was only ever 1 item per segment and
+ * 2^64 items the tree could get this deep.
+ */
+#define SCOUTFS_MANIFEST_MAX_LEVEL 20
+
+struct scoutfs_manifest {
+	struct scoutfs_treap_root root;
+	__le64 level_counts[SCOUTFS_MANIFEST_MAX_LEVEL];
+} __packed;
+
+struct scoutfs_manifest_entry {
 	__le64 segno;
 	__le64 seq;
 	__le16 first_key_len;
 	__le16 last_key_len;
 	__u8 level;
-	/* first and last key bytes */
+	__u8 keys[0];
 } __packed;
 
 #define SCOUTFS_ALLOC_REGION_SHIFT 8
@@ -77,25 +118,9 @@ struct scoutfs_ring_add_manifest {
  * The bits need to be aligned so that the host can use native long
  * bitops on the bits in memory.
  */
-struct scoutfs_ring_alloc_region {
-	struct scoutfs_ring_entry_header eh;
+struct scoutfs_alloc_region {
 	__le64 index;
-	__u8 pad[5];
 	__le64 bits[SCOUTFS_ALLOC_REGION_BITS / 64];
-} __packed;
-
-/*
- * This is absurdly huge.  If there was only ever 1 item per segment and
- * 2^64 items the tree could get this deep.
- */
-#define SCOUTFS_MANIFEST_MAX_LEVEL 20
-
-/*
- * The packed entries in the block are terminated by a header with a 0 length.
- */
-struct scoutfs_ring_block {
-	struct scoutfs_block_header hdr;
-	struct scoutfs_ring_entry_header entries[0];
 } __packed;
 
 /*
@@ -315,12 +340,13 @@ struct scoutfs_super_block {
 	__le64 free_blocks;
 	__le64 ring_blkno;
 	__le64 ring_blocks;
-	__le64 ring_index;
-	__le64 ring_nr;
-	__le64 ring_seq;
+	__le64 ring_tail_block;
+	__le64 ring_gen;
 	__le64 buddy_blocks;
         struct scoutfs_buddy_root buddy_root;
         struct scoutfs_btree_root btree_root;
+	struct scoutfs_treap_root alloc_treap_root;
+	struct scoutfs_manifest manifest;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1

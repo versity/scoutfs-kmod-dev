@@ -27,7 +27,7 @@
 #include "manifest.h"
 #include "seg.h"
 #include "alloc.h"
-#include "ring.h"
+#include "treap.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -96,20 +96,15 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	scoutfs_filerw_free_alloc(sb);
 #endif
 
-	/*
-	 * We only have to check if there are dirty items or manifest
-	 * entries.  You can't have dirty alloc regions without having
-	 * changed references to the allocated segments which produces
-	 * dirty manfiest entries.
-	 */
-	if (scoutfs_item_dirty_bytes(sb) || scoutfs_manifest_has_dirty(sb)) {
+	if (scoutfs_item_dirty_bytes(sb) || scoutfs_manifest_has_dirty(sb) ||
+	    scoutfs_alloc_has_dirty(sb)) {
 
 		ret = scoutfs_seg_alloc(sb, &seg) ?:
-		      scoutfs_item_dirty_seg(sb, seg);
+		      scoutfs_item_dirty_seg(sb, seg) ?:
 		      scoutfs_seg_manifest_add(sb, seg, 0) ?:
 		      scoutfs_manifest_dirty_ring(sb) ?:
 		      scoutfs_alloc_dirty_ring(sb) ?:
-		      scoutfs_ring_submit_write(sb, &comp) ?:
+		      scoutfs_treap_submit_write(sb, &comp) ?:
 		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
 		      scoutfs_bio_wait_comp(sb, &comp) ?:
 		      scoutfs_write_dirty_super(sb);

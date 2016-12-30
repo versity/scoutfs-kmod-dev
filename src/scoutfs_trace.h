@@ -349,15 +349,14 @@ DEFINE_EVENT(scoutfs_btree_ranged_op, scoutfs_btree_since,
 
 TRACE_EVENT(scoutfs_manifest_add,
         TP_PROTO(struct super_block *sb, struct kvec *first,
-		 struct kvec *last, u64 segno, u64 seq, u8 level, bool dirty),
-        TP_ARGS(sb, first, last, segno, seq, level, dirty),
+		 struct kvec *last, u64 segno, u64 seq, u8 level),
+        TP_ARGS(sb, first, last, segno, seq, level),
         TP_STRUCT__entry(
                 __dynamic_array(char, first, scoutfs_kvec_key_strlen(first))
                 __dynamic_array(char, last, scoutfs_kvec_key_strlen(last))
 		__field(u64, segno)
 		__field(u64, seq)
 		__field(u8, level)
-		__field(u8, dirty)
         ),
         TP_fast_assign(
 		scoutfs_kvec_key_sprintf(__get_dynamic_array(first), first);
@@ -365,11 +364,10 @@ TRACE_EVENT(scoutfs_manifest_add,
 		__entry->segno = segno;
 		__entry->seq = seq;
 		__entry->level = level;
-		__entry->dirty = dirty;
         ),
-        TP_printk("first %s last %s segno %llu seq %llu level %u dirty %u",
+        TP_printk("first %s last %s segno %llu seq %llu level %u",
 		  __get_str(first), __get_str(last), __entry->segno,
-		  __entry->seq, __entry->level, __entry->dirty)
+		  __entry->seq, __entry->level)
 );
 
 TRACE_EVENT(scoutfs_item_lookup,

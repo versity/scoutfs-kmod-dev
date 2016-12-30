@@ -17,77 +17,128 @@
 
 #include "super.h"
 #include "format.h"
-#include "ring.h"
+#include "treap.h"
+#include "cmp.h"
 #include "alloc.h"
 
 /*
- * scoutfs allocates segments by storing regions of a bitmap in a radix.
- * As the regions are modified their index in the radix is marked dirty
- * for writeout.
+ * scoutfs allocates segments by storing regions of a bitmap in treap
+ * nodes.
  *
- * Frees are tracked in a separate radix.  They're only applied to the
- * free regions as a transaction is written.  The frees can't satisfy
- * allocation until they're committed so that we don't overwrite stable
- * referenced data.
+ * Freed segments are recorded in nodes in an rbtree.  The frees can't
+ * satisfy allocation until they're committed to prevent overwriting
+ * live data so they're only applied to the region nodes as their
+ * transaction is written.
  *
- * The allocated segments are large enough to be effectively
- * independent.  We allocate by sweeping a cursor through the volume.
- * This gives racing unlocked readers more time to try to sample a stale
- * freed segment, when its safe to do so, before it is reallocated and
+ * We allocate by sweeping a cursor through the volume.  This gives
+ * racing unlocked readers more time to try to sample a stale freed
+ * segment, when its safe to do so, before it is reallocated and
  * rewritten and they're forced to retry their racey read.
- *
- * XXX
- *  - make sure seg fits in long index
- *  - frees can delete region, leave non-NULL nul behind for logging
  */
 
 struct seg_alloc {
-	spinlock_t lock;
-	struct radix_tree_root regs;
-	struct radix_tree_root pending;
+	struct rw_semaphore rwsem;
+	struct rb_root pending_root;
+	struct scoutfs_treap *treap;
 	u64 next_segno;
 };
 
 #define DECLARE_SEG_ALLOC(sb, name) \
 	struct seg_alloc *name = SCOUTFS_SB(sb)->seg_alloc
 
-enum {
-	DIRTY_RADIX_TAG = 0,
+struct pending_region {
+	struct rb_node node;
+	struct scoutfs_alloc_region reg;
 };
+
+static struct pending_region *find_pending(struct rb_root *root, u64 ind)
+{
+	struct rb_node *node = root->rb_node;
+	struct pending_region *pend;
+
+	while (node) {
+		pend = container_of(node, struct pending_region, node);
+
+		if (ind < le64_to_cpu(pend->reg.index))
+			node = node->rb_left;
+		else if (ind > le64_to_cpu(pend->reg.index))
+			node = node->rb_right;
+		else
+			return pend;
+	}
+
+	return NULL;
+}
+
+static void insert_pending(struct rb_root *root, struct pending_region *ins)
+{
+	struct rb_node **node = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct pending_region *pend;
+	u64 ind = le64_to_cpu(ins->reg.index);
+
+	while (*node) {
+		parent = *node;
+		pend = container_of(*node, struct pending_region, node);
+
+		if (ind < le64_to_cpu(pend->reg.index))
+			node = &(*node)->rb_left;
+		else if (ind > le64_to_cpu(pend->reg.index))
+			node = &(*node)->rb_right;
+		else
+			BUG();
+	}
+
+	rb_link_node(&ins->node, parent, node);
+	rb_insert_color(&ins->node, root);
+}
+
+static bool empty_region(struct scoutfs_alloc_region *reg)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(reg->bits); i++) {
+		if (reg->bits[i])
+			return false;
+	}
+
+	return true;
+}
 
 int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_ring_alloc_region *reg;
+	struct scoutfs_alloc_region *reg;
 	DECLARE_SEG_ALLOC(sb, sal);
-	unsigned long flags;
-	unsigned long ind;
+	u64 ind;
 	int ret;
 	int nr;
 
-	spin_lock_irqsave(&sal->lock, flags);
+	down_write(&sal->rwsem);
 
-	/* start by sweeping through the device for the first time */
-	if (sal->next_segno == le64_to_cpu(super->alloc_uninit)) {
+	/* initially sweep through all segments */
+	if (super->alloc_uninit != super->total_segs) {
+		*segno = le64_to_cpu(super->alloc_uninit);
+		/* done when inc hits total_segs */
 		le64_add_cpu(&super->alloc_uninit, 1);
-		*segno = sal->next_segno++;
-		if (sal->next_segno == le64_to_cpu(super->total_segs))
-			sal->next_segno = 0;
 		ret = 0;
 		goto out;
 	}
 
-	/* then fall back to the allocator */
+	/* but usually search for region nodes */
 	ind = sal->next_segno >> SCOUTFS_ALLOC_REGION_SHIFT;
 	nr = sal->next_segno & SCOUTFS_ALLOC_REGION_MASK;
 
 	do {
-		ret = radix_tree_gang_lookup(&sal->regs, (void **)&reg, ind, 1);
-	} while (ret == 0 && ind && (ind = 0, nr = 0, 1));
+		reg = scoutfs_treap_lookup_next_dirty(sal->treap, &ind);
+	} while (reg == NULL && ind && (ind = 0, nr = 0, 1));
 
-	if (ret == 0) {
-		ret = -ENOSPC;
+	if (IS_ERR_OR_NULL(reg)) {
+		if (IS_ERR(reg))
+			ret = PTR_ERR(reg);
+		else
+			ret = -ENOSPC;
 		goto out;
 	}
 
@@ -98,237 +149,200 @@ int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 		goto out;
 	}
 
+	ind = le64_to_cpu(reg->index);
+
 	clear_bit_le(nr, reg->bits);
-	radix_tree_tag_set(&sal->regs, ind, DIRTY_RADIX_TAG);
+
+	if (empty_region(reg)) {
+		ret = scoutfs_treap_delete(sal->treap, &ind);
+		/* XXX figure out what to do about this inconsistency */
+		if (WARN_ON_ONCE(ret))
+			goto out;
+	}
 
 	*segno = (ind << SCOUTFS_ALLOC_REGION_SHIFT) + nr;
-
-	/* once this wraps it will never equal alloc_uninit */
 	sal->next_segno = *segno + 1;
-	if (sal->next_segno == le64_to_cpu(super->total_segs))
-		sal->next_segno = 0;
 
 	ret = 0;
 out:
-	spin_unlock_irqrestore(&sal->lock, flags);
+	up_write(&sal->rwsem);
 
 	trace_printk("segno %llu ret %d\n", *segno, ret);
 	return ret;
 }
 
 /*
- * Record newly freed sgements in pending regions.  These can't be
- * applied to the main allocator regions until the next commit so that
- * they're not still referenced by the stable tree in event of a crash.
- *
- * The pending regions are merged into dirty regions for the next commit.
+ * Record newly freed sgements in pending regions.  These are applied to
+ * treap nodes as the transaction commits.
  */
 int scoutfs_alloc_free(struct super_block *sb, u64 segno)
 {
-	struct scoutfs_ring_alloc_region *reg;
-	struct scoutfs_ring_alloc_region *ins;
+	struct pending_region *pend;
 	DECLARE_SEG_ALLOC(sb, sal);
-	unsigned long flags;
-	unsigned long ind;
+	u64 ind;
 	int ret;
 	int nr;
 
 	ind = segno >> SCOUTFS_ALLOC_REGION_SHIFT;
 	nr = segno & SCOUTFS_ALLOC_REGION_MASK;
 
-	ins = kzalloc(sizeof(struct scoutfs_ring_alloc_region), GFP_NOFS);
-	if (!ins) {
-		ret = -ENOMEM;
-		goto out;
+	down_write(&sal->rwsem);
+
+	pend = find_pending(&sal->pending_root, ind);
+	if (!pend) {
+		pend = kzalloc(sizeof(struct pending_region), GFP_NOFS);
+		if (!pend) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		pend->reg.index = cpu_to_le64(ind);
+		insert_pending(&sal->pending_root, pend);
 	}
 
-	ins->eh.type = SCOUTFS_RING_ADD_ALLOC;
-	ins->eh.len = cpu_to_le16(sizeof(struct scoutfs_ring_alloc_region));
-	ins->index = cpu_to_le64(ind);
-
-	ret = radix_tree_preload(GFP_NOFS);
-	if (ret) {
-		goto out;
-	}
-
-	spin_lock_irqsave(&sal->lock, flags);
-
-	reg = radix_tree_lookup(&sal->pending, ind);
-	if (!reg) {
-		reg = ins;
-		ins = NULL;
-		radix_tree_insert(&sal->pending, ind, reg);
-	}
-
-	set_bit_le(nr, reg->bits);
-
-	spin_unlock_irqrestore(&sal->lock, flags);
-	radix_tree_preload_end();
+	set_bit_le(nr, pend->reg.bits);
+	ret = 0;
 out:
-	kfree(ins);
-	trace_printk("freeing segno %llu ind %lu nr %d ret %d\n",
+	up_write(&sal->rwsem);
+
+	trace_printk("freeing segno %llu ind %llu nr %d ret %d\n",
 		     segno, ind, nr, ret);
 	return ret;
 }
 
-/*
- * Add a new clean region from the ring.  It can be replacing existing
- * clean stale entries during replay as we make our way through the
- * ring.
- */
-int scoutfs_alloc_add(struct super_block *sb,
-		      struct scoutfs_ring_alloc_region *ins)
+static void or_region_bits(struct scoutfs_alloc_region *dst,
+			   struct scoutfs_alloc_region *src)
 {
-	struct scoutfs_ring_alloc_region *existing;
-	struct scoutfs_ring_alloc_region *reg;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(dst->bits); i++)
+		dst->bits[i] |= src->bits[i];
+}
+
+int scoutfs_alloc_has_dirty(struct super_block *sb)
+{
 	DECLARE_SEG_ALLOC(sb, sal);
-	unsigned long flags;
 	int ret;
 
-	reg = kmalloc(sizeof(struct scoutfs_ring_alloc_region), GFP_NOFS);
-	if (!reg) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	down_write(&sal->rwsem);
+	ret = scoutfs_treap_has_dirty(sal->treap);
+	up_write(&sal->rwsem);
 
-	memcpy(reg, ins, sizeof(struct scoutfs_ring_alloc_region));
-
-	ret = radix_tree_preload(GFP_NOFS);
-	if (ret) {
-		kfree(reg);
-		goto out;
-	}
-
-	spin_lock_irqsave(&sal->lock, flags);
-
-	existing = radix_tree_lookup(&sal->regs, le64_to_cpu(reg->index));
-	if (existing)
-		radix_tree_delete(&sal->regs, le64_to_cpu(reg->index));
-	radix_tree_insert(&sal->regs, le64_to_cpu(reg->index), reg);
-
-	spin_unlock_irqrestore(&sal->lock, flags);
-	radix_tree_preload_end();
-
-	if (existing)
-		kfree(existing);
-
-	ret = 0;
-out:
-	trace_printk("inserted reg ind %llu ret %d\n",
-		     le64_to_cpu(ins->index), ret);
 	return ret;
 }
 
 /*
- * Append all the dirty alloc regions to the end of the ring.  First we
- * apply the pending frees to create the final set of dirty regions.
- *
- * This can't fail and always returns 0.
+ * First we apply the pending frees to create the final set of dirty
+ * region nodes and then ask the treap to write them to ring pages.
  */
 int scoutfs_alloc_dirty_ring(struct super_block *sb)
 {
-	struct scoutfs_ring_alloc_region *regs[16];
-	struct scoutfs_ring_alloc_region *reg;
 	DECLARE_SEG_ALLOC(sb, sal);
-	unsigned long start;
-	unsigned long ind;
-	int nr;
-	int i;
-	int b;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_alloc_region *reg;
+	struct pending_region *pend;
+	struct rb_node *node;
+	u64 ind;
+	int ret;
 
-	/*
-	 * Merge pending free regions into dirty regions.  If the dirty
-	 * region doesn't exist we can just move the pending region over.
-	 * If it does we or the pending bits in the region.
-	 */
-	start = 0;
-	do {
-		nr = radix_tree_gang_lookup(&sal->pending, (void **)regs,
-					    start, ARRAY_SIZE(regs));
-		for (i = 0; i < nr; i++) {
-			ind = le64_to_cpu(regs[i]->index);
+	down_write(&sal->rwsem);
 
-			reg = radix_tree_lookup(&sal->regs, ind);
-			if (!reg) {
-				radix_tree_insert(&sal->regs, ind, regs[i]);
-			} else {
-				for (b = 0; b < ARRAY_SIZE(reg->bits); b++)
-					reg->bits[i] |= regs[i]->bits[i];
-				kfree(regs[i]);
-			}
+	while ((node = rb_first(&sal->pending_root))) {
+		pend = container_of(node, struct pending_region, node);
 
-			radix_tree_delete(&sal->pending, ind);
-			radix_tree_tag_set(&sal->regs, ind, DIRTY_RADIX_TAG);
-			start = ind + 1;
+		ind = le64_to_cpu(pend->reg.index);
+
+		reg = scoutfs_treap_lookup_dirty(sal->treap, &ind);
+		if (!reg)
+			reg = scoutfs_treap_insert(sal->treap, &ind,
+					sizeof(struct scoutfs_alloc_region),
+					&ind);
+		if (IS_ERR(reg)) {
+			ret = PTR_ERR(reg);
+			goto out;
 		}
-	} while (nr);
 
-	/* and append all the dirty regions to the ring */
-	start = 0;
-	do {
-		nr = radix_tree_gang_lookup_tag(&sal->regs, (void **)regs,
-					        start, ARRAY_SIZE(regs),
-						DIRTY_RADIX_TAG);
-		for (i = 0; i < nr; i++) {
-			reg = regs[i];
-			ind = le64_to_cpu(reg->index);
+		reg->index = pend->reg.index;
+		or_region_bits(reg, &pend->reg);
 
-			scoutfs_ring_append(sb, &reg->eh);
-			radix_tree_tag_clear(&sal->regs, ind, DIRTY_RADIX_TAG);
-			start = ind + 1;
-		}
-	} while (nr);
+		rb_erase(&pend->node, &sal->pending_root);
+		kfree(pend);
+	}
 
-	return 0;
+	scoutfs_treap_dirty_ring(sal->treap);
+	scoutfs_treap_update_root(&super->alloc_treap_root, sal->treap);
+	ret = 0;
+out:
+	up_write(&sal->rwsem);
+	return ret;
 }
+
+static int alloc_treap_compare(void *key, void *data)
+{
+	u64 *ind = key;
+	struct scoutfs_alloc_region *reg = data;
+
+	return scoutfs_cmp_u64s(*ind, le64_to_cpu(reg->index));
+}
+
+static void alloc_treap_fill(void *data, void *fill_arg)
+{
+	struct scoutfs_alloc_region *reg = data;
+	u64 *ind = fill_arg;
+
+	memset(reg, 0, sizeof(struct scoutfs_alloc_region));
+	reg->index = cpu_to_le64p(ind);
+}
+
+static struct scoutfs_treap_ops alloc_treap_ops = {
+	.compare = alloc_treap_compare,
+	.fill = alloc_treap_fill,
+};
 
 int scoutfs_alloc_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
 	struct seg_alloc *sal;
 
 	/* bits need to be aligned so hosts can use native bitops */
-	BUILD_BUG_ON(offsetof(struct scoutfs_ring_alloc_region, bits) &
+	BUILD_BUG_ON(offsetof(struct scoutfs_alloc_region, bits) &
 		     (sizeof(long) - 1));
 
 	sal = kzalloc(sizeof(struct seg_alloc), GFP_KERNEL);
 	if (!sal)
 		return -ENOMEM;
-	sbi->seg_alloc = sal;
 
-	spin_lock_init(&sal->lock);
-	/* inserts preload with _NOFS */
-	INIT_RADIX_TREE(&sal->pending, GFP_ATOMIC);
-	INIT_RADIX_TREE(&sal->regs, GFP_ATOMIC);
+	init_rwsem(&sal->rwsem);
+	sal->pending_root = RB_ROOT;
+	sal->treap = scoutfs_treap_alloc(sb, &alloc_treap_ops,
+					 &super->alloc_treap_root);
+	if (!sal->treap) {
+		kfree(sal);
+		return -ENOMEM;
+	}
+
 	/* XXX read next_segno from super? */
 
+	sbi->seg_alloc = sal;
+
 	return 0;
-}
-
-static void destroy_radix_regs(struct radix_tree_root *radix)
-{
-	struct scoutfs_ring_alloc_region *regs[16];
-	int nr;
-	int i;
-
-
-	do {
-		nr = radix_tree_gang_lookup(radix, (void **)regs,
-					    0, ARRAY_SIZE(regs));
-		for (i = 0; i < nr; i++) {
-			radix_tree_delete(radix, le64_to_cpu(regs[i]->index));
-			kfree(regs[i]);
-		}
-	} while (nr);
 }
 
 void scoutfs_alloc_destroy(struct super_block *sb)
 {
 	DECLARE_SEG_ALLOC(sb, sal);
+	struct pending_region *pend;
+	struct rb_node *node;
 
 	if (sal) {
-		destroy_radix_regs(&sal->pending);
-		destroy_radix_regs(&sal->regs);
+		scoutfs_treap_free(sal->treap);
+		while ((node = rb_first(&sal->pending_root))) {
+			pend = container_of(node, struct pending_region, node);
+			rb_erase(&pend->node, &sal->pending_root);
+			kfree(pend);
+		}
 		kfree(sal);
 	}
 }

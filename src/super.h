@@ -12,7 +12,7 @@ struct buddy_info;
 struct item_cache;
 struct manifest;
 struct segment_cache;
-struct ring_info;
+struct treap_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -36,7 +36,7 @@ struct scoutfs_sb_info {
 	struct item_cache *item_cache;
 	struct segment_cache *segment_cache;
 	struct seg_alloc *seg_alloc;
-	struct ring_info *ring_info;
+	struct treap_info *treap_info;
 
 	struct buddy_info *buddy_info;
 

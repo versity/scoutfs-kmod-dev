@@ -540,7 +540,7 @@ int scoutfs_seg_manifest_add(struct super_block *sb,
 	kvec_from_pages(seg, last, item.key_off, item.key_len);
 
 	return scoutfs_manifest_add(sb, first, last, le64_to_cpu(sblk->segno),
-				    le64_to_cpu(sblk->max_seq), level, true);
+				    le64_to_cpu(sblk->max_seq), level);
 }
 
 int scoutfs_seg_setup(struct super_block *sb)

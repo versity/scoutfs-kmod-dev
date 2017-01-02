@@ -168,17 +168,19 @@ static u8 old_aug_bit(struct scoutfs_treap *treap)
 	return off_aug_bit(treap, tinf->dirty_off) ^ SCOUTFS_TREAP_AUG_HALVES;
 }
 
-
-/* Return the aug bits that'll be used to refer to the given node. */
+/*
+ * Return the aug bits that'll be used to refer to the given node.
+ * We calculate the bits for the node itself and then or those with the
+ * bits in its references to its children.
+ */
 static u8 node_aug_bits(struct scoutfs_treap *treap, struct treap_node *node)
 {
 	DECLARE_TREAP_INFO(treap->sb, tinf);
-	u8 aug_bits = 0;
 
-	if (node->off == tinf->dirty_off)
-		aug_bits |= SCOUTFS_TREAP_AUG_DIRTY;
-
-	return aug_bits | off_aug_bit(treap, node->off);
+	return (node->off == tinf->dirty_off ? SCOUTFS_TREAP_AUG_DIRTY : 0) |
+	        off_aug_bit(treap, node->off) |
+	        node->left.aug_bits |
+		node->right.aug_bits;
 }
 
 /*

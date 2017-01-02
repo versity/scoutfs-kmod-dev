@@ -466,6 +466,8 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 			    struct kvec *key, struct kvec *val,
 			    unsigned int nr_items, unsigned int key_bytes)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct native_item item;
 	SCOUTFS_DECLARE_KVEC(item_key);
@@ -475,7 +477,8 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 
 	/* XXX the segment block header is a mess, be better */
 	sblk->segno = cpu_to_le64(seg->segno);
-	sblk->max_seq = cpu_to_le64(1);
+	sblk->seq = super->next_seg_seq;
+	le64_add_cpu(&super->next_seg_seq, 1);
 
 	key_off = pos_off(seg, nr_items);
 	val_off = key_off + key_bytes;
@@ -540,7 +543,7 @@ int scoutfs_seg_manifest_add(struct super_block *sb,
 	kvec_from_pages(seg, last, item.key_off, item.key_len);
 
 	return scoutfs_manifest_add(sb, first, last, le64_to_cpu(sblk->segno),
-				    le64_to_cpu(sblk->max_seq), level);
+				    le64_to_cpu(sblk->seq), level);
 }
 
 int scoutfs_seg_setup(struct super_block *sb)

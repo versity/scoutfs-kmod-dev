@@ -151,7 +151,7 @@ struct scoutfs_segment_block {
 	__le32 crc;
 	__le32 _padding;
 	__le64 segno;
-	__le64 max_seq;
+	__le64 seq;
 	__le32 nr_items;
 	__le32 _moar_pads;
 	struct scoutfs_segment_item items[0];
@@ -342,6 +342,7 @@ struct scoutfs_super_block {
 	__le64 ring_blocks;
 	__le64 ring_tail_block;
 	__le64 ring_gen;
+	__le64 next_seg_seq;
 	__le64 buddy_blocks;
         struct scoutfs_buddy_root buddy_root;
         struct scoutfs_btree_root btree_root;

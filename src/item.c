@@ -977,6 +977,17 @@ static void count_seg_items(struct item_cache *cac, u32 *nr_items,
  *
  * The caller is responsible for the consistency of the dirty items once
  * they're in its seg.  We can consider them clean once we store them.
+ *
+ * Today entering a transaction doesn't ensure that there's never more
+ * than a segment's worth of dirty items.  As we release a trans we kick
+ * off an async sync.  By the time we get here we can have a lot more
+ * than a segments worth of dirty items.
+ *
+ * XXX This is unacceptable because multiple segment writes are not
+ * atomic.  We can have the items that make up an atomic change span
+ * segments and can be partially visible if we only write the first
+ * segment.  We probably want to throttle trans enters once we have as
+ * many dirty items as our atomic segment updates can write.
  */
 int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 {
@@ -987,16 +998,18 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 	u32 nr_items;
 
 	count_seg_items(cac, &nr_items, &key_bytes);
-	if (nr_items) {
-		item = first_dirty(cac->items.rb_node);
+
+	item = first_dirty(cac->items.rb_node);
+	if (item) {
 		scoutfs_seg_first_item(sb, seg, item->key, item->val,
 				       nr_items, key_bytes);
 		clear_item_dirty(cac, item);
+		nr_items--;
+	}
 
-		while ((item = next_dirty(item))) {
-			scoutfs_seg_append_item(sb, seg, item->key, item->val);
-			clear_item_dirty(cac, item);
-		}
+	while (nr_items-- && (item = next_dirty(item))) {
+		scoutfs_seg_append_item(sb, seg, item->key, item->val);
+		clear_item_dirty(cac, item);
 	}
 
 	return 0;

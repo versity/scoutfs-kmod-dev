@@ -590,7 +590,7 @@ retry:
 	memcpy(node->data, tnode->data, bytes);
 
 	node->parent = parent;
-	parent_ref(treap, node)->node = node;
+	ref->node = node;
 	ret = 0;
 out:
 	release_ring_node(tnode);

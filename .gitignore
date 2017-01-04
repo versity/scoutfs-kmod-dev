@@ -1,8 +1,12 @@
-src/*.o
-src/*.ko
-src/*.mod.c
-src/*.cmd
+*.o
+*.ko
+*.mod.c
+*.cmd
+*~
 src/.tmp_versions/
+dlm/.tmp_versions/
 src/Module.symvers
+dlm/Module.symvers
 src/modules.order
+dlm/modules.order
 cscope.*

@@ -217,7 +217,7 @@ static void update_internal_aug(struct scoutfs_treap *treap,
 	u8 bits;
 
 	if (!node)
-		parent_ref(treap, node)->aug_bits = 0;
+		treap->root_ref.aug_bits = 0;
 
 	while (node) {
 		bits = node_aug_bits(treap, node);

@@ -68,5 +68,7 @@ void scoutfs_kvec_set_max_key(struct kvec *kvec);
 void scoutfs_kvec_clone_less(struct kvec *dst, struct kvec *src);
 unsigned scoutfs_kvec_key_strlen(struct kvec *key);
 void scoutfs_kvec_key_sprintf(char *buf, struct kvec *key);
+void scoutfs_kvec_be_inc(struct kvec *kvec);
+void scoutfs_kvec_be_dec(struct kvec *kvec);
 
 #endif

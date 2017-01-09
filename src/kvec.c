@@ -259,6 +259,36 @@ void scoutfs_kvec_set_max_key(struct kvec *kvec)
 }
 
 /*
+ * Increase the kvec as though it is a big endian value.  Carry
+ * increments of the least significant byte as long as it wraps.
+ */
+void scoutfs_kvec_be_inc(struct kvec *kvec)
+{
+	int i;
+	int b;
+
+	for (i = SCOUTFS_KVEC_NR - 1; i >= 0; i--) {
+		for (b = (int)kvec[i].iov_len - 1; b >= 0; b--) {
+			if (++((u8 *)kvec[i].iov_base)[b])
+				return;
+		}
+	}
+}
+
+void scoutfs_kvec_be_dec(struct kvec *kvec)
+{
+	int i;
+	int b;
+
+	for (i = SCOUTFS_KVEC_NR - 1; i >= 0; i--) {
+		for (b = (int)kvec[i].iov_len - 1; b >= 0; b--) {
+			if (--((u8 *)kvec[i].iov_base)[b] != 0xff)
+				return;
+		}
+	}
+}
+
+/*
  * Clone the source kvec into the dst if the dst is empty or if
  * the src kvec is less than the dst.
  */

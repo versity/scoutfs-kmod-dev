@@ -34,6 +34,7 @@
 #include "bio.h"
 #include "alloc.h"
 #include "treap.h"
+#include "compact.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -230,6 +231,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_alloc_setup(sb) ?:
 	      scoutfs_treap_setup(sb) ?:
 //	      scoutfs_buddy_setup(sb) ?:
+	      scoutfs_compact_setup(sb) ?:
 	      scoutfs_setup_trans(sb);
 	if (ret)
 		return ret;
@@ -261,6 +263,7 @@ static void scoutfs_kill_sb(struct super_block *sb)
 
 	kill_block_super(sb);
 	if (sbi) {
+		scoutfs_compact_destroy(sb);
 		scoutfs_shutdown_trans(sb);
 		scoutfs_buddy_destroy(sb);
 		if (sbi->block_shrinker.shrink == scoutfs_block_shrink)

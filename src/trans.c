@@ -84,6 +84,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	struct scoutfs_segment *seg;
 	bool advance = false;
 	int ret = 0;
+	int err;
 
 	scoutfs_bio_init_comp(&comp);
 	sbi->trans_task = NULL;
@@ -96,23 +97,43 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	scoutfs_filerw_free_alloc(sb);
 #endif
 
-	if (scoutfs_item_dirty_bytes(sb) || scoutfs_manifest_has_dirty(sb) ||
-	    scoutfs_alloc_has_dirty(sb)) {
-
+	/*
+	 * XXX this needs serious work to handle errors.
+	 */
+	while (scoutfs_item_dirty_bytes(sb)) {
+		advance = true;
+		seg = NULL;
 		ret = scoutfs_seg_alloc(sb, &seg) ?:
 		      scoutfs_item_dirty_seg(sb, seg) ?:
+		      scoutfs_manifest_lock(sb) ?:
 		      scoutfs_seg_manifest_add(sb, seg, 0) ?:
-		      scoutfs_manifest_dirty_ring(sb) ?:
-		      scoutfs_alloc_dirty_ring(sb) ?:
-		      scoutfs_treap_submit_write(sb, &comp) ?:
-		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
-		      scoutfs_bio_wait_comp(sb, &comp) ?:
-		      scoutfs_write_dirty_super(sb);
-		BUG_ON(ret);
-
+		      scoutfs_manifest_unlock(sb) ?:
+		      scoutfs_seg_submit_write(sb, seg, &comp);
 		scoutfs_seg_put(seg);
-		advance = true;
+		if (ret)
+			goto out;
 	}
+
+	if (scoutfs_manifest_has_dirty(sb) || scoutfs_alloc_has_dirty(sb)) {
+		advance = true;
+		ret = scoutfs_manifest_dirty_ring(sb) ?:
+		      scoutfs_alloc_dirty_ring(sb) ?:
+		      scoutfs_treap_submit_write(sb, &comp);
+		if (ret)
+			goto out;
+	}
+
+out:
+	err = scoutfs_bio_wait_comp(sb, &comp) ?:
+	      scoutfs_write_dirty_super(sb);
+	if (err && !ret)
+		ret = err;
+
+	/* XXX this all needs serious work for dealing with errors */
+	WARN_ON_ONCE(ret);
+
+	if (advance && ret)
+		advance = false;
 
 	spin_lock(&sbi->trans_write_lock);
 	if (advance)

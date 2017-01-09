@@ -14,7 +14,6 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
-#include <linux/list_sort.h>
 
 #include "super.h"
 #include "format.h"
@@ -23,6 +22,7 @@
 #include "item.h"
 #include "treap.h"
 #include "cmp.h"
+#include "compact.h"
 #include "manifest.h"
 #include "scoutfs_trace.h"
 
@@ -45,6 +45,11 @@ struct manifest {
 	struct rw_semaphore rwsem;
 	struct scoutfs_treap *treap;
 	u8 nr_levels;
+
+	/* calculated on mount, const thereafter */
+	u64 level_limits[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
+
+	SCOUTFS_DECLARE_KVEC(compact_keys[SCOUTFS_MANIFEST_MAX_LEVEL + 1]);
 };
 
 #define DECLARE_MANIFEST(sb, name) \
@@ -79,6 +84,10 @@ struct manifest_fill_args {
 	struct kvec *last;
 };
 
+/*
+ * Seq is only specified for operations that differentiate between
+ * segments with identical items by their sequence number.
+ */
 struct manifest_search_key {
 	u64 seq;
 	struct kvec *key;
@@ -121,6 +130,8 @@ static bool cmp_range_ment(struct kvec *key, struct kvec *end,
 /*
  * Insert a new manifest entry in the treap.  The treap allocates a new
  * node for us and we fill it.
+ *
+ * This must be called with the manifest lock held.
  */
 int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 			 struct kvec *last, u64 segno, u64 seq, u8 level)
@@ -153,20 +164,90 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 	skey.level = level;
 	skey.seq = seq;
 
-	down_write(&mani->rwsem);
-
 	ment = scoutfs_treap_insert(mani->treap, &skey, bytes, &args);
 	if (IS_ERR(ment)) {
 		ret = PTR_ERR(ment);
 	} else {
 		mani->nr_levels = max_t(u8, mani->nr_levels, level + 1);
 		le64_add_cpu(&super->manifest.level_counts[level], 1);
+
+		if (le64_to_cpu(super->manifest.level_counts[level]) >
+		    mani->level_limits[level])
+			scoutfs_compact_kick(sb);
+
 		ret = 0;
 	}
 
-	up_write(&mani->rwsem);
+	return ret;
+}
+
+/*
+ * This must be called with the manifest lock held.
+ */
+int scoutfs_manifest_dirty(struct super_block *sb, struct kvec *first, u64 seq,
+			   u8 level)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_manifest_entry *ment;
+	struct manifest_search_key skey;
+
+	skey.key = first;
+	skey.level = level;
+	skey.seq = seq;
+
+	ment = scoutfs_treap_lookup_dirty(mani->treap, &skey);
+	if (IS_ERR(ment))
+		return PTR_ERR(ment);
+	if (!ment)
+		return -ENOENT;
+	return 0;
+}
+
+/*
+ * This must be called with the manifest lock held.
+ */
+int scoutfs_manifest_del(struct super_block *sb, struct kvec *first, u64 seq,
+			 u8 level)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct manifest_search_key skey;
+	int ret;
+
+	skey.key = first;
+	skey.level = level;
+	skey.seq = seq;
+
+	ret = scoutfs_treap_delete(mani->treap, &skey);
+	if (ret == 0)
+		le64_add_cpu(&super->manifest.level_counts[level], -1ULL);
 
 	return ret;
+}
+
+/*
+ * XXX This feels pretty gross, but it's a simple way to give compaction
+ * atomic updates.  It'll go away once compactions go to the trouble of
+ * communicating their atomic results in a message instead of a series
+ * of function calls.
+ */
+int scoutfs_manifest_lock(struct super_block *sb)
+{
+	DECLARE_MANIFEST(sb, mani);
+
+	down_write(&mani->rwsem);
+
+	return 0;
+}
+
+int scoutfs_manifest_unlock(struct super_block *sb)
+{
+	DECLARE_MANIFEST(sb, mani);
+
+	up_write(&mani->rwsem);
+
+	return 0;
 }
 
 static int alloc_add_ref(struct list_head *list,
@@ -206,16 +287,6 @@ static int alloc_add_ref(struct list_head *list,
 
 }
 
-/* sort level 0 segments of the list from greatest to least seq */
-static int cmp_ref_list_seqs(void *priv, struct list_head *A,
-			     struct list_head *B)
-{
-	struct manifest_ref *a = list_entry(A, struct manifest_ref, entry);
-	struct manifest_ref *b = list_entry(B, struct manifest_ref, entry);
-
-	return -scoutfs_cmp_u64s(a->seq, b->seq);
-}
-
 /*
  * Get refs on all the segments in the manifest that we'll need to
  * search to populate the cache with the given range.
@@ -238,42 +309,34 @@ static int get_range_refs(struct super_block *sb, struct manifest *mani,
 	SCOUTFS_DECLARE_KVEC(last);
 	struct manifest_ref *ref;
 	struct manifest_ref *tmp;
-	int cmp;
 	int ret;
 	int i;
 
 	down_write(&mani->rwsem);
 
 	/* get level 0 segments that overlap with the missing range */
-	ment = scoutfs_treap_first(mani->treap);
+	skey.level = 0;
+	skey.seq = ~0ULL;
+	ment = scoutfs_treap_lookup_prev(mani->treap, &skey);
 	while (!IS_ERR_OR_NULL(ment)) {
-		if (ment->level > 0)
-			break;
-
-		cmp = cmp_range_ment(key, end, ment);
-		if (cmp < 0)
-			break;
-
-		if (cmp == 0) {
+		if (cmp_range_ment(key, end, ment) == 0) {
 			ret = alloc_add_ref(ref_list, ment);
 			if (ret)
 				goto out;
 		}
 
-		ment = scoutfs_treap_next(mani->treap, ment);
+		ment = scoutfs_treap_prev(mani->treap, ment);
 	}
 	if (IS_ERR(ment)) {
 		ret = PTR_ERR(ment);
 		goto out;
 	}
 
-	/* level0s are sorted by key, reverse sort by seq */
-	list_sort(NULL, ref_list, cmp_ref_list_seqs);
-
 	/* get higher level segments that overlap with the starting key */
 	for (i = 1; i < mani->nr_levels; i++) {
 		skey.key = key;
 		skey.level = i;
+		skey.seq = 0;
 
 		/* XXX should use level counts to skip searches */
 
@@ -528,16 +591,182 @@ int scoutfs_manifest_dirty_ring(struct super_block *sb)
 }
 
 /*
- * Manifest entries are first sorted by their level.
+ * Give the caller the segments that will be involved in the next
+ * compaction.
  *
- * Level 0 segments can arbitrarily overlap.  Their manifest entries are
- * sorted by their first key so that searches can iterate over the
- * entries until first shows that no more segments can overlap.  We then
- * sort by the sequence so that we can manage entries that have
- * identical keys.
+ * For now we have a simple candidate search.  We only initiate
+ * compaction when a level has exceeded its exponentially increasing
+ * limit on the number of segments.  Once we have a level we use keys at
+ * each level to chose the next segment.  This results in a pattern
+ * where clock hands sweep through each level.  The hands wrap much
+ * faster on the higher levels.
  *
- * Higher level segments don't overlap.  There will never be manifest
- * entries with the same key at a given level.
+ * If the candidate segment doesn't overlap with any higher level
+ * segments then just move it down a level.
+ *
+ * If the candidate does overlap then we add all the segments to the
+ * compaction caller's data and let it do its thing.  It'll allocate and
+ * free segments and update the manifest.
+ *
+ * XXX this will get a lot more clever:
+ *  - ensuring concurrent compactions don't overlap
+ *  - prioritize segments with deletion or incremental records
+ *  - prioritize partial segments
+ *  - maybe compact segments by age in a given level
+ */
+int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_manifest_entry *ment;
+	struct scoutfs_manifest_entry *over;
+	struct manifest_search_key skey;
+	SCOUTFS_DECLARE_KVEC(ment_first);
+	SCOUTFS_DECLARE_KVEC(ment_last);
+	SCOUTFS_DECLARE_KVEC(over_first);
+	SCOUTFS_DECLARE_KVEC(over_last);
+	int level;
+	int err;
+	int ret;
+	int i;
+
+	down_write(&mani->rwsem);
+
+	for (level = mani->nr_levels - 1; level >= 0; level--) {
+		if (le64_to_cpu(super->manifest.level_counts[level]) >=
+		    mani->level_limits[level])
+			break;
+	}
+
+	if (level < 0) {
+		ret = 0;
+		goto out;
+	}
+
+	/* find the oldest level 0 or the next higher order level by key */
+	if (level == 0) {
+		ment = scoutfs_treap_first(mani->treap);
+		if (!IS_ERR_OR_NULL(ment) && ment->level)
+			ment = NULL;
+	} else {
+		skey.key = mani->compact_keys[level];
+		skey.level = level;
+		skey.seq = 0;
+		ment = scoutfs_treap_lookup_next(mani->treap, &skey);
+		if (ment == NULL && scoutfs_kvec_length(skey.key)) {
+			/* XXX ugh, these kvecs are the worst */
+			scoutfs_kvec_init(skey.key,
+					  skey.key[0].iov_base, 0);
+			ment = scoutfs_treap_lookup_next(mani->treap, &skey);
+		}
+	}
+	if (IS_ERR(ment)) {
+		ret = PTR_ERR(ment);
+		goto out;
+	}
+	if (ment == NULL || ment->level != level) {
+		/* XXX shouldn't be possible */
+		ret = 0;
+		goto out;
+	}
+
+	init_ment_keys(ment, ment_first, ment_last);
+
+	/* find first overlapping at the next level */
+	skey.key = ment_first;
+	skey.level = level + 1;
+	skey.seq = 0;
+	over = scoutfs_treap_lookup(mani->treap, &skey);
+	if (IS_ERR(over)) {
+		ret = PTR_ERR(over);
+		goto out;
+	}
+
+	/* if there's no overlap we can just move it down a level */
+	if (!over) {
+		ret = scoutfs_manifest_add(sb, ment_first, ment_last,
+					   le64_to_cpu(ment->segno),
+					   le64_to_cpu(ment->seq),
+					   ment->level + 1);
+		if (ret)
+			goto out;
+
+		ret = scoutfs_manifest_del(sb, ment_first,
+					   le64_to_cpu(ment->seq),
+					   ment->level);
+		if (ret) {
+			err = scoutfs_manifest_del(sb, ment_first,
+						   le64_to_cpu(ment->seq),
+						   ment->level + 1);
+			BUG_ON(err);
+			goto out;
+		}
+
+		goto done;
+	}
+
+	/* add the upper input segment */
+	ret = scoutfs_compact_add(sb, data, ment_first,
+				  le64_to_cpu(ment->segno),
+				  le64_to_cpu(ment->seq), level);
+	if (ret)
+		goto out;
+
+	/* add a fanout's worth of lower overlapping segments */
+	init_ment_keys(over, over_first, over_last);
+	for (i = 0; i < SCOUTFS_MANIFEST_FANOUT; i++) {
+		ret = scoutfs_compact_add(sb, data, over_first,
+					  le64_to_cpu(over->segno),
+					  le64_to_cpu(over->seq), level + 1);
+		if (ret)
+			goto out;
+
+		over = scoutfs_treap_next(mani->treap, over);
+		if (IS_ERR(over)) {
+			ret = PTR_ERR(over);
+			goto out;
+		}
+		if (!over || over->level != (ment->level + 1))
+			break;
+
+		init_ment_keys(over, over_first, over_last);
+		if (scoutfs_kvec_cmp_overlap(ment_first, ment_last,
+					     over_first, over_last) != 0)
+			break;
+	}
+
+done:
+	/* record the next key to start from, not exact */
+	scoutfs_kvec_init_key(mani->compact_keys[level]);
+	scoutfs_kvec_memcpy_truncate(mani->compact_keys[level], ment_last);
+	scoutfs_kvec_be_inc(mani->compact_keys[level]);
+
+	ret = 0;
+out:
+	up_write(&mani->rwsem);
+	return ret;
+}
+
+/*
+ * Manifest entries for all levels are stored in a single treap.
+ *
+ * First they're sorted by their level.
+ *
+ * Level 0 segments can contain any items which overlap so they are
+ * sorted by their sequence number.  Compaction can find the first node
+ * and reading walks backwards through level 0 to get them from newest
+ * to oldest to resolve matching items.
+ *
+ * Higher level segments don't overlap.  They are sorted by their first
+ * key.
+ *
+ * Searching comparisons are different than insertion and deletion
+ * comparisons for higher level segments.  Searches want to find the
+ * segment that intersects with a given key.  Insertions and deletions
+ * want to operate on the segment with a specific first key and sequence
+ * number.  We tell the difference by the presence of a sequence number.
+ * A segment will never have a seq of 0.
  */
 static int manifest_treap_compare(void *key, void *data)
 {
@@ -545,21 +774,34 @@ static int manifest_treap_compare(void *key, void *data)
 	struct scoutfs_manifest_entry *ment = data;
 	SCOUTFS_DECLARE_KVEC(first);
 	SCOUTFS_DECLARE_KVEC(last);
+	int cmp;
 
-	if (skey->level < ment->level)
-		return -1;
-	if (skey->level > ment->level)
-		return 1;
+	if (skey->level < ment->level) {
+		cmp = -1;
+		goto out;
+	}
+	if (skey->level > ment->level) {
+		cmp = 1;
+		goto out;
+	}
 
-	init_ment_keys(ment, first, NULL);
+	if (skey->level == 0) {
+		cmp = scoutfs_cmp_u64s(skey->seq, le64_to_cpu(ment->seq));
+		goto out;
+	}
 
-	if (skey->level == 0)
-		return scoutfs_kvec_memcmp(skey->key, first) ?:
-		       scoutfs_cmp_u64s(skey->seq, le64_to_cpu(ment->seq));
+	init_ment_keys(ment, first, last);
 
-	init_ment_keys(ment, NULL, last);
+	if (skey->seq == 0) {
+		cmp = scoutfs_kvec_cmp_overlap(skey->key, skey->key,
+					       first, last);
+	} else {
+		cmp = scoutfs_kvec_memcmp(skey->key, first) ?:
+		      scoutfs_cmp_u64s(skey->seq, le64_to_cpu(ment->seq));
+	}
 
-	return scoutfs_kvec_cmp_overlap(skey->key, skey->key, first, last);
+out:
+	return cmp;
 }
 
 static void manifest_treap_fill(void *data, void *arg)
@@ -588,6 +830,7 @@ int scoutfs_manifest_setup(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct manifest *mani;
+	int ret;
 	int i;
 
 	mani = kzalloc(sizeof(struct manifest), GFP_KERNEL);
@@ -602,11 +845,30 @@ int scoutfs_manifest_setup(struct super_block *sb)
 		return -ENOMEM;
 	}
 
+	for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++) {
+		ret = scoutfs_kvec_alloc_key(mani->compact_keys[i]);
+		if (ret) {
+			while (--i >= 0)
+				scoutfs_kvec_kfree(mani->compact_keys[i]);
+			scoutfs_treap_free(mani->treap);
+			kfree(mani);
+			return -ENOMEM;
+		}
+	}
+
 	for (i = ARRAY_SIZE(super->manifest.level_counts) - 1; i >= 0; i--) {
 		if (super->manifest.level_counts[i]) {
 			mani->nr_levels = i + 1;
 			break;
 		}
+	}
+
+	/* always trigger a compaction if there's a single l0 segment? */
+	mani->level_limits[0] = 0;
+	mani->level_limits[1] = SCOUTFS_MANIFEST_FANOUT;
+	for (i = 2; i < ARRAY_SIZE(mani->level_limits); i++) {
+		mani->level_limits[i] = mani->level_limits[i - 1] *
+					SCOUTFS_MANIFEST_FANOUT;
 	}
 
 	sbi->manifest = mani;
@@ -618,9 +880,12 @@ void scoutfs_manifest_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct manifest *mani = sbi->manifest;
+	int i;
 
 	if (mani) {
 		scoutfs_treap_free(mani->treap);
+		for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++)
+			scoutfs_kvec_kfree(mani->compact_keys[i]);
 		kfree(mani);
 	}
 }

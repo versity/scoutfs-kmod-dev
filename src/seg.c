@@ -247,6 +247,16 @@ out:
 }
 
 /*
+ * This just frees the segno for the given seg.  It's gross but
+ * symmetrical with only being able to allocate segnos by allocating a
+ * seg.  We'll probably have to do better.
+ */
+int scoutfs_seg_free_segno(struct super_block *sb, struct scoutfs_segment *seg)
+{
+	return scoutfs_alloc_free(sb, seg->segno);
+}
+
+/*
  * The bios submitted by this don't have page references themselves.  If
  * this succeeds then the caller must call _wait before putting their
  * seg ref.
@@ -544,6 +554,19 @@ int scoutfs_seg_manifest_add(struct super_block *sb,
 
 	return scoutfs_manifest_add(sb, first, last, le64_to_cpu(sblk->segno),
 				    le64_to_cpu(sblk->seq), level);
+}
+
+int scoutfs_seg_manifest_del(struct super_block *sb,
+			     struct scoutfs_segment *seg, u8 level)
+{
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	struct native_item item;
+	SCOUTFS_DECLARE_KVEC(first);
+
+	load_item(seg, 0, &item);
+	kvec_from_pages(seg, first, item.key_off, item.key_len);
+
+	return scoutfs_manifest_del(sb, first, le64_to_cpu(sblk->seq), level);
 }
 
 int scoutfs_seg_setup(struct super_block *sb)

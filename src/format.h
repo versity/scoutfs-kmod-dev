@@ -96,6 +96,8 @@ struct scoutfs_treap_root {
  */
 #define SCOUTFS_MANIFEST_MAX_LEVEL 20
 
+#define SCOUTFS_MANIFEST_FANOUT 10
+
 struct scoutfs_manifest {
 	struct scoutfs_treap_root root;
 	__le64 level_counts[SCOUTFS_MANIFEST_MAX_LEVEL];

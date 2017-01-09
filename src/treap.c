@@ -738,20 +738,25 @@ out:
 }
 
 /*
- * Deletion is easy if the node to delete doesn't have both children.
- * We just point its parent at its child, if it has one.  If it has both
- * children we relocate it in the tree so that it doesn't.  We find its
- * next least successor which by definition won't have a left child.  We
- * can swap them and maintain key ordering in the tree.  But we have to
- * repair balance and augmentation.
+ * Delete a node with the given key.
+ *
+ * It's easy when the node doesn't have two children.  We remove the
+ * node and point it's parent ref at either of the child's refs that
+ * might have been populated.
+ *
+ * Deletion's a little tricker when we have both children.  We could
+ * find an ancestor and swap but that's fiddly to get right with all our
+ * rich node pointers.  Instead we can reuse rotation to rotate the node
+ * down until it doesn't have both children.
  */
 int scoutfs_treap_delete(struct scoutfs_treap *treap, void *key)
 {
 	struct treap_ref *ref = &treap->root_ref;
-	struct treap_ref *child_ref;
 	struct treap_node *parent = NULL;
 	struct treap_node *node = NULL;
-	struct treap_node *child;
+	struct treap_ref *child_ref;
+	struct treap_node *left;
+	struct treap_node *right;
 	int cmp;
 	int ret;
 
@@ -780,47 +785,43 @@ int scoutfs_treap_delete(struct scoutfs_treap *treap, void *key)
 		goto out;
 	}
 
-	/* if it has both children find next successor and swap */
-	if (node->left.gen && node->right.gen) {
-		child_ref = &node->right;
-		child = read_node(treap, node, child_ref, true);
-		if (IS_ERR(child)) {
-			ret = PTR_ERR(child);
+	/*
+	 * Rotate the node down with its higher priority child until it
+	 * doesn't have both children.  Dirtying tries to repair which
+	 * can try to repair priority imbalance with rotation so we swap
+	 * priorities first.  Unfortunately we need to read both
+	 * children to get their priorities but we only try to dirty the
+	 * rotation child.  It's messy but dirtying both can double
+	 * write amplification.
+	 */
+	while (node->left.gen && node->right.gen) {
+		left = read_node(treap, node, &node->left, false);
+		right = read_node(treap, node, &node->right, false);
+		if (IS_ERR(left) || IS_ERR(right)) {
+			ret = IS_ERR(left) ? PTR_ERR(left) : PTR_ERR(right);
 			goto out;
 		}
 
-		while (child->left.gen) {
-			child_ref = &child->left;
-			child = read_node(treap, child, child_ref, true);
-			if (IS_ERR(child)) {
-				ret = PTR_ERR(child);
+		if (left->prio > right->prio) {
+			left = read_node(treap, node, &node->left, true);
+			if (IS_ERR(left)) {
+				ret = IS_ERR(left);
 				goto out;
 			}
+			swap(node->prio, left->prio);
+			rotate_right(treap, node, left);
+		} else {
+			right = read_node(treap, node, &node->right, true);
+			if (IS_ERR(right)) {
+				ret = IS_ERR(right);
+				goto out;
+			}
+			swap(node->prio, right->prio);
+			rotate_left(treap, node, right);
 		}
 
-		/*
-		 * ref points to node, child_ref points to the child.
-		 * We swap the node and child's position in the tree by
-		 * updating refs in and out of the nodes.
-		 *
-		 * Repair after deletion catches the aug and prio
-		 * inconsistencies from moving the child up the tree and
-		 * removing the node.
-		 */
-
-		swap(*ref, *child_ref);
-		swap(node->parent, child->parent);
-		swap(node->left, child->left);
-		swap(node->right, child->right);
-		if (node->left.node)
-			node->left.node->parent = node;
-		if (node->right.node)
-			node->right.node->parent = node;
-		if (child->left.node)
-			child->left.node->parent = child;
-		if (child->right.node)
-			child->right.node->parent = child;
-
+		parent = node->parent;
+		ref = parent_ref(treap, node);
 	}
 
 	/* delete the node, might have to point parent at child */

@@ -142,6 +142,28 @@ struct treap_node {
 	u8 data[0] __aligned(sizeof(long));
 };
 
+#if 0
+static void print_treap_node(struct treap_ref *ref, u64 loc)
+{
+	struct treap_node *node = ref->node;
+
+	if (!node)
+		return;
+
+	printk("loc %llx node %p: off %llu gen %llu prio %016llx bytes %u\n",
+		loc, node, node->off, node->gen, node->prio, node->bytes);
+	printk("    left: off %llu gen %llu aug %u node %p\n",
+		node->left.off, node->left.gen, node->left.aug_bits,
+		node->left.node);
+	printk("    right: off %llu gen %llu aug %u node %p\n",
+		node->right.off, node->right.gen, node->right.aug_bits,
+		node->right.node);
+
+	print_treap_node(&node->left, (loc << 4) | 1);
+	print_treap_node(&node->right, (loc << 4) | 2);
+}
+#endif
+
 static struct treap_ref *parent_ref(struct scoutfs_treap *treap,
 				    struct treap_node *node)
 {

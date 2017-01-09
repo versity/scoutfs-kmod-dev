@@ -927,7 +927,7 @@ void *scoutfs_treap_next(struct scoutfs_treap *treap, void *data)
 		goto out;
 	}
 
-	while (((parent = node->parent)) && node == parent->left.node)
+	while (((parent = node->parent)) && node == parent->right.node)
 		node = parent;
 	node = parent;
 

@@ -845,29 +845,45 @@ out:
 	return ret;
 }
 
-static void *treap_lookup(struct scoutfs_treap *treap, void *key, bool dirty)
+enum {
+	LU_DIRTY,
+	LU_NEXT,
+	LU_PREV,
+};
+
+static void *treap_lookup(struct scoutfs_treap *treap, void *key, int flags)
 {
 	struct treap_ref *ref = &treap->root_ref;
 	struct treap_node *parent = NULL;
 	struct treap_node *node = NULL;
+	struct treap_node *prev = NULL;
+	struct treap_node *next = NULL;
 	int cmp;
 
 	while (ref->gen) {
-		node = read_node(treap, parent, ref, dirty);
+		node = read_node(treap, parent, ref, flags & LU_DIRTY);
 		if (IS_ERR(node))
 			break;
 
 		cmp = treap->ops->compare(key, node->data);
-		if (cmp < 0)
+		if (cmp < 0) {
 			ref = &node->left;
-		else if (cmp > 0)
+			next = node;
+		} else if (cmp > 0) {
 			ref = &node->right;
-		else
+			prev = node;
+		} else {
 			break;
+		}
 
 		parent = node;
 		node = NULL;
 	}
+
+	if (!node && (flags & LU_PREV) && prev)
+		node = prev;
+	else if (!node && (flags & LU_NEXT) && next)
+		node = next;
 
 	if (IS_ERR(node))
 		return ERR_CAST(node);
@@ -878,12 +894,32 @@ static void *treap_lookup(struct scoutfs_treap *treap, void *key, bool dirty)
 
 void *scoutfs_treap_lookup(struct scoutfs_treap *treap, void *key)
 {
-	return treap_lookup(treap, key, false);
+	return treap_lookup(treap, key, 0);
 }
 
 void *scoutfs_treap_lookup_dirty(struct scoutfs_treap *treap, void *key)
 {
-	return treap_lookup(treap, key, true);
+	return treap_lookup(treap, key, LU_DIRTY);
+}
+
+void *scoutfs_treap_lookup_next(struct scoutfs_treap *treap, void *key)
+{
+	return treap_lookup(treap, key, LU_NEXT);
+}
+
+void *scoutfs_treap_lookup_next_dirty(struct scoutfs_treap *treap, void *key)
+{
+	return treap_lookup(treap, key, LU_NEXT | LU_DIRTY);
+}
+
+void *scoutfs_treap_lookup_prev(struct scoutfs_treap *treap, void *key)
+{
+	return treap_lookup(treap, key, LU_PREV);
+}
+
+void *scoutfs_treap_lookup_prev_dirty(struct scoutfs_treap *treap, void *key)
+{
+	return treap_lookup(treap, key, LU_PREV | LU_DIRTY);
 }
 
 void *scoutfs_treap_first(struct scoutfs_treap *treap)
@@ -898,6 +934,28 @@ void *scoutfs_treap_first(struct scoutfs_treap *treap)
 			break;
 
 		ref = &node->left;
+		parent = node;
+	}
+
+	if (IS_ERR(node))
+		return ERR_CAST(node);
+	if (node)
+		return node->data;
+	return NULL;
+}
+
+void *scoutfs_treap_last(struct scoutfs_treap *treap)
+{
+	struct treap_ref *ref = &treap->root_ref;
+	struct treap_node *parent = NULL;
+	struct treap_node *node = NULL;
+
+	while (ref->gen) {
+		node = read_node(treap, parent, ref, false);
+		if (IS_ERR(node))
+			break;
+
+		ref = &node->right;
 		parent = node;
 	}
 
@@ -939,49 +997,35 @@ out:
 	return NULL;
 }
 
-static void *lookup_next(struct scoutfs_treap *treap, void *key, bool dirty)
+void *scoutfs_treap_prev(struct scoutfs_treap *treap, void *data)
 {
-	struct treap_ref *ref = &treap->root_ref;
-	struct treap_node *parent = NULL;
-	struct treap_node *node = NULL;
-	struct treap_node *next = NULL;
-	int cmp;
+	struct treap_node *node = container_of(data, struct treap_node, data);
+	struct treap_node *parent;
 
-	while (ref->off) {
-		node = read_node(treap, parent, ref, dirty);
+	if (node->left.gen) {
+		node = read_node(treap, node, &node->left, false);
 		if (IS_ERR(node))
-			break;
+			goto out;
 
-		cmp = treap->ops->compare(key, node->data);
-		if (cmp < 0) {
-			ref = &node->left;
-			next = node;
-		} else if (cmp > 0) {
-			ref = &node->right;
-		} else {
-			next = node;
-			break;
+		while (node->right.gen) {
+			node = read_node(treap, node, &node->right, false);
+			if (IS_ERR(node))
+				goto out;
 		}
 
-		parent = node;
-		node = NULL;
+		goto out;
 	}
 
+	while (((parent = node->parent)) && node == parent->left.node)
+		node = parent;
+	node = parent;
+
+out:
 	if (IS_ERR(node))
 		return ERR_CAST(node);
-	if (next)
-		return next->data;
+	if (node)
+		return node->data;
 	return NULL;
-}
-
-void *scoutfs_treap_lookup_next(struct scoutfs_treap *treap, void *key)
-{
-	return lookup_next(treap, key, false);
-}
-
-void *scoutfs_treap_lookup_next_dirty(struct scoutfs_treap *treap, void *key)
-{
-	return lookup_next(treap, key, true);
 }
 
 int scoutfs_treap_has_dirty(struct scoutfs_treap *treap)

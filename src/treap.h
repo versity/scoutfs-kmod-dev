@@ -29,9 +29,13 @@ void *scoutfs_treap_lookup(struct scoutfs_treap *treap, void *key);
 void *scoutfs_treap_lookup_dirty(struct scoutfs_treap *treap, void *key);
 void *scoutfs_treap_lookup_next(struct scoutfs_treap *treap, void *key);
 void *scoutfs_treap_lookup_next_dirty(struct scoutfs_treap *treap, void *key);
+void *scoutfs_treap_lookup_prev(struct scoutfs_treap *treap, void *key);
+void *scoutfs_treap_lookup_prev_dirty(struct scoutfs_treap *treap, void *key);
 
 void *scoutfs_treap_first(struct scoutfs_treap *treap);
+void *scoutfs_treap_last(struct scoutfs_treap *treap);
 void *scoutfs_treap_next(struct scoutfs_treap *treap, void *data);
+void *scoutfs_treap_prev(struct scoutfs_treap *treap, void *data);
 
 int scoutfs_treap_has_dirty(struct scoutfs_treap *treap);
 int scoutfs_treap_dirty_ring(struct scoutfs_treap *treap);

@@ -43,6 +43,7 @@
 
 struct manifest {
 	struct rw_semaphore rwsem;
+	seqcount_t seqcount;
 	struct scoutfs_treap *treap;
 	u8 nr_levels;
 
@@ -127,6 +128,35 @@ static bool cmp_range_ment(struct kvec *key, struct kvec *end,
 	return scoutfs_kvec_cmp_overlap(key, end, first, last);
 }
 
+static u64 get_level_count(struct manifest *mani,
+			   struct scoutfs_super_block *super, u8 level)
+{
+	unsigned int sc;
+	u64 count;
+
+	do {
+		sc = read_seqcount_begin(&mani->seqcount);
+		count = le64_to_cpu(super->manifest.level_counts[level]);
+	} while (read_seqcount_retry(&mani->seqcount, sc));
+
+	return count;
+}
+
+static void add_level_count(struct manifest *mani,
+			    struct scoutfs_super_block *super, u8 level,
+			    s64 val)
+{
+	write_seqcount_begin(&mani->seqcount);
+	le64_add_cpu(&super->manifest.level_counts[level], val);
+	write_seqcount_end(&mani->seqcount);
+}
+
+static bool level_full(struct manifest *mani,
+		       struct scoutfs_super_block *super, u8 level)
+{
+	return get_level_count(mani, super, level) > mani->level_limits[level];
+}
+
 /*
  * Insert a new manifest entry in the treap.  The treap allocates a new
  * node for us and we fill it.
@@ -169,10 +199,9 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 		ret = PTR_ERR(ment);
 	} else {
 		mani->nr_levels = max_t(u8, mani->nr_levels, level + 1);
-		le64_add_cpu(&super->manifest.level_counts[level], 1);
+		add_level_count(mani, super, level, 1);
 
-		if (le64_to_cpu(super->manifest.level_counts[level]) >
-		    mani->level_limits[level])
+		if (level_full(mani, super, level))
 			scoutfs_compact_kick(sb);
 
 		ret = 0;
@@ -221,7 +250,7 @@ int scoutfs_manifest_del(struct super_block *sb, struct kvec *first, u64 seq,
 
 	ret = scoutfs_treap_delete(mani->treap, &skey);
 	if (ret == 0)
-		le64_add_cpu(&super->manifest.level_counts[level], -1ULL);
+		add_level_count(mani, super, level, -1ULL);
 
 	return ret;
 }
@@ -634,8 +663,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	down_write(&mani->rwsem);
 
 	for (level = mani->nr_levels - 1; level >= 0; level--) {
-		if (le64_to_cpu(super->manifest.level_counts[level]) >=
-		    mani->level_limits[level])
+		if (level_full(mani, super, level))
 			break;
 	}
 
@@ -838,6 +866,8 @@ int scoutfs_manifest_setup(struct super_block *sb)
 		return -ENOMEM;
 
 	init_rwsem(&mani->rwsem);
+	seqcount_init(&mani->seqcount);
+
 	mani->treap = scoutfs_treap_alloc(sb, &manifest_treap_ops,
 					  &super->manifest.root);
 	if (!mani->treap) {

@@ -25,6 +25,7 @@
 #include "compact.h"
 #include "manifest.h"
 #include "trans.h"
+#include "counters.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -762,6 +763,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 			goto out;
 		}
 
+		scoutfs_inc_counter(sb, manifest_compact_migrate);
 		goto done;
 	}
 

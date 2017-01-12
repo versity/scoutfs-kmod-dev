@@ -29,6 +29,7 @@
 #include "alloc.h"
 #include "treap.h"
 #include "compact.h"
+#include "counters.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -116,6 +117,8 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		scoutfs_seg_put(seg);
 		if (ret)
 			goto out;
+
+		scoutfs_inc_counter(sb, trans_level0_seg_write);
 	}
 
 	if (scoutfs_manifest_has_dirty(sb) || scoutfs_alloc_has_dirty(sb)) {

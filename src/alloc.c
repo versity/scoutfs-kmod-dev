@@ -20,6 +20,7 @@
 #include "treap.h"
 #include "cmp.h"
 #include "alloc.h"
+#include "counters.h"
 
 /*
  * scoutfs allocates segments by storing regions of a bitmap in treap
@@ -165,6 +166,8 @@ int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 
 	ret = 0;
 out:
+	if (ret == 0)
+		scoutfs_inc_counter(sb, alloc_alloc);
 	up_write(&sal->rwsem);
 
 	trace_printk("segno %llu ret %d\n", *segno, ret);
@@ -201,6 +204,7 @@ int scoutfs_alloc_free(struct super_block *sb, u64 segno)
 	}
 
 	set_bit_le(nr, pend->reg.bits);
+	scoutfs_inc_counter(sb, alloc_free);
 	ret = 0;
 out:
 	up_write(&sal->rwsem);

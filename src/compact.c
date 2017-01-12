@@ -23,6 +23,7 @@
 #include "compact.h"
 #include "manifest.h"
 #include "trans.h"
+#include "counters.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -131,6 +132,7 @@ static int read_segments(struct super_block *sb, struct compact_cursor *curs)
 		}
 
 		cseg->seg = seg;
+		scoutfs_inc_counter(sb, compact_segment_read);
 	}
 
 	list_for_each_entry(cseg, &curs->csegs, entry) {
@@ -165,6 +167,7 @@ static int write_segments(struct super_block *sb, struct list_head *results)
 		ret = scoutfs_seg_submit_write(sb, cseg->seg, &comp);
 		if (ret)
 			break;
+		scoutfs_inc_counter(sb, compact_segment_write);
 	}
 
 	err = scoutfs_bio_wait_comp(sb, &comp);
@@ -474,6 +477,8 @@ static void scoutfs_compact_func(struct work_struct *work)
 	ret = scoutfs_manifest_next_compact(sb, (void *)&curs);
 	if (ret <= 0)
 		goto out;
+
+	scoutfs_inc_counter(sb, compact_compactions);
 
 	ret = read_segments(sb, &curs) ?:
 	      compact_segments(sb, &curs, &results) ?:

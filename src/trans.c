@@ -97,6 +97,11 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	scoutfs_filerw_free_alloc(sb);
 #endif
 
+	trace_printk("dirty bytes %ld manifest dirty %d alloc dirty %d\n",
+		     scoutfs_item_dirty_bytes(sb),
+		     scoutfs_manifest_has_dirty(sb),
+		     scoutfs_alloc_has_dirty(sb));
+
 	/*
 	 * XXX this needs serious work to handle errors.
 	 */
@@ -183,6 +188,8 @@ int scoutfs_sync_fs(struct super_block *sb, int wait)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct write_attempt attempt;
 	int ret;
+
+	trace_printk("wait %d\n", wait);
 
 	if (!wait) {
 		queue_trans_work(sbi);

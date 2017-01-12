@@ -223,6 +223,8 @@ static void update_internal_aug(struct scoutfs_treap *treap,
 	while (node) {
 		bits = node_aug_bits(treap, node);
 		ref = parent_ref(treap, node);
+		trace_printk("node %p bits %x parent %p ref bits %x\n",
+				node, bits, node->parent, ref->aug_bits);
 		if (ref->aug_bits == bits)
 			break;
 		ref->aug_bits = bits;
@@ -377,6 +379,9 @@ static void repair(struct scoutfs_treap *treap, struct treap_node *node)
 	update_internal_aug(treap, node);
 	update_data_aug(treap, node);
 	rebalance(treap, node);
+
+	trace_printk("treap %p root aug %x\n",
+		     treap, treap->root_ref.aug_bits);
 }
 
 static struct treap_node *alloc_node(u16 bytes)
@@ -423,6 +428,9 @@ static bool mark_node_dirty(struct scoutfs_treap *treap, struct treap_ref *ref,
 
 	if (dirty_node(treap, node))
 		return false;
+
+	trace_printk("node %p off %llu gen %llu now dirty\n",
+		     node, node->off, node->gen);
 
 	treap->dirty_bytes += node_ring_bytes(node);
 	treap->dirty = true;

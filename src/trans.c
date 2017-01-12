@@ -87,7 +87,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	int err;
 
 	scoutfs_bio_init_comp(&comp);
-	sbi->trans_task = NULL;
+	sbi->trans_task = current;
 
 	wait_event(sbi->trans_hold_wq,
 		   atomic_cmpxchg(&sbi->trans_holds, 0, -1) == 0);

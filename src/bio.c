@@ -32,6 +32,9 @@ static void dec_end_io(struct bio_end_io_args *args, size_t bytes, int err)
 	if (err && !args->err)
 		args->err = err;
 
+	trace_printk("args %p bytes %zu in_flight %d err %d\n",
+		     args, bytes, atomic_read(&args->bytes_in_flight), err);
+
 	if (atomic_sub_return(bytes, &args->bytes_in_flight) == 0) {
 		args->end_io(args->sb, args->data, args->err);
 		kfree(args);
@@ -42,7 +45,7 @@ static void bio_end_io(struct bio *bio, int err)
 {
 	struct bio_end_io_args *args = bio->bi_private;
 
-	trace_printk("bio %p end io\n", bio);
+	trace_printk("bio %p size %u err %d \n", bio, bio->bi_size, err);
 
 	dec_end_io(args, bio->bi_size, err);
 	bio_put(bio);
@@ -110,6 +113,9 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 		if (bio_add_page(bio, page, bytes, 0) != bytes) {
 			/* submit the full bio and retry this page */
 			atomic_add(bio->bi_size, &args->bytes_in_flight);
+			trace_printk("bio %p args %p size %u in_flight %d\n",
+				     bio, args, bio->bi_size,
+				     atomic_read(&args->bytes_in_flight));
 			submit_bio(rw, bio);
 			bio = NULL;
 			i--;
@@ -124,6 +130,9 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 
 	if (bio) {
 		atomic_add(bio->bi_size, &args->bytes_in_flight);
+		trace_printk("bio %p args %p size %u in_flight %d\n",
+			     bio, args, bio->bi_size,
+			     atomic_read(&args->bytes_in_flight));
 		submit_bio(rw, bio);
 	}
 
@@ -137,6 +146,7 @@ void scoutfs_bio_init_comp(struct scoutfs_bio_completion *comp)
 	atomic_set(&comp->pending, 1);
 	init_completion(&comp->comp);
 	comp->err = 0;
+	trace_printk("initing comp %p\n", comp);
 }
 
 static void comp_end_io(struct super_block *sb, void *data, int err)
@@ -145,6 +155,9 @@ static void comp_end_io(struct super_block *sb, void *data, int err)
 
 	if (err && !comp->err)
 		comp->err = err;
+
+	trace_printk("ending comp %p pending before %d\n",
+		     comp, atomic_read(&comp->pending));
 
 	if (atomic_dec_and_test(&comp->pending))
 		complete(&comp->comp);
@@ -156,6 +169,9 @@ void scoutfs_bio_submit_comp(struct super_block *sb, int rw,
 			     struct scoutfs_bio_completion *comp)
 {
 	atomic_inc(&comp->pending);
+	trace_printk("submitting comp %p pending before %d\n",
+		     comp, atomic_read(&comp->pending));
+
 	scoutfs_bio_submit(sb, rw, pages, blkno, nr_blocks, comp_end_io, comp);
 }
 
@@ -163,6 +179,7 @@ int scoutfs_bio_wait_comp(struct super_block *sb,
 			  struct scoutfs_bio_completion *comp)
 {
 	comp_end_io(sb, comp, 0);
+	trace_printk("waiting for comp %p\n", comp);
 	wait_for_completion(&comp->comp);
 	return comp->err;
 }

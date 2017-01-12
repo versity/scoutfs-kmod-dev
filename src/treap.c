@@ -117,6 +117,7 @@ struct scoutfs_treap {
 	struct scoutfs_super_block *super;
 	struct scoutfs_treap_ops *ops;
 	struct treap_ref root_ref;
+	bool dirty;
 	u64 dirty_bytes;
 };
 
@@ -424,6 +425,7 @@ static bool mark_node_dirty(struct scoutfs_treap *treap, struct treap_ref *ref,
 		return false;
 
 	treap->dirty_bytes += node_ring_bytes(node);
+	treap->dirty = true;
 
 	node->off = tinf->dirty_off;
 	node->gen = tinf->dirty_gen;
@@ -1030,7 +1032,7 @@ out:
 
 int scoutfs_treap_has_dirty(struct scoutfs_treap *treap)
 {
-	return !!(treap->root_ref.aug_bits & SCOUTFS_TREAP_AUG_DIRTY);
+	return treap->dirty;
 }
 
 static void *pages_off_ptr(struct treap_info *tinf)
@@ -1135,7 +1137,8 @@ static void copy_node_to_ring(struct scoutfs_treap *treap,
  *
  * This is called for multiple treaps before the ring is written.
  */
-int scoutfs_treap_dirty_ring(struct scoutfs_treap *treap)
+int scoutfs_treap_dirty_ring(struct scoutfs_treap *treap,
+			     struct scoutfs_treap_root *root)
 {
 	struct treap_node *node;
 	unsigned bytes;
@@ -1168,7 +1171,13 @@ int scoutfs_treap_dirty_ring(struct scoutfs_treap *treap)
 		}
 	}
 
+	/* point the persistent super root at the treap we wrote to the ring */
+	root->ref.off = cpu_to_le64(treap->root_ref.off);
+	root->ref.gen = cpu_to_le64(treap->root_ref.gen);
+	root->ref.aug_bits = treap->root_ref.aug_bits;
+
 	treap->dirty_bytes = 0;
+	treap->dirty = false;
 	ret = 0;
 out:
 	return ret;
@@ -1256,14 +1265,6 @@ struct scoutfs_treap *scoutfs_treap_alloc(struct super_block *sb,
 	}
 
 	return treap;
-}
-
-void scoutfs_treap_update_root(struct scoutfs_treap_root *root,
-			       struct scoutfs_treap *treap)
-{
-	root->ref.off = cpu_to_le64(treap->root_ref.off);
-	root->ref.gen = cpu_to_le64(treap->root_ref.gen);
-	root->ref.aug_bits = treap->root_ref.aug_bits;
 }
 
 /*

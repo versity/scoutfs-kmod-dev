@@ -612,8 +612,7 @@ int scoutfs_manifest_dirty_ring(struct super_block *sb)
 	struct scoutfs_super_block *super = &sbi->super;
 
 	down_write(&mani->rwsem);
-	scoutfs_treap_dirty_ring(mani->treap);
-	scoutfs_treap_update_root(&super->manifest.root, mani->treap);
+	scoutfs_treap_dirty_ring(mani->treap, &super->manifest.root);
 	up_write(&mani->rwsem);
 
 	return 0;

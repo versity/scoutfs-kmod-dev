@@ -270,8 +270,7 @@ int scoutfs_alloc_dirty_ring(struct super_block *sb)
 		kfree(pend);
 	}
 
-	scoutfs_treap_dirty_ring(sal->treap);
-	scoutfs_treap_update_root(&super->alloc_treap_root, sal->treap);
+	scoutfs_treap_dirty_ring(sal->treap, &super->alloc_treap_root);
 	ret = 0;
 out:
 	up_write(&sal->rwsem);

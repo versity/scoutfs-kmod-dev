@@ -18,8 +18,6 @@ struct scoutfs_treap_ops {
 struct scoutfs_treap *scoutfs_treap_alloc(struct super_block *sb,
 					  struct scoutfs_treap_ops *ops,
 					  struct scoutfs_treap_root *root);
-void scoutfs_treap_update_root(struct scoutfs_treap_root *root,
-			       struct scoutfs_treap *treap);
 void scoutfs_treap_free(struct scoutfs_treap *treap);
 
 void *scoutfs_treap_insert(struct scoutfs_treap *treap, void *key, u16 bytes,
@@ -38,7 +36,8 @@ void *scoutfs_treap_next(struct scoutfs_treap *treap, void *data);
 void *scoutfs_treap_prev(struct scoutfs_treap *treap, void *data);
 
 int scoutfs_treap_has_dirty(struct scoutfs_treap *treap);
-int scoutfs_treap_dirty_ring(struct scoutfs_treap *treap);
+int scoutfs_treap_dirty_ring(struct scoutfs_treap *treap,
+			     struct scoutfs_treap_root *root);
 int scoutfs_treap_submit_write(struct super_block *sb,
 			       struct scoutfs_bio_completion *comp);
 

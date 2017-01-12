@@ -28,6 +28,7 @@
 #include "seg.h"
 #include "alloc.h"
 #include "treap.h"
+#include "compact.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -210,9 +211,56 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 }
 
 /*
- * The first holders race to try and allocate the segment that will be
- * written by the next commit.
+ * I think the holder that creates the most dirty item data is
+ * symlinking, which can create all the entry items and a symlink target
+ * item with a full 4k path.  We go a little nuts and just set it to two
+ * blocks.
+ *
+ * XXX This divides the segment size to set the hard limit on the number of
+ * concurrent holders so we'll want this to be more precise.
  */
+#define MOST_DIRTY (2 * SCOUTFS_BLOCK_SIZE)
+
+/*
+ * We're able to hold the transaction if the current dirty item bytes
+ * and the presumed worst case item dirtying of all the holders,
+ * including us, all fit in a segment.
+ */
+static bool hold_acquired(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	long bytes;
+	int with_us;
+	int holds;
+	int before;
+
+	holds = atomic_read(&sbi->trans_holds);
+	for (;;) {
+		/* transaction is being committed */
+		if (holds < 0)
+			return false;
+
+		/* only hold when there's no level 0 segments, XXX for now */
+		if (scoutfs_manifest_level_count(sb, 0) > 0) {
+			scoutfs_compact_kick(sb);
+			return false;
+		}
+
+		/* see if we all would fill the segment */
+		with_us = holds + 1;
+		bytes = (with_us * MOST_DIRTY) + scoutfs_item_dirty_bytes(sb);
+		if (bytes > SCOUTFS_SEGMENT_SIZE) {
+			scoutfs_sync_fs(sb, 0);
+			return false;
+		}
+
+		before = atomic_cmpxchg(&sbi->trans_holds, holds, with_us);
+		if (before == holds)
+			return true;
+		holds = before;
+	}
+}
+
 int scoutfs_hold_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -220,37 +268,36 @@ int scoutfs_hold_trans(struct super_block *sb)
 	if (current == sbi->trans_task)
 		return 0;
 
-	return wait_event_interruptible(sbi->trans_hold_wq,
-				  atomic_add_unless(&sbi->trans_holds, 1, -1));
+	return wait_event_interruptible(sbi->trans_hold_wq, hold_acquired(sb));
 }
 
 /*
- * As we release we kick off a commit if we have a segment's worth of
- * dirty items.
- *
- * Right now it's conservatively kicking off writes at ~95% full blocks.
- * This leaves a lot of slop for the largest item bytes created by a
- * holder and overrun by concurrent holders (who aren't accounted
- * today).
- *
- * It should more precisely know the worst case item byte consumption of
- * holders and only kick off a write when someone tries to hold who
- * might fill the segment.
+ * As we release we'll almost certainly have dirtied less than the
+ * worst case dirty assumption that holders might be throttled waiting
+ * for.  We always try and wake blocked holders in case they now have
+ * room to dirty.
  */
 void scoutfs_release_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	unsigned int target = (SCOUTFS_SEGMENT_SIZE * 95 / 100);
 
 	if (current == sbi->trans_task)
 		return;
 
-	if (atomic_sub_return(1, &sbi->trans_holds) == 0) {
-		if (scoutfs_item_dirty_bytes(sb) >= target)
-			scoutfs_sync_fs(sb, 0);
+	atomic_dec(&sbi->trans_holds);
+	wake_up(&sbi->trans_hold_wq);
+}
 
-		wake_up(&sbi->trans_hold_wq);
-	}
+/*
+ * This is called to wake people waiting on holders when the conditions
+ * that they're waiting on change: levels being full, dirty count falling
+ * under a segment, or holders falling to 0.
+ */
+void scoutfs_trans_wake_holders(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	wake_up(&sbi->trans_hold_wq);
 }
 
 int scoutfs_setup_trans(struct super_block *sb)

@@ -22,6 +22,7 @@
 #include "cmp.h"
 #include "compact.h"
 #include "manifest.h"
+#include "trans.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -470,15 +471,21 @@ static void scoutfs_compact_func(struct work_struct *work)
 
 	INIT_LIST_HEAD(&curs.csegs);
 
-	ret = scoutfs_manifest_next_compact(sb, (void *)&curs) ?:
-	      read_segments(sb, &curs) ?:
+	ret = scoutfs_manifest_next_compact(sb, (void *)&curs);
+	if (ret <= 0)
+		goto out;
+
+	ret = read_segments(sb, &curs) ?:
 	      compact_segments(sb, &curs, &results) ?:
 	      write_segments(sb, &results) ?:
 	      update_manifest(sb, &curs, &results);
-
-	if (ret)
+	if (ret) {
 		free_result_segnos(sb, &results);
-
+	} else {
+		scoutfs_sync_fs(sb, 0);
+		scoutfs_compact_kick(sb);
+	}
+out:
 	free_csegs(&curs.csegs);
 	free_csegs(&results);
 

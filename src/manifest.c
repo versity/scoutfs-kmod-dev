@@ -24,6 +24,7 @@
 #include "cmp.h"
 #include "compact.h"
 #include "manifest.h"
+#include "trans.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -142,19 +143,41 @@ static u64 get_level_count(struct manifest *mani,
 	return count;
 }
 
-static void add_level_count(struct manifest *mani,
-			    struct scoutfs_super_block *super, u8 level,
-			    s64 val)
+static bool past_limit(struct manifest *mani, u8 level, u64 count)
 {
-	write_seqcount_begin(&mani->seqcount);
-	le64_add_cpu(&super->manifest.level_counts[level], val);
-	write_seqcount_end(&mani->seqcount);
+	return count > mani->level_limits[level];
 }
 
 static bool level_full(struct manifest *mani,
 		       struct scoutfs_super_block *super, u8 level)
 {
-	return get_level_count(mani, super, level) > mani->level_limits[level];
+	return past_limit(mani, level, get_level_count(mani, super, level));
+}
+
+static void add_level_count(struct super_block *sb, struct manifest *mani,
+			    struct scoutfs_super_block *super, u8 level,
+			    s64 val)
+{
+	bool was_full;
+	bool now_full;
+	u64 count;
+
+	write_seqcount_begin(&mani->seqcount);
+
+	count = le64_to_cpu(super->manifest.level_counts[level]);
+	was_full = past_limit(mani, level, count);
+
+	count += val;
+	now_full = past_limit(mani, level, count);
+	super->manifest.level_counts[level] = cpu_to_le64(count);
+
+	write_seqcount_end(&mani->seqcount);
+
+	if (was_full && !now_full)
+		scoutfs_trans_wake_holders(sb);
+
+	if (now_full)
+		scoutfs_compact_kick(sb);
 }
 
 /*
@@ -199,11 +222,7 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 		ret = PTR_ERR(ment);
 	} else {
 		mani->nr_levels = max_t(u8, mani->nr_levels, level + 1);
-		add_level_count(mani, super, level, 1);
-
-		if (level_full(mani, super, level))
-			scoutfs_compact_kick(sb);
-
+		add_level_count(sb, mani, super, level, 1);
 		ret = 0;
 	}
 
@@ -250,7 +269,7 @@ int scoutfs_manifest_del(struct super_block *sb, struct kvec *first, u64 seq,
 
 	ret = scoutfs_treap_delete(mani->treap, &skey);
 	if (ret == 0)
-		add_level_count(mani, super, level, -1ULL);
+		add_level_count(sb, mani, super, level, -1ULL);
 
 	return ret;
 }
@@ -618,6 +637,15 @@ int scoutfs_manifest_dirty_ring(struct super_block *sb)
 	return 0;
 }
 
+u64 scoutfs_manifest_level_count(struct super_block *sb, u8 level)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+
+	return get_level_count(mani, super, level);
+}
+
 /*
  * Give the caller the segments that will be involved in the next
  * compaction.
@@ -635,6 +663,8 @@ int scoutfs_manifest_dirty_ring(struct super_block *sb)
  * If the candidate does overlap then we add all the segments to the
  * compaction caller's data and let it do its thing.  It'll allocate and
  * free segments and update the manifest.
+ *
+ * Returns 1 if there's compaction work to do, 0 if not, or -errno.
  *
  * XXX this will get a lot more clever:
  *  - ensuring concurrent compactions don't overlap
@@ -769,7 +799,7 @@ done:
 	scoutfs_kvec_memcpy_truncate(mani->compact_keys[level], ment_last);
 	scoutfs_kvec_be_inc(mani->compact_keys[level]);
 
-	ret = 0;
+	ret = 1;
 out:
 	up_write(&mani->rwsem);
 	return ret;

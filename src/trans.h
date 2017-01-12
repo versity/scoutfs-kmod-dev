@@ -8,6 +8,7 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 
 int scoutfs_hold_trans(struct super_block *sb);
 void scoutfs_release_trans(struct super_block *sb);
+void scoutfs_trans_wake_holders(struct super_block *sb);
 
 int scoutfs_setup_trans(struct super_block *sb);
 void scoutfs_shutdown_trans(struct super_block *sb);

@@ -16,6 +16,7 @@ int scoutfs_manifest_unlock(struct super_block *sb);
 int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 				struct kvec *until);
 
+u64 scoutfs_manifest_level_count(struct super_block *sb, u8 level);
 int scoutfs_manifest_next_compact(struct super_block *sb, void *data);
 
 int scoutfs_manifest_setup(struct super_block *sb);

@@ -21,21 +21,21 @@
 
 struct bio_end_io_args {
 	struct super_block *sb;
-	atomic_t bytes_in_flight;
+	atomic_t in_flight;
 	int err;
 	scoutfs_bio_end_io_t end_io;
 	void *data;
 };
 
-static void dec_end_io(struct bio_end_io_args *args, size_t bytes, int err)
+static void dec_end_io(struct bio_end_io_args *args, int err)
 {
 	if (err && !args->err)
 		args->err = err;
 
-	trace_printk("args %p bytes %zu in_flight %d err %d\n",
-		     args, bytes, atomic_read(&args->bytes_in_flight), err);
+	trace_printk("args %p in_flight %d err %d\n",
+		     args, atomic_read(&args->in_flight), err);
 
-	if (atomic_sub_return(bytes, &args->bytes_in_flight) == 0) {
+	if (atomic_dec_and_test(&args->in_flight)) {
 		args->end_io(args->sb, args->data, args->err);
 		kfree(args);
 	}
@@ -47,7 +47,7 @@ static void bio_end_io(struct bio *bio, int err)
 
 	trace_printk("bio %p size %u err %d \n", bio, bio->bi_size, err);
 
-	dec_end_io(args, bio->bi_size, err);
+	dec_end_io(args, err);
 	bio_put(bio);
 }
 
@@ -83,7 +83,7 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 	}
 
 	args->sb = sb;
-	atomic_set(&args->bytes_in_flight, 1);
+	atomic_set(&args->in_flight, 1);
 	args->err = 0;
 	args->end_io = end_io;
 	args->data = data;
@@ -112,10 +112,9 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 
 		if (bio_add_page(bio, page, bytes, 0) != bytes) {
 			/* submit the full bio and retry this page */
-			atomic_add(bio->bi_size, &args->bytes_in_flight);
-			trace_printk("bio %p args %p size %u in_flight %d\n",
-				     bio, args, bio->bi_size,
-				     atomic_read(&args->bytes_in_flight));
+			atomic_inc(&args->in_flight);
+			trace_printk("bio %p args %p in_flight %d\n",
+				     bio, args, atomic_read(&args->in_flight));
 			submit_bio(rw, bio);
 			bio = NULL;
 			i--;
@@ -129,15 +128,14 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 	}
 
 	if (bio) {
-		atomic_add(bio->bi_size, &args->bytes_in_flight);
-		trace_printk("bio %p args %p size %u in_flight %d\n",
-			     bio, args, bio->bi_size,
-			     atomic_read(&args->bytes_in_flight));
+		atomic_inc(&args->in_flight);
+		trace_printk("bio %p args %p in_flight %d\n",
+			     bio, args, atomic_read(&args->in_flight));
 		submit_bio(rw, bio);
 	}
 
 	blk_finish_plug(&plug);
-	dec_end_io(args, 1, ret);
+	dec_end_io(args, ret);
 }
 
 void scoutfs_bio_init_comp(struct scoutfs_bio_completion *comp)

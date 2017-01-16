@@ -22,6 +22,7 @@
 #include "manifest.h"
 #include "item.h"
 #include "seg.h"
+#include "counters.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -102,12 +103,21 @@ static struct cached_item *walk_items(struct rb_root *root, struct kvec *key,
 	return NULL;
 }
 
-static struct cached_item *find_item(struct rb_root *root, struct kvec *key)
+static struct cached_item *find_item(struct super_block *sb,
+				     struct rb_root *root, struct kvec *key)
 {
 	struct cached_item *prev;
 	struct cached_item *next;
+	struct cached_item *item;
 
-	return walk_items(root, key, &prev, &next);
+	item = walk_items(root, key, &prev, &next);
+
+	if (item)
+		scoutfs_inc_counter(sb, item_lookup_hit);
+	else
+		scoutfs_inc_counter(sb, item_lookup_miss);
+
+	return item;
 }
 
 static struct cached_item *next_item(struct rb_root *root, struct kvec *key)
@@ -252,8 +262,8 @@ static int insert_item(struct rb_root *root, struct cached_item *ins)
  * instead in an uncached hole.  end is set to the start of the next
  * cached range.
  */
-static bool check_range(struct rb_root *root, struct kvec *key,
-		        struct kvec *end)
+static bool check_range(struct super_block *sb, struct rb_root *root,
+			struct kvec *key, struct kvec *end)
 {
 	struct rb_node *node = root->rb_node;
 	struct cached_range *next = NULL;
@@ -272,6 +282,7 @@ static bool check_range(struct rb_root *root, struct kvec *key,
 			node = node->rb_right;
 		} else {
 			scoutfs_kvec_memcpy_truncate(end, rng->end);
+			scoutfs_inc_counter(sb, item_range_hit);
 			return true;
 		}
 	}
@@ -281,6 +292,7 @@ static bool check_range(struct rb_root *root, struct kvec *key,
 	else
 		scoutfs_kvec_set_max_key(end);
 
+	scoutfs_inc_counter(sb, item_range_miss);
 	return false;
 }
 
@@ -301,7 +313,8 @@ static void free_range(struct cached_range *rng)
  * We're responsible for the ins allocation.  We free it if we don't
  * insert it in the tree.
  */
-static void insert_range(struct rb_root *root, struct cached_range *ins)
+static void insert_range(struct super_block *sb, struct rb_root *root,
+			 struct cached_range *ins)
 {
 	struct cached_range *rng;
 	struct rb_node *parent;
@@ -309,6 +322,8 @@ static void insert_range(struct rb_root *root, struct cached_range *ins)
 	int start_cmp;
 	int end_cmp;
 	int cmp;
+
+	scoutfs_inc_counter(sb, item_range_insert);
 
 restart:
 	parent = NULL;
@@ -379,10 +394,10 @@ int scoutfs_item_lookup(struct super_block *sb, struct kvec *key,
 
 		spin_lock_irqsave(&cac->lock, flags);
 
-		item = find_item(&cac->items, key);
+		item = find_item(sb, &cac->items, key);
 		if (item)
 			ret = scoutfs_kvec_memcpy(val, item->val);
-		else if (check_range(&cac->ranges, key, end))
+		else if (check_range(sb, &cac->ranges, key, end))
 			ret = -ENOENT;
 		else
 			ret = -ENODATA;
@@ -465,7 +480,7 @@ int scoutfs_item_next(struct super_block *sb, struct kvec *key,
 		scoutfs_kvec_init_key(range_end);
 
 		/* see if we have a usable item in cache and before last */
-		cached = check_range(&cac->ranges, key, range_end);
+		cached = check_range(sb, &cac->ranges, key, range_end);
 
 		if (cached && (item = next_item(&cac->items, key)) &&
 		    scoutfs_kvec_memcmp(item->key, range_end) <= 0 &&
@@ -639,8 +654,10 @@ int scoutfs_item_create(struct super_block *sb, struct kvec *key,
 
 	spin_lock_irqsave(&cac->lock, flags);
 	ret = insert_item(&cac->items, item);
-	if (!ret)
+	if (!ret) {
+		scoutfs_inc_counter(sb, item_create);
 		mark_item_dirty(cac, item);
+	}
 	spin_unlock_irqrestore(&cac->lock, flags);
 
 	if (ret)
@@ -716,7 +733,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 
 	spin_lock_irqsave(&cac->lock, flags);
 
-	insert_range(&cac->ranges, rng);
+	insert_range(sb, &cac->ranges, rng);
 
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del(&item->entry);
@@ -766,11 +783,11 @@ int scoutfs_item_dirty(struct super_block *sb, struct kvec *key)
 
 		spin_lock_irqsave(&cac->lock, flags);
 
-		item = find_item(&cac->items, key);
+		item = find_item(sb, &cac->items, key);
 		if (item) {
 			mark_item_dirty(cac, item);
 			ret = 0;
-		} else if (check_range(&cac->ranges, key, end)) {
+		} else if (check_range(sb, &cac->ranges, key, end)) {
 			ret = -ENOENT;
 		} else {
 			ret = -ENODATA;
@@ -821,13 +838,13 @@ int scoutfs_item_update(struct super_block *sb, struct kvec *key,
 
 		spin_lock_irqsave(&cac->lock, flags);
 
-		item = find_item(&cac->items, key);
+		item = find_item(sb, &cac->items, key);
 		if (item) {
 			clear_item_dirty(cac, item);
 			scoutfs_kvec_swap(up_val, item->val);
 			mark_item_dirty(cac, item);
 			ret = 0;
-		} else if (check_range(&cac->ranges, key, end)) {
+		} else if (check_range(sb, &cac->ranges, key, end)) {
 			ret = -ENOENT;
 		} else {
 			ret = -ENODATA;

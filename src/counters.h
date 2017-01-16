@@ -22,10 +22,16 @@
 	EXPAND_COUNTER(compact_segment_moved) \
 	EXPAND_COUNTER(compact_segment_skipped) \
 	EXPAND_COUNTER(compact_segment_read)	\
-	EXPAND_COUNTER(compact_segment_written)
+	EXPAND_COUNTER(compact_segment_written)	\
+	EXPAND_COUNTER(item_create)		\
+	EXPAND_COUNTER(item_lookup_hit)		\
+	EXPAND_COUNTER(item_lookup_miss)	\
+	EXPAND_COUNTER(item_range_hit)		\
+	EXPAND_COUNTER(item_range_miss)		\
+	EXPAND_COUNTER(item_range_insert)
 
 #define FIRST_COUNTER alloc_alloc
-#define LAST_COUNTER compact_segment_written
+#define LAST_COUNTER item_range_insert
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

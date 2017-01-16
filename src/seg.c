@@ -87,6 +87,11 @@ static struct scoutfs_segment *alloc_seg(u64 segno)
 	return seg;
 }
 
+void scoutfs_seg_get(struct scoutfs_segment *seg)
+{
+	atomic_inc(&seg->refcount);
+}
+
 void scoutfs_seg_put(struct scoutfs_segment *seg)
 {
 	int i;

@@ -714,7 +714,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		skey.level = level;
 		skey.seq = 0;
 		ment = scoutfs_treap_lookup_next(mani->treap, &skey);
-		if (ment == NULL && scoutfs_kvec_length(skey.key)) {
+		if (ment == NULL || ment->level != level) {
 			/* XXX ugh, these kvecs are the worst */
 			scoutfs_kvec_init(skey.key,
 					  skey.key[0].iov_base, 0);

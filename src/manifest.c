@@ -658,14 +658,10 @@ u64 scoutfs_manifest_level_count(struct super_block *sb, u8 level)
  * where clock hands sweep through each level.  The hands wrap much
  * faster on the higher levels.
  *
- * If the candidate segment doesn't overlap with any higher level
- * segments then just move it down a level.
+ * We add all the segments to the compaction caller's data and let it do
+ * its thing.  It'll allocate and free segments and update the manifest.
  *
- * If the candidate does overlap then we add all the segments to the
- * compaction caller's data and let it do its thing.  It'll allocate and
- * free segments and update the manifest.
- *
- * Returns 1 if there's compaction work to do, 0 if not, or -errno.
+ * Returns 0 or -errno.  The caller will see if any segments were added.
  *
  * XXX this will get a lot more clever:
  *  - ensuring concurrent compactions don't overlap
@@ -686,7 +682,6 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	SCOUTFS_DECLARE_KVEC(over_first);
 	SCOUTFS_DECLARE_KVEC(over_last);
 	int level;
-	int err;
 	int ret;
 	int i;
 
@@ -733,57 +728,21 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 
 	init_ment_keys(ment, ment_first, ment_last);
 
-	/* find first overlapping at the next level */
-	skey.key = ment_first;
-	skey.level = level + 1;
-	skey.seq = 0;
-	over = scoutfs_treap_lookup(mani->treap, &skey);
-	if (IS_ERR(over)) {
-		ret = PTR_ERR(over);
-		goto out;
-	}
-
-	/* if there's no overlap we can just move it down a level */
-	if (!over) {
-		ret = scoutfs_manifest_add(sb, ment_first, ment_last,
-					   le64_to_cpu(ment->segno),
-					   le64_to_cpu(ment->seq),
-					   ment->level + 1);
-		if (ret)
-			goto out;
-
-		ret = scoutfs_manifest_del(sb, ment_first,
-					   le64_to_cpu(ment->seq),
-					   ment->level);
-		if (ret) {
-			err = scoutfs_manifest_del(sb, ment_first,
-						   le64_to_cpu(ment->seq),
-						   ment->level + 1);
-			BUG_ON(err);
-			goto out;
-		}
-
-		scoutfs_inc_counter(sb, manifest_compact_migrate);
-		goto done;
-	}
-
 	/* add the upper input segment */
-	ret = scoutfs_compact_add(sb, data, ment_first,
+	ret = scoutfs_compact_add(sb, data, ment_first, ment_last,
 				  le64_to_cpu(ment->segno),
 				  le64_to_cpu(ment->seq), level);
 	if (ret)
 		goto out;
 
-	/* add a fanout's worth of lower overlapping segments */
-	init_ment_keys(over, over_first, over_last);
-	for (i = 0; i < SCOUTFS_MANIFEST_FANOUT; i++) {
-		ret = scoutfs_compact_add(sb, data, over_first,
-					  le64_to_cpu(over->segno),
-					  le64_to_cpu(over->seq), level + 1);
-		if (ret)
-			goto out;
+	/* start with the first overlapping at the next level */
+	skey.key = ment_first;
+	skey.level = level + 1;
+	skey.seq = 0;
+	over = scoutfs_treap_lookup(mani->treap, &skey);
 
-		over = scoutfs_treap_next(mani->treap, over);
+	/* and add a fanout's worth of lower overlapping segments */
+	for (i = 0; i < SCOUTFS_MANIFEST_FANOUT; i++) {
 		if (IS_ERR(over)) {
 			ret = PTR_ERR(over);
 			goto out;
@@ -792,18 +751,26 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 			break;
 
 		init_ment_keys(over, over_first, over_last);
+
 		if (scoutfs_kvec_cmp_overlap(ment_first, ment_last,
 					     over_first, over_last) != 0)
 			break;
+
+		ret = scoutfs_compact_add(sb, data, over_first, over_last,
+					  le64_to_cpu(over->segno),
+					  le64_to_cpu(over->seq), level + 1);
+		if (ret)
+			goto out;
+
+		over = scoutfs_treap_next(mani->treap, over);
 	}
 
-done:
 	/* record the next key to start from, not exact */
 	scoutfs_kvec_init_key(mani->compact_keys[level]);
 	scoutfs_kvec_memcpy_truncate(mani->compact_keys[level], ment_last);
 	scoutfs_kvec_be_inc(mani->compact_keys[level]);
 
-	ret = 1;
+	ret = 0;
 out:
 	up_write(&mani->rwsem);
 	return ret;

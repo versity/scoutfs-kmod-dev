@@ -71,6 +71,7 @@ struct compact_seg {
 	u64 seq;
 	u8 level;
 	SCOUTFS_DECLARE_KVEC(first);
+	SCOUTFS_DECLARE_KVEC(last);
 	struct scoutfs_segment *seg;
 	int pos;
 	int saved_pos;
@@ -90,6 +91,28 @@ struct compact_cursor {
 	struct compact_seg *lower;
 	struct compact_seg *saved_lower;
 };
+
+static void free_cseg(struct compact_seg *cseg)
+{
+	WARN_ON_ONCE(!list_empty(&cseg->entry));
+
+	scoutfs_seg_put(cseg->seg);
+	scoutfs_kvec_kfree(cseg->first);
+	scoutfs_kvec_kfree(cseg->last);
+
+	kfree(cseg);
+}
+
+static void free_cseg_list(struct list_head *list)
+{
+	struct compact_seg *cseg;
+	struct compact_seg *tmp;
+
+	list_for_each_entry_safe(cseg, tmp, list, entry) {
+		list_del_init(&cseg->entry);
+		free_cseg(cseg);
+	}
+}
 
 static void save_pos(struct compact_cursor *curs)
 {
@@ -113,66 +136,24 @@ static void restore_pos(struct compact_cursor *curs)
 	curs->lower = curs->saved_lower;
 }
 
-/*
- * There's some common patterns with scoutfs_manifest_read_items().. may
- * want some sharing if it's clean.
- */
-static int read_segments(struct super_block *sb, struct compact_cursor *curs)
+static int read_segment(struct super_block *sb, struct compact_seg *cseg)
 {
 	struct scoutfs_segment *seg;
-	struct compact_seg *cseg;
-	int ret = 0;
-	int err;
+	int ret;
 
-	list_for_each_entry(cseg, &curs->csegs, entry) {
-		seg = scoutfs_seg_submit_read(sb, cseg->segno);
-		if (IS_ERR(seg)) {
-			ret = PTR_ERR(seg);
-			break;
-		}
+	if (cseg == NULL || cseg->seg)
+		return 0;
 
+	seg = scoutfs_seg_submit_read(sb, cseg->segno);
+	if (IS_ERR(seg)) {
+		ret = PTR_ERR(seg);
+	} else {
 		cseg->seg = seg;
 		scoutfs_inc_counter(sb, compact_segment_read);
+		ret = scoutfs_seg_wait(sb, cseg->seg);
 	}
 
-	list_for_each_entry(cseg, &curs->csegs, entry) {
-		if (!cseg->seg)
-			break;
-
-		err = scoutfs_seg_wait(sb, cseg->seg);
-		if (err && !ret)
-			ret = err;
-
-		/* XXX verify segs */
-	}
-
-	return ret;
-}
-
-/*
- * This is synchronous for now.  We're just ensuring that the segments
- * are stable on disk so that the references to them in the dirty manifest
- * are safe without having to associate dirty segments and manifest entries.
- */
-static int write_segments(struct super_block *sb, struct list_head *results)
-{
-	struct scoutfs_bio_completion comp;
-	struct compact_seg *cseg;
-	int ret = 0;
-	int err;
-
-	scoutfs_bio_init_comp(&comp);
-
-	list_for_each_entry(cseg, results, entry) {
-		ret = scoutfs_seg_submit_write(sb, cseg->seg, &comp);
-		if (ret)
-			break;
-		scoutfs_inc_counter(sb, compact_segment_write);
-	}
-
-	err = scoutfs_bio_wait_comp(sb, &comp);
-	if (err && !ret)
-		ret = err;
+	/* XXX verify read segment metadata */
 
 	return ret;
 }
@@ -188,22 +169,20 @@ static struct compact_seg *next_spos(struct compact_cursor *curs,
 
 /*
  * Point the caller's key and value kvecs at the next item that should
- * be copied from the segment's position in the upper and lower
- * segments.  We use the item that has the lowest key or the upper if
- * they're the same.  We advance the cursor past the item that is
- * returned.
+ * be copied from the upper or lower segments.  We use the item that has
+ * the lowest key or the upper if they're the same.  We advance the
+ * cursor past the item that is returned.
  *
  * XXX this will get fancier as we get range deletion items and incremental
  * update items.
  */
-static bool next_item(struct compact_cursor *curs,
-		      struct kvec *item_key, struct kvec *item_val)
+static int next_item(struct super_block *sb, struct compact_cursor *curs,
+		     struct kvec *item_key, struct kvec *item_val)
 {
 	struct compact_seg *upper = curs->upper;
 	struct compact_seg *lower = curs->lower;
 	SCOUTFS_DECLARE_KVEC(lower_key);
 	SCOUTFS_DECLARE_KVEC(lower_val);
-	bool found = false;
 	int cmp;
 	int ret;
 
@@ -215,6 +194,10 @@ static bool next_item(struct compact_cursor *curs,
 	}
 
 	while (lower) {
+		ret = read_segment(sb, lower);
+		if (ret)
+			goto out;
+
 		ret = scoutfs_seg_item_kvecs(lower->seg, lower->pos,
 					     lower_key, lower_val);
 		if (ret == 0)
@@ -224,7 +207,7 @@ static bool next_item(struct compact_cursor *curs,
 
 	/* we're done if all are empty */
 	if (!upper && !lower) {
-		found = false;
+		ret = 0;
 		goto out;
 	}
 
@@ -250,73 +233,171 @@ static bool next_item(struct compact_cursor *curs,
 	if (cmp >= 0)
 		lower->pos++;
 
-	found = true;
+	ret = 1;
 out:
 	curs->upper = upper;
 	curs->lower = lower;
 
-	return found;
+	return ret;
 }
 
 /*
  * Figure out how many items and bytes of keys we're going to try and
  * compact into the next segment.
  */
-static void count_items(struct super_block *sb, struct compact_cursor *curs,
-			u32 *nr_items, u32 *key_bytes)
+static int count_items(struct super_block *sb, struct compact_cursor *curs,
+		       u32 *nr_items, u32 *key_bytes)
 {
 	SCOUTFS_DECLARE_KVEC(item_key);
 	SCOUTFS_DECLARE_KVEC(item_val);
 	u32 total;
+	int ret;
 
 	*nr_items = 0;
 	*key_bytes = 0;
 	total = sizeof(struct scoutfs_segment_block);
 
-	while (next_item(curs, item_key, item_val)) {
+	while ((ret = next_item(sb, curs, item_key, item_val)) > 0) {
 
 		total += sizeof(struct scoutfs_segment_item) +
 			 scoutfs_kvec_length(item_key) +
 			 scoutfs_kvec_length(item_val);
 
-		if (total > SCOUTFS_SEGMENT_SIZE)
+		if (total > SCOUTFS_SEGMENT_SIZE) {
+			ret = 0;
 			break;
+		}
 
 		(*nr_items)++;
 		(*key_bytes) += scoutfs_kvec_length(item_key);
 	}
+
+	return ret;
 }
 
-static void compact_items(struct super_block *sb, struct compact_cursor *curs,
-			  struct scoutfs_segment *seg, u32 nr_items,
-			  u32 key_bytes)
+static int compact_items(struct super_block *sb, struct compact_cursor *curs,
+			 struct scoutfs_segment *seg, u32 nr_items,
+			 u32 key_bytes)
 {
 	SCOUTFS_DECLARE_KVEC(item_key);
 	SCOUTFS_DECLARE_KVEC(item_val);
+	int ret;
 
-	next_item(curs, item_key, item_val);
+	ret = next_item(sb, curs, item_key, item_val);
+	if (ret <= 0)
+		goto out;
+
 	scoutfs_seg_first_item(sb, seg, item_key, item_val,
 			       nr_items, key_bytes);
 
-	while (--nr_items && next_item(curs, item_key, item_val))
+	while (--nr_items) {
+		ret = next_item(sb, curs, item_key, item_val);
+		if (ret <= 0)
+			break;
+
 		scoutfs_seg_append_item(sb, seg, item_key, item_val);
+	}
+
+out:
+	return ret;
 }
 
 static int compact_segments(struct super_block *sb,
 			    struct compact_cursor *curs,
+			    struct scoutfs_bio_completion *comp,
 			    struct list_head *results)
 {
 	struct scoutfs_segment *seg;
 	struct compact_seg *cseg;
+	struct compact_seg *upper;
+	struct compact_seg *lower;
+	SCOUTFS_DECLARE_KVEC(upper_next);
 	u32 key_bytes;
 	u32 nr_items;
 	int ret;
 
+	scoutfs_inc_counter(sb, compact_operations);
+
 	for (;;) {
+		upper = curs->upper;
+		lower = curs->lower;
+
+		/*
+		 * We can just move the upper segment down a level if it
+		 * doesn't intersect any lower segments.
+		 */
+		if (upper && upper->pos == 0 &&
+		    (!lower ||
+		     scoutfs_kvec_memcmp(upper->last, lower->first) < 0)) {
+
+			cseg = kzalloc(sizeof(struct compact_seg), GFP_NOFS);
+			if (!cseg) {
+				ret = -ENOMEM;
+				break;
+			}
+
+			/*
+			 * XXX blah!  these csegs are getting
+			 * ridiculous.  We should have a robust manifest
+			 * entry iterator that reading and compacting
+			 * can use.
+			 */
+			ret = scoutfs_kvec_dup_flatten(cseg->first,
+						       upper->first) ?:
+			      scoutfs_kvec_dup_flatten(cseg->last, upper->last);
+			if (ret) {
+				kfree(cseg);
+				ret = -ENOMEM;
+				break;
+			}
+
+			cseg->segno = upper->segno;
+			cseg->seq = upper->seq;
+			cseg->level = upper->level + 1;
+			cseg->seg = upper->seg;
+			if (cseg->seg)
+				scoutfs_seg_get(cseg->seg);
+			list_add_tail(&cseg->entry, results);
+
+			curs->upper = NULL;
+			upper = NULL;
+
+			scoutfs_inc_counter(sb, compact_segment_moved);
+		}
+
+		/* we're going to need its next key */
+		ret = read_segment(sb, upper);
+		if (ret)
+			break;
+
+		/*
+		 * We can skip a lower segment if there's no upper segment
+		 * or the next upper item is past the last in the lower.
+		 */
+		if (lower && lower->pos == 0 &&
+		    (!upper ||
+		     (!scoutfs_seg_item_kvecs(upper->seg, upper->pos,
+					      upper_next, NULL) &&
+		      scoutfs_kvec_memcmp(upper_next, lower->last) > 0))) {
+
+			curs->lower = next_spos(curs, lower);
+
+			list_del_init(&lower->entry);
+			free_cseg(lower);
+
+			scoutfs_inc_counter(sb, compact_segment_skipped);
+			continue;
+		}
+
+		ret = read_segment(sb, lower);
+		if (ret)
+			break;
 
 		save_pos(curs);
-		count_items(sb, curs, &nr_items, &key_bytes);
+		ret = count_items(sb, curs, &nr_items, &key_bytes);
 		restore_pos(curs);
+		if (ret < 0)
+			break;
 
 		if (nr_items == 0) {
 			ret = 0;
@@ -335,31 +416,28 @@ static int compact_segments(struct super_block *sb,
 			break;
 		}
 
+		/* csegs will be claned up once they're on the list */
 		cseg->level = curs->lower_level;
 		cseg->seg = seg;
 		list_add_tail(&cseg->entry, results);
 
-		compact_items(sb, curs, seg, nr_items, key_bytes);
+		ret = compact_items(sb, curs, seg, nr_items, key_bytes);
+		if (ret < 0)
+			break;
+
+		/* start a complete segment write now, we'll wait later */
+		ret = scoutfs_seg_submit_write(sb, seg, comp);
+		if (ret)
+			break;
+
+		scoutfs_inc_counter(sb, compact_segment_written);
 	}
 
 	return ret;
 }
 
-static void free_csegs(struct list_head *list)
-{
-	struct compact_seg *cseg;
-	struct compact_seg *tmp;
-
-	list_for_each_entry_safe(cseg, tmp, list, entry) {
-		list_del_init(&cseg->entry);
-		scoutfs_seg_put(cseg->seg);
-		scoutfs_kvec_kfree(cseg->first);
-		kfree(cseg);
-	}
-}
-
 int scoutfs_compact_add(struct super_block *sb, void *data, struct kvec *first,
-			u64 segno, u64 seq, u8 level)
+			struct kvec *last, u64 segno, u64 seq, u8 level)
 {
 	struct compact_cursor *curs = data;
 	struct compact_seg *cseg;
@@ -373,7 +451,8 @@ int scoutfs_compact_add(struct super_block *sb, void *data, struct kvec *first,
 
 	list_add_tail(&cseg->entry, &curs->csegs);
 
-	ret = scoutfs_kvec_dup_flatten(cseg->first, first);
+	ret = scoutfs_kvec_dup_flatten(cseg->first, first) ?:
+	      scoutfs_kvec_dup_flatten(cseg->last, last);
 	if (ret)
 		goto out;
 
@@ -421,7 +500,14 @@ static int update_manifest(struct super_block *sb, struct compact_cursor *curs,
 	}
 
 	list_for_each_entry(cseg, results, entry) {
-		ret = scoutfs_seg_manifest_add(sb, cseg->seg, cseg->level);
+		/* XXX moved upper segments won't have read the segment :P */
+		if (cseg->seg)
+			ret = scoutfs_seg_manifest_add(sb, cseg->seg,
+						       cseg->level);
+		else
+			ret = scoutfs_manifest_add(sb, cseg->first,
+						   cseg->last, cseg->segno,
+						   cseg->seq, cseg->level);
 		if (ret) {
 			until = cseg;
 			list_for_each_entry(cseg, results, entry) {
@@ -464,35 +550,52 @@ static int free_result_segnos(struct super_block *sb,
 	return ret;
 }
 
+/*
+ * The compaction worker tries to make forward progress with compaction
+ * every time its kicked.  It asks the manifest for segments to compact.
+ *
+ * If it succeeds in doing work then it kicks itself again to see if there's
+ * more work to do.
+ *
+ * XXX worry about forward progress in the case of errors.
+ */
 static void scoutfs_compact_func(struct work_struct *work)
 {
 	struct compact_info *ci = container_of(work, struct compact_info, work);
 	struct super_block *sb = ci->sb;
 	struct compact_cursor curs = {{NULL,}};
+	struct scoutfs_bio_completion comp;
 	LIST_HEAD(results);
 	int ret;
+	int err;
 
 	INIT_LIST_HEAD(&curs.csegs);
+	scoutfs_bio_init_comp(&comp);
 
 	ret = scoutfs_manifest_next_compact(sb, (void *)&curs);
-	if (ret <= 0)
+	if (list_empty(&curs.csegs))
 		goto out;
 
-	scoutfs_inc_counter(sb, compact_compactions);
+	ret = compact_segments(sb, &curs, &comp, &results);
 
-	ret = read_segments(sb, &curs) ?:
-	      compact_segments(sb, &curs, &results) ?:
-	      write_segments(sb, &results) ?:
-	      update_manifest(sb, &curs, &results);
-	if (ret) {
-		free_result_segnos(sb, &results);
-	} else {
+	/* always wait for io completion */
+	err = scoutfs_bio_wait_comp(sb, &comp);
+	if (!ret && err)
+		ret = err;
+	if (ret)
+		goto out;
+
+	ret = update_manifest(sb, &curs, &results);
+	if (ret == 0) {
 		scoutfs_sync_fs(sb, 0);
+		scoutfs_trans_wake_holders(sb);
 		scoutfs_compact_kick(sb);
 	}
 out:
-	free_csegs(&curs.csegs);
-	free_csegs(&results);
+	if (ret)
+		free_result_segnos(sb, &results);
+	free_cseg_list(&curs.csegs);
+	free_cseg_list(&results);
 
 	WARN_ON_ONCE(ret);
 	trace_printk("ret %d\n", ret);

@@ -18,12 +18,14 @@
 	EXPAND_COUNTER(block_mem_free) \
 	EXPAND_COUNTER(trans_level0_seg_write) \
 	EXPAND_COUNTER(manifest_compact_migrate) \
-	EXPAND_COUNTER(compact_compactions) \
-	EXPAND_COUNTER(compact_segment_read) \
-	EXPAND_COUNTER(compact_segment_write)
+	EXPAND_COUNTER(compact_operations) \
+	EXPAND_COUNTER(compact_segment_moved) \
+	EXPAND_COUNTER(compact_segment_skipped) \
+	EXPAND_COUNTER(compact_segment_read)	\
+	EXPAND_COUNTER(compact_segment_written)
 
-#define FIRST_COUNTER block_mem_alloc
-#define LAST_COUNTER compact_segment_write
+#define FIRST_COUNTER alloc_alloc
+#define LAST_COUNTER compact_segment_written
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

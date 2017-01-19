@@ -59,22 +59,24 @@ struct cached_item {
 	};
 	long dirty;
 
-	SCOUTFS_DECLARE_KVEC(key);
+	struct scoutfs_key_buf *key;
+
 	SCOUTFS_DECLARE_KVEC(val);
 };
 
 struct cached_range {
 	struct rb_node node;
 
-	SCOUTFS_DECLARE_KVEC(start);
-	SCOUTFS_DECLARE_KVEC(end);
+	struct scoutfs_key_buf *start;
+	struct scoutfs_key_buf *end;
 };
 
 /*
  * Walk the item rbtree and return the item found and the next and
  * prev items.
  */
-static struct cached_item *walk_items(struct rb_root *root, struct kvec *key,
+static struct cached_item *walk_items(struct rb_root *root,
+				      struct scoutfs_key_buf *key,
 				      struct cached_item **prev,
 				      struct cached_item **next)
 {
@@ -88,7 +90,7 @@ static struct cached_item *walk_items(struct rb_root *root, struct kvec *key,
 	while (node) {
 		item = container_of(node, struct cached_item, node);
 
-		cmp = scoutfs_kvec_memcmp(key, item->key);
+		cmp = scoutfs_key_compare(key, item->key);
 		if (cmp < 0) {
 			*next = item;
 			node = node->rb_left;
@@ -104,7 +106,8 @@ static struct cached_item *walk_items(struct rb_root *root, struct kvec *key,
 }
 
 static struct cached_item *find_item(struct super_block *sb,
-				     struct rb_root *root, struct kvec *key)
+				     struct rb_root *root,
+				     struct scoutfs_key_buf *key)
 {
 	struct cached_item *prev;
 	struct cached_item *next;
@@ -120,7 +123,8 @@ static struct cached_item *find_item(struct super_block *sb,
 	return item;
 }
 
-static struct cached_item *next_item(struct rb_root *root, struct kvec *key)
+static struct cached_item *next_item(struct rb_root *root,
+				     struct scoutfs_key_buf *key)
 {
 	struct cached_item *prev;
 	struct cached_item *next;
@@ -234,7 +238,7 @@ static int insert_item(struct rb_root *root, struct cached_item *ins)
 		parent = *node;
 		item = container_of(*node, struct cached_item, node);
 
-		cmp = scoutfs_kvec_memcmp(ins->key, item->key);
+		cmp = scoutfs_key_compare(ins->key, item->key);
 		if (cmp < 0) {
 			if (ins->dirty)
 				item->dirty |= LEFT_DIRTY;
@@ -263,7 +267,8 @@ static int insert_item(struct rb_root *root, struct cached_item *ins)
  * cached range.
  */
 static bool check_range(struct super_block *sb, struct rb_root *root,
-			struct kvec *key, struct kvec *end)
+			struct scoutfs_key_buf *key,
+			struct scoutfs_key_buf *end)
 {
 	struct rb_node *node = root->rb_node;
 	struct cached_range *next = NULL;
@@ -273,34 +278,34 @@ static bool check_range(struct super_block *sb, struct rb_root *root,
 	while (node) {
 		rng = container_of(node, struct cached_range, node);
 
-		cmp = scoutfs_kvec_cmp_overlap(key, key,
-					       rng->start, rng->end);
+		cmp = scoutfs_key_compare_ranges(key, key,
+						 rng->start, rng->end);
 		if (cmp < 0) {
 			next = rng;
 			node = node->rb_left;
 		} else if (cmp > 0) {
 			node = node->rb_right;
 		} else {
-			scoutfs_kvec_memcpy_truncate(end, rng->end);
+			scoutfs_key_copy(end, rng->end);
 			scoutfs_inc_counter(sb, item_range_hit);
 			return true;
 		}
 	}
 
 	if (next)
-		scoutfs_kvec_memcpy_truncate(end, next->start);
+		scoutfs_key_copy(end, next->start);
 	else
-		scoutfs_kvec_set_max_key(end);
+		scoutfs_key_set_max(end);
 
 	scoutfs_inc_counter(sb, item_range_miss);
 	return false;
 }
 
-static void free_range(struct cached_range *rng)
+static void free_range(struct super_block *sb, struct cached_range *rng)
 {
 	if (!IS_ERR_OR_NULL(rng)) {
-		scoutfs_kvec_kfree(rng->start);
-		scoutfs_kvec_kfree(rng->end);
+		scoutfs_key_free(sb, rng->start);
+		scoutfs_key_free(sb, rng->end);
 		kfree(rng);
 	}
 }
@@ -332,8 +337,8 @@ restart:
 		parent = *node;
 		rng = container_of(*node, struct cached_range, node);
 
-		cmp = scoutfs_kvec_cmp_overlap(ins->start, ins->end,
-					       rng->start, rng->end);
+		cmp = scoutfs_key_compare_ranges(ins->start, ins->end,
+						 rng->start, rng->end);
 		/* simple iteration until we overlap */
 		if (cmp < 0) {
 			node = &(*node)->rb_left;
@@ -343,24 +348,24 @@ restart:
 			continue;
 		}
 
-		start_cmp = scoutfs_kvec_memcmp(ins->start, rng->start);
-		end_cmp = scoutfs_kvec_memcmp(ins->end, rng->end);
+		start_cmp = scoutfs_key_compare(ins->start, rng->start);
+		end_cmp = scoutfs_key_compare(ins->end, rng->end);
 
 		/* free our insertion if we're entirely within an existing */
 		if (start_cmp >= 0 && end_cmp <= 0) {
-			free_range(ins);
+			free_range(sb, ins);
 			return;
 		}
 
 		/* expand to cover partial overlap before freeing */
 		if (start_cmp < 0 && end_cmp < 0)
-			scoutfs_kvec_swap(ins->end, rng->end);
+			swap(ins->end, rng->end);
 		else if (start_cmp > 0 && end_cmp > 0)
-			scoutfs_kvec_swap(ins->start, rng->start);
+			swap(ins->start, rng->start);
 
 		/* remove and free all overlaps and restart the descent */
 		rb_erase(&rng->node, root);
-		free_range(rng);
+		free_range(sb, rng);
 		goto restart;
 	}
 
@@ -373,25 +378,25 @@ restart:
  * value vector.  The amount of bytes copied is returned which can be 0
  * or truncated if the caller's buffer isn't big enough.
  */
-int scoutfs_item_lookup(struct super_block *sb, struct kvec *key,
+int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 			struct kvec *val)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	SCOUTFS_DECLARE_KVEC(end);
+	struct scoutfs_key_buf *end;
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
 
-	trace_scoutfs_item_lookup(sb, key, val);
+//	trace_scoutfs_item_lookup(sb, key, val);
 
-	ret = scoutfs_kvec_alloc_key(end);
-	if (ret)
+	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!end) {
+		ret = -ENOMEM;
 		goto out;
+	}
 
 	do {
-		scoutfs_kvec_init_key(end);
-
 		spin_lock_irqsave(&cac->lock, flags);
 
 		item = find_item(sb, &cac->items, key);
@@ -407,7 +412,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct kvec *key,
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
-	scoutfs_kvec_kfree(end);
+	scoutfs_key_free(sb, end);
 out:
 	trace_printk("ret %d\n", ret);
 	return ret;
@@ -423,8 +428,9 @@ out:
  *
  * Returns 0 or -errno.
  */
-int scoutfs_item_lookup_exact(struct super_block *sb, struct kvec *key,
-			      struct kvec *val, int size)
+int scoutfs_item_lookup_exact(struct super_block *sb,
+			      struct scoutfs_key_buf *key, struct kvec *val,
+			      int size)
 {
 	int ret;
 
@@ -444,55 +450,51 @@ int scoutfs_item_lookup_exact(struct super_block *sb, struct kvec *key,
  * -ENOENT is returned if there are no items between the given and last
  * keys.
  *
- * The next item's key is copied to the caller's key.  -ENOBUFS is
- * returned if the item's key didn't fit in the caller's key.
+ * The next item's key is copied to the caller's key.  The caller is
+ * responsible for dealing with key lengths and truncation.
  *
  * The next item's value is copied into the callers value.  The number
  * of value bytes copied is returned.  The copied value can be truncated
  * by the caller's value buffer length.
  */
-int scoutfs_item_next(struct super_block *sb, struct kvec *key,
-		      struct kvec *last, struct kvec *val)
+int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
+		      struct scoutfs_key_buf *last, struct kvec *val)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	SCOUTFS_DECLARE_KVEC(read_start);
-	SCOUTFS_DECLARE_KVEC(read_end);
-	SCOUTFS_DECLARE_KVEC(range_end);
+	struct scoutfs_key_buf *read_start = NULL;
+	struct scoutfs_key_buf *read_end = NULL;
+	struct scoutfs_key_buf *range_end = NULL;
 	struct cached_item *item;
 	unsigned long flags;
 	bool cached;
 	int ret;
 
 	/* convenience to avoid searching if caller iterates past their last */
-	if (scoutfs_kvec_length(key) > scoutfs_kvec_length(last)) {
+	if (scoutfs_key_compare(key, last) > 0) {
 		ret = -ENOENT;
 		goto out;
 	}
 
-	ret = scoutfs_kvec_alloc_key(range_end);
-	if (ret)
+	read_start = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	read_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	range_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!read_start || !read_end || !range_end) {
+		ret = -ENOMEM;
 		goto out;
+	}
 
 	spin_lock_irqsave(&cac->lock, flags);
 
 	for(;;) {
-		scoutfs_kvec_init_key(range_end);
-
 		/* see if we have a usable item in cache and before last */
 		cached = check_range(sb, &cac->ranges, key, range_end);
 
 		if (cached && (item = next_item(&cac->items, key)) &&
-		    scoutfs_kvec_memcmp(item->key, range_end) <= 0 &&
-		    scoutfs_kvec_memcmp(item->key, last) <= 0) {
+		    scoutfs_key_compare(item->key, range_end) <= 0 &&
+		    scoutfs_key_compare(item->key, last) <= 0) {
 
-			if (scoutfs_kvec_length(item->key) >
-			    scoutfs_kvec_length(key)) {
-				ret = -ENOBUFS;
-				break;
-			}
-
-			scoutfs_kvec_memcpy_truncate(key, item->key);
+			scoutfs_key_copy(key, item->key);
 			if (val)
 				ret = scoutfs_kvec_memcpy(val, item->val);
 			else
@@ -502,13 +504,13 @@ int scoutfs_item_next(struct super_block *sb, struct kvec *key,
 
 		if (!cached) {
 			/* missing cache starts at key */
-			scoutfs_kvec_clone(read_start, key);
-			scoutfs_kvec_clone(read_end, range_end);
+			scoutfs_key_copy(read_start, key);
+			scoutfs_key_copy(read_end, range_end);
 
-		} else if (scoutfs_kvec_memcmp(range_end, last) < 0) {
+		} else if (scoutfs_key_compare(range_end, last) < 0) {
 			/* missing cache starts at range_end */
-			scoutfs_kvec_clone(read_start, range_end);
-			scoutfs_kvec_clone(read_end, last);
+			scoutfs_key_copy(read_start, range_end);
+			scoutfs_key_copy(read_end, last);
 
 		} else {
 			/* no items and we have cache between key and last */
@@ -526,9 +528,11 @@ int scoutfs_item_next(struct super_block *sb, struct kvec *key,
 	}
 
 	spin_unlock_irqrestore(&cac->lock, flags);
-
-	scoutfs_kvec_kfree(range_end);
 out:
+	scoutfs_key_free(sb, read_start);
+	scoutfs_key_free(sb, read_end);
+	scoutfs_key_free(sb, range_end);
+
 	trace_printk("ret %d\n", ret);
 	return ret;
 }
@@ -539,10 +543,12 @@ out:
  * size mismatches as a sign of corruption.  A found key larger than the
  * found key buffer gives -ENOBUFS and is a sign of corruption.
  */
-int scoutfs_item_next_same_min(struct super_block *sb, struct kvec *key,
-			       struct kvec *last, struct kvec *val, int len)
+int scoutfs_item_next_same_min(struct super_block *sb,
+			       struct scoutfs_key_buf *key,
+			       struct scoutfs_key_buf *last,
+			       struct kvec *val, int len)
 {
-	int key_len = scoutfs_kvec_length(key);
+	int key_len = key->key_len;
 	int ret;
 
 	trace_printk("key len %u min val len %d\n", key_len, len);
@@ -551,8 +557,7 @@ int scoutfs_item_next_same_min(struct super_block *sb, struct kvec *key,
 		return -EINVAL;
 
 	ret = scoutfs_item_next(sb, key, last, val);
-	if (ret == -ENOBUFS ||
-	    (ret >= 0 && (scoutfs_kvec_length(key) != key_len || ret < len)))
+	if (ret >= 0 && (key->key_len != key_len || ret < len))
 		ret = -EIO;
 
 	trace_printk("ret %d\n", ret);
@@ -560,10 +565,10 @@ int scoutfs_item_next_same_min(struct super_block *sb, struct kvec *key,
 	return ret;
 }
 
-static void free_item(struct cached_item *item)
+static void free_item(struct super_block *sb, struct cached_item *item)
 {
 	if (!IS_ERR_OR_NULL(item)) {
-		scoutfs_kvec_kfree(item->key);
+		scoutfs_key_free(sb, item->key);
 		scoutfs_kvec_kfree(item->val);
 		kfree(item);
 	}
@@ -591,7 +596,7 @@ static void mark_item_dirty(struct item_cache *cac,
 
 	item->dirty |= ITEM_DIRTY;
 	cac->nr_dirty_items++;
-	cac->dirty_key_bytes += scoutfs_kvec_length(item->key);
+	cac->dirty_key_bytes += item->key->key_len;
 	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
 
 	update_dirty_parents(item);
@@ -608,7 +613,7 @@ static void clear_item_dirty(struct item_cache *cac,
 
 	item->dirty &= ~ITEM_DIRTY;
 	cac->nr_dirty_items--;
-	cac->dirty_key_bytes -= scoutfs_kvec_length(item->key);
+	cac->dirty_key_bytes -= item->key->key_len;
 	cac->dirty_val_bytes -= scoutfs_kvec_length(item->val);
 
 	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||
@@ -617,15 +622,17 @@ static void clear_item_dirty(struct item_cache *cac,
 	update_dirty_parents(item);
 }
 
-static struct cached_item *alloc_item(struct kvec *key, struct kvec *val)
+static struct cached_item *alloc_item(struct super_block *sb,
+				      struct scoutfs_key_buf *key,
+				      struct kvec *val)
 {
 	struct cached_item *item;
 
 	item = kzalloc(sizeof(struct cached_item), GFP_NOFS);
 	if (item) {
-		if (scoutfs_kvec_dup_flatten(item->key, key) ||
-		    scoutfs_kvec_dup_flatten(item->val, val)) {
-			free_item(item);
+		item->key = scoutfs_key_dup(sb, key);
+		if (!item->key || scoutfs_kvec_dup_flatten(item->val, val)) {
+			free_item(sb, item);
 			item = NULL;
 		}
 	}
@@ -639,7 +646,7 @@ static struct cached_item *alloc_item(struct kvec *key, struct kvec *val)
  *
  * XXX but it doesn't read.. is that weird?  Seems weird.
  */
-int scoutfs_item_create(struct super_block *sb, struct kvec *key,
+int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 		        struct kvec *val)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -648,7 +655,7 @@ int scoutfs_item_create(struct super_block *sb, struct kvec *key,
 	unsigned long flags;
 	int ret;
 
-	item = alloc_item(key, val);
+	item = alloc_item(sb, key, val);
 	if (!item)
 		return -ENOMEM;
 
@@ -661,7 +668,7 @@ int scoutfs_item_create(struct super_block *sb, struct kvec *key,
 	spin_unlock_irqrestore(&cac->lock, flags);
 
 	if (ret)
-		free_item(item);
+		free_item(sb, item);
 
 	return ret;
 }
@@ -672,12 +679,12 @@ int scoutfs_item_create(struct super_block *sb, struct kvec *key,
  * and we add with _tail to maintain that order.
  */
 int scoutfs_item_add_batch(struct super_block *sb, struct list_head *list,
-			   struct kvec *key, struct kvec *val)
+			   struct scoutfs_key_buf *key, struct kvec *val)
 {
 	struct cached_item *item;
 	int ret;
 
-	item = alloc_item(key, val);
+	item = alloc_item(sb, key, val);
 	if (item) {
 		list_add_tail(&item->entry, list);
 		ret = 0;
@@ -705,7 +712,8 @@ int scoutfs_item_add_batch(struct super_block *sb, struct list_head *list,
  * that will be inserted.
  */
 int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
-			      struct kvec *start, struct kvec *end)
+			      struct scoutfs_key_buf *start,
+			      struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
@@ -715,18 +723,18 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 	unsigned long flags;
 	int ret;
 
-	trace_scoutfs_item_insert_batch(sb, start, end);
+//	trace_scoutfs_item_insert_batch(sb, start, end);
 
-	if (WARN_ON_ONCE(scoutfs_kvec_memcmp(start, end) > 0))
+	if (WARN_ON_ONCE(scoutfs_key_compare(start, end) > 0))
 		return -EINVAL;
 
 	rng = kzalloc(sizeof(struct cached_range), GFP_NOFS);
-	if (rng && (scoutfs_kvec_dup_flatten(rng->start, start) ||
-		    scoutfs_kvec_dup_flatten(rng->end, end))) {
-		free_range(rng);
-		rng = NULL;
+	if (rng) {
+	       rng->start = scoutfs_key_dup(sb, start);
+	       rng->end = scoutfs_key_dup(sb, end);
 	}
-	if (!rng) {
+	if (!rng || !rng->start || !rng->end) {
+		free_range(sb, rng);
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -745,18 +753,18 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 
 	ret = 0;
 out:
-	scoutfs_item_free_batch(list);
+	scoutfs_item_free_batch(sb, list);
 	return ret;
 }
 
-void scoutfs_item_free_batch(struct list_head *list)
+void scoutfs_item_free_batch(struct super_block *sb, struct list_head *list)
 {
 	struct cached_item *item;
 	struct cached_item *tmp;
 
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del_init(&item->entry);
-		free_item(item);
+		free_item(sb, item);
 	}
 }
 
@@ -765,22 +773,22 @@ void scoutfs_item_free_batch(struct list_head *list)
  * If the item exists make sure it's dirty and pinned.  It can be read
  * if it wasn't cached.  -ENOENT is returned if the item doesn't exist.
  */
-int scoutfs_item_dirty(struct super_block *sb, struct kvec *key)
+int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	SCOUTFS_DECLARE_KVEC(end);
+	struct scoutfs_key_buf *end;
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
 
-	ret = scoutfs_kvec_alloc_key(end);
-	if (ret)
+	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!end) {
+		ret = -ENOMEM;
 		goto out;
+	}
 
 	do {
-		scoutfs_kvec_init_key(end);
-
 		spin_lock_irqsave(&cac->lock, flags);
 
 		item = find_item(sb, &cac->items, key);
@@ -798,7 +806,7 @@ int scoutfs_item_dirty(struct super_block *sb, struct kvec *key)
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
-	scoutfs_kvec_kfree(end);
+	scoutfs_key_free(sb, end);
 out:
 	trace_printk("ret %d\n", ret);
 	return ret;
@@ -810,20 +818,22 @@ out:
  *
  * Returns -ENOENT if the item doesn't exist.
  */
-int scoutfs_item_update(struct super_block *sb, struct kvec *key,
+int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 			struct kvec *val)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
+	struct scoutfs_key_buf *end;
 	SCOUTFS_DECLARE_KVEC(up_val);
-	SCOUTFS_DECLARE_KVEC(end);
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
 
-	ret = scoutfs_kvec_alloc_key(end);
-	if (ret)
+	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!end) {
+		ret = -ENOMEM;
 		goto out;
+	}
 
 	if (val) {
 		ret = scoutfs_kvec_dup_flatten(up_val, val);
@@ -834,8 +844,6 @@ int scoutfs_item_update(struct super_block *sb, struct kvec *key,
 	}
 
 	do {
-		scoutfs_kvec_init_key(end);
-
 		spin_lock_irqsave(&cac->lock, flags);
 
 		item = find_item(sb, &cac->items, key);
@@ -855,7 +863,7 @@ int scoutfs_item_update(struct super_block *sb, struct kvec *key,
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 out:
-	scoutfs_kvec_kfree(end);
+	scoutfs_key_free(sb, end);
 	scoutfs_kvec_kfree(up_val);
 
 	trace_printk("ret %d\n", ret);
@@ -866,7 +874,7 @@ out:
  * XXX how nice, it'd just creates a cached deletion item.  It doesn't
  * have to read.
  */
-int scoutfs_item_delete(struct super_block *sb, struct kvec *key)
+int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key)
 {
 	return WARN_ON_ONCE(-EINVAL);
 }
@@ -931,33 +939,39 @@ static struct cached_item *next_dirty(struct cached_item *item)
 	return NULL;
 }
 
-/*
- * The total number of bytes that will be stored in segments if we were
- * to write out all the currently dirty items.
- *
- * XXX this isn't strictly correct because item's aren't of a uniform
- * size.  We might need more segments when large items leave gaps at the
- * tail of each segment as it is filled with sorted items.  It's close
- * enough for now.
- */
-long scoutfs_item_dirty_bytes(struct super_block *sb)
+bool scoutfs_item_has_dirty(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	unsigned long flags;
-	long bytes;
+	bool has;
 
 	spin_lock_irqsave(&cac->lock, flags);
-
-	bytes = (cac->nr_dirty_items * sizeof(struct scoutfs_segment_item)) +
-	         cac->dirty_key_bytes + cac->dirty_val_bytes;
-
+	has = cac->nr_dirty_items != 0;
 	spin_unlock_irqrestore(&cac->lock, flags);
 
-	bytes += DIV_ROUND_UP(bytes, SCOUTFS_SEGMENT_SIZE) *
-		 sizeof(struct scoutfs_segment_block);
+	return has;
+}
 
-	return bytes;
+/*
+ * Returns true if adding more items with the given count, keys, and values
+ * still fits in a single item along with the current dirty items.
+ */
+bool scoutfs_item_dirty_fits_single(struct super_block *sb, u32 nr_items,
+			            u32 key_bytes, u32 val_bytes)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	unsigned long flags;
+	bool fits;
+
+	spin_lock_irqsave(&cac->lock, flags);
+	fits = scoutfs_seg_fits_single(nr_items + cac->nr_dirty_items,
+				       key_bytes + cac->dirty_key_bytes,
+				       val_bytes + cac->dirty_val_bytes);
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	return fits;
 }
 
 /*
@@ -968,24 +982,25 @@ static void count_seg_items(struct item_cache *cac, u32 *nr_items,
 			    u32 *key_bytes)
 {
 	struct cached_item *item;
-	u32 total;
+	u32 items = 0;
+	u32 keys = 0;
+	u32 vals = 0;
 
 	*nr_items = 0;
 	*key_bytes = 0;
-	total = sizeof(struct scoutfs_segment_block);
 
 	for (item = first_dirty(cac->items.rb_node); item;
 	     item = next_dirty(item)) {
 
-		total += sizeof(struct scoutfs_segment_item) +
-			 scoutfs_kvec_length(item->key) +
-			 scoutfs_kvec_length(item->val);
+		items++;
+		keys += item->key->key_len;
+		vals += scoutfs_kvec_length(item->val);
 
-		if (total > SCOUTFS_SEGMENT_SIZE)
+		if (!scoutfs_seg_fits_single(items, keys, vals))
 			break;
 
-		(*nr_items)++;
-		(*key_bytes) += scoutfs_kvec_length(item->key);
+		*nr_items = items;
+		*key_bytes = keys;
 	}
 }
 
@@ -1062,14 +1077,14 @@ void scoutfs_item_destroy(struct super_block *sb)
 			item = container_of(node, struct cached_item, node);
 			node = rb_next(node);
 			rb_erase(&item->node, &cac->items);
-			free_item(item);
+			free_item(sb, item);
 		}
 
 		for (node = rb_first(&cac->ranges); node; ) {
 			rng = container_of(node, struct cached_range, node);
 			node = rb_next(node);
 			rb_erase(&rng->node, &cac->items);
-			free_range(rng);
+			free_range(sb, rng);
 		}
 
 		kfree(cac);

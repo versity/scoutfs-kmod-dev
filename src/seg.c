@@ -24,6 +24,7 @@
 #include "cmp.h"
 #include "manifest.h"
 #include "alloc.h"
+#include "key.h"
 
 /*
  * seg.c should just be about the cache and io, and maybe
@@ -339,7 +340,7 @@ static void *off_ptr(struct scoutfs_segment *seg, u32 off)
 	return page_address(seg->pages[pg]) + pg_off;
 }
 
-static u32 pos_off(struct scoutfs_segment *seg, u32 pos)
+static u32 pos_off(u32 pos)
 {
 	/* items need of be a power of two */
 	BUILD_BUG_ON(!is_power_of_2(sizeof(struct scoutfs_segment_item)));
@@ -352,7 +353,7 @@ static u32 pos_off(struct scoutfs_segment *seg, u32 pos)
 
 static void *pos_ptr(struct scoutfs_segment *seg, u32 pos)
 {
-	return off_ptr(seg, pos_off(seg, pos));
+	return off_ptr(seg, pos_off(pos));
 }
 
 /*
@@ -416,8 +417,8 @@ static void kvec_from_pages(struct scoutfs_segment *seg,
 			          off_ptr(seg, off + first), len - first);
 }
 
-int scoutfs_seg_item_kvecs(struct scoutfs_segment *seg, int pos,
-			   struct kvec *key, struct kvec *val)
+int scoutfs_seg_item_ptrs(struct scoutfs_segment *seg, int pos,
+			  struct scoutfs_key_buf *key, struct kvec *val)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct native_item item;
@@ -428,7 +429,7 @@ int scoutfs_seg_item_kvecs(struct scoutfs_segment *seg, int pos,
 	load_item(seg, pos, &item);
 
 	if (key)
-		kvec_from_pages(seg, key, item.key_off, item.key_len);
+		scoutfs_key_init(key, off_ptr(seg, item.key_off), item.key_len);
 	if (val)
 		kvec_from_pages(seg, val, item.val_off, item.val_len);
 
@@ -440,10 +441,11 @@ int scoutfs_seg_item_kvecs(struct scoutfs_segment *seg, int pos,
  * This can return the number of positions if the key is greater than
  * all the keys.
  */
-static int find_key_pos(struct scoutfs_segment *seg, struct kvec *search)
+static int find_key_pos(struct scoutfs_segment *seg,
+			struct scoutfs_key_buf *search)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	SCOUTFS_DECLARE_KVEC(key);
+	struct scoutfs_key_buf key;
 	unsigned int start = 0;
 	unsigned int end = le32_to_cpu(sblk->nr_items);
 	unsigned int pos = 0;
@@ -451,9 +453,9 @@ static int find_key_pos(struct scoutfs_segment *seg, struct kvec *search)
 
 	while (start < end) {
 		pos = start + (end - start) / 2;
-		scoutfs_seg_item_kvecs(seg, pos, key, NULL);
+		scoutfs_seg_item_ptrs(seg, pos, &key, NULL);
 
-		cmp = scoutfs_kvec_memcmp(search, key);
+		cmp = scoutfs_key_compare(search, &key);
 		if (cmp < 0)
 			end = pos;
 		else if (cmp > 0)
@@ -465,9 +467,49 @@ static int find_key_pos(struct scoutfs_segment *seg, struct kvec *search)
 	return pos;
 }
 
-int scoutfs_seg_find_pos(struct scoutfs_segment *seg, struct kvec *key)
+int scoutfs_seg_find_pos(struct scoutfs_segment *seg,
+			 struct scoutfs_key_buf *key)
 {
 	return find_key_pos(seg, key);
+}
+
+/*
+ * Keys are aligned to the next block boundary if they'd cross a block
+ * boundary.  To find the first value offset we have to assume that
+ * there will be a worst case key alignment at every block boundary.
+ */
+static u32 first_val_off(u32 nr_items, u32 key_bytes)
+{
+	u32 key_padding = SCOUTFS_MAX_KEY_SIZE - 1;
+	u32 partial_block = SCOUTFS_BLOCK_SIZE - key_padding;
+	u32 first_key_off = pos_off(nr_items);
+	u32 block_off = first_key_off & SCOUTFS_BLOCK_MASK;
+	u32 total_padding = ((block_off + key_bytes) / partial_block) *
+				key_padding;
+
+	return first_key_off + key_bytes + total_padding;
+}
+
+/*
+ * Returns true if the given number of items with the given total byte
+ * counts of keys and values fits inside a single segment.
+ */
+bool scoutfs_seg_fits_single(u32 nr_items, u32 key_bytes, u32 val_bytes)
+{
+	return (first_val_off(nr_items, key_bytes) + val_bytes)
+			<= SCOUTFS_SEGMENT_SIZE;
+}
+
+static u32 align_key_off(struct scoutfs_segment *seg, u32 key_off, u32 len)
+{
+	u32 space = SCOUTFS_BLOCK_SIZE - (key_off & SCOUTFS_BLOCK_MASK);
+
+	if (len > space) {
+		memset(off_ptr(seg, key_off), 0, space);
+		return key_off + space;
+	}
+
+	return key_off;
 }
 
 /*
@@ -478,14 +520,14 @@ int scoutfs_seg_find_pos(struct scoutfs_segment *seg, struct kvec *key)
  * This should never fail because any item must always fit in a segment.
  */
 void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
-			    struct kvec *key, struct kvec *val,
+			    struct scoutfs_key_buf *key, struct kvec *val,
 			    unsigned int nr_items, unsigned int key_bytes)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct native_item item;
-	SCOUTFS_DECLARE_KVEC(item_key);
+	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
 	u32 key_off;
 	u32 val_off;
@@ -495,31 +537,33 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 	sblk->seq = super->next_seg_seq;
 	le64_add_cpu(&super->next_seg_seq, 1);
 
-	key_off = pos_off(seg, nr_items);
-	val_off = key_off + key_bytes;
+	key_off = align_key_off(seg, pos_off(nr_items), key->key_len);
+	val_off = first_val_off(nr_items, key_bytes);
 
 	sblk->nr_items = cpu_to_le32(1);
+
+	trace_printk("first item offs key %u val %u\n", key_off, val_off);
 
 	item.seq = 1;
 	item.key_off = key_off;
 	item.val_off = val_off;
-	item.key_len = scoutfs_kvec_length(key);
+	item.key_len = key->key_len;
 	item.val_len = scoutfs_kvec_length(val);
 	store_item(seg, 0, &item);
 
-	scoutfs_seg_item_kvecs(seg, 0, item_key, item_val);
-	scoutfs_kvec_memcpy(item_key, key);
+	scoutfs_seg_item_ptrs(seg, 0, &item_key, item_val);
+	scoutfs_key_copy(&item_key, key);
 	scoutfs_kvec_memcpy(item_val, val);
 }
 
 void scoutfs_seg_append_item(struct super_block *sb,
 			     struct scoutfs_segment *seg,
-			     struct kvec *key, struct kvec *val)
+			     struct scoutfs_key_buf *key, struct kvec *val)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct native_item item;
 	struct native_item prev;
-	SCOUTFS_DECLARE_KVEC(item_key);
+	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
 	u32 pos;
 
@@ -529,14 +573,18 @@ void scoutfs_seg_append_item(struct super_block *sb,
 	load_item(seg, pos - 1, &prev);
 
 	item.seq = 1;
-	item.key_off = prev.key_off + prev.key_len;
-	item.key_len = scoutfs_kvec_length(key);
+	item.key_off = align_key_off(seg, prev.key_off + prev.key_len,
+				     key->key_len);
+	item.key_len = key->key_len;
 	item.val_off = prev.val_off + prev.val_len;
 	item.val_len = scoutfs_kvec_length(val);
 	store_item(seg, pos, &item);
 
-	scoutfs_seg_item_kvecs(seg, pos, item_key, item_val);
-	scoutfs_kvec_memcpy(item_key, key);
+	trace_printk("item %u offs key %u val %u\n",
+		     pos, item.key_off, item.val_off);
+
+	scoutfs_seg_item_ptrs(seg, pos, &item_key, item_val);
+	scoutfs_key_copy(&item_key, key);
 	scoutfs_kvec_memcpy(item_val, val);
 }
 
@@ -548,16 +596,16 @@ int scoutfs_seg_manifest_add(struct super_block *sb,
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct native_item item;
-	SCOUTFS_DECLARE_KVEC(first);
-	SCOUTFS_DECLARE_KVEC(last);
+	struct scoutfs_key_buf first;
+	struct scoutfs_key_buf last;
 
 	load_item(seg, 0, &item);
-	kvec_from_pages(seg, first, item.key_off, item.key_len);
+	scoutfs_key_init(&first, off_ptr(seg, item.key_off), item.key_len);
 
 	load_item(seg, le32_to_cpu(sblk->nr_items) - 1, &item);
-	kvec_from_pages(seg, last, item.key_off, item.key_len);
+	scoutfs_key_init(&last, off_ptr(seg, item.key_off), item.key_len);
 
-	return scoutfs_manifest_add(sb, first, last, le64_to_cpu(sblk->segno),
+	return scoutfs_manifest_add(sb, &first, &last, le64_to_cpu(sblk->segno),
 				    le64_to_cpu(sblk->seq), level);
 }
 
@@ -566,12 +614,12 @@ int scoutfs_seg_manifest_del(struct super_block *sb,
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct native_item item;
-	SCOUTFS_DECLARE_KVEC(first);
+	struct scoutfs_key_buf first;
 
 	load_item(seg, 0, &item);
-	kvec_from_pages(seg, first, item.key_off, item.key_len);
+	scoutfs_key_init(&first, off_ptr(seg, item.key_off), item.key_len);
 
-	return scoutfs_manifest_del(sb, first, le64_to_cpu(sblk->seq), level);
+	return scoutfs_manifest_del(sb, &first, le64_to_cpu(sblk->seq), level);
 }
 
 int scoutfs_seg_setup(struct super_block *sb)

@@ -70,8 +70,8 @@ struct compact_seg {
 	u64 segno;
 	u64 seq;
 	u8 level;
-	SCOUTFS_DECLARE_KVEC(first);
-	SCOUTFS_DECLARE_KVEC(last);
+	struct scoutfs_key_buf *first;
+	struct scoutfs_key_buf *last;
 	struct scoutfs_segment *seg;
 	int pos;
 	int saved_pos;
@@ -92,25 +92,45 @@ struct compact_cursor {
 	struct compact_seg *saved_lower;
 };
 
-static void free_cseg(struct compact_seg *cseg)
+static void free_cseg(struct super_block *sb, struct compact_seg *cseg)
 {
 	WARN_ON_ONCE(!list_empty(&cseg->entry));
 
 	scoutfs_seg_put(cseg->seg);
-	scoutfs_kvec_kfree(cseg->first);
-	scoutfs_kvec_kfree(cseg->last);
+	scoutfs_key_free(sb, cseg->first);
+	scoutfs_key_free(sb, cseg->last);
 
 	kfree(cseg);
 }
 
-static void free_cseg_list(struct list_head *list)
+static struct compact_seg *alloc_cseg(struct super_block *sb,
+				      struct scoutfs_key_buf *first,
+				      struct scoutfs_key_buf *last)
+{
+	struct compact_seg *cseg;
+
+	cseg = kzalloc(sizeof(struct compact_seg), GFP_NOFS);
+	if (cseg) {
+		INIT_LIST_HEAD(&cseg->entry);
+		cseg->first = scoutfs_key_dup(sb, first);
+		cseg->last = scoutfs_key_dup(sb, last);
+		if (!cseg->first || !cseg->last) {
+			free_cseg(sb, cseg);
+			cseg = NULL;
+		}
+	}
+
+	return cseg;
+}
+
+static void free_cseg_list(struct super_block *sb, struct list_head *list)
 {
 	struct compact_seg *cseg;
 	struct compact_seg *tmp;
 
 	list_for_each_entry_safe(cseg, tmp, list, entry) {
 		list_del_init(&cseg->entry);
-		free_cseg(cseg);
+		free_cseg(sb, cseg);
 	}
 }
 
@@ -177,18 +197,18 @@ static struct compact_seg *next_spos(struct compact_cursor *curs,
  * update items.
  */
 static int next_item(struct super_block *sb, struct compact_cursor *curs,
-		     struct kvec *item_key, struct kvec *item_val)
+		     struct scoutfs_key_buf *item_key, struct kvec *item_val)
 {
 	struct compact_seg *upper = curs->upper;
 	struct compact_seg *lower = curs->lower;
-	SCOUTFS_DECLARE_KVEC(lower_key);
+	struct scoutfs_key_buf lower_key;
 	SCOUTFS_DECLARE_KVEC(lower_val);
 	int cmp;
 	int ret;
 
 	if (upper) {
-		ret = scoutfs_seg_item_kvecs(upper->seg, upper->pos,
-					     item_key, item_val);
+		ret = scoutfs_seg_item_ptrs(upper->seg, upper->pos,
+					    item_key, item_val);
 		if (ret < 0)
 			upper = NULL;
 	}
@@ -198,8 +218,8 @@ static int next_item(struct super_block *sb, struct compact_cursor *curs,
 		if (ret)
 			goto out;
 
-		ret = scoutfs_seg_item_kvecs(lower->seg, lower->pos,
-					     lower_key, lower_val);
+		ret = scoutfs_seg_item_ptrs(lower->seg, lower->pos,
+					    &lower_key, lower_val);
 		if (ret == 0)
 			break;
 		lower = next_spos(curs, lower);
@@ -217,14 +237,14 @@ static int next_item(struct super_block *sb, struct compact_cursor *curs,
 	 * > 0: return lower, advance lower
 	 */
 	if (upper && lower)
-		cmp = scoutfs_kvec_memcmp(item_key, lower_key);
+		cmp = scoutfs_key_compare(item_key, &lower_key);
 	else if (upper)
 		cmp = -1;
 	else
 		cmp = 1;
 
 	if (cmp > 0) {
-		scoutfs_kvec_clone(item_key, lower_key);
+		scoutfs_key_clone(item_key, &lower_key);
 		scoutfs_kvec_clone(item_val, lower_val);
 	}
 
@@ -248,28 +268,27 @@ out:
 static int count_items(struct super_block *sb, struct compact_cursor *curs,
 		       u32 *nr_items, u32 *key_bytes)
 {
-	SCOUTFS_DECLARE_KVEC(item_key);
+	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
-	u32 total;
+	u32 items = 0;
+	u32 keys = 0;
+	u32 vals = 0;
 	int ret;
 
 	*nr_items = 0;
 	*key_bytes = 0;
-	total = sizeof(struct scoutfs_segment_block);
 
-	while ((ret = next_item(sb, curs, item_key, item_val)) > 0) {
+	while ((ret = next_item(sb, curs, &item_key, item_val)) > 0) {
 
-		total += sizeof(struct scoutfs_segment_item) +
-			 scoutfs_kvec_length(item_key) +
-			 scoutfs_kvec_length(item_val);
+		items++;
+		keys += item_key.key_len;
+		vals += scoutfs_kvec_length(item_val);
 
-		if (total > SCOUTFS_SEGMENT_SIZE) {
-			ret = 0;
+		if (!scoutfs_seg_fits_single(items, keys, vals))
 			break;
-		}
 
-		(*nr_items)++;
-		(*key_bytes) += scoutfs_kvec_length(item_key);
+		*nr_items = items;
+		*key_bytes = keys;
 	}
 
 	return ret;
@@ -279,23 +298,23 @@ static int compact_items(struct super_block *sb, struct compact_cursor *curs,
 			 struct scoutfs_segment *seg, u32 nr_items,
 			 u32 key_bytes)
 {
-	SCOUTFS_DECLARE_KVEC(item_key);
+	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
 	int ret;
 
-	ret = next_item(sb, curs, item_key, item_val);
+	ret = next_item(sb, curs, &item_key, item_val);
 	if (ret <= 0)
 		goto out;
 
-	scoutfs_seg_first_item(sb, seg, item_key, item_val,
+	scoutfs_seg_first_item(sb, seg, &item_key, item_val,
 			       nr_items, key_bytes);
 
 	while (--nr_items) {
-		ret = next_item(sb, curs, item_key, item_val);
+		ret = next_item(sb, curs, &item_key, item_val);
 		if (ret <= 0)
 			break;
 
-		scoutfs_seg_append_item(sb, seg, item_key, item_val);
+		scoutfs_seg_append_item(sb, seg, &item_key, item_val);
 	}
 
 out:
@@ -307,11 +326,11 @@ static int compact_segments(struct super_block *sb,
 			    struct scoutfs_bio_completion *comp,
 			    struct list_head *results)
 {
+	struct scoutfs_key_buf upper_next;
 	struct scoutfs_segment *seg;
 	struct compact_seg *cseg;
 	struct compact_seg *upper;
 	struct compact_seg *lower;
-	SCOUTFS_DECLARE_KVEC(upper_next);
 	u32 key_bytes;
 	u32 nr_items;
 	int ret;
@@ -328,13 +347,7 @@ static int compact_segments(struct super_block *sb,
 		 */
 		if (upper && upper->pos == 0 &&
 		    (!lower ||
-		     scoutfs_kvec_memcmp(upper->last, lower->first) < 0)) {
-
-			cseg = kzalloc(sizeof(struct compact_seg), GFP_NOFS);
-			if (!cseg) {
-				ret = -ENOMEM;
-				break;
-			}
+		     scoutfs_key_compare(upper->last, lower->first) < 0)) {
 
 			/*
 			 * XXX blah!  these csegs are getting
@@ -342,11 +355,8 @@ static int compact_segments(struct super_block *sb,
 			 * entry iterator that reading and compacting
 			 * can use.
 			 */
-			ret = scoutfs_kvec_dup_flatten(cseg->first,
-						       upper->first) ?:
-			      scoutfs_kvec_dup_flatten(cseg->last, upper->last);
-			if (ret) {
-				kfree(cseg);
+			cseg = alloc_cseg(sb, upper->first, upper->last);
+			if (!cseg) {
 				ret = -ENOMEM;
 				break;
 			}
@@ -376,14 +386,14 @@ static int compact_segments(struct super_block *sb,
 		 */
 		if (lower && lower->pos == 0 &&
 		    (!upper ||
-		     (!scoutfs_seg_item_kvecs(upper->seg, upper->pos,
-					      upper_next, NULL) &&
-		      scoutfs_kvec_memcmp(upper_next, lower->last) > 0))) {
+		     (!scoutfs_seg_item_ptrs(upper->seg, upper->pos,
+					     &upper_next, NULL) &&
+		      scoutfs_key_compare(&upper_next, lower->last) > 0))) {
 
 			curs->lower = next_spos(curs, lower);
 
 			list_del_init(&lower->entry);
-			free_cseg(lower);
+			free_cseg(sb, lower);
 
 			scoutfs_inc_counter(sb, compact_segment_skipped);
 			continue;
@@ -404,6 +414,7 @@ static int compact_segments(struct super_block *sb,
 			break;
 		}
 
+		/* no cseg keys, manifest update uses seg item keys */
 		cseg = kzalloc(sizeof(struct compact_seg), GFP_NOFS);
 		if (!cseg) {
 			ret = -ENOMEM;
@@ -436,25 +447,22 @@ static int compact_segments(struct super_block *sb,
 	return ret;
 }
 
-int scoutfs_compact_add(struct super_block *sb, void *data, struct kvec *first,
-			struct kvec *last, u64 segno, u64 seq, u8 level)
+int scoutfs_compact_add(struct super_block *sb, void *data,
+			struct scoutfs_key_buf *first,
+			struct scoutfs_key_buf *last, u64 segno, u64 seq,
+			u8 level)
 {
 	struct compact_cursor *curs = data;
 	struct compact_seg *cseg;
 	int ret;
 
-	cseg = kzalloc(sizeof(struct compact_seg), GFP_NOFS);
+	cseg = alloc_cseg(sb, first, last);
 	if (!cseg) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
 	list_add_tail(&cseg->entry, &curs->csegs);
-
-	ret = scoutfs_kvec_dup_flatten(cseg->first, first) ?:
-	      scoutfs_kvec_dup_flatten(cseg->last, last);
-	if (ret)
-		goto out;
 
 	cseg->segno = segno;
 	cseg->seq = seq;
@@ -594,8 +602,8 @@ static void scoutfs_compact_func(struct work_struct *work)
 out:
 	if (ret)
 		free_result_segnos(sb, &results);
-	free_cseg_list(&curs.csegs);
-	free_cseg_list(&results);
+	free_cseg_list(sb, &curs.csegs);
+	free_cseg_list(sb, &results);
 
 	WARN_ON_ONCE(ret);
 	trace_printk("ret %d\n", ret);

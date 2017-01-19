@@ -98,15 +98,15 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	scoutfs_filerw_free_alloc(sb);
 #endif
 
-	trace_printk("dirty bytes %ld manifest dirty %d alloc dirty %d\n",
-		     scoutfs_item_dirty_bytes(sb),
+	trace_printk("items dirty %d manifest dirty %d alloc dirty %d\n",
+		     scoutfs_item_has_dirty(sb),
 		     scoutfs_manifest_has_dirty(sb),
 		     scoutfs_alloc_has_dirty(sb));
 
 	/*
 	 * XXX this needs serious work to handle errors.
 	 */
-	while (scoutfs_item_dirty_bytes(sb)) {
+	while (scoutfs_item_has_dirty(sb)) {
 		seg = NULL;
 		ret = scoutfs_seg_alloc(sb, &seg) ?:
 		      scoutfs_item_dirty_seg(sb, seg) ?:
@@ -222,14 +222,27 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 
 /*
  * I think the holder that creates the most dirty item data is
- * symlinking, which can create all the entry items and a symlink target
- * item with a full 4k path.  We go a little nuts and just set it to two
- * blocks.
+ * symlinking which can create an inode, the three dirent items with a
+ * full file name, and a symlink item with a full path.
  *
- * XXX This divides the segment size to set the hard limit on the number of
- * concurrent holders so we'll want this to be more precise.
+ * XXX Assuming the worst case here too aggressively limits the number
+ * of concurrent holders that can work without being blocked when they
+ * know they'll dirty much less.  We may want to have callers pass in
+ * their item, key, and val budgets if that's not too fragile.
+ *
+ * XXX fix to use real backref and symlink items, placeholders for now
  */
-#define MOST_DIRTY (2 * SCOUTFS_BLOCK_SIZE)
+#define HOLD_WORST_ITEMS 5
+#define HOLD_WORST_KEYS (sizeof(struct scoutfs_inode_key) +		\
+			 sizeof(struct scoutfs_dirent_key) + SCOUTFS_NAME_LEN +\
+			 sizeof(struct scoutfs_readdir_key) +		\
+			 sizeof(struct scoutfs_readdir_key) +		\
+			 sizeof(struct scoutfs_inode_key))
+#define HOLD_WORST_VALS (sizeof(struct scoutfs_inode) +			\
+			 sizeof(struct scoutfs_dirent) +		\
+			 sizeof(struct scoutfs_dirent) + SCOUTFS_NAME_LEN + \
+			 sizeof(struct scoutfs_dirent) + SCOUTFS_NAME_LEN + \
+			 SCOUTFS_SYMLINK_MAX_SIZE)
 
 /*
  * We're able to hold the transaction if the current dirty item bytes
@@ -239,10 +252,12 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 static bool hold_acquired(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	long bytes;
 	int with_us;
 	int holds;
 	int before;
+	u32 items;
+	u32 keys;
+	u32 vals;
 
 	holds = atomic_read(&sbi->trans_holds);
 	for (;;) {
@@ -258,8 +273,10 @@ static bool hold_acquired(struct super_block *sb)
 
 		/* see if we all would fill the segment */
 		with_us = holds + 1;
-		bytes = (with_us * MOST_DIRTY) + scoutfs_item_dirty_bytes(sb);
-		if (bytes > SCOUTFS_SEGMENT_SIZE) {
+		items = with_us * HOLD_WORST_ITEMS;
+		keys = with_us * HOLD_WORST_KEYS;
+		vals = with_us * HOLD_WORST_VALS;
+		if (!scoutfs_item_dirty_fits_single(sb, items, keys, vals)) {
 			scoutfs_sync_fs(sb, 0);
 			return false;
 		}

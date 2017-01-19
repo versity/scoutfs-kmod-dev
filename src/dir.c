@@ -97,13 +97,32 @@ static unsigned int dentry_type(unsigned int type)
 	return DT_UNKNOWN;
 }
 
+static struct scoutfs_key_buf *alloc_dirent_key(struct super_block *sb,
+						struct inode *dir,
+						struct dentry *dentry)
+{
+	struct scoutfs_dirent_key *dkey;
+	struct scoutfs_key_buf *key;
+
+	key = scoutfs_key_alloc(sb, offsetof(struct scoutfs_dirent_key,
+					     name[dentry->d_name.len]));
+	if (key) {
+		dkey = key->data;
+		dkey->type = SCOUTFS_DIRENT_KEY;
+		dkey->ino = cpu_to_be64(scoutfs_ino(dir));
+		memcpy(dkey->name, (void *)dentry->d_name.name,
+		       dentry->d_name.len);
+	}
+
+	return key;
+}
+
 static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 				     unsigned int flags)
 {
 	struct super_block *sb = dir->i_sb;
-	struct scoutfs_dirent_key dkey;
+	struct scoutfs_key_buf *key = NULL;
 	struct scoutfs_dirent dent;
-	SCOUTFS_DECLARE_KVEC(key);
 	SCOUTFS_DECLARE_KVEC(val);
 	struct inode *inode;
 	u64 ino = 0;
@@ -114,10 +133,11 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
-	dkey.type = SCOUTFS_DIRENT_KEY;
-	dkey.ino = cpu_to_be64(scoutfs_ino(dir));
-	scoutfs_kvec_init(key, &dkey, sizeof(dkey),
-			  (void *)dentry->d_name.name, dentry->d_name.len);
+	key = alloc_dirent_key(sb, dir, dentry);
+	if (!key) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	scoutfs_kvec_init(val, &dent, sizeof(dent));
 
@@ -136,6 +156,8 @@ out:
 		inode = NULL;
 	else
 		inode = scoutfs_iget(sb, ino);
+
+	scoutfs_key_free(sb, key);
 
 	return d_splice_alias(inode, dentry);
 }
@@ -162,6 +184,17 @@ static int dir_emit_dots(struct file *file, void *dirent, filldir_t filldir)
 	return 1;
 }
 
+static void init_readdir_key(struct scoutfs_key_buf *key,
+			     struct scoutfs_readdir_key *rkey,
+			     struct inode *inode, loff_t pos)
+{
+	rkey->type = SCOUTFS_READDIR_KEY;
+	rkey->ino = cpu_to_be64(scoutfs_ino(inode));
+	rkey->pos = cpu_to_be64(pos);
+
+	scoutfs_key_init(key, rkey, sizeof(struct scoutfs_readdir_key));
+}
+
 /*
  * readdir simply iterates over the dirent items for the dir inode and
  * uses their offset as the readdir position.
@@ -174,10 +207,10 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_dirent *dent;
+	struct scoutfs_key_buf key;
+	struct scoutfs_key_buf last_key;
 	struct scoutfs_readdir_key rkey;
 	struct scoutfs_readdir_key last_rkey;
-	SCOUTFS_DECLARE_KVEC(key);
-	SCOUTFS_DECLARE_KVEC(last_key);
 	SCOUTFS_DECLARE_KVEC(val);
 	unsigned int item_len;
 	unsigned int name_len;
@@ -187,15 +220,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	if (!dir_emit_dots(file, dirent, filldir))
 		return 0;
 
-	rkey.type = SCOUTFS_READDIR_KEY;
-	rkey.ino = cpu_to_be64(scoutfs_ino(inode));
-	/* pos set in each loop */
-	scoutfs_kvec_init(key, &rkey, sizeof(rkey));
-
-	last_rkey.type = SCOUTFS_READDIR_KEY;
-	last_rkey.ino = cpu_to_be64(scoutfs_ino(inode));
-	last_rkey.pos = cpu_to_be64(SCOUTFS_DIRENT_LAST_POS);
-	scoutfs_kvec_init(last_key, &last_rkey, sizeof(last_rkey));
+	init_readdir_key(&last_key, &last_rkey, inode, SCOUTFS_DIRENT_LAST_POS);
 
 	item_len = offsetof(struct scoutfs_dirent, name[SCOUTFS_NAME_LEN]);
 	dent = kmalloc(item_len, GFP_KERNEL);
@@ -203,9 +228,10 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 		return -ENOMEM;
 
 	for (;;) {
-		rkey.pos = cpu_to_be64(file->f_pos);
+		init_readdir_key(&key, &rkey, inode, file->f_pos);
+
 		scoutfs_kvec_init(val, dent, item_len);
-		ret = scoutfs_item_next_same_min(sb, key, last_key, val,
+		ret = scoutfs_item_next_same_min(sb, &key, &last_key, val,
 				offsetof(struct scoutfs_dirent, name[1]));
 		if (ret < 0) {
 			if (ret == -ENOENT)
@@ -261,9 +287,8 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 			   struct inode *inode)
 {
 	struct super_block *sb = dir->i_sb;
-	struct scoutfs_dirent_key dkey;
+	struct scoutfs_key_buf *key;
 	struct scoutfs_dirent dent;
-	SCOUTFS_DECLARE_KVEC(key);
 	SCOUTFS_DECLARE_KVEC(val);
 	int ret;
 
@@ -275,10 +300,9 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 		return ret;
 
 	/* dirent item for lookup */
-	dkey.type = SCOUTFS_DIRENT_KEY;
-	dkey.ino = cpu_to_be64(scoutfs_ino(dir));
-	scoutfs_kvec_init(key, &dkey, sizeof(dkey),
-			  (void *)dentry->d_name.name, dentry->d_name.len);
+	key = alloc_dirent_key(sb, dir, dentry);
+	if (!key)
+		return -ENOMEM;
 
 	dent.ino = cpu_to_le64(scoutfs_ino(inode));
 	dent.type = mode_to_type(inode->i_mode);
@@ -323,6 +347,7 @@ out_dent:
 	}
 #endif
 
+	scoutfs_key_free(sb, key);
 	return ret;
 }
 
@@ -423,8 +448,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode = dentry->d_inode;
 	struct timespec ts = current_kernel_time();
-	struct scoutfs_dirent_key dkey;
-	SCOUTFS_DECLARE_KVEC(key);
+	struct scoutfs_key_buf *key = NULL;
 	int ret = 0;
 
 	/* will need to add deletion items */
@@ -443,10 +467,11 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		goto out;
 
 	/* XXX same items as add_entry_items */
-	dkey.type = SCOUTFS_DIRENT_KEY;
-	dkey.ino = cpu_to_be64(scoutfs_ino(dir));
-	scoutfs_kvec_init(key, &dkey, sizeof(dkey),
-			  (void *)dentry->d_name.name, dentry->d_name.len);
+	key = alloc_dirent_key(sb, dir, dentry);
+	if (!key) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	ret = scoutfs_item_delete(sb, key);
 	if (ret)
@@ -478,6 +503,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	scoutfs_update_inode_item(dir);
 
 out:
+	scoutfs_key_free(sb, key);
 	scoutfs_release_trans(sb);
 	return ret;
 }

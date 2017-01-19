@@ -52,7 +52,7 @@ struct manifest {
 	/* calculated on mount, const thereafter */
 	u64 level_limits[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
 
-	SCOUTFS_DECLARE_KVEC(compact_keys[SCOUTFS_MANIFEST_MAX_LEVEL + 1]);
+	struct scoutfs_key_buf *compact_keys[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
 };
 
 #define DECLARE_MANIFEST(sb, name) \
@@ -75,16 +75,16 @@ struct manifest_ref {
 	struct scoutfs_segment *seg;
 	int found_ctr;
 	int pos;
-	u16 first_key_len;
-	u16 last_key_len;
 	u8 level;
-	u8 keys[0];
+
+	struct scoutfs_key_buf *first;
+	struct scoutfs_key_buf *last;
 };
 
 struct manifest_fill_args {
 	struct scoutfs_manifest_entry ment;
-	struct kvec *first;
-	struct kvec *last;
+	struct scoutfs_key_buf *first;
+	struct scoutfs_key_buf *last;
 };
 
 /*
@@ -93,41 +93,33 @@ struct manifest_fill_args {
  */
 struct manifest_search_key {
 	u64 seq;
-	struct kvec *key;
+	struct scoutfs_key_buf *key;
 	u8 level;
 };
 
 static void init_ment_keys(struct scoutfs_manifest_entry *ment,
-			   struct kvec *first, struct kvec *last)
+			   struct scoutfs_key_buf *first,
+			   struct scoutfs_key_buf *last)
 {
 	if (first)
-		scoutfs_kvec_init(first, ment->keys,
-				  le16_to_cpu(ment->first_key_len));
+		scoutfs_key_init(first, ment->keys,
+				 le16_to_cpu(ment->first_key_len));
 	if (last)
-		scoutfs_kvec_init(last, ment->keys +
-				  le16_to_cpu(ment->first_key_len),
-				  le16_to_cpu(ment->last_key_len));
+		scoutfs_key_init(last, ment->keys +
+				 le16_to_cpu(ment->first_key_len),
+				 le16_to_cpu(ment->last_key_len));
 }
 
-static void init_ref_keys(struct manifest_ref *ref, struct kvec *first,
-			  struct kvec *last)
-{
-	if (first)
-		scoutfs_kvec_init(first, ref->keys, ref->first_key_len);
-	if (last)
-		scoutfs_kvec_init(last, ref->keys + ref->first_key_len,
-				  ref->last_key_len);
-}
-
-static bool cmp_range_ment(struct kvec *key, struct kvec *end,
+static bool cmp_range_ment(struct scoutfs_key_buf *key,
+			   struct scoutfs_key_buf *end,
 			   struct scoutfs_manifest_entry *ment)
 {
-	SCOUTFS_DECLARE_KVEC(first);
-	SCOUTFS_DECLARE_KVEC(last);
+	struct scoutfs_key_buf first;
+	struct scoutfs_key_buf last;
 
-	init_ment_keys(ment, first, last);
+	init_ment_keys(ment, &first, &last);
 
-	return scoutfs_kvec_cmp_overlap(key, end, first, last);
+	return scoutfs_key_compare_ranges(key, end, &first, &last);
 }
 
 static u64 get_level_count(struct manifest *mani,
@@ -187,8 +179,10 @@ static void add_level_count(struct super_block *sb, struct manifest *mani,
  *
  * This must be called with the manifest lock held.
  */
-int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
-			 struct kvec *last, u64 segno, u64 seq, u8 level)
+int scoutfs_manifest_add(struct super_block *sb,
+			 struct scoutfs_key_buf *first,
+			 struct scoutfs_key_buf *last, u64 segno, u64 seq,
+			 u8 level)
 {
 	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -200,15 +194,15 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 	unsigned bytes;
 	int ret;
 
-	trace_scoutfs_manifest_add(sb, first, last, segno, seq, level);
+//	trace_scoutfs_manifest_add(sb, first, last, segno, seq, level);
 
-	key_bytes = scoutfs_kvec_length(first) + scoutfs_kvec_length(last);
+	key_bytes = first->key_len + last->key_len;
 	bytes = offsetof(struct scoutfs_manifest_entry, keys[key_bytes]);
 
 	args.ment.segno = cpu_to_le64(segno);
 	args.ment.seq = cpu_to_le64(seq);
-	args.ment.first_key_len = cpu_to_le16(scoutfs_kvec_length(first));
-	args.ment.last_key_len = cpu_to_le16(scoutfs_kvec_length(last));
+	args.ment.first_key_len = cpu_to_le16(first->key_len);
+	args.ment.last_key_len = cpu_to_le16(last->key_len);
 	args.ment.level = level;
 
 	args.first = first;
@@ -233,8 +227,8 @@ int scoutfs_manifest_add(struct super_block *sb, struct kvec *first,
 /*
  * This must be called with the manifest lock held.
  */
-int scoutfs_manifest_dirty(struct super_block *sb, struct kvec *first, u64 seq,
-			   u8 level)
+int scoutfs_manifest_dirty(struct super_block *sb,
+			   struct scoutfs_key_buf *first, u64 seq, u8 level)
 {
 	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_manifest_entry *ment;
@@ -255,8 +249,8 @@ int scoutfs_manifest_dirty(struct super_block *sb, struct kvec *first, u64 seq,
 /*
  * This must be called with the manifest lock held.
  */
-int scoutfs_manifest_del(struct super_block *sb, struct kvec *first, u64 seq,
-			 u8 level)
+int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
+			 u64 seq, u8 level)
 {
 	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -299,41 +293,43 @@ int scoutfs_manifest_unlock(struct super_block *sb)
 	return 0;
 }
 
-static int alloc_add_ref(struct list_head *list,
+static void free_ref(struct super_block *sb, struct manifest_ref *ref)
+{
+	if (!IS_ERR_OR_NULL(ref)) {
+		WARN_ON_ONCE(!list_empty(&ref->entry));
+		scoutfs_seg_put(ref->seg);
+		scoutfs_key_free(sb, ref->first);
+		scoutfs_key_free(sb, ref->last);
+		kfree(ref);
+	}
+}
+
+static int alloc_add_ref(struct super_block *sb, struct list_head *list,
 			 struct scoutfs_manifest_entry *ment)
 {
-	SCOUTFS_DECLARE_KVEC(ment_first);
-	SCOUTFS_DECLARE_KVEC(ment_last);
-	SCOUTFS_DECLARE_KVEC(first);
-	SCOUTFS_DECLARE_KVEC(last);
+	struct scoutfs_key_buf ment_first;
+	struct scoutfs_key_buf ment_last;
 	struct manifest_ref *ref;
-	unsigned bytes;
 
-	init_ment_keys(ment, ment_first, ment_last);
+	init_ment_keys(ment, &ment_first, &ment_last);
 
-	bytes = scoutfs_kvec_length(ment_first) +
-		scoutfs_kvec_length(ment_first);
-
-	ref = kmalloc(offsetof(struct manifest_ref, keys[bytes]), GFP_NOFS);
-	if (!ref)
+	ref = kzalloc(sizeof(struct manifest_ref), GFP_NOFS);
+	if (ref) {
+		ref->first = scoutfs_key_dup(sb, &ment_first);
+		ref->last = scoutfs_key_dup(sb, &ment_last);
+	}
+	if (!ref || !ref->first || !ref->last) {
+		free_ref(sb, ref);
 		return -ENOMEM;
-
-	memset(ref, 0, offsetof(struct manifest_ref, keys));
+	}
 
 	ref->segno = le64_to_cpu(ment->segno);
 	ref->seq = le64_to_cpu(ment->seq);
 	ref->level = ment->level;
-	ref->first_key_len = le16_to_cpu(ment->first_key_len);
-	ref->last_key_len = le16_to_cpu(ment->last_key_len);
-
-	init_ref_keys(ref, first, last);
-	scoutfs_kvec_memcpy(first, ment_first);
-	scoutfs_kvec_memcpy(last, ment_last);
 
 	list_add_tail(&ref->entry, list);
 
 	return 0;
-
 }
 
 /*
@@ -349,13 +345,14 @@ static int alloc_add_ref(struct list_head *list,
  * segment starting with the key.
  */
 static int get_range_refs(struct super_block *sb, struct manifest *mani,
-			  struct kvec *key, struct kvec *end,
+			  struct scoutfs_key_buf *key,
+			  struct scoutfs_key_buf *end,
 			  struct list_head *ref_list)
 {
 	struct scoutfs_manifest_entry *ment;
 	struct manifest_search_key skey;
-	SCOUTFS_DECLARE_KVEC(first);
-	SCOUTFS_DECLARE_KVEC(last);
+	struct scoutfs_key_buf first;
+	struct scoutfs_key_buf last;
 	struct manifest_ref *ref;
 	struct manifest_ref *tmp;
 	int ret;
@@ -369,7 +366,7 @@ static int get_range_refs(struct super_block *sb, struct manifest *mani,
 	ment = scoutfs_treap_lookup_prev(mani->treap, &skey);
 	while (!IS_ERR_OR_NULL(ment)) {
 		if (cmp_range_ment(key, end, ment) == 0) {
-			ret = alloc_add_ref(ref_list, ment);
+			ret = alloc_add_ref(sb, ref_list, ment);
 			if (ret)
 				goto out;
 		}
@@ -396,8 +393,8 @@ static int get_range_refs(struct super_block *sb, struct manifest *mani,
 		}
 
 		if (ment) {
-			init_ment_keys(ment, first, last);
-			ret = alloc_add_ref(ref_list, ment);
+			init_ment_keys(ment, &first, &last);
+			ret = alloc_add_ref(sb, ref_list, ment);
 			if (ret)
 				goto out;
 		}
@@ -411,7 +408,7 @@ out:
 	if (ret) {
 		list_for_each_entry_safe(ref, tmp, ref_list, entry) {
 			list_del_init(&ref->entry);
-			kfree(ref);
+			free_ref(sb, ref);
 		}
 	}
 
@@ -446,16 +443,17 @@ out:
  */
 #define MAX_ITEMS_READ 32
 
-int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
-				struct kvec *end)
+int scoutfs_manifest_read_items(struct super_block *sb,
+				struct scoutfs_key_buf *key,
+				struct scoutfs_key_buf *end)
 {
 	DECLARE_MANIFEST(sb, mani);
-	SCOUTFS_DECLARE_KVEC(item_key);
+	struct scoutfs_key_buf item_key;
+	struct scoutfs_key_buf found_key;
+	struct scoutfs_key_buf batch_end;
+	struct scoutfs_key_buf seg_end;
 	SCOUTFS_DECLARE_KVEC(item_val);
-	SCOUTFS_DECLARE_KVEC(found_key);
 	SCOUTFS_DECLARE_KVEC(found_val);
-	SCOUTFS_DECLARE_KVEC(batch_end);
-	SCOUTFS_DECLARE_KVEC(seg_end);
 	struct scoutfs_segment *seg;
 	struct manifest_ref *ref;
 	struct manifest_ref *tmp;
@@ -486,7 +484,7 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 		ref->seg = seg;
 	}
 
-	/* wait for submitted segments and search for starting pos */
+	/* always wait for submitted segments */
 	list_for_each_entry(ref, &ref_list, entry) {
 		if (!ref->seg)
 			break;
@@ -494,15 +492,29 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 		err = scoutfs_seg_wait(sb, ref->seg);
 		if (err && !ret)
 			ret = err;
-
-		if (ret == 0)
-			ref->pos = scoutfs_seg_find_pos(ref->seg, key);
 	}
 	if (ret)
 		goto out;
 
-	scoutfs_kvec_init_null(batch_end);
-	scoutfs_kvec_init_null(seg_end);
+	/* start from the next item from the key in each segment */
+	list_for_each_entry(ref, &ref_list, entry)
+		ref->pos = scoutfs_seg_find_pos(ref->seg, key);
+
+	/*
+	 * Find the greatest range we can cover if we walk all the
+	 * segments.  We only have level 0 segments for the missing
+	 * range so that's the greatest.  Then we shrink the range by
+	 * the limit of each higher level segment that intersected with
+	 * our starting key.
+	 */
+	scoutfs_key_clone(&seg_end, end);
+	list_for_each_entry(ref, &ref_list, entry) {
+		if (ref->level > 0 &&
+		    scoutfs_key_compare(ref->last, &seg_end) < 0) {
+			scoutfs_key_clone(&seg_end, ref->last);
+		}
+	}
+
 	found_ctr = 0;
 
 	for (n = 0; n < MAX_ITEMS_READ; n++) {
@@ -512,37 +524,26 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 
 		/* find the next least key from the pos in each segment */
 		list_for_each_entry_safe(ref, tmp, &ref_list, entry) {
+			if (ref->pos == -1)
+				continue;
 
 			/*
 			 * Check the next item in the segment.  We're
 			 * done with the segment if there are no more
 			 * items or if the next item is past the
-			 * caller's end.  We record either the caller's
-			 * end or the segment end if it's a l1+ segment for
-			 * use as the batch end if we don't see more items.
+			 * caller's end.
 			 */
-			ret = scoutfs_seg_item_kvecs(ref->seg, ref->pos,
-					             item_key, item_val);
-			if (ret < 0)  {
-				if (ref->level > 0) {
-					init_ref_keys(ref, NULL, item_key);
-					scoutfs_kvec_clone_less(seg_end,
-								item_key);
-				}
-			} else if (scoutfs_kvec_memcmp(item_key, end) > 0) {
-				scoutfs_kvec_clone_less(seg_end, end);
-				ret = -ENOENT;
-			}
-			if (ret < 0) {
-				list_del_init(&ref->entry);
-				scoutfs_seg_put(ref->seg);
-				kfree(ref);
+			ret = scoutfs_seg_item_ptrs(ref->seg, ref->pos,
+						    &item_key, item_val);
+			if (ret < 0 || scoutfs_key_compare(&item_key, end) > 0){
+				ref->pos = -1;
 				continue;
 			}
 
 			/* see if it's the new least item */
 			if (found) {
-				cmp = scoutfs_kvec_memcmp(item_key, found_key);
+				cmp = scoutfs_key_compare(&item_key,
+							  &found_key);
 				if (cmp >= 0) {
 					if (cmp == 0)
 						ref->found_ctr = found_ctr;
@@ -551,7 +552,7 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 			}
 
 			/* remember new least key */
-			scoutfs_kvec_clone(found_key, item_key);
+			scoutfs_key_clone(&found_key, &item_key);
 			scoutfs_kvec_clone(found_val, item_val);
 			ref->found_ctr = ++found_ctr;
 			found = true;
@@ -559,7 +560,7 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 
 		/* ran out of keys in segs, range extends to seg end */
 		if (!found) {
-			scoutfs_kvec_clone(batch_end, seg_end);
+			scoutfs_key_clone(&batch_end, &seg_end);
 			ret = 0;
 			break;
 		}
@@ -569,18 +570,18 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 		 * have items it's not a failure and the end of the cached
 		 * range is the last successfully added item.
 		 */
-		ret = scoutfs_item_add_batch(sb, &batch, found_key, found_val);
+		ret = scoutfs_item_add_batch(sb, &batch, &found_key, found_val);
 		if (ret) {
 			if (n > 0)
 				ret = 0;
 			break;
 		}
 
-		/* the last successful key determines the range */
-		scoutfs_kvec_clone(batch_end, found_key);
+		/* the last successful key determines range end until run out */
+		scoutfs_key_clone(&batch_end, &found_key);
 
 		/* if we just saw the end key then we're done */
-		if (scoutfs_kvec_memcmp(found_key, end) == 0) {
+		if (scoutfs_key_compare(&found_key, end) == 0) {
 			ret = 0;
 			break;
 		}
@@ -595,14 +596,13 @@ int scoutfs_manifest_read_items(struct super_block *sb, struct kvec *key,
 	}
 
 	if (ret)
-		scoutfs_item_free_batch(&batch);
+		scoutfs_item_free_batch(sb, &batch);
 	else
-		ret = scoutfs_item_insert_batch(sb, &batch, key, batch_end);
+		ret = scoutfs_item_insert_batch(sb, &batch, key, &batch_end);
 out:
 	list_for_each_entry_safe(ref, tmp, &ref_list, entry) {
 		list_del_init(&ref->entry);
-		scoutfs_seg_put(ref->seg);
-		kfree(ref);
+		free_ref(sb, ref);
 	}
 
 	return ret;
@@ -677,10 +677,10 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	struct scoutfs_manifest_entry *ment;
 	struct scoutfs_manifest_entry *over;
 	struct manifest_search_key skey;
-	SCOUTFS_DECLARE_KVEC(ment_first);
-	SCOUTFS_DECLARE_KVEC(ment_last);
-	SCOUTFS_DECLARE_KVEC(over_first);
-	SCOUTFS_DECLARE_KVEC(over_last);
+	struct scoutfs_key_buf ment_first;
+	struct scoutfs_key_buf ment_last;
+	struct scoutfs_key_buf over_first;
+	struct scoutfs_key_buf over_last;
 	int level;
 	int ret;
 	int i;
@@ -710,9 +710,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		skey.seq = 0;
 		ment = scoutfs_treap_lookup_next(mani->treap, &skey);
 		if (ment == NULL || ment->level != level) {
-			/* XXX ugh, these kvecs are the worst */
-			scoutfs_kvec_init(skey.key,
-					  skey.key[0].iov_base, 0);
+			scoutfs_key_set_min(skey.key);
 			ment = scoutfs_treap_lookup_next(mani->treap, &skey);
 		}
 	}
@@ -726,17 +724,17 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		goto out;
 	}
 
-	init_ment_keys(ment, ment_first, ment_last);
+	init_ment_keys(ment, &ment_first, &ment_last);
 
 	/* add the upper input segment */
-	ret = scoutfs_compact_add(sb, data, ment_first, ment_last,
+	ret = scoutfs_compact_add(sb, data, &ment_first, &ment_last,
 				  le64_to_cpu(ment->segno),
 				  le64_to_cpu(ment->seq), level);
 	if (ret)
 		goto out;
 
 	/* start with the first overlapping at the next level */
-	skey.key = ment_first;
+	skey.key = &ment_first;
 	skey.level = level + 1;
 	skey.seq = 0;
 	over = scoutfs_treap_lookup(mani->treap, &skey);
@@ -750,13 +748,13 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		if (!over || over->level != (ment->level + 1))
 			break;
 
-		init_ment_keys(over, over_first, over_last);
+		init_ment_keys(over, &over_first, &over_last);
 
-		if (scoutfs_kvec_cmp_overlap(ment_first, ment_last,
-					     over_first, over_last) != 0)
+		if (scoutfs_key_compare_ranges(&ment_first, &ment_last,
+					       &over_first, &over_last) != 0)
 			break;
 
-		ret = scoutfs_compact_add(sb, data, over_first, over_last,
+		ret = scoutfs_compact_add(sb, data, &over_first, &over_last,
 					  le64_to_cpu(over->segno),
 					  le64_to_cpu(over->seq), level + 1);
 		if (ret)
@@ -765,10 +763,9 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		over = scoutfs_treap_next(mani->treap, over);
 	}
 
-	/* record the next key to start from, not exact */
-	scoutfs_kvec_init_key(mani->compact_keys[level]);
-	scoutfs_kvec_memcpy_truncate(mani->compact_keys[level], ment_last);
-	scoutfs_kvec_be_inc(mani->compact_keys[level]);
+	/* record the next key to start from */
+	scoutfs_key_copy(mani->compact_keys[level], &ment_last);
+	scoutfs_key_inc(mani->compact_keys[level]);
 
 	ret = 0;
 out:
@@ -800,8 +797,8 @@ static int manifest_treap_compare(void *key, void *data)
 {
 	struct manifest_search_key *skey = key;
 	struct scoutfs_manifest_entry *ment = data;
-	SCOUTFS_DECLARE_KVEC(first);
-	SCOUTFS_DECLARE_KVEC(last);
+	struct scoutfs_key_buf first;
+	struct scoutfs_key_buf last;
 	int cmp;
 
 	if (skey->level < ment->level) {
@@ -818,13 +815,13 @@ static int manifest_treap_compare(void *key, void *data)
 		goto out;
 	}
 
-	init_ment_keys(ment, first, last);
+	init_ment_keys(ment, &first, &last);
 
 	if (skey->seq == 0) {
-		cmp = scoutfs_kvec_cmp_overlap(skey->key, skey->key,
-					       first, last);
+		cmp = scoutfs_key_compare_ranges(skey->key, skey->key,
+					         &first, &last);
 	} else {
-		cmp = scoutfs_kvec_memcmp(skey->key, first) ?:
+		cmp = scoutfs_key_compare(skey->key, &first) ?:
 		      scoutfs_cmp_u64s(skey->seq, le64_to_cpu(ment->seq));
 	}
 
@@ -836,14 +833,14 @@ static void manifest_treap_fill(void *data, void *arg)
 {
 	struct scoutfs_manifest_entry *ment = data;
 	struct manifest_fill_args *args = arg;
-	SCOUTFS_DECLARE_KVEC(ment_first);
-	SCOUTFS_DECLARE_KVEC(ment_last);
+	struct scoutfs_key_buf ment_first;
+	struct scoutfs_key_buf ment_last;
 
 	*ment = args->ment;
 
-	init_ment_keys(ment, ment_first, ment_last);
-	scoutfs_kvec_memcpy(ment_first, args->first);
-	scoutfs_kvec_memcpy(ment_last, args->last);
+	init_ment_keys(ment, &ment_first, &ment_last);
+	scoutfs_key_copy(&ment_first, args->first);
+	scoutfs_key_copy(&ment_last, args->last);
 }
 
 static struct scoutfs_treap_ops manifest_treap_ops = {
@@ -858,7 +855,6 @@ int scoutfs_manifest_setup(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct manifest *mani;
-	int ret;
 	int i;
 
 	mani = kzalloc(sizeof(struct manifest), GFP_KERNEL);
@@ -876,14 +872,17 @@ int scoutfs_manifest_setup(struct super_block *sb)
 	}
 
 	for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++) {
-		ret = scoutfs_kvec_alloc_key(mani->compact_keys[i]);
-		if (ret) {
+		mani->compact_keys[i] = scoutfs_key_alloc(sb,
+							  SCOUTFS_MAX_KEY_SIZE);
+		if (!mani->compact_keys[i]) {
 			while (--i >= 0)
-				scoutfs_kvec_kfree(mani->compact_keys[i]);
+				scoutfs_key_free(sb, mani->compact_keys[i]);
 			scoutfs_treap_free(mani->treap);
 			kfree(mani);
 			return -ENOMEM;
 		}
+
+		scoutfs_key_set_min(mani->compact_keys[i]);
 	}
 
 	for (i = ARRAY_SIZE(super->manifest.level_counts) - 1; i >= 0; i--) {
@@ -915,7 +914,7 @@ void scoutfs_manifest_destroy(struct super_block *sb)
 	if (mani) {
 		scoutfs_treap_free(mani->treap);
 		for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++)
-			scoutfs_kvec_kfree(mani->compact_keys[i]);
+			scoutfs_key_free(sb, mani->compact_keys[i]);
 		kfree(mani);
 	}
 }

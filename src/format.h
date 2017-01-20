@@ -130,20 +130,15 @@ struct scoutfs_alloc_region {
  * aligned.  This ensures that they won't cross page boundaries and we
  * can use pointers to them in the page vecs that make up segments without
  * funny business.
- *
- * We limit segment sizes to 8 megs (23 bits) and value lengths to 512 bytes
- * (9 bits).  The item offsets and lengths then take up 64 bits.
- *
- * We then operate on the items in on-stack nice native structs.
  */
 struct scoutfs_segment_item {
 	__le64 seq;
-	__le32 key_off_len;
-	__le32 val_off_len;
+	__le32 key_off;
+	__le32 val_off;
+	__le16 key_len;
+	__le16 val_len;
+	__u8 padding[12];
 } __packed;
-
-#define SCOUTFS_SEGMENT_ITEM_OFF_SHIFT 9
-#define SCOUTFS_SEGMENT_ITEM_LEN_MASK ((1 << SCOUTFS_SEGMENT_ITEM_OFF_SHIFT)-1)
 
 /*
  * Each large segment starts with a segment block that describes the

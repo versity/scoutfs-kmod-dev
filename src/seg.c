@@ -394,53 +394,6 @@ static void *pos_ptr(struct scoutfs_segment *seg, u32 pos)
 	return off_ptr(seg, pos_off(pos));
 }
 
-/*
- * The persistent item fields that are stored in the segment are packed
- * with funny precision.  We translate those to and from a much more
- * natural native representation of the fields.
- */
-struct native_item {
-	u64 seq;
-	u32 key_off;
-	u32 val_off;
-	u16 key_len;
-	u16 val_len;
-};
-
-static void load_item(struct scoutfs_segment *seg, u32 pos,
-		      struct native_item *item)
-{
-	struct scoutfs_segment_item *sitem = pos_ptr(seg, pos);
-	u32 packed;
-
-	item->seq = le64_to_cpu(sitem->seq);
-
-	packed = le32_to_cpu(sitem->key_off_len);
-	item->key_off = packed >> SCOUTFS_SEGMENT_ITEM_OFF_SHIFT;
-	item->key_len = packed & SCOUTFS_SEGMENT_ITEM_LEN_MASK;
-
-	packed = le32_to_cpu(sitem->val_off_len);
-	item->val_off = packed >> SCOUTFS_SEGMENT_ITEM_OFF_SHIFT;
-	item->val_len = packed & SCOUTFS_SEGMENT_ITEM_LEN_MASK;
-}
-
-static void store_item(struct scoutfs_segment *seg, u32 pos,
-		       struct native_item *item)
-{
-	struct scoutfs_segment_item *sitem = pos_ptr(seg, pos);
-	u32 packed;
-
-	sitem->seq = cpu_to_le64(item->seq);
-
-	packed = (item->key_off << SCOUTFS_SEGMENT_ITEM_OFF_SHIFT) |
-		 (item->key_len & SCOUTFS_SEGMENT_ITEM_LEN_MASK);
-	sitem->key_off_len = cpu_to_le32(packed);
-
-	packed = (item->val_off << SCOUTFS_SEGMENT_ITEM_OFF_SHIFT) |
-		 (item->val_len & SCOUTFS_SEGMENT_ITEM_LEN_MASK);
-	sitem->val_off_len = cpu_to_le32(packed);
-}
-
 static void kvec_from_pages(struct scoutfs_segment *seg,
 			    struct kvec *kvec, u32 off, u16 len)
 {
@@ -459,17 +412,19 @@ int scoutfs_seg_item_ptrs(struct scoutfs_segment *seg, int pos,
 			  struct scoutfs_key_buf *key, struct kvec *val)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct native_item item;
+	struct scoutfs_segment_item *item;
 
 	if (pos < 0 || pos >= le32_to_cpu(sblk->nr_items))
 		return -ENOENT;
 
-	load_item(seg, pos, &item);
+	item = pos_ptr(seg, pos);
 
 	if (key)
-		scoutfs_key_init(key, off_ptr(seg, item.key_off), item.key_len);
+		scoutfs_key_init(key, off_ptr(seg, le32_to_cpu(item->key_off)),
+				 le16_to_cpu(item->key_len));
 	if (val)
-		kvec_from_pages(seg, val, item.val_off, item.val_len);
+		kvec_from_pages(seg, val, le32_to_cpu(item->val_off),
+				le16_to_cpu(item->val_len));
 
 	return 0;
 }
@@ -564,7 +519,7 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct native_item item;
+	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
 	u32 key_off;
@@ -582,12 +537,12 @@ void scoutfs_seg_first_item(struct super_block *sb, struct scoutfs_segment *seg,
 
 	trace_printk("first item offs key %u val %u\n", key_off, val_off);
 
-	item.seq = 1;
-	item.key_off = key_off;
-	item.val_off = val_off;
-	item.key_len = key->key_len;
-	item.val_len = scoutfs_kvec_length(val);
-	store_item(seg, 0, &item);
+	item = pos_ptr(seg, 0);
+	item->seq = cpu_to_le64(1);
+	item->key_off = cpu_to_le32(key_off);
+	item->val_off = cpu_to_le32(val_off);
+	item->key_len = cpu_to_le16(key->key_len);
+	item->val_len = cpu_to_le16(scoutfs_kvec_length(val));
 
 	scoutfs_seg_item_ptrs(seg, 0, &item_key, item_val);
 	scoutfs_key_copy(&item_key, key);
@@ -599,27 +554,33 @@ void scoutfs_seg_append_item(struct super_block *sb,
 			     struct scoutfs_key_buf *key, struct kvec *val)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct native_item item;
-	struct native_item prev;
+	struct scoutfs_segment_item *item;
+	struct scoutfs_segment_item *prev;
 	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
+	u32 key_off;
+	u32 val_off;
 	u32 pos;
 
 	pos = le32_to_cpu(sblk->nr_items);
 	sblk->nr_items = cpu_to_le32(pos + 1);
 
-	load_item(seg, pos - 1, &prev);
+	prev = pos_ptr(seg, pos - 1);
+	item = pos_ptr(seg, pos);
 
-	item.seq = 1;
-	item.key_off = align_key_off(seg, prev.key_off + prev.key_len,
-				     key->key_len);
-	item.key_len = key->key_len;
-	item.val_off = prev.val_off + prev.val_len;
-	item.val_len = scoutfs_kvec_length(val);
-	store_item(seg, pos, &item);
+	key_off = le32_to_cpu(prev->key_off) + le16_to_cpu(prev->key_len);
+	val_off = le32_to_cpu(prev->val_off) + le16_to_cpu(prev->val_len);
+
+	key_off = align_key_off(seg, key_off, key->key_len);
+
+	item->seq = cpu_to_le64(1);
+	item->key_off = cpu_to_le32(key_off);
+	item->val_off = cpu_to_le32(val_off);
+	item->key_len = cpu_to_le16(key->key_len);
+	item->val_len = cpu_to_le16(scoutfs_kvec_length(val));
 
 	trace_printk("item %u offs key %u val %u\n",
-		     pos, item.key_off, item.val_off);
+		     pos, key_off, val_off);
 
 	scoutfs_seg_item_ptrs(seg, pos, &item_key, item_val);
 	scoutfs_key_copy(&item_key, key);
@@ -633,15 +594,17 @@ int scoutfs_seg_manifest_add(struct super_block *sb,
 			     struct scoutfs_segment *seg, u8 level)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct native_item item;
+	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf first;
 	struct scoutfs_key_buf last;
 
-	load_item(seg, 0, &item);
-	scoutfs_key_init(&first, off_ptr(seg, item.key_off), item.key_len);
+	item = pos_ptr(seg, 0);
+	scoutfs_key_init(&first, off_ptr(seg, le32_to_cpu(item->key_off)),
+				 le16_to_cpu(item->key_len));
 
-	load_item(seg, le32_to_cpu(sblk->nr_items) - 1, &item);
-	scoutfs_key_init(&last, off_ptr(seg, item.key_off), item.key_len);
+	item = pos_ptr(seg, le32_to_cpu(sblk->nr_items) - 1);
+	scoutfs_key_init(&last, off_ptr(seg, le32_to_cpu(item->key_off)),
+				 le16_to_cpu(item->key_len));
 
 	return scoutfs_manifest_add(sb, &first, &last, le64_to_cpu(sblk->segno),
 				    le64_to_cpu(sblk->seq), level);
@@ -651,11 +614,12 @@ int scoutfs_seg_manifest_del(struct super_block *sb,
 			     struct scoutfs_segment *seg, u8 level)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct native_item item;
+	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf first;
 
-	load_item(seg, 0, &item);
-	scoutfs_key_init(&first, off_ptr(seg, item.key_off), item.key_len);
+	item = pos_ptr(seg, 0);
+	scoutfs_key_init(&first, off_ptr(seg, le32_to_cpu(item->key_off)),
+				 le16_to_cpu(item->key_len));
 
 	return scoutfs_manifest_del(sb, &first, le64_to_cpu(sblk->seq), level);
 }

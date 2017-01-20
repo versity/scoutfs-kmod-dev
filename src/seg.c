@@ -25,6 +25,7 @@
 #include "manifest.h"
 #include "alloc.h"
 #include "key.h"
+#include "counters.h"
 
 /*
  * seg.c should just be about the cache and io, and maybe
@@ -38,13 +39,19 @@
  */
 
 struct segment_cache {
+	struct super_block *sb;
 	spinlock_t lock;
 	struct rb_root root;
 	wait_queue_head_t waitq;
+
+	struct shrinker shrinker;
+	struct list_head lru_list;
+	unsigned long lru_nr;
 };
 
 struct scoutfs_segment {
 	struct rb_node node;
+	struct list_head lru_entry;
 	atomic_t refcount;
 	u64 segno;
 	unsigned long flags;
@@ -70,6 +77,7 @@ static struct scoutfs_segment *alloc_seg(u64 segno)
 		return seg;
 
 	RB_CLEAR_NODE(&seg->node);
+	INIT_LIST_HEAD(&seg->lru_entry);
 	atomic_set(&seg->refcount, 1);
 	seg->segno = segno;
 
@@ -99,6 +107,7 @@ void scoutfs_seg_put(struct scoutfs_segment *seg)
 
 	if (!IS_ERR_OR_NULL(seg) && atomic_dec_and_test(&seg->refcount)) {
 		WARN_ON_ONCE(!RB_EMPTY_NODE(&seg->node));
+		WARN_ON_ONCE(!list_empty(&seg->lru_entry));
 		for (i = 0; i < SCOUTFS_SEGMENT_PAGES; i++)
 			if (seg->pages[i])
 				__free_page(seg->pages[i]);
@@ -129,15 +138,33 @@ static struct scoutfs_segment *find_seg(struct rb_root *root, u64 segno)
 	return NULL;
 }
 
+static void lru_check(struct segment_cache *cac, struct scoutfs_segment *seg)
+{
+	if (RB_EMPTY_NODE(&seg->node)) {
+		if (!list_empty(&seg->lru_entry)) {
+			list_del_init(&seg->lru_entry);
+			cac->lru_nr--;
+		}
+	} else {
+		if (list_empty(&seg->lru_entry)) {
+			list_add_tail(&seg->lru_entry, &cac->lru_list);
+			cac->lru_nr++;
+		} else {
+			list_move_tail(&seg->lru_entry, &cac->lru_list);
+		}
+	}
+}
+
 /*
  * This always inserts the segment into the rbtree.  If there's already
  * a segment at the given seg then it is removed and returned.  The
  * caller doesn't have to erase it from the tree if it's returned but it
  * does have to put the reference that it's given.
  */
-static struct scoutfs_segment *replace_seg(struct rb_root *root,
+static struct scoutfs_segment *replace_seg(struct segment_cache *cac,
 					   struct scoutfs_segment *ins)
 {
+	struct rb_root *root = &cac->root;
 	struct rb_node **node = &root->rb_node;
 	struct rb_node *parent = NULL;
 	struct scoutfs_segment *seg;
@@ -155,6 +182,8 @@ static struct scoutfs_segment *replace_seg(struct rb_root *root,
 			node = &(*node)->rb_right;
 		} else {
 			rb_replace_node(&seg->node, &ins->node, root);
+			lru_check(cac, seg);
+			lru_check(cac, ins);
 			found = seg;
 			break;
 		}
@@ -163,16 +192,18 @@ static struct scoutfs_segment *replace_seg(struct rb_root *root,
 	if (!found) {
 		rb_link_node(&ins->node, parent, node);
 		rb_insert_color(&ins->node, root);
+		lru_check(cac, ins);
 	}
 
 	return found;
 }
 
-static bool erase_seg(struct rb_root *root, struct scoutfs_segment *seg)
+static bool erase_seg(struct segment_cache *cac, struct scoutfs_segment *seg)
 {
 	if (!RB_EMPTY_NODE(&seg->node)) {
-		rb_erase(&seg->node, root);
+		rb_erase(&seg->node, &cac->root);
 		RB_CLEAR_NODE(&seg->node);
+		lru_check(cac, seg);
 		return true;
 	}
 
@@ -185,23 +216,27 @@ static void seg_end_io(struct super_block *sb, void *data, int err)
 	struct segment_cache *cac = sbi->segment_cache;
 	struct scoutfs_segment *seg = data;
 	unsigned long flags;
-	bool erased;
+	bool erased = false;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	set_bit(SF_END_IO, &seg->flags);
 
 	if (err) {
 		seg->err = err;
-
-		spin_lock_irqsave(&cac->lock, flags);
-		erased = erase_seg(&cac->root, seg);
-		spin_unlock_irqrestore(&cac->lock, flags);
-		if (erased)
-			scoutfs_seg_put(seg);
+		erased = erase_seg(cac, seg);
+	} else {
+		lru_check(cac, seg);
 	}
 
-	set_bit(SF_END_IO, &seg->flags);
+	spin_unlock_irqrestore(&cac->lock, flags);
+
 	smp_mb__after_atomic();
 	if (waitqueue_active(&cac->waitq))
 		wake_up(&cac->waitq);
 
+	if (erased)
+		scoutfs_seg_put(seg);
 	scoutfs_seg_put(seg);
 }
 
@@ -239,8 +274,9 @@ int scoutfs_seg_alloc(struct super_block *sb, struct scoutfs_segment **seg_ret)
 
 	/* XXX always remove existing segs, is that necessary? */
 	spin_lock_irqsave(&cac->lock, flags);
+
 	atomic_inc(&seg->refcount);
-	existing = replace_seg(&cac->root, seg);
+	existing = replace_seg(cac, seg);
 	spin_unlock_irqrestore(&cac->lock, flags);
 	if (existing)
 		scoutfs_seg_put(existing);
@@ -280,8 +316,10 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 
 	spin_lock_irqsave(&cac->lock, flags);
 	seg = find_seg(&cac->root, segno);
-	if (seg)
+	if (seg) {
+		lru_check(cac, seg);
 		atomic_inc(&seg->refcount);
+	}
 	spin_unlock_irqrestore(&cac->lock, flags);
 	if (seg)
 		return seg;
@@ -293,7 +331,7 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 	/* always drop existing segs, could compare seqs */
 	spin_lock_irqsave(&cac->lock, flags);
 	atomic_inc(&seg->refcount);
-	existing = replace_seg(&cac->root, seg);
+	existing = replace_seg(cac, seg);
 	spin_unlock_irqrestore(&cac->lock, flags);
 	if (existing)
 		scoutfs_seg_put(existing);
@@ -622,6 +660,68 @@ int scoutfs_seg_manifest_del(struct super_block *sb,
 	return scoutfs_manifest_del(sb, &first, le64_to_cpu(sblk->seq), level);
 }
 
+/*
+ * We maintain an LRU of segments so that the shrinker can free the
+ * oldest under memory pressure.  Segments are only present in the LRU
+ * after their IO has completed and while they're in the rbtree.  This
+ * shrink only removes them from the rbtree and drops the reference it
+ * held.  They may be freed a bit later once all their active references
+ * are dropped.
+ *
+ * If this is called with nr_to_scan == 0 then it only returns the nr.
+ * We avoid acquiring the lock in that case.
+ *
+ * Lookup code only uses the lru entry to change position in the LRU while
+ * the segment is in the rbtree.  Once we remove it no one else will use
+ * the LRU entry and we can use it to track all the segments that we're
+ * going to put outside of the lock.
+ *
+ * XXX:
+ *  - are sc->nr_to_scan and our return meant to be in units of pages?
+ *  - should we sync a transaction here?
+ */
+static int seg_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
+{
+	struct segment_cache *cac = container_of(shrink, struct segment_cache,
+						 shrinker);
+	struct super_block *sb = cac->sb;
+	struct scoutfs_segment *seg;
+	struct scoutfs_segment *tmp;
+	unsigned long flags;
+	unsigned long nr;
+	LIST_HEAD(list);
+
+	nr = sc->nr_to_scan;
+	if (!nr)
+		goto out;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	list_for_each_entry_safe(seg, tmp, &cac->lru_list, lru_entry) {
+		/* shouldn't be possible */
+		if (WARN_ON_ONCE(RB_EMPTY_NODE(&seg->node)))
+			continue;
+
+		if (nr-- == 0)
+			break;
+
+		/* using ref that rb tree presence had */
+		erase_seg(cac, seg);
+		list_add_tail(&seg->lru_entry, &list);
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	list_for_each_entry_safe(seg, tmp, &list, lru_entry) {
+		scoutfs_inc_counter(sb, seg_lru_shrink);
+		list_del_init(&seg->lru_entry);
+		scoutfs_seg_put(seg);
+	}
+
+out:
+	return min_t(unsigned long, cac->lru_nr, INT_MAX);
+}
+
 int scoutfs_seg_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -632,9 +732,15 @@ int scoutfs_seg_setup(struct super_block *sb)
 		return -ENOMEM;
 	sbi->segment_cache = cac;
 
+	cac->sb = sb;
 	spin_lock_init(&cac->lock);
 	cac->root = RB_ROOT;
 	init_waitqueue_head(&cac->waitq);
+
+	cac->shrinker.shrink = seg_lru_shrink;
+	cac->shrinker.seeks = DEFAULT_SEEKS;
+	register_shrinker(&cac->shrinker);
+	INIT_LIST_HEAD(&cac->lru_list);
 
 	return 0;
 }
@@ -647,10 +753,13 @@ void scoutfs_seg_destroy(struct super_block *sb)
 	struct rb_node *node;
 
 	if (cac) {
+		if (cac->shrinker.shrink == seg_lru_shrink)
+			unregister_shrinker(&cac->shrinker);
+
 		for (node = rb_first(&cac->root); node; ) {
 			seg = container_of(node, struct scoutfs_segment, node);
 			node = rb_next(node);
-			erase_seg(&cac->root, seg);
+			erase_seg(cac, seg);
 			scoutfs_seg_put(seg);
 		}
 

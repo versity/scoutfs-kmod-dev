@@ -383,7 +383,7 @@ static u32 pos_off(u32 pos)
 	/* items need of be a power of two */
 	BUILD_BUG_ON(!is_power_of_2(sizeof(struct scoutfs_segment_item)));
 	/* and the first item has to be naturally aligned */
-	BUILD_BUG_ON(offsetof(struct scoutfs_segment_block, items) &
+	BUILD_BUG_ON(offsetof(struct scoutfs_segment_block, items) %
 		     sizeof(struct scoutfs_segment_item));
 
 	return offsetof(struct scoutfs_segment_block, items[pos]);

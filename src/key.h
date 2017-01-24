@@ -15,7 +15,9 @@ struct scoutfs_key_buf *scoutfs_key_dup(struct super_block *sb,
 					struct scoutfs_key_buf *key);
 void scoutfs_key_free(struct super_block *sb, struct scoutfs_key_buf *key);
 void scoutfs_key_inc(struct scoutfs_key_buf *key);
+void scoutfs_key_inc_cur_len(struct scoutfs_key_buf *key);
 void scoutfs_key_dec(struct scoutfs_key_buf *key);
+void scoutfs_key_dec_cur_len(struct scoutfs_key_buf *key);
 
 
 /*

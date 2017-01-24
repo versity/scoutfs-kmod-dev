@@ -65,12 +65,16 @@ static void extend_zeros(struct scoutfs_key_buf *key)
 	}
 }
 
-void scoutfs_key_inc(struct scoutfs_key_buf *key)
+/*
+ * There are callers that work with a range of keys of a uniform length
+ * who know that it's safe to increment their keys that aren't full
+ * precision.  These are exceptional so a specific function variant
+ * marks them.
+ */
+void scoutfs_key_inc_cur_len(struct scoutfs_key_buf *key)
 {
 	u8 *bytes = key->data;
 	int i;
-
-	extend_zeros(key);
 
 	for (i = key->key_len - 1; i >= 0; i--) {
 		if (++bytes[i] != 0)
@@ -78,7 +82,13 @@ void scoutfs_key_inc(struct scoutfs_key_buf *key)
 	}
 }
 
-void scoutfs_key_dec(struct scoutfs_key_buf *key)
+void scoutfs_key_inc(struct scoutfs_key_buf *key)
+{
+	extend_zeros(key);
+	scoutfs_key_inc_cur_len(key);
+}
+
+void scoutfs_key_dec_cur_len(struct scoutfs_key_buf *key)
 {
 	u8 *bytes = key->data;
 	int i;
@@ -89,4 +99,10 @@ void scoutfs_key_dec(struct scoutfs_key_buf *key)
 		if (--bytes[i] != 255)
 			break;
 	}
+}
+
+void scoutfs_key_dec(struct scoutfs_key_buf *key)
+{
+	extend_zeros(key);
+	scoutfs_key_dec_cur_len(key);
 }

@@ -714,6 +714,27 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 }
 
 /*
+ * Like _next but requires that the found keys be the same length as the
+ * search key.  It treats size mismatches as a sign of corruption.
+ */
+int scoutfs_item_next_same(struct super_block *sb, struct scoutfs_key_buf *key,
+			   struct scoutfs_key_buf *last, struct kvec *val)
+{
+	int key_len = key->key_len;
+	int ret;
+
+	trace_printk("key len %u\n", key_len);
+
+	ret = scoutfs_item_next(sb, key, last, val);
+	if (ret >= 0 && (key->key_len != key_len))
+		ret = -EIO;
+
+	trace_printk("ret %d\n", ret);
+
+	return ret;
+}
+
+/*
  * Create a new dirty item in the cache.  Returns -EEXIST if an item
  * already exists with the given key.
  *

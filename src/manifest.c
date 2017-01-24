@@ -459,6 +459,8 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	struct manifest_ref *tmp;
 	LIST_HEAD(ref_list);
 	LIST_HEAD(batch);
+	u8 found_flags = 0;
+	u8 item_flags;
 	int found_ctr;
 	bool found;
 	int ret = 0;
@@ -534,7 +536,8 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 			 * caller's end.
 			 */
 			ret = scoutfs_seg_item_ptrs(ref->seg, ref->pos,
-						    &item_key, item_val);
+						    &item_key, item_val,
+						    &item_flags);
 			if (ret < 0 || scoutfs_key_compare(&item_key, end) > 0){
 				ref->pos = -1;
 				continue;
@@ -554,6 +557,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 			/* remember new least key */
 			scoutfs_key_clone(&found_key, &item_key);
 			scoutfs_kvec_clone(found_val, item_val);
+			found_flags = item_flags;
 			ref->found_ctr = ++found_ctr;
 			found = true;
 		}
@@ -566,15 +570,22 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 		}
 
 		/*
+		 * Add the next found item to the batch if it's not a
+		 * deletion item.  We still need to use their key to
+		 * remember the end of the batch for negative caching.
+		 *
 		 * If we fail to add an item we're done.  If we already
-		 * have items it's not a failure and the end of the cached
-		 * range is the last successfully added item.
+		 * have items it's not a failure and the end of the
+		 * cached range is the last successfully added item.
 		 */
-		ret = scoutfs_item_add_batch(sb, &batch, &found_key, found_val);
-		if (ret) {
-			if (n > 0)
-				ret = 0;
-			break;
+		if (!(found_flags & SCOUTFS_ITEM_FLAG_DELETION)) {
+			ret = scoutfs_item_add_batch(sb, &batch, &found_key,
+						     found_val);
+			if (ret) {
+				if (n > 0)
+					ret = 0;
+				break;
+			}
 		}
 
 		/* the last successful key determines range end until run out */
@@ -699,6 +710,8 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		goto out;
 	}
 
+	scoutfs_compact_describe(sb, data, level, mani->nr_levels - 1);
+
 	/* find the oldest level 0 or the next higher order level by key */
 	if (level == 0) {
 		ment = scoutfs_treap_first(mani->treap);
@@ -737,7 +750,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	skey.key = &ment_first;
 	skey.level = level + 1;
 	skey.seq = 0;
-	over = scoutfs_treap_lookup(mani->treap, &skey);
+	over = scoutfs_treap_lookup_next(mani->treap, &skey);
 
 	/* and add a fanout's worth of lower overlapping segments */
 	for (i = 0; i < SCOUTFS_MANIFEST_FANOUT; i++) {

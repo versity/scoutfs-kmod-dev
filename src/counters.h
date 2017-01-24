@@ -27,6 +27,7 @@
 	EXPAND_COUNTER(item_create)		\
 	EXPAND_COUNTER(item_lookup_hit)		\
 	EXPAND_COUNTER(item_lookup_miss)	\
+	EXPAND_COUNTER(item_delete)		\
 	EXPAND_COUNTER(item_range_hit)		\
 	EXPAND_COUNTER(item_range_miss)		\
 	EXPAND_COUNTER(item_range_insert)

@@ -33,6 +33,11 @@
  * that are completely described by the items.  This lets it return
  * negative lookups cache hits for items that don't exist without having
  * to constantly perform expensive segment searches.
+ *
+ * Deletions are recorded with items in the rbtree which record the key
+ * of the deletion.  They're removed once they're written to a level0
+ * segment.  While they're present in the cache we have to be careful to
+ * clobber them in creation and skip them in lookups.
  */
 
 struct item_cache {
@@ -57,7 +62,9 @@ struct cached_item {
 		struct rb_node node;
 		struct list_head entry;
 	};
+
 	long dirty;
+	unsigned deletion:1;
 
 	struct scoutfs_key_buf *key;
 
@@ -70,6 +77,38 @@ struct cached_range {
 	struct scoutfs_key_buf *start;
 	struct scoutfs_key_buf *end;
 };
+
+static u8 item_flags(struct cached_item *item)
+{
+	return item->deletion ? SCOUTFS_ITEM_FLAG_DELETION : 0;
+}
+
+static void free_item(struct super_block *sb, struct cached_item *item)
+{
+	if (!IS_ERR_OR_NULL(item)) {
+		scoutfs_key_free(sb, item->key);
+		scoutfs_kvec_kfree(item->val);
+		kfree(item);
+	}
+}
+
+static struct cached_item *alloc_item(struct super_block *sb,
+				      struct scoutfs_key_buf *key,
+				      struct kvec *val)
+{
+	struct cached_item *item;
+
+	item = kzalloc(sizeof(struct cached_item), GFP_NOFS);
+	if (item) {
+		item->key = scoutfs_key_dup(sb, key);
+		if (!item->key || scoutfs_kvec_dup_flatten(item->val, val)) {
+			free_item(sb, item);
+			item = NULL;
+		}
+	}
+
+	return item;
+}
 
 /*
  * Walk the item rbtree and return the item found and the next and
@@ -105,6 +144,14 @@ static struct cached_item *walk_items(struct rb_root *root,
 	return NULL;
 }
 
+/*
+ * Look for the item with the given key.  Callers of this are looking
+ * for existing items.  They would just return -ENOENT from a deletion
+ * item if we gave it to them so we return null for deletion items.
+ * Callers that would remove a deletion item before inserting a new
+ * version of the item do so by having insert_item() replace existing
+ * deleted items on their behalf.
+ */
 static struct cached_item *find_item(struct super_block *sb,
 				     struct rb_root *root,
 				     struct scoutfs_key_buf *key)
@@ -114,6 +161,9 @@ static struct cached_item *find_item(struct super_block *sb,
 	struct cached_item *item;
 
 	item = walk_items(root, key, &prev, &next);
+
+	if (item && item->deletion)
+		item = NULL;
 
 	if (item)
 		scoutfs_inc_counter(sb, item_lookup_hit);
@@ -224,11 +274,64 @@ static const struct rb_augment_callbacks scoutfs_item_rb_cb  = {
 };
 
 /*
- * Try to insert the given item.  If there's already an item with the
- * insertion key then return -EEXIST.
+ * The caller has changed an item's dirty bit.  Its child dirty bits are
+ * still consistent.  But its parent's bits might need to be updated.
+ * Its bits are consistent so we don't propagate from the node itself
+ * because it would immediately terminate.
  */
-static int insert_item(struct rb_root *root, struct cached_item *ins)
+static void update_dirty_parents(struct cached_item *item)
 {
+	scoutfs_item_rb_propagate(rb_parent(&item->node), NULL);
+}
+
+static void mark_item_dirty(struct item_cache *cac,
+			    struct cached_item *item)
+{
+	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
+		return;
+
+	if (item->dirty & ITEM_DIRTY)
+		return;
+
+	item->dirty |= ITEM_DIRTY;
+	cac->nr_dirty_items++;
+	cac->dirty_key_bytes += item->key->key_len;
+	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
+
+	update_dirty_parents(item);
+}
+
+static void clear_item_dirty(struct item_cache *cac,
+			     struct cached_item *item)
+{
+	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
+		return;
+
+	if (!(item->dirty & ITEM_DIRTY))
+		return;
+
+	item->dirty &= ~ITEM_DIRTY;
+	cac->nr_dirty_items--;
+	cac->dirty_key_bytes -= item->key->key_len;
+	cac->dirty_val_bytes -= scoutfs_kvec_length(item->val);
+
+	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||
+		     cac->dirty_val_bytes < 0);
+
+	update_dirty_parents(item);
+}
+
+/*
+ * Try to insert the given item.  If there's already a non-deletion item
+ * with the insertion key then return -EEXIST.  An existing deletion
+ * item is replaced and freed.
+ *
+ * The caller is responsible for marking the newly inserted item dirty.
+ */
+static int insert_item(struct super_block *sb, struct item_cache *cac,
+		       struct cached_item *ins)
+{
+	struct rb_root *root = &cac->items;
 	struct rb_node **node = &root->rb_node;
 	struct rb_node *parent = NULL;
 	struct cached_item *item;
@@ -248,7 +351,13 @@ static int insert_item(struct rb_root *root, struct cached_item *ins)
 				item->dirty |= RIGHT_DIRTY;
 			node = &(*node)->rb_right;
 		} else {
-			return -EEXIST;
+			if (!item->deletion)
+				return -EEXIST;
+
+			clear_item_dirty(cac, item);
+			rb_replace_node(&item->node, &ins->node, root);
+			free_item(sb, item);
+			return 0;
 		}
 	}
 
@@ -444,6 +553,43 @@ int scoutfs_item_lookup_exact(struct super_block *sb,
 }
 
 /*
+ * Find the next item to return from the "_next" item interface.  It's the
+ * next item from the key that isn't a deletion item and is within the
+ * bounds of the end of the cache and the caller's last key.
+ */
+static struct cached_item *item_for_next(struct rb_root *root,
+				         struct scoutfs_key_buf *key,
+					 struct scoutfs_key_buf *range_end,
+					 struct scoutfs_key_buf *last)
+{
+	struct cached_item *item;
+	struct rb_node *node;
+
+	/* limit by the lesser of the two */
+	if (scoutfs_key_compare(range_end, last) < 0)
+		last = range_end;
+
+	item = next_item(root, key);
+	while (item) {
+		if (scoutfs_key_compare(item->key, last) > 0) {
+			item = NULL;
+			break;
+		}
+
+		if (!item->deletion)
+			break;
+
+		node = rb_next(&item->node);
+		if (node)
+			item = container_of(node, struct cached_item, node);
+		else
+			item = NULL;
+	}
+
+	return item;
+}
+
+/*
  * Return the next item starting with the given key, returning the last
  * key at the most.
  *
@@ -490,10 +636,8 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		/* see if we have a usable item in cache and before last */
 		cached = check_range(sb, &cac->ranges, key, range_end);
 
-		if (cached && (item = next_item(&cac->items, key)) &&
-		    scoutfs_key_compare(item->key, range_end) <= 0 &&
-		    scoutfs_key_compare(item->key, last) <= 0) {
-
+		if (cached && (item = item_for_next(&cac->items, key,
+						    range_end, last))) {
 			scoutfs_key_copy(key, item->key);
 			if (val)
 				ret = scoutfs_kvec_memcpy(val, item->val);
@@ -565,81 +709,6 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 	return ret;
 }
 
-static void free_item(struct super_block *sb, struct cached_item *item)
-{
-	if (!IS_ERR_OR_NULL(item)) {
-		scoutfs_key_free(sb, item->key);
-		scoutfs_kvec_kfree(item->val);
-		kfree(item);
-	}
-}
-
-/*
- * The caller has changed an item's dirty bit.  Its child dirty bits are
- * still consistent.  But its parent's bits might need to be updated.
- * Its bits are consistent so we don't propagate from the node itself
- * because it would immediately terminate.
- */
-static void update_dirty_parents(struct cached_item *item)
-{
-	scoutfs_item_rb_propagate(rb_parent(&item->node), NULL);
-}
-
-static void mark_item_dirty(struct item_cache *cac,
-			    struct cached_item *item)
-{
-	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
-		return;
-
-	if (item->dirty & ITEM_DIRTY)
-		return;
-
-	item->dirty |= ITEM_DIRTY;
-	cac->nr_dirty_items++;
-	cac->dirty_key_bytes += item->key->key_len;
-	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
-
-	update_dirty_parents(item);
-}
-
-static void clear_item_dirty(struct item_cache *cac,
-			     struct cached_item *item)
-{
-	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
-		return;
-
-	if (!(item->dirty & ITEM_DIRTY))
-		return;
-
-	item->dirty &= ~ITEM_DIRTY;
-	cac->nr_dirty_items--;
-	cac->dirty_key_bytes -= item->key->key_len;
-	cac->dirty_val_bytes -= scoutfs_kvec_length(item->val);
-
-	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||
-		     cac->dirty_val_bytes < 0);
-
-	update_dirty_parents(item);
-}
-
-static struct cached_item *alloc_item(struct super_block *sb,
-				      struct scoutfs_key_buf *key,
-				      struct kvec *val)
-{
-	struct cached_item *item;
-
-	item = kzalloc(sizeof(struct cached_item), GFP_NOFS);
-	if (item) {
-		item->key = scoutfs_key_dup(sb, key);
-		if (!item->key || scoutfs_kvec_dup_flatten(item->val, val)) {
-			free_item(sb, item);
-			item = NULL;
-		}
-	}
-
-	return item;
-}
-
 /*
  * Create a new dirty item in the cache.  Returns -EEXIST if an item
  * already exists with the given key.
@@ -660,7 +729,7 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 		return -ENOMEM;
 
 	spin_lock_irqsave(&cac->lock, flags);
-	ret = insert_item(&cac->items, item);
+	ret = insert_item(sb, cac, item);
 	if (!ret) {
 		scoutfs_inc_counter(sb, item_create);
 		mark_item_dirty(cac, item);
@@ -745,7 +814,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del(&item->entry);
-		if (insert_item(&cac->items, item))
+		if (insert_item(sb, cac, item))
 			list_add(&item->entry, list);
 	}
 
@@ -871,12 +940,61 @@ out:
 }
 
 /*
- * XXX how nice, it'd just creates a cached deletion item.  It doesn't
- * have to read.
+ * Delete an existing item with the given key.
+ *
+ * If a non-deletion item is present then we mark it dirty and deleted
+ * and free it's value.
+ *
+ * Returns -ENOENT if an item doesn't exist at the key.  This forces us
+ * to read the item before creating a deletion item for it.  XXX If we
+ * relaxed this we'd need to see if callers make use of -ENOENT and if
+ * there are any ways for userspace to overwhelm the system with
+ * deletion items for items that didn't exist in the first place.
  */
 int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key)
 {
-	return WARN_ON_ONCE(-EINVAL);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct scoutfs_key_buf *end;
+	struct cached_item *item;
+	SCOUTFS_DECLARE_KVEC(del_val);
+	unsigned long flags;
+	int ret;
+
+	scoutfs_kvec_init_null(del_val);
+
+	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!end) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	do {
+		spin_lock_irqsave(&cac->lock, flags);
+
+		item = find_item(sb, &cac->items, key);
+		if (item) {
+			scoutfs_kvec_swap(item->val, del_val);
+			item->deletion = 1;
+			mark_item_dirty(cac, item);
+			scoutfs_inc_counter(sb, item_delete);
+			ret = 0;
+		} else if (check_range(sb, &cac->ranges, key, end)) {
+			ret = -ENOENT;
+		} else {
+			ret = -ENODATA;
+		}
+
+		spin_unlock_irqrestore(&cac->lock, flags);
+
+	} while (ret == -ENODATA &&
+		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
+
+	scoutfs_key_free(sb, end);
+	scoutfs_kvec_kfree(del_val);
+out:
+	trace_printk("ret %d\n", ret);
+	return ret;
 }
 
 /*
@@ -1020,28 +1138,46 @@ static void count_seg_items(struct item_cache *cac, u32 *nr_items,
  * segments and can be partially visible if we only write the first
  * segment.  We probably want to throttle trans enters once we have as
  * many dirty items as our atomic segment updates can write.
+ *
+ * XXX this first/append pattern will go away once we can write a stream
+ * of items to a segment without needing to know the item count to
+ * find the starting key and value offsets.
  */
 int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct cached_item *item;
+	struct cached_item *item = NULL;
+	struct cached_item *del;
 	u32 key_bytes;
 	u32 nr_items;
 
 	count_seg_items(cac, &nr_items, &key_bytes);
 
-	item = first_dirty(cac->items.rb_node);
-	if (item) {
-		scoutfs_seg_first_item(sb, seg, item->key, item->val,
-				       nr_items, key_bytes);
-		clear_item_dirty(cac, item);
-		nr_items--;
-	}
+	/* remember nr_items is passed to _first_item */
+	while (nr_items) {
 
-	while (nr_items-- && (item = next_dirty(item))) {
-		scoutfs_seg_append_item(sb, seg, item->key, item->val);
+		if (!item) {
+			item = first_dirty(cac->items.rb_node);
+			scoutfs_seg_first_item(sb, seg, item->key, item->val,
+					       item_flags(item), nr_items,
+					       key_bytes);
+		} else {
+			scoutfs_seg_append_item(sb, seg, item->key, item->val,
+						item_flags(item));
+		}
+
 		clear_item_dirty(cac, item);
+
+		del = item;
+		item = next_dirty(item);
+
+		if (del->deletion) {
+			rb_erase(&del->node, &cac->items);
+			free_item(sb, del);
+		}
+
+		nr_items--;
 	}
 
 	return 0;

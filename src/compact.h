@@ -3,6 +3,8 @@
 
 void scoutfs_compact_kick(struct super_block *sb);
 
+void scoutfs_compact_describe(struct super_block *sb, void *data,
+			      u8 upper_level, u8 last_level);
 int scoutfs_compact_add(struct super_block *sb, void *data,
 			struct scoutfs_key_buf *first,
 			struct scoutfs_key_buf *last, u64 segno, u64 seq,

@@ -137,8 +137,11 @@ struct scoutfs_segment_item {
 	__le32 val_off;
 	__le16 key_len;
 	__le16 val_len;
-	__u8 padding[12];
+	__u8 padding[11];
+	__u8 flags;
 } __packed;
+
+#define SCOUTFS_ITEM_FLAG_DELETION (1 << 0)
 
 /*
  * Each large segment starts with a segment block that describes the

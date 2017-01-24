@@ -49,10 +49,6 @@
  * Once the compaction is completed the manifest is updated to remove
  * the input segments and add the output segments.  Here segment space
  * is reclaimed when the input items fit in fewer output segments.
- *
- * XXX today we only know how to skip duplicate individual items.  We'll
- * need to know how to skip lower based on upper range deletion items
- * and to combine incremental update items.
  */
 
 struct compact_info {
@@ -85,6 +81,7 @@ struct compact_cursor {
 	struct list_head csegs;
 
 	u8 lower_level;
+	u8 last_level;
 
 	struct compact_seg *upper;
 	struct compact_seg *saved_upper;
@@ -193,22 +190,25 @@ static struct compact_seg *next_spos(struct compact_cursor *curs,
  * the lowest key or the upper if they're the same.  We advance the
  * cursor past the item that is returned.
  *
- * XXX this will get fancier as we get range deletion items and incremental
- * update items.
+ * XXX this will get fancier as we get range deletion items and
+ * incremental update items.
  */
 static int next_item(struct super_block *sb, struct compact_cursor *curs,
-		     struct scoutfs_key_buf *item_key, struct kvec *item_val)
+		     struct scoutfs_key_buf *item_key, struct kvec *item_val,
+		     u8 *item_flags)
 {
 	struct compact_seg *upper = curs->upper;
 	struct compact_seg *lower = curs->lower;
 	struct scoutfs_key_buf lower_key;
 	SCOUTFS_DECLARE_KVEC(lower_val);
+	u8 lower_flags;
 	int cmp;
 	int ret;
 
+retry:
 	if (upper) {
 		ret = scoutfs_seg_item_ptrs(upper->seg, upper->pos,
-					    item_key, item_val);
+					    item_key, item_val, item_flags);
 		if (ret < 0)
 			upper = NULL;
 	}
@@ -219,7 +219,8 @@ static int next_item(struct super_block *sb, struct compact_cursor *curs,
 			goto out;
 
 		ret = scoutfs_seg_item_ptrs(lower->seg, lower->pos,
-					    &lower_key, lower_val);
+					    &lower_key, lower_val,
+					    &lower_flags);
 		if (ret == 0)
 			break;
 		lower = next_spos(curs, lower);
@@ -246,12 +247,23 @@ static int next_item(struct super_block *sb, struct compact_cursor *curs,
 	if (cmp > 0) {
 		scoutfs_key_clone(item_key, &lower_key);
 		scoutfs_kvec_clone(item_val, lower_val);
+		*item_flags = lower_flags;
 	}
 
 	if (cmp <= 0)
 		upper->pos++;
 	if (cmp >= 0)
 		lower->pos++;
+
+	/*
+	 * Deletion items make their way down all the levels, replacing
+	 * all the duplicate items that they find.  When we're
+	 * compacting to the last level we can remove them by retrying
+	 * the search after we've advanced past them.
+	 */
+	if ((curs->lower_level == curs->last_level) &&
+	    ((*item_flags) & SCOUTFS_ITEM_FLAG_DELETION))
+		goto retry;
 
 	ret = 1;
 out:
@@ -273,12 +285,13 @@ static int count_items(struct super_block *sb, struct compact_cursor *curs,
 	u32 items = 0;
 	u32 keys = 0;
 	u32 vals = 0;
+	u8 flags;
 	int ret;
 
 	*nr_items = 0;
 	*key_bytes = 0;
 
-	while ((ret = next_item(sb, curs, &item_key, item_val)) > 0) {
+	while ((ret = next_item(sb, curs, &item_key, item_val, &flags)) > 0) {
 
 		items++;
 		keys += item_key.key_len;
@@ -300,21 +313,22 @@ static int compact_items(struct super_block *sb, struct compact_cursor *curs,
 {
 	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
+	u8 flags;
 	int ret;
 
-	ret = next_item(sb, curs, &item_key, item_val);
+	ret = next_item(sb, curs, &item_key, item_val, &flags);
 	if (ret <= 0)
 		goto out;
 
-	scoutfs_seg_first_item(sb, seg, &item_key, item_val,
+	scoutfs_seg_first_item(sb, seg, &item_key, item_val, flags,
 			       nr_items, key_bytes);
 
 	while (--nr_items) {
-		ret = next_item(sb, curs, &item_key, item_val);
+		ret = next_item(sb, curs, &item_key, item_val, &flags);
 		if (ret <= 0)
 			break;
 
-		scoutfs_seg_append_item(sb, seg, &item_key, item_val);
+		scoutfs_seg_append_item(sb, seg, &item_key, item_val, flags);
 	}
 
 out:
@@ -344,6 +358,12 @@ static int compact_segments(struct super_block *sb,
 		/*
 		 * We can just move the upper segment down a level if it
 		 * doesn't intersect any lower segments.
+		 *
+		 * XXX we can't do this if the segment we're moving has
+		 * deletion items.  We need to copy the non-deletion items
+		 * and drop the deletion items in that case.  To do that
+		 * we'll need the manifest to count the number of deletion
+		 * and non-deletion items.
 		 */
 		if (upper && upper->pos == 0 &&
 		    (!lower ||
@@ -383,11 +403,14 @@ static int compact_segments(struct super_block *sb,
 		/*
 		 * We can skip a lower segment if there's no upper segment
 		 * or the next upper item is past the last in the lower.
+		 *
+		 * XXX this will need to test for intersection with range
+		 * deletion items.
 		 */
 		if (lower && lower->pos == 0 &&
 		    (!upper ||
 		     (!scoutfs_seg_item_ptrs(upper->seg, upper->pos,
-					     &upper_next, NULL) &&
+					     &upper_next, NULL, NULL) &&
 		      scoutfs_key_compare(&upper_next, lower->last) > 0))) {
 
 			curs->lower = next_spos(curs, lower);
@@ -447,6 +470,25 @@ static int compact_segments(struct super_block *sb,
 	return ret;
 }
 
+/*
+ * Manifest walking is providing the details of the overall compaction
+ * operation.  It'll then add all the segments involved.
+ */
+void scoutfs_compact_describe(struct super_block *sb, void *data,
+			      u8 upper_level, u8 last_level)
+{
+	struct compact_cursor *curs = data;
+
+	curs->lower_level = upper_level + 1;
+	curs->last_level = last_level;
+}
+
+/*
+ * Add a segment involved in the compaction operation.
+ *
+ * XXX Today we know that the caller is always adding only one upper segment
+ * and is then possibly adding all the lower overlapping segments.
+ */
 int scoutfs_compact_add(struct super_block *sb, void *data,
 			struct scoutfs_key_buf *first,
 			struct scoutfs_key_buf *last, u64 segno, u64 seq,
@@ -468,12 +510,10 @@ int scoutfs_compact_add(struct super_block *sb, void *data,
 	cseg->seq = seq;
 	cseg->level = level;
 
-	if (!curs->upper) {
+	if (!curs->upper)
 		curs->upper = cseg;
-	} else if (!curs->lower) {
+	else if (!curs->lower)
 		curs->lower = cseg;
-		curs->lower_level = level;
-	}
 
 	ret = 0;
 out:

@@ -262,6 +262,12 @@ struct scoutfs_readdir_key {
 	__be64 pos;
 } __packed;
 
+/* no value */
+struct scoutfs_orphan_key {
+	__u8 type;
+	__be64 ino;
+} __packed;
+
 struct scoutfs_btree_root {
 	u8 height;
 	struct scoutfs_block_ref ref;

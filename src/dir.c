@@ -451,9 +451,6 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct scoutfs_key_buf *key = NULL;
 	int ret = 0;
 
-	/* will need to add deletion items */
-	return -EINVAL;
-
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
 		return -ENOTEMPTY;
 

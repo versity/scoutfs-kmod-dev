@@ -100,8 +100,12 @@ static struct cached_item *alloc_item(struct super_block *sb,
 
 	item = kzalloc(sizeof(struct cached_item), GFP_NOFS);
 	if (item) {
+		if (!val)
+			scoutfs_kvec_init_null(item->val);
+
 		item->key = scoutfs_key_dup(sb, key);
-		if (!item->key || scoutfs_kvec_dup_flatten(item->val, val)) {
+		if (!item->key ||
+		    (val && scoutfs_kvec_dup_flatten(item->val, val))) {
 			free_item(sb, item);
 			item = NULL;
 		}

@@ -965,6 +965,23 @@ out:
 }
 
 /*
+ * Turn an item that the caller has found while holding the lock into a
+ * deletion item.  The caller will free whatever we put in the deletion
+ * value after releasing the lock.
+ */
+static void become_deletion_item(struct super_block *sb,
+				 struct item_cache *cac,
+				 struct cached_item *item,
+				 struct kvec *del_val)
+{
+	scoutfs_kvec_clone(del_val, item->val);
+	scoutfs_kvec_init_null(item->val);
+	item->deletion = 1;
+	mark_item_dirty(cac, item);
+	scoutfs_inc_counter(sb, item_delete);
+}
+
+/*
  * Delete an existing item with the given key.
  *
  * If a non-deletion item is present then we mark it dirty and deleted
@@ -999,10 +1016,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key)
 
 		item = find_item(sb, &cac->items, key);
 		if (item) {
-			scoutfs_kvec_swap(item->val, del_val);
-			item->deletion = 1;
-			mark_item_dirty(cac, item);
-			scoutfs_inc_counter(sb, item_delete);
+			become_deletion_item(sb, cac, item, del_val);
 			ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, end)) {
 			ret = -ENOENT;
@@ -1017,6 +1031,62 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key)
 
 	scoutfs_key_free(sb, end);
 	scoutfs_kvec_kfree(del_val);
+out:
+	trace_printk("ret %d\n", ret);
+	return ret;
+}
+
+/*
+ * Delete an item that the caller knows must be dirty because they hold
+ * locks and the transaction and have created or dirtied it.  This can't
+ * fail.
+ */
+void scoutfs_item_delete_dirty(struct super_block *sb,
+			       struct scoutfs_key_buf *key)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	SCOUTFS_DECLARE_KVEC(del_val);
+	struct cached_item *item;
+	unsigned long flags;
+
+	scoutfs_kvec_init_null(del_val);
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	item = find_item(sb, &cac->items, key);
+	if (item)
+		become_deletion_item(sb, cac, item, del_val);
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	scoutfs_kvec_kfree(del_val);
+}
+
+/*
+ * A helper that deletes a set of items.  It first dirties the items
+ * will be pinned so that deletion won't fail as it tries to read and
+ * populate the items.
+ *
+ * It's a little cleaner to have this helper than have the caller
+ * iterate, but it could also give us the opportunity to reduce item
+ * searches if we remembered the items we dirtied.
+ */
+int scoutfs_item_delete_many(struct super_block *sb,
+			     struct scoutfs_key_buf **keys, unsigned nr)
+{
+	int ret = 0;
+	int i;
+
+	for (i = 0; i < nr; i++) {
+		ret = scoutfs_item_dirty(sb, keys[i]);
+		if (ret)
+			goto out;
+	}
+
+	for (i = 0; i < nr; i++)
+		scoutfs_item_delete_dirty(sb, keys[i]);
+
 out:
 	trace_printk("ret %d\n", ret);
 	return ret;

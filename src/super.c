@@ -292,6 +292,7 @@ static struct file_system_type scoutfs_fs_type = {
 /* safe to call at any failure point in _init */
 static void teardown_module(void)
 {
+	scoutfs_dir_exit();
 	scoutfs_inode_exit();
 	if (scoutfs_kset)
 		kset_unregister(scoutfs_kset);
@@ -308,6 +309,7 @@ static int __init scoutfs_module_init(void)
 		return -ENOMEM;
 
 	ret = scoutfs_inode_init() ?:
+	      scoutfs_dir_init() ?:
 	      register_filesystem(&scoutfs_fs_type);
 	if (ret)
 		teardown_module();

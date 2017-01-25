@@ -97,6 +97,77 @@ static unsigned int dentry_type(unsigned int type)
 	return DT_UNKNOWN;
 }
 
+/*
+ * Each dentry stores the values that are needed to build the keys of
+ * the items that are removed on unlink so that we don't to search
+ * through items on unlink.
+ */
+struct dentry_info {
+	u64 readdir_pos;
+};
+
+static struct kmem_cache *dentry_info_cache;
+
+static void scoutfs_d_release(struct dentry *dentry)
+{
+	struct dentry_info *di = dentry->d_fsdata;
+
+	if (di) {
+		kmem_cache_free(dentry_info_cache, di);
+		dentry->d_fsdata = NULL;
+	}
+}
+
+static const struct dentry_operations scoutfs_dentry_ops = {
+	.d_release = scoutfs_d_release,
+};
+
+static int alloc_dentry_info(struct dentry *dentry)
+{
+	struct dentry_info *di;
+
+	/* XXX read mb? */
+	if (dentry->d_fsdata)
+		return 0;
+
+	di = kmem_cache_zalloc(dentry_info_cache, GFP_NOFS);
+	if (!di)
+		return -ENOMEM;
+
+	spin_lock(&dentry->d_lock);
+	if (!dentry->d_fsdata) {
+		dentry->d_fsdata = di;
+		d_set_d_op(dentry, &scoutfs_dentry_ops);
+	}
+	spin_unlock(&dentry->d_lock);
+
+	if (di != dentry->d_fsdata)
+		kmem_cache_free(dentry_info_cache, di);
+
+	return 0;
+}
+
+static void update_dentry_info(struct dentry *dentry,
+			       struct scoutfs_dirent *dent)
+{
+	struct dentry_info *di = dentry->d_fsdata;
+
+	if (WARN_ON_ONCE(di == NULL))
+		return;
+
+	di->readdir_pos = le64_to_cpu(dent->readdir_pos);
+}
+
+static u64 dentry_info_pos(struct dentry *dentry)
+{
+	struct dentry_info *di = dentry->d_fsdata;
+
+	if (WARN_ON_ONCE(di == NULL))
+		return 0;
+
+	return di->readdir_pos;
+}
+
 static struct scoutfs_key_buf *alloc_dirent_key(struct super_block *sb,
 						struct inode *dir,
 						struct dentry *dentry)
@@ -133,6 +204,10 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
+	ret = alloc_dentry_info(dentry);
+	if (ret)
+		goto out;
+
 	key = alloc_dirent_key(sb, dir, dentry);
 	if (!key) {
 		ret = -ENOMEM;
@@ -147,6 +222,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		ret = 0;
 	} else if (ret == 0) {
 		ino = le64_to_cpu(dent.ino);
+		update_dentry_info(dentry, &dent);
 	}
 
 out:
@@ -286,11 +362,23 @@ static int update_lref_item(struct super_block *sb, struct scoutfs_key *key,
 static int add_entry_items(struct inode *dir, struct dentry *dentry,
 			   struct inode *inode)
 {
+	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
+	struct dentry_info *di = dentry->d_fsdata;
 	struct super_block *sb = dir->i_sb;
-	struct scoutfs_key_buf *key;
+	struct scoutfs_key_buf *ent_key = NULL;
+	struct scoutfs_key_buf *del_keys[3];
+	struct scoutfs_key_buf rdir_key;
+	struct scoutfs_readdir_key rkey;
 	struct scoutfs_dirent dent;
 	SCOUTFS_DECLARE_KVEC(val);
+	int del = 0;
+	u64 pos;
 	int ret;
+	int err;
+
+	/* caller should have allocated the dentry info */
+	if (WARN_ON_ONCE(di == NULL))
+		return -EINVAL;
 
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
@@ -299,55 +387,54 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		return ret;
 
+	/* initialize the dent */
+	pos = si->next_readdir_pos++;
+	dent.ino = cpu_to_le64(scoutfs_ino(inode));
+	dent.readdir_pos = cpu_to_le64(pos);
+	dent.type = mode_to_type(inode->i_mode);
+
 	/* dirent item for lookup */
-	key = alloc_dirent_key(sb, dir, dentry);
-	if (!key)
+	ent_key = alloc_dirent_key(sb, dir, dentry);
+	if (!ent_key)
 		return -ENOMEM;
 
-	dent.ino = cpu_to_le64(scoutfs_ino(inode));
-	dent.type = mode_to_type(inode->i_mode);
 	scoutfs_kvec_init(val, &dent, sizeof(dent));
 
-	ret = scoutfs_item_create(sb, key, val);
+	ret = scoutfs_item_create(sb, ent_key, val);
 	if (ret)
-		return ret;
-
-#if 0
-	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
+		goto out;
+	del_keys[del++] = ent_key;
 
 	/* readdir item for .. readdir */
-	si->readdir_pos++;
-	rkey.type = SCOUTFS_READDIR_KEY;
-	rkey.ino = cpu_to_le64(scoutfs_ino(dir));
-	rkey.pos = cpu_to_le64(si->readdir_pos);
-	scoutfs_kvec_init(key, &rkey, sizeof(rkey));
-
+	init_readdir_key(&rdir_key, &rkey, dir, pos);
 	scoutfs_kvec_init(val, &dent, sizeof(dent),
-			dentry->d_name.name, dentry->d_name.len);
+			  (void *)dentry->d_name.name, dentry->d_name.len);
 
-	ret = scoutfs_item_create(sb, key, val);
+	ret = scoutfs_item_create(sb, &rdir_key, val);
 	if (ret)
-		goto out_dent;
+		goto out;
+	del_keys[del++] = &rdir_key;
 
+#if 0
 	/* backref item for inode to path resolution */
 	lrkey.type = SCOUTFS_LINK_BACKREF_KEY;
 	lrey.ino = cpu_to_le64(scoutfs_ino(inode));
 	lrey.dir = cpu_to_le64(scoutfs_ino(dir));
 	scoutfs_kvec_init(key, &lrkey, sizeof(lrkey),
 			  dentry->d_name.name, dentry->d_name.len);
-
-	ret = scoutfs_item_create(sb, key, NULL);
-	if (ret) {
-		scoutfs_kvec_init(key, &rkey, sizeof(rkey));
-		scoutfs_item_delete(sb, key);
-out_dent:
-		scoutfs_kvec_init(key, &dkey, sizeof(dkey),
-			  dentry->d_name.name, dentry->d_name.len);
-		scoutfs_item_delete(sb, key);
-	}
 #endif
 
-	scoutfs_key_free(sb, key);
+	update_dentry_info(dentry, &dent);
+	ret = 0;
+out:
+	while (ret < 0 && --del >= 0) {
+		err = scoutfs_item_delete(sb, del_keys[del]);
+		/* can always delete dirty while holding */
+		BUG_ON(err);
+	}
+
+	scoutfs_key_free(sb, ent_key);
+
 	return ret;
 }
 
@@ -357,6 +444,10 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode;
 	int ret;
+
+	ret = alloc_dentry_info(dentry);
+	if (ret)
+		return ret;
 
 	ret = scoutfs_hold_trans(sb);
 	if (ret)
@@ -416,6 +507,10 @@ static int scoutfs_link(struct dentry *old_dentry,
 	if (inode->i_nlink >= SCOUTFS_LINK_MAX)
 		return -EMLINK;
 
+	ret = alloc_dentry_info(dentry);
+	if (ret)
+		return ret;
+
 	ret = scoutfs_hold_trans(sb);
 	if (ret)
 		return ret;
@@ -448,7 +543,9 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode = dentry->d_inode;
 	struct timespec ts = current_kernel_time();
-	struct scoutfs_key_buf *key = NULL;
+	struct scoutfs_key_buf *keys[2] = {NULL,};
+	struct scoutfs_key_buf rdir_key;
+	struct scoutfs_readdir_key rkey;
 	int ret = 0;
 
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
@@ -463,14 +560,16 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (ret)
 		goto out;
 
-	/* XXX same items as add_entry_items */
-	key = alloc_dirent_key(sb, dir, dentry);
-	if (!key) {
+	keys[0] = alloc_dirent_key(sb, dir, dentry);
+	if (!keys[0]) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	ret = scoutfs_item_delete(sb, key);
+	init_readdir_key(&rdir_key, &rkey, dir, dentry_info_pos(dentry));
+	keys[1] = &rdir_key;
+
+	ret = scoutfs_item_delete_many(sb, keys, ARRAY_SIZE(keys));
 	if (ret)
 		goto out;
 
@@ -500,7 +599,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	scoutfs_update_inode_item(dir);
 
 out:
-	scoutfs_key_free(sb, key);
+	scoutfs_key_free(sb, keys[0]);
 	scoutfs_release_trans(sb);
 	return ret;
 }
@@ -617,6 +716,10 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	/* path_max includes null as does our value for nd_set_link */
 	if (name_len > PATH_MAX || name_len > SCOUTFS_SYMLINK_MAX_SIZE)
 		return -ENAMETOOLONG;
+
+	ret = alloc_dentry_info(dentry);
+	if (ret)
+		return ret;
 
 	ret = scoutfs_hold_trans(sb);
 	if (ret)
@@ -911,3 +1014,22 @@ const struct inode_operations scoutfs_dir_iops = {
 	.removexattr	= scoutfs_removexattr,
 	.symlink	= scoutfs_symlink,
 };
+
+void scoutfs_dir_exit(void)
+{
+	if (dentry_info_cache) {
+		kmem_cache_destroy(dentry_info_cache);
+		dentry_info_cache = NULL;
+	}
+}
+
+int scoutfs_dir_init(void)
+{
+	dentry_info_cache = kmem_cache_create("scoutfs_dentry_info",
+					      sizeof(struct dentry_info), 0,
+					      SLAB_RECLAIM_ACCOUNT, NULL);
+	if (!dentry_info_cache)
+		return -ENOMEM;
+
+	return 0;
+}

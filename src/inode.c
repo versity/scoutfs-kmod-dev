@@ -125,6 +125,7 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	ci->salt = le32_to_cpu(cinode->salt);
 	atomic64_set(&ci->link_counter, le64_to_cpu(cinode->link_counter));
 	ci->data_version = le64_to_cpu(cinode->data_version);
+	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
 }
 
 static void init_inode_key(struct scoutfs_key_buf *key,
@@ -245,6 +246,7 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->salt = cpu_to_le32(ci->salt);
 	cinode->link_counter = cpu_to_le64(atomic64_read(&ci->link_counter));
 	cinode->data_version = cpu_to_le64(ci->data_version);
+	cinode->next_readdir_pos = cpu_to_le64(ci->next_readdir_pos);
 }
 
 /*
@@ -407,6 +409,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->ino = ino;
 	seqcount_init(&ci->seqcount);
 	ci->data_version = 0;
+	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->staging = false;
 	get_random_bytes(&ci->salt, sizeof(ci->salt));
 	atomic64_set(&ci->link_counter, 0);

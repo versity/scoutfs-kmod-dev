@@ -7,6 +7,7 @@ struct scoutfs_inode_info {
 
 	seqcount_t seqcount;
 	u64 data_version;
+	u64 next_readdir_pos;
 
 	/* holder of i_mutex is staging */
 	bool staging;

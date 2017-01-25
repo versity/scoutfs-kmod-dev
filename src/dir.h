@@ -18,4 +18,7 @@ int scoutfs_dir_get_ino_path(struct super_block *sb, u64 ino, u64 *ctr,
 
 int scoutfs_symlink_drop(struct super_block *sb, u64 ino);
 
+int scoutfs_dir_init(void);
+void scoutfs_dir_exit(void);
+
 #endif

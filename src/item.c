@@ -1106,6 +1106,32 @@ out:
 }
 
 /*
+ * Forcefully remove an item from the cache regardless of its state or
+ * relationship to persistent items.
+ *
+ * The caller is entirely responsible for the correctness of having this
+ * item vanish.
+ */
+void scoutfs_item_forget(struct super_block *sb, struct scoutfs_key_buf *key)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *item;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	item = find_item(sb, &cac->items, key);
+	if (item) {
+		trace_printk("forgetting item %p\n", item);
+		scoutfs_inc_counter(sb, item_forget);
+		erase_item(sb, cac, item);
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+}
+
+/*
  * Return the first dirty node in the subtree starting at the given node.
  */
 static struct cached_item *first_dirty(struct rb_node *node)

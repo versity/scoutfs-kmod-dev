@@ -239,10 +239,9 @@ static void scoutfs_item_rb_propagate(struct rb_node *node,
 
 static void scoutfs_item_rb_copy(struct rb_node *old, struct rb_node *new)
 {
-	struct cached_item *o = container_of(old, struct cached_item, node);
 	struct cached_item *n = container_of(new, struct cached_item, node);
 
-	n->dirty = o->dirty;
+	n->dirty = compute_item_dirty(n);
 }
 
 /* calculate the new parent last as it depends on the old parent */
@@ -250,8 +249,6 @@ static void scoutfs_item_rb_rotate(struct rb_node *old, struct rb_node *new)
 {
 	struct cached_item *o = container_of(old, struct cached_item, node);
 	struct cached_item *n = container_of(new, struct cached_item, node);
-
-	BUG_ON(rb_parent(old) != new);
 
 	o->dirty = compute_item_dirty(o);
 	n->dirty = compute_item_dirty(n);
@@ -326,6 +323,20 @@ static void clear_item_dirty(struct item_cache *cac,
 }
 
 /*
+ * Safely erase an item from the tree.  Make sure to remove its dirty
+ * accounting, use the augmented erase, and free it.
+ */
+static void erase_item(struct super_block *sb, struct item_cache *cac,
+		       struct cached_item *item)
+{
+	trace_printk("erasing item %p\n", item);
+
+	clear_item_dirty(cac, item);
+	rb_erase_augmented(&item->node, &cac->items, &scoutfs_item_rb_cb);
+	free_item(sb, item);
+}
+
+/*
  * Try to insert the given item.  If there's already a non-deletion item
  * with the insertion key then return -EEXIST.  An existing deletion
  * item is replaced and freed.
@@ -336,11 +347,14 @@ static int insert_item(struct super_block *sb, struct item_cache *cac,
 		       struct cached_item *ins)
 {
 	struct rb_root *root = &cac->items;
-	struct rb_node **node = &root->rb_node;
-	struct rb_node *parent = NULL;
 	struct cached_item *item;
+	struct rb_node *parent;
+	struct rb_node **node;
 	int cmp;
 
+restart:
+	node = &root->rb_node;
+	parent = NULL;
 	while (*node) {
 		parent = *node;
 		item = container_of(*node, struct cached_item, node);
@@ -358,10 +372,9 @@ static int insert_item(struct super_block *sb, struct item_cache *cac,
 			if (!item->deletion)
 				return -EEXIST;
 
-			clear_item_dirty(cac, item);
-			rb_replace_node(&item->node, &ins->node, root);
-			free_item(sb, item);
-			return 0;
+			/* sadly there's no augmented replace */
+			erase_item(sb, cac, item);
+			goto restart;
 		}
 	}
 
@@ -1275,10 +1288,8 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 		del = item;
 		item = next_dirty(item);
 
-		if (del->deletion) {
-			rb_erase(&del->node, &cac->items);
-			free_item(sb, del);
-		}
+		if (del->deletion)
+			erase_item(sb, cac, del);
 
 		nr_items--;
 	}

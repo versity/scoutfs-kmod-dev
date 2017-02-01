@@ -687,7 +687,7 @@ void scoutfs_compact_destroy(struct super_block *sb)
 {
 	DECLARE_COMPACT_INFO(sb, ci);
 
-	if (ci->workq) {
+	if (ci) {
 		flush_work(&ci->work);
 		destroy_workqueue(ci->workq);
 	}

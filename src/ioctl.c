@@ -30,7 +30,7 @@
 #include "super.h"
 #include "inode.h"
 #include "trans.h"
-#include "filerw.h"
+#include "data.h"
 
 /*
  * Find all the inodes that have had keys of a given type modified since
@@ -365,8 +365,8 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	if (ret)
 		goto out;
 
-	ret = scoutfs_truncate_extent_items(sb, scoutfs_ino(inode),
-					    iblock, len, true);
+	ret = scoutfs_data_truncate_items(sb, scoutfs_ino(inode), iblock, len,
+					  true);
 	scoutfs_release_trans(sb);
 out:
 	mutex_unlock(&inode->i_mutex);

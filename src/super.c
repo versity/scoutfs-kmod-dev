@@ -35,6 +35,7 @@
 #include "alloc.h"
 #include "treap.h"
 #include "compact.h"
+#include "data.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -212,7 +213,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
-	spin_lock_init(&sbi->file_alloc_lock);
 
 	sbi->block_shrinker.shrink = scoutfs_block_shrink;
 	sbi->block_shrinker.seeks = DEFAULT_SEEKS;
@@ -228,6 +228,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_manifest_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
+	      scoutfs_data_setup(sb) ?:
 	      scoutfs_alloc_setup(sb) ?:
 	      scoutfs_treap_setup(sb) ?:
 //	      scoutfs_buddy_setup(sb) ?:
@@ -268,6 +269,7 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		scoutfs_buddy_destroy(sb);
 		if (sbi->block_shrinker.shrink == scoutfs_block_shrink)
 			unregister_shrinker(&sbi->block_shrinker);
+		scoutfs_data_destroy(sb);
 		scoutfs_item_destroy(sb);
 		scoutfs_alloc_destroy(sb);
 		scoutfs_manifest_destroy(sb);

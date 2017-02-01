@@ -14,6 +14,7 @@ struct manifest;
 struct segment_cache;
 struct treap_info;
 struct compact_info;
+struct data_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -39,6 +40,7 @@ struct scoutfs_sb_info {
 	struct seg_alloc *seg_alloc;
 	struct treap_info *treap_info;
 	struct compact_info *compact_info;
+	struct data_info *data_info;
 
 	struct buddy_info *buddy_info;
 
@@ -59,11 +61,6 @@ struct scoutfs_sb_info {
 	struct kset *kset;
 
 	struct scoutfs_counters *counters;
-
-	/* XXX we'd like this to be per task, not per super */
-	spinlock_t file_alloc_lock;
-	u64 file_alloc_blkno;
-	u64 file_alloc_count;
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)

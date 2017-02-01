@@ -24,6 +24,12 @@
 	EXPAND_COUNTER(compact_segment_skipped) \
 	EXPAND_COUNTER(compact_segment_read)	\
 	EXPAND_COUNTER(compact_segment_written)	\
+	EXPAND_COUNTER(data_readpage)		\
+	EXPAND_COUNTER(data_write_begin)	\
+	EXPAND_COUNTER(data_write_end)		\
+	EXPAND_COUNTER(data_invalidatepage)	\
+	EXPAND_COUNTER(data_writepage)		\
+	EXPAND_COUNTER(data_end_writeback_page)	\
 	EXPAND_COUNTER(item_create)		\
 	EXPAND_COUNTER(item_create_ephemeral)	\
 	EXPAND_COUNTER(item_update_ephemeral)	\

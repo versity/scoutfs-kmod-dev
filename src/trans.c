@@ -21,7 +21,7 @@
 #include "block.h"
 #include "trans.h"
 #include "buddy.h"
-#include "filerw.h"
+#include "data.h"
 #include "bio.h"
 #include "item.h"
 #include "manifest.h"
@@ -93,11 +93,6 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	wait_event(sbi->trans_hold_wq,
 		   atomic_cmpxchg(&sbi->trans_holds, 0, -1) == 0);
 
-	/* XXX file data needs to be updated to the new item api */
-#if 0
-	scoutfs_filerw_free_alloc(sb);
-#endif
-
 	trace_printk("items dirty %d manifest dirty %d alloc dirty %d\n",
 		     scoutfs_item_has_dirty(sb),
 		     scoutfs_manifest_has_dirty(sb),
@@ -136,6 +131,9 @@ void scoutfs_trans_write_func(struct work_struct *work)
 out:
 	/* XXX this all needs serious work for dealing with errors */
 	WARN_ON_ONCE(ret);
+
+	/* must be done before waking waiting trans holders who might dirty */
+	scoutfs_data_end_writeback(sb, ret);
 
 	spin_lock(&sbi->trans_write_lock);
 	if (advance)

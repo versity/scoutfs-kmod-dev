@@ -238,6 +238,7 @@ struct scoutfs_key {
 #define SCOUTFS_SYMLINK_KEY		8
 #define SCOUTFS_EXTENT_KEY		9
 #define SCOUTFS_ORPHAN_KEY		10
+#define SCOUTFS_DATA_KEY		11
 #define SCOUTFS_MAX_UNUSED_KEY		255
 
 #define SCOUTFS_MAX_ITEM_LEN 512
@@ -266,6 +267,13 @@ struct scoutfs_readdir_key {
 struct scoutfs_orphan_key {
 	__u8 type;
 	__be64 ino;
+} __packed;
+
+/* value is data payload bytes */
+struct scoutfs_data_key {
+	__u8 type;
+	__be64 ino;
+	__be64 block;
 } __packed;
 
 struct scoutfs_btree_root {

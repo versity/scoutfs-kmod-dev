@@ -16,6 +16,7 @@
 #include <linux/random.h>
 #include <linux/xattr.h>
 #include <linux/mm.h>
+#include <linux/pagemap.h>
 
 #include "format.h"
 #include "super.h"
@@ -23,7 +24,7 @@
 #include "inode.h"
 #include "btree.h"
 #include "dir.h"
-#include "filerw.h"
+#include "data.h"
 #include "scoutfs_trace.h"
 #include "xattr.h"
 #include "trans.h"
@@ -103,6 +104,9 @@ static void set_inode_ops(struct inode *inode)
 		init_special_inode(inode, inode->i_mode, inode->i_rdev);
 		break;
 	}
+
+	/* ephemeral data items avoid kmap for pointers to page contents */
+	mapping_set_gfp_mask(inode->i_mapping, GFP_USER);
 }
 
 static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)

@@ -1214,6 +1214,9 @@ static void count_seg_items(struct item_cache *cac, u32 *nr_items,
 
 		*nr_items = items;
 		*key_bytes = keys;
+
+		trace_printk("counted item %p nr %u keys %u\n",
+			     item, items, keys);
 	}
 }
 
@@ -1252,6 +1255,9 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 	/* remember nr_items is passed to _first_item */
 	while (nr_items) {
 
+		trace_printk("copying item %p nr %u keys %u\n",
+			     item, nr_items, key_bytes);
+
 		if (!item) {
 			item = first_dirty(cac->items.rb_node);
 			scoutfs_seg_first_item(sb, seg, item->key, item->val,
@@ -1261,6 +1267,8 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 			scoutfs_seg_append_item(sb, seg, item->key, item->val,
 						item_flags(item));
 		}
+
+		key_bytes -= item->key->key_len;
 
 		clear_item_dirty(cac, item);
 

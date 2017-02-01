@@ -166,8 +166,10 @@ int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 
 	ret = 0;
 out:
-	if (ret == 0)
+	if (ret == 0) {
 		scoutfs_inc_counter(sb, alloc_alloc);
+		le64_add_cpu(&super->free_segs, -1);
+	}
 	up_write(&sal->rwsem);
 
 	trace_printk("segno %llu ret %d\n", *segno, ret);
@@ -180,6 +182,8 @@ out:
  */
 int scoutfs_alloc_free(struct super_block *sb, u64 segno)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
 	struct pending_region *pend;
 	DECLARE_SEG_ALLOC(sb, sal);
 	u64 ind;
@@ -205,6 +209,7 @@ int scoutfs_alloc_free(struct super_block *sb, u64 segno)
 
 	set_bit_le(nr, pend->reg.bits);
 	scoutfs_inc_counter(sb, alloc_free);
+	le64_add_cpu(&super->free_segs, 1);
 	ret = 0;
 out:
 	up_write(&sal->rwsem);
@@ -279,6 +284,23 @@ int scoutfs_alloc_dirty_ring(struct super_block *sb)
 out:
 	up_write(&sal->rwsem);
 	return ret;
+}
+
+/*
+ * Return the number of blocks free for statfs.
+ */
+u64 scoutfs_alloc_bfree(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	DECLARE_SEG_ALLOC(sb, sal);
+	u64 bfree;
+
+	down_read(&sal->rwsem);
+	bfree = le64_to_cpu(super->free_segs) << SCOUTFS_SEGMENT_BLOCK_SHIFT;
+	up_read(&sal->rwsem);
+
+	return bfree;
 }
 
 static int alloc_treap_compare(void *key, void *data)

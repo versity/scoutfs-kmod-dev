@@ -23,6 +23,8 @@
 #define SCOUTFS_SEGMENT_MASK (SCOUTFS_SEGMENT_SIZE - 1)
 #define SCOUTFS_SEGMENT_PAGES (SCOUTFS_SEGMENT_SIZE / PAGE_SIZE)
 #define SCOUTFS_SEGMENT_BLOCKS (SCOUTFS_SEGMENT_SIZE / SCOUTFS_BLOCK_SIZE)
+#define SCOUTFS_SEGMENT_BLOCK_SHIFT \
+		(SCOUTFS_SEGMENT_SHIFT - SCOUTFS_BLOCK_SHIFT)
 
 #define SCOUTFS_PAGES_PER_BLOCK (SCOUTFS_BLOCK_SIZE / PAGE_SIZE)
 #define SCOUTFS_BLOCK_PAGE_ORDER (SCOUTFS_BLOCK_SHIFT - PAGE_SHIFT)
@@ -350,6 +352,7 @@ struct scoutfs_super_block {
 	__le64 next_ino;
 	__le64 alloc_uninit;
 	__le64 total_segs;
+	__le64 free_segs;
 	__le64 total_blocks;
 	__le64 free_blocks;
 	__le64 ring_blkno;

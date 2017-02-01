@@ -56,7 +56,7 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	struct scoutfs_super_block *super = &sbi->super;
 	__le32 * __packed uuid = (void *)super->uuid;
 
-	kst->f_bfree =  scoutfs_buddy_bfree(sb);
+	kst->f_bfree = scoutfs_alloc_bfree(sb);
 	kst->f_type = SCOUTFS_SUPER_MAGIC;
 	kst->f_bsize = SCOUTFS_BLOCK_SIZE;
 	kst->f_blocks = le64_to_cpu(super->total_blocks);

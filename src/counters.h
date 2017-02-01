@@ -25,6 +25,8 @@
 	EXPAND_COUNTER(compact_segment_read)	\
 	EXPAND_COUNTER(compact_segment_written)	\
 	EXPAND_COUNTER(item_create)		\
+	EXPAND_COUNTER(item_create_ephemeral)	\
+	EXPAND_COUNTER(item_update_ephemeral)	\
 	EXPAND_COUNTER(item_lookup_hit)		\
 	EXPAND_COUNTER(item_lookup_miss)	\
 	EXPAND_COUNTER(item_delete)		\

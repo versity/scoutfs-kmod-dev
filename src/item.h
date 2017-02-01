@@ -23,9 +23,15 @@ int scoutfs_item_insert(struct super_block *sb, struct scoutfs_key_buf *key,
 		        struct kvec *val);
 int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 		        struct kvec *val);
+int scoutfs_item_create_ephemeral(struct super_block *sb,
+			          struct scoutfs_key_buf *key,
+				  struct kvec *val);
 int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key);
 int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 			struct kvec *val);
+void scoutfs_item_update_ephemeral(struct super_block *sb,
+				   struct scoutfs_key_buf *key,
+				   struct kvec *val);
 void scoutfs_item_delete_dirty(struct super_block *sb,
 			       struct scoutfs_key_buf *key);
 int scoutfs_item_delete_many(struct super_block *sb,

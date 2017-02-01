@@ -1295,26 +1295,27 @@ int scoutfs_item_setup(struct super_block *sb)
 	return 0;
 }
 
+/*
+ * There's no more users of the items and ranges at this point.  We can
+ * destroy them without locking and ignoring augmentation.
+ */
 void scoutfs_item_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item;
+	struct cached_item *pos_item;
 	struct cached_range *rng;
-	struct rb_node *node;
+	struct cached_range *pos_rng;
 
 	if (cac) {
-		for (node = rb_first(&cac->items); node; ) {
-			item = container_of(node, struct cached_item, node);
-			node = rb_next(node);
-			rb_erase(&item->node, &cac->items);
+		rbtree_postorder_for_each_entry_safe(item, pos_item,
+						     &cac->items, node) {
 			free_item(sb, item);
 		}
 
-		for (node = rb_first(&cac->ranges); node; ) {
-			rng = container_of(node, struct cached_range, node);
-			node = rb_next(node);
-			rb_erase(&rng->node, &cac->items);
+		rbtree_postorder_for_each_entry_safe(rng, pos_rng,
+						     &cac->ranges, node) {
 			free_range(sb, rng);
 		}
 

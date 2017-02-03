@@ -19,6 +19,22 @@ void scoutfs_key_inc_cur_len(struct scoutfs_key_buf *key);
 void scoutfs_key_dec(struct scoutfs_key_buf *key);
 void scoutfs_key_dec_cur_len(struct scoutfs_key_buf *key);
 
+/*
+ * Initialize a small key in a larger allocated buffer.  This lets
+ * callers, for example, search for a small key and get a larger key
+ * copied in.
+ */
+static inline void scoutfs_key_init_buf_len(struct scoutfs_key_buf *key,
+				            void *data, u16 key_len,
+					    u16 buf_len)
+{
+	WARN_ON_ONCE(buf_len > SCOUTFS_MAX_KEY_SIZE);
+	WARN_ON_ONCE(key_len > buf_len);
+
+	key->data = data;
+	key->key_len = key_len;
+	key->buf_len = buf_len;
+}
 
 /*
  * Point the key buf, usually statically allocated, at an existing
@@ -27,11 +43,7 @@ void scoutfs_key_dec_cur_len(struct scoutfs_key_buf *key);
 static inline void scoutfs_key_init(struct scoutfs_key_buf *key,
 				    void *data, u16 len)
 {
-	WARN_ON_ONCE(len > SCOUTFS_MAX_KEY_SIZE);
-
-	key->data = data;
-	key->key_len = len;
-	key->buf_len = len;
+	scoutfs_key_init_buf_len(key, data, len, len);
 }
 
 /*

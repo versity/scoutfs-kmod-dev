@@ -106,90 +106,116 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
 	return ret;
 }
 
+struct ino_path_cursor {
+	__u64 dir_ino;
+	__u8 name[SCOUTFS_NAME_LEN + 1];
+} __packed;
+
 /*
- * Fill the caller's buffer with one of the paths from the on-disk root
- * directory to the target inode.
+ * see the definition of scoutfs_ioctl_ino_path for ioctl semantics.
  *
- * Userspace provides a u64 counter used to chose which path to return.
- * It should be initialized to zero to start iterating.  After each path
- * it is set to the next counter to search from.
- *
- * This only walks back through full hard links.  None of the returned
- * paths will reflect symlinks to components in the path.
- *
- * This doesn't ensure that the caller has permissions to traverse the
- * returned paths to the inode.  It requires CAP_DAC_READ_SEARCH which
- * bypasses permissions checking.
- *
- * ENAMETOOLONG is returned when the next path from the given counter
- * doesn't fit in the buffer.  Providing a buffer of PATH_MAX should
- * succeed.
- *
- * This call is not serialized with any modification (create, rename,
- * unlink) of the path components.  It will return all the paths that
- * were stable both before and after the call.  It may or may not return
- * paths which are created or unlinked during the call.
- *
- * The number of bytes in the path, including the null terminator, are
- * returned when a path is found.  0 is returned when there are no more
- * paths to the link from the given counter.  -errno is returned on
- * errors.
- *
- * XXX
- *  - can dir renaming trick us into returning garbage paths?  seems likely.
+ * The null termination of the cursor name is a trick to skip past the
+ * last name we read without having to try and "increment" the name.
+ * Adding a null sorts the cursor after the non-null name and before all
+ * the next names because the item names aren't null terminated.
  */
 static long scoutfs_ioc_ino_path(struct file *file, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_ioctl_ino_path __user *uargs = (void __user *)arg;
+	struct scoutfs_ioctl_ino_path __user *uargs;
+	struct scoutfs_link_backref_entry *ent;
+	struct ino_path_cursor __user *ucurs;
 	struct scoutfs_ioctl_ino_path args;
-	unsigned int bytes;
 	char __user *upath;
-	char *comp;
-	char *path;
+	LIST_HEAD(list);
+	u64 dir_ino;
+	u16 name_len;
+	char term;
+	char *name;
 	int ret;
-	int len;
+
+	BUILD_BUG_ON(SCOUTFS_IOC_INO_PATH_CURSOR_BYTES !=
+		     sizeof(struct ino_path_cursor));
 
 	if (!capable(CAP_DAC_READ_SEARCH))
 		return -EPERM;
 
+	uargs = (void __user *)arg;
 	if (copy_from_user(&args, uargs, sizeof(args)))
 		return -EFAULT;
 
-	if (args.path_bytes <= 1)
+	if (args.cursor_bytes != sizeof(struct ino_path_cursor))
 		return -EINVAL;
 
-	bytes = min_t(unsigned int, args.path_bytes, PATH_MAX);
-	path = kmalloc(bytes, GFP_KERNEL);
-	if (path == NULL)
+	ucurs = (void __user *)(unsigned long)args.cursor_ptr;
+	upath = (void __user *)(unsigned long)args.path_ptr;
+
+	if (get_user(dir_ino, &ucurs->dir_ino))
+		return -EFAULT;
+
+	/* alloc/copy the small cursor name, requires and includes null */
+	name_len = strnlen_user(ucurs->name, sizeof(ucurs->name));
+	if (name_len < 1 || name_len > sizeof(ucurs->name))
+		return -EINVAL;
+
+	name = kmalloc(name_len, GFP_KERNEL);
+	if (!name)
 		return -ENOMEM;
 
-	/* positive ret is len of all components including null terminators */
-	ret = scoutfs_dir_get_ino_path(sb, args.ino, &args.ctr, path, bytes);
-	if (ret <= 0)
+	if (copy_from_user(name, ucurs->name, name_len)) {
+		ret = -EFAULT;
 		goto out;
+	}
 
-	/* reverse the components from backref order to path/ order */
-	comp = path;
-	upath = (void __user *)((unsigned long)args.path_ptr + ret);
-	while (comp < (path + ret)) {
-		len = strlen(comp);
-		if (comp != path)
-			comp[len] = '/';
-		len++;
+	ret = scoutfs_dir_get_backref_path(sb, args.ino, dir_ino, name,
+					   name_len, &list);
+	if (ret < 0) {
+		if (ret == -ENOENT)
+			ret = 0;
+		goto out;
+	}
 
-		upath -= len;
-		if (copy_to_user(upath, comp, len)) {
+	ret = 0;
+	list_for_each_entry(ent, &list, head) {
+		if (ret + ent->name_len + 1 > args.path_bytes) {
+			ret = -ENAMETOOLONG;
+			goto out;
+		}
+
+		if (copy_to_user(upath, ent->lbkey.name, ent->name_len)) {
+			ret = -EFAULT;
+			goto out;
+		}
+
+		upath += ent->name_len;
+		ret += ent->name_len;
+
+		if (ent->head.next == &list)
+			term = '\0';
+		else
+			term = '/';
+
+		if (put_user(term, upath)) {
 			ret = -EFAULT;
 			break;
 		}
-		comp += len;
+
+		upath++;
+		ret++;
 	}
 
-	if (ret > 0 && put_user(args.ctr, &uargs->ctr))
+	/* copy the last entry into the cursor */
+	ent = list_last_entry(&list, struct scoutfs_link_backref_entry, head);
+
+	if (put_user(be64_to_cpu(ent->lbkey.dir_ino), &ucurs->dir_ino) ||
+	    copy_to_user(ucurs->name, ent->lbkey.name, ent->name_len) ||
+	    put_user('\0', &ucurs->name[ent->name_len])) {
 		ret = -EFAULT;
+	}
+
 out:
-	kfree(path);
+	scoutfs_dir_free_backref_path(sb, &list);
+	kfree(name);
 	return ret;
 }
 

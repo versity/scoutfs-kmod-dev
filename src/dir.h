@@ -7,14 +7,17 @@ extern const struct file_operations scoutfs_dir_fops;
 extern const struct inode_operations scoutfs_dir_iops;
 extern const struct inode_operations scoutfs_symlink_iops;
 
-struct scoutfs_path_component {
+struct scoutfs_link_backref_entry {
 	struct list_head head;
-	unsigned int len;
-	char name[SCOUTFS_NAME_LEN];
+	u16 name_len;
+	struct scoutfs_link_backref_key lbkey;
 };
 
-int scoutfs_dir_get_ino_path(struct super_block *sb, u64 ino, u64 *ctr,
-			     char *path, unsigned int bytes);
+int scoutfs_dir_get_backref_path(struct super_block *sb, u64 target_ino,
+				 u64 dir_ino, char *name, u16 name_len,
+				 struct list_head *list);
+void scoutfs_dir_free_backref_path(struct super_block *sb,
+				   struct list_head *list);
 
 int scoutfs_symlink_drop(struct super_block *sb, u64 ino);
 

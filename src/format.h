@@ -265,6 +265,14 @@ struct scoutfs_readdir_key {
 	__be64 pos;
 } __packed;
 
+/* value is empty */
+struct scoutfs_link_backref_key {
+	__u8 type;
+	__be64 ino;
+	__be64 dir_ino;
+	__u8 name[0];
+} __packed;
+
 /* no value */
 struct scoutfs_orphan_key {
 	__u8 type;
@@ -479,17 +487,8 @@ struct scoutfs_extent {
 
 #define SCOUTFS_EXTENT_FLAG_OFFLINE (1 << 0)
 
-/*
- * link backrefs give us a way to find all the hard links that refer
- * to a target inode.  They're stored at an offset determined by an
- * advancing counter in their inode.
- */
-struct scoutfs_link_backref {
-	__le64 ino;
-	__le64 offset;
-} __packed;
-
+/* ino_path can search for backref items with a null term */
 #define SCOUTFS_MAX_KEY_SIZE \
-	offsetof(struct scoutfs_dirent_key, name[SCOUTFS_NAME_LEN])
+	offsetof(struct scoutfs_link_backref_key, name[SCOUTFS_NAME_LEN + 1])
 
 #endif

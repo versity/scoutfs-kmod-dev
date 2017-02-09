@@ -220,94 +220,6 @@ out:
 }
 
 /*
- * Find inodes that might contain a given xattr name or value.
- *
- * The inodes are filled in sorted order from the first to the last
- * inode.  The number of found inodes is returned.  If an error is hit
- * it can return the number of inodes found before the error.
- *
- * The search can be continued from the next inode after the last
- * returned.
- */
-static long scoutfs_ioc_find_xattr(struct file *file, unsigned long arg,
-				   bool find_name)
-{
-	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_STABLE_META(sb);
-	struct scoutfs_ioctl_find_xattr args;
-	struct scoutfs_key key;
-	struct scoutfs_key last;
-	char __user *ustr;
-	u64 __user *uino;
-	char *str;
-	int copied = 0;
-	int ret = 0;
-	u64 ino;
-	u8 type;
-	u64 h;
-
-	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
-		return -EFAULT;
-
-	if (args.str_len > SCOUTFS_MAX_XATTR_LEN || args.ino_count > INT_MAX)
-		return -EINVAL;
-
-	if (args.first_ino > args.last_ino)
-		return -EINVAL;
-
-	if (args.ino_count == 0)
-		return 0;
-
-	ustr = (void __user *)(unsigned long)args.str_ptr;
-	uino = (void __user *)(unsigned long)args.ino_ptr;
-
-	str = kmalloc(args.str_len, GFP_KERNEL);
-	if (!str)
-		return -ENOMEM;
-
-	if (copy_from_user(str, ustr, args.str_len)) {
-		ret = -EFAULT;
-		goto out;
-	}
-
-	h = scoutfs_name_hash(str, args.str_len);
-
-	if (find_name) {
-		h &= ~SCOUTFS_XATTR_NAME_HASH_MASK;
-		type = SCOUTFS_XATTR_NAME_HASH_KEY;
-	} else {
-		type = SCOUTFS_XATTR_VAL_HASH_KEY;
-	}
-
-	scoutfs_set_key(&key, h, type, args.first_ino);
-	scoutfs_set_key(&last, h, type, args.last_ino);
-
-	while (copied < args.ino_count) {
-
-		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, NULL);
-		if (ret < 0) {
-			if (ret == -ENOENT)
-				ret = 0;
-			break;
-		}
-
-		ino = scoutfs_key_offset(&key);
-		if (put_user(ino, uino)) {
-			ret = -EFAULT;
-			break;
-		}
-
-		uino++;
-		copied++;
-		scoutfs_inc_key(&key);
-	}
-
-out:
-	kfree(str);
-	return copied ?: ret;
-}
-
-/*
  * Sample the inode's data_version.  It is not strictly serialized with
  * writes that are in flight.
  */
@@ -505,10 +417,6 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_INODE_KEY);
 	case SCOUTFS_IOC_INO_PATH:
 		return scoutfs_ioc_ino_path(file, arg);
-	case SCOUTFS_IOC_FIND_XATTR_NAME:
-		return scoutfs_ioc_find_xattr(file, arg, true);
-	case SCOUTFS_IOC_FIND_XATTR_VAL:
-		return scoutfs_ioc_find_xattr(file, arg, false);
 	case SCOUTFS_IOC_INODE_DATA_SINCE:
 		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_EXTENT_KEY);
 	case SCOUTFS_IOC_DATA_VERSION:

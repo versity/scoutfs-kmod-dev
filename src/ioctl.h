@@ -80,25 +80,10 @@ struct scoutfs_ioctl_ino_path {
 #define SCOUTFS_IOC_INO_PATH _IOW(SCOUTFS_IOCTL_MAGIC, 2, \
 				      struct scoutfs_ioctl_ino_path)
 
-/* XXX might as well include a seq?  0 for current behaviour? */
-struct scoutfs_ioctl_find_xattr {
-	__u64 first_ino;
-	__u64 last_ino;
-	__u64 str_ptr;
-	__u32 str_len;
-	__u64 ino_ptr;
-	__u32 ino_count;
-} __packed;
-
-#define SCOUTFS_IOC_FIND_XATTR_NAME _IOW(SCOUTFS_IOCTL_MAGIC, 3, \
-				      struct scoutfs_ioctl_find_xattr)
-#define SCOUTFS_IOC_FIND_XATTR_VAL _IOW(SCOUTFS_IOCTL_MAGIC, 4, \
-				      struct scoutfs_ioctl_find_xattr)
-
-#define SCOUTFS_IOC_INODE_DATA_SINCE _IOW(SCOUTFS_IOCTL_MAGIC, 5, \
+#define SCOUTFS_IOC_INODE_DATA_SINCE _IOW(SCOUTFS_IOCTL_MAGIC, 3, \
 					  struct scoutfs_ioctl_inodes_since)
 
-#define SCOUTFS_IOC_DATA_VERSION _IOW(SCOUTFS_IOCTL_MAGIC, 6, u64)
+#define SCOUTFS_IOC_DATA_VERSION _IOW(SCOUTFS_IOCTL_MAGIC, 4, u64)
 
 struct scoutfs_ioctl_release {
 	__u64 offset;
@@ -106,7 +91,7 @@ struct scoutfs_ioctl_release {
 	__u64 data_version;
 } __packed;
 
-#define SCOUTFS_IOC_RELEASE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \
+#define SCOUTFS_IOC_RELEASE _IOW(SCOUTFS_IOCTL_MAGIC, 5, \
 				  struct scoutfs_ioctl_release)
 
 struct scoutfs_ioctl_stage {
@@ -116,7 +101,7 @@ struct scoutfs_ioctl_stage {
 	__s32 count;
 } __packed;
 
-#define SCOUTFS_IOC_STAGE _IOW(SCOUTFS_IOCTL_MAGIC, 8, \
+#define SCOUTFS_IOC_STAGE _IOW(SCOUTFS_IOCTL_MAGIC, 6, \
 			       struct scoutfs_ioctl_stage)
 
 #endif

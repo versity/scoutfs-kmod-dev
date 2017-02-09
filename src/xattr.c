@@ -19,291 +19,115 @@
 #include "inode.h"
 #include "key.h"
 #include "super.h"
-#include "btree.h"
+#include "kvec.h"
+#include "item.h"
 #include "trans.h"
 #include "name.h"
 #include "xattr.h"
 
 /*
- * xattrs are stored in items with offsets set to the hash of their
- * name.  The item's value contains the xattr name and value.
+ * In the simple case an xattr is stored in a single item whose key and
+ * value contain the key and value from the xattr.
  *
- * We reserve a few low bits of the key offset for hash collisions.
- * Lookup walks collisions looking for an xattr with its name and create
- * looks for a hole in the colliding key space for the new xattr.
+ * But xattr values can be larger than our max item value length.  In
+ * that case the rest of the xattr value is stored in additional items.
+ * Each item key contains a footer struct after the name which
+ * identifies the position of the item in the series that make up the
+ * total xattr.
  *
- * Usually btree block locking would protect the atomicity of xattr
- * value updates.  Lookups would have to wait for modification to
- * finish.  But the collision items are updated with multiple btree
- * operations.  And we insert new items before deleting the old so that
- * we can always unwind on errors.  This means that there can be
- * multiple versions of an xattr in the btree.  So we add an inode rw
- * semaphore around xattr operations.
- *
- * We support ioctls which find inodes that may contain xattrs with
- * either a given name or value.  A name hash item is created for a
- * given hash value with no collision bits as long as there are any
- * names at that hash value.  A value hash item is created but it
- * contains a refcount in its value to track the number of values with
- * that hash value because we can't use the xattr keys to determine if
- * there are matching values or not.
+ * That xattrs are then spread out across multiple items does mean that
+ * we need locking other than the item cache locking which only protects
+ * each item call, the i_mutex which isn't held on getxattr, and cluster
+ * locking which doesn't serialize local matches on the same node.  We
+ * use a rwsem in the inode.
  *
  * XXX
  *  - add acl support and call generic xattr->handlers for SYSTEM
- *  - remove all xattrs on unlink
  */
 
-/* the value immediately follows the name and there is no null termination */
-static char *xat_value(struct scoutfs_xattr *xat)
+/*
+ * We have a static full xattr name with all 1s so that we can construct
+ * precise final keys for the range of items that cover all the xattrs
+ * on an inode.  We could instead construct a smaller last key for the
+ * next inode with a null name but that could be accidentally create
+ * lock contention with that next inode.  We want lock ranges to be as
+ * precise as possible.
+ */
+static char last_xattr_name[SCOUTFS_XATTR_MAX_NAME_LEN];
+
+/* account for the footer after the name */
+static unsigned xattr_key_bytes(unsigned name_len)
 {
-	return &xat->name[xat->name_len];
+	return offsetof(struct scoutfs_xattr_key, name[name_len]) +
+	       sizeof(struct scoutfs_xattr_key_footer);
 }
 
-static unsigned int xat_bytes(unsigned int name_len, unsigned int value_len)
+static unsigned xattr_key_name_len(struct scoutfs_key_buf *key)
 {
-	return offsetof(struct scoutfs_xattr, name[name_len + value_len]);
+	return key->key_len - xattr_key_bytes(0);
 }
 
-static void set_xattr_keys(struct inode *inode, struct scoutfs_key *first,
-			   struct scoutfs_key *last, const char *name,
-			   unsigned int name_len)
+static struct scoutfs_xattr_key_footer *
+xattr_key_footer(struct scoutfs_key_buf *key)
 {
-	u64 h = scoutfs_name_hash(name, name_len) &
-		~SCOUTFS_XATTR_NAME_HASH_MASK;
-
-	scoutfs_set_key(first, scoutfs_ino(inode), SCOUTFS_XATTR_KEY, h);
-	scoutfs_set_key(last, scoutfs_ino(inode), SCOUTFS_XATTR_KEY,
-			h | SCOUTFS_XATTR_NAME_HASH_MASK);
+	return key->data + key->key_len -
+	       sizeof(struct scoutfs_xattr_key_footer);
 }
 
-static void set_name_val_keys(struct scoutfs_key *name_key,
-			      struct scoutfs_key *val_key,
-			      struct scoutfs_key *key, u64 val_hash)
+static struct scoutfs_key_buf *alloc_xattr_key(struct super_block *sb,
+					       u64 ino, const char *name,
+					       unsigned int name_len, u8 part)
 {
-	u64 h = scoutfs_key_offset(key) & ~SCOUTFS_XATTR_NAME_HASH_MASK;
+	struct scoutfs_xattr_key_footer *foot;
+	struct scoutfs_xattr_key *xkey;
+	struct scoutfs_key_buf *key;
 
-	scoutfs_set_key(name_key, h, SCOUTFS_XATTR_NAME_HASH_KEY,
-			scoutfs_key_inode(key));
+	key = scoutfs_key_alloc(sb, xattr_key_bytes(name_len));
+	if (key) {
+		xkey = key->data;
+		foot = xattr_key_footer(key);
 
-	scoutfs_set_key(val_key, val_hash, SCOUTFS_XATTR_VAL_HASH_KEY,
-			scoutfs_key_inode(key));
+		xkey->type = SCOUTFS_XATTR_KEY;
+		xkey->ino = cpu_to_be64(ino);
+
+		if (name && name_len)
+			memcpy(xkey->name, name, name_len);
+
+		foot->null = '\0';
+		foot->part = part;
+	}
+
+	return key;
+}
+
+static void set_xattr_key_part(struct scoutfs_key_buf *key, u8 part)
+{
+	struct scoutfs_xattr_key_footer *foot = xattr_key_footer(key);
+
+	foot->part = part;
 }
 
 /*
- * Before insertion we perform a pretty through search of the xattr
- * items whose offset collides with the name to be inserted.
+ * This walks the keys and values for the items that make up the xattr
+ * items that describe the value in the caller's buffer.  The caller is
+ * responsible for breaking out when it hits an existing final item that
+ * hasn't consumed the buffer.
  *
- * We try to find the item with the matching item so it can be removed.
- * We notice if there are other colliding names so that the caller can
- * correctly maintain the name hash items.  We calculate the value hash
- * of the existing item so that the caller can maintain the value hash
- * items.  And we notice if there are any free colliding items that are
- * available for new item insertion.
+ * Each iteration sets the val header in case the caller is writing
+ * items.  If they're reading items they'll just overwrite it.
  */
-struct xattr_search_results {
-	bool found;
-	bool other_coll;
-	struct scoutfs_key key;
-	u64 val_hash;
-	bool found_hole;
-	struct scoutfs_key hole_key;
-};
-
-static int search_xattr_items(struct inode *inode, const char *name,
-			      unsigned int name_len,
-			      struct xattr_search_results *res)
-{
-	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
-	struct scoutfs_xattr *xat;
-	struct scoutfs_key last;
-	struct scoutfs_key key;
-	unsigned int max_len;
-	int ret;
-
-	max_len = xat_bytes(SCOUTFS_MAX_XATTR_LEN, SCOUTFS_MAX_XATTR_LEN),
-	xat = kmalloc(max_len, GFP_KERNEL);
-	if (!xat)
-		return -ENOMEM;
-
-	set_xattr_keys(inode, &key, &last, name, name_len);
-	scoutfs_btree_init_val(&val, xat, max_len);
-
-	res->found = false;
-	res->other_coll = false;
-	res->found_hole = false;
-	res->hole_key = key;
-
-	for (;;) {
-		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
-		if (ret < 0) {
-			if (ret == -ENOENT)
-				ret = 0;
-			break;
-		}
-
-		/* XXX corruption */
-		if (ret < sizeof(struct scoutfs_xattr) ||
-		    ret != xat_bytes(xat->name_len, xat->value_len)) {
-			ret = -EIO;
-			break;
-		}
-
-		/* found a hole when we skip past next expected key */
-		if (!res->found_hole &&
-		    scoutfs_key_cmp(&res->hole_key, &key) < 0)
-			res->found_hole = true;
-
-		/* keep searching for a hole past this key */
-		if (!res->found_hole) {
-			res->hole_key = key;
-			scoutfs_inc_key(&res->hole_key);
-		}
-
-		/* only compare the names until we find our given name */
-		if (!res->found &&
-		    scoutfs_names_equal(name, name_len, xat->name,
-				        xat->name_len)) {
-			res->found = true;
-			res->key = key;
-			res->val_hash = scoutfs_name_hash(xat_value(xat),
-							  xat->value_len);
-		} else {
-			res->other_coll = true;
-		}
-
-		/* finished once we have all the caller needs */
-		if (res->found && res->other_coll && res->found_hole) {
-			ret = 0;
-			break;
-		}
-
-		scoutfs_inc_key(&key);
-	}
-
-	kfree(xat);
-	return ret;
-}
-
-/*
- * Inset a new xattr item, updating the name and value hash items as
- * needed.  The caller is responsible for managing transactions and
- * locking.  If this returns an error then no changes will have been
- * made.
- */
-static int insert_xattr(struct inode *inode, const char *name,
-			unsigned int name_len, const void *value, size_t size,
-			struct scoutfs_key *key, bool other_coll,
-			u64 val_hash)
-{
-	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	bool inserted_name_hash_item = false;
-	struct scoutfs_btree_val val;
-	__le64 refcount;
-	struct scoutfs_key name_key;
-	struct scoutfs_key val_key;
-	struct scoutfs_xattr xat;
-	int ret;
-
-	/* insert the main xattr item */
-	set_name_val_keys(&name_key, &val_key, key, val_hash);
-	scoutfs_btree_init_val(&val, &xat, sizeof(xat), (void *)name, name_len,
-			       (void *)value, size);
-
-	xat.name_len = name_len;
-	xat.value_len = size;
-
-	ret = scoutfs_btree_insert(sb, meta, key, &val);
-	if (ret)
-		return ret;
-
-	/* insert the name hash item for find_xattr if we're first */
-	if (!other_coll) {
-		ret = scoutfs_btree_insert(sb, meta, &name_key, NULL);
-		/* XXX eexist would be corruption */
-		if (ret)
-			goto out;
-		inserted_name_hash_item = true;
-	}
-
-	/* increment the val hash item for find_xattr, inserting if first */
-	scoutfs_btree_init_val(&val, &refcount, sizeof(refcount));
-	val.check_size_eq = 1;
-
-	ret = scoutfs_btree_lookup(sb, meta, &val_key, &val);
-	if (ret < 0 && ret != -ENOENT)
-		goto out;
-
-	if (ret == -ENOENT) {
-		refcount = cpu_to_le64(1);
-		ret = scoutfs_btree_insert(sb, meta, &val_key, &val);
-	} else {
-		le64_add_cpu(&refcount, 1);
-		ret = scoutfs_btree_update(sb, meta, &val_key, &val);
-	}
-out:
-	if (ret) {
-		scoutfs_btree_delete(sb, meta, key);
-		if (inserted_name_hash_item)
-			scoutfs_btree_delete(sb, meta, &name_key);
-	}
-	return ret;
-}
-
-/*
- * Remove an xattr.  Remove the name hash item if there are no more xattrs
- * in the inode that hash to the name's hash value.  Remove the value hash
- * item if there are no more xattr values in the inode with this value
- * hash.
- */
-static int delete_xattr(struct super_block *sb, struct scoutfs_key *key,
-			bool other_coll, u64 val_hash)
-{
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
-	struct scoutfs_key name_key;
-	struct scoutfs_key val_key;
-	__le64 refcount;
-	int ret;
-
-	set_name_val_keys(&name_key, &val_key, key, val_hash);
-
-	/* update the val_hash refcount, making sure it's not nonsense */
-	scoutfs_btree_init_val(&val, &refcount, sizeof(refcount));
-	val.check_size_eq = 1;
-	ret = scoutfs_btree_lookup(sb, meta, &val_key, &val);
-	if (ret < 0)
-		goto out;
-
-	le64_add_cpu(&refcount, -1ULL);
-
-	/* ensure that we can update and delete name_ and val_ keys */
-	if (!other_coll) {
-		ret = scoutfs_btree_dirty(sb, meta, &name_key);
-		if (ret)
-			goto out;
-	}
-	ret = scoutfs_btree_dirty(sb, meta, &val_key);
-	if (ret)
-		goto out;
-
-	ret = scoutfs_btree_delete(sb, meta, key);
-	if (ret)
-		goto out;
-
-	if (!other_coll)
-		scoutfs_btree_delete(sb, meta, &name_key);
-
-	if (refcount)
-		scoutfs_btree_update(sb, meta, &val_key, &val);
-	else
-		scoutfs_btree_delete(sb, meta, &val_key);
-	ret = 0;
-out:
-	return ret;
-}
+#define for_each_xattr_item(key, val, vh, buffer, size, part, off, bytes)    \
+	for (part = 0, off = 0;						     \
+	     off < size &&						     \
+		(bytes = min_t(size_t, SCOUTFS_XATTR_PART_SIZE, size - off), \
+		 set_xattr_key_part(key, part),				     \
+		 (vh)->part_len = cpu_to_le16(bytes),			     \
+		 (vh)->last_part = off + bytes == size ? 1 : 0,		     \
+		 scoutfs_kvec_init(val, vh,				     \
+			           sizeof(struct scoutfs_xattr_val_header),  \
+				   buffer + off, bytes),		     \
+		 1);							     \
+	     part++, off += bytes)
 
 /*
  * This will grow to have all the supported prefixes (then will turn
@@ -315,76 +139,89 @@ static int unknown_prefix(const char *name)
 }
 
 /*
- * Look up an xattr matching the given name.  We walk our xattr items stored
- * at the hashed name.  We'll only be able to copy out a value that fits
- * in the callers buffer.
+ * Copy the value for the given xattr name into the caller's buffer, if it
+ * fits.  Return the bytes copied or -ERANGE if it doesn't fit.
  */
 ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 			 size_t size)
 {
 	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
-	size_t name_len = strlen(name);
-	struct scoutfs_btree_val val;
-	struct scoutfs_xattr *xat;
-	struct scoutfs_key key;
-	struct scoutfs_key last;
-	unsigned int item_len;
+	struct scoutfs_xattr_val_header vh;
+	struct scoutfs_key_buf *key = NULL;
+	SCOUTFS_DECLARE_KVEC(val);
+	unsigned int total;
+	unsigned int bytes;
+	unsigned int off;
+	size_t name_len;
+	u8 part;
 	int ret;
 
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;
 
-	/* make sure we don't allocate an enormous item */
-	if (name_len > SCOUTFS_MAX_XATTR_LEN)
+	name_len = strlen(name);
+	if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN)
 		return -ENODATA;
-	size = min_t(size_t, size, SCOUTFS_MAX_XATTR_LEN);
 
-	item_len = xat_bytes(name_len, size);
-	xat = kmalloc(item_len, GFP_KERNEL);
-	if (!xat)
+	/* honestly, userspace, just alloc a max size buffer */
+	if (size == 0)
+		return SCOUTFS_XATTR_MAX_SIZE;
+
+	key = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0);
+	if (!key)
 		return -ENOMEM;
-
-	set_xattr_keys(inode, &key, &last, name, name_len);
-	scoutfs_btree_init_val(&val, xat, item_len);
 
 	down_read(&si->xattr_rwsem);
 
-	for (;;) {
-		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+	total = 0;
+	vh.last_part = 0;
+
+	for_each_xattr_item(key, val, &vh, buffer, size, part, off, bytes) {
+
+		ret = scoutfs_item_lookup(sb, key, val);
 		if (ret < 0) {
 			if (ret == -ENOENT)
-				ret = -ENODATA;
+				ret = -EIO;
 			break;
 		}
 
-		/* XXX corruption */
-		if (ret < sizeof(struct scoutfs_xattr)) {
+		/* XXX corruption: no header, more val than header len */
+		ret -= sizeof(struct scoutfs_xattr_val_header);
+		if (ret < 0 || ret > le16_to_cpu(vh.part_len)) {
 			ret = -EIO;
 			break;
 		}
 
-		if (!scoutfs_names_equal(name, name_len, xat->name,
-					 xat->name_len)) {
-			scoutfs_inc_key(&key);
-			continue;
+		/* not enough buffer if we didn't copy the part */
+		if (ret < le16_to_cpu(vh.part_len)) {
+			ret = -ERANGE;
+			break;
 		}
 
-		ret = xat->value_len;
-		if (buffer) {
-			if (ret <= size)
-				memcpy(buffer, xat_value(xat), ret);
-			else
-				ret = -ERANGE;
+		total += ret;
+
+		/* XXX corruption: total xattr val too long */
+		if (total > SCOUTFS_XATTR_MAX_SIZE) {
+			ret = -EIO;
+			break;
 		}
-		break;
+
+		/* done if we fully copied last part */
+		if (vh.last_part) {
+			ret = total;
+			break;
+		}
 	}
 
-	up_read(&si->xattr_rwsem);
+	/* not enough buffer if we didn't see last */
+	if (ret >= 0 && !vh.last_part)
+		ret = -ERANGE;
 
-	kfree(xat);
+	up_read(&si->xattr_rwsem);
+	scoutfs_key_free(sb, key);
+
 	return ret;
 }
 
@@ -392,94 +229,97 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
  * The confusing swiss army knife of creating, modifying, and deleting
  * xattrs.
  *
- * If the value pointer is non-null then we always create a new item.  The
- * value can have a size of 0.  We create a new item before possibly
- * deleting an old item.
+ * This always removes the old existing xattr.  If value is set then
+ * we're replacing it with a new xattr.  The flags cause creation to
+ * fail if the xattr already exists (_CREATE) or doesn't already exist
+ * (_REPLACE).  xattrs can have a zero length value.
  *
- * We always delete the old xattr item.  If we have a null value then we're
- * deleting the xattr.  If there's a value then we're effectively updating
- * the xattr by deleting old and creating new.
+ * To modify xattrs built of individual items we use the batch
+ * interface.  It provides atomic transitions from one group of items to
+ * another.
  */
 static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
+
 			     const void *value, size_t size, int flags)
 
 {
 	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	struct xattr_search_results old = {0,};
+	struct scoutfs_key_buf *last;
+	struct scoutfs_key_buf *key;
+	struct scoutfs_xattr_val_header vh;
 	size_t name_len = strlen(name);
-	u64 new_val_hash = 0;
+	SCOUTFS_DECLARE_KVEC(val);
+	unsigned int bytes;
+	unsigned int off;
+	LIST_HEAD(list);
+	u8 part;
+	int sif;
 	int ret;
 
-	if (name_len > SCOUTFS_MAX_XATTR_LEN ||
-	    (value && size > SCOUTFS_MAX_XATTR_LEN))
+	trace_printk("name_len %zu value %p size %zu flags 0x%x\n",
+		     name_len, value, size, flags);
+
+	if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN ||
+	    (value && size > SCOUTFS_XATTR_MAX_SIZE))
 		return -EINVAL;
 
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;
 
-	ret = scoutfs_hold_trans(sb);
-	if (ret)
-		return ret;
-
-	ret = scoutfs_dirty_inode_item(inode);
-	if (ret)
-		goto out;
-
-	/* might as well do this outside locking */
-	if (value)
-		new_val_hash = scoutfs_name_hash(value, size);
-
-	down_write(&si->xattr_rwsem);
-
-	/*
-	 * The presence of other colliding names is a little tricky.
-	 * Searching will set it if there are other non-matching names.
-	 * It will be false if we only found the old matching name. That
-	 * old match is also considered a collision for later insertion.
-	 * Then *that* insertion is considered a collision for deletion
-	 * of the existing old matching name.
-	 */
-	ret = search_xattr_items(inode, name, name_len, &old);
-	if (ret)
-		goto out;
-
-	if (old.found && (flags & XATTR_CREATE)) {
-		ret = -EEXIST;
-		goto out;
-	}
-	if (!old.found && (flags & XATTR_REPLACE)) {
-		ret = -ENODATA;
+	key = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0);
+	last = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0xff);
+	if (!key || !last) {
+		ret = -ENOMEM;
 		goto out;
 	}
 
+	/* build up batch of new items for the new xattr */
 	if (value) {
-		ret = insert_xattr(inode, name, name_len, value, size,
-				   &old.hole_key, old.other_coll || old.found,
-				   new_val_hash);
-		if (ret)
-			goto out;
-	}
+		for_each_xattr_item(key, val, &vh, (void *)value, size,
+				    part, off, bytes) {
 
-	if (old.found) {
-		ret = delete_xattr(sb, &old.key, old.other_coll || value,
-				   old.val_hash);
-		if (ret) {
-			if (value)
-				delete_xattr(sb, &old.hole_key, true,
-					     new_val_hash);
-			goto out;
+			ret = scoutfs_item_add_batch(sb, &list, key, val);
+			if (ret)
+				goto out;
 		}
 	}
 
-	inode_inc_iversion(inode);
-	inode->i_ctime = CURRENT_TIME;
-	scoutfs_update_inode_item(inode);
-	ret = 0;
-out:
+	/* XXX could add range deletion items around xattr items here */
+
+	/* reset key to first */
+	set_xattr_key_part(key, 0);
+
+	if (flags & XATTR_CREATE)
+		sif = SIF_EXCLUSIVE;
+	else if (flags & XATTR_REPLACE)
+		sif = SIF_REPLACE;
+	else
+		sif = 0;
+
+	ret = scoutfs_hold_trans(sb);
+	if (ret)
+		goto out;
+
+	down_write(&si->xattr_rwsem);
+
+	ret = scoutfs_dirty_inode_item(inode) ?:
+	      scoutfs_item_set_batch(sb, &list, key, last, sif);
+	if (ret == 0) {
+		/* XXX do these want i_mutex or anything? */
+		inode_inc_iversion(inode);
+		inode->i_ctime = CURRENT_TIME;
+		scoutfs_update_inode_item(inode);
+	}
+
 	up_write(&si->xattr_rwsem);
 	scoutfs_release_trans(sb);
+
+out:
+	scoutfs_item_free_batch(sb, &list);
+	scoutfs_key_free(sb, key);
+	scoutfs_key_free(sb, last);
 
 	return ret;
 }
@@ -503,134 +343,129 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
-	struct scoutfs_xattr *xat;
-	struct scoutfs_key key;
-	struct scoutfs_key last;
-	unsigned int item_len;
+	struct scoutfs_xattr_key_footer *foot;
+	struct scoutfs_xattr_key *xkey;
+	struct scoutfs_key_buf *key;
+	struct scoutfs_key_buf *last;
 	ssize_t total;
+	int name_len;
 	int ret;
 
-	item_len = xat_bytes(SCOUTFS_MAX_XATTR_LEN, 0);
-	xat = kmalloc(item_len, GFP_KERNEL);
-	if (!xat)
-		return -ENOMEM;
+	key = alloc_xattr_key(sb, scoutfs_ino(inode),
+			      NULL, SCOUTFS_XATTR_MAX_NAME_LEN, 0);
+	last = alloc_xattr_key(sb, scoutfs_ino(inode), last_xattr_name,
+			       SCOUTFS_XATTR_MAX_NAME_LEN, 0xff);
+	if (!key || !last) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
-	scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_XATTR_KEY, 0);
-	scoutfs_set_key(&last, scoutfs_ino(inode), SCOUTFS_XATTR_KEY, ~0ULL);
-	scoutfs_btree_init_val(&val, xat, item_len);
+	xkey = key->data;
+	xkey->name[0] = '\0';
 
 	down_read(&si->xattr_rwsem);
 
 	total = 0;
 	for (;;) {
-		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		ret = scoutfs_item_next(sb, key, last, NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
-				ret = 0;
+				ret = total;
 			break;
 		}
 
+		/* not used until we verify key len */
+		foot = xattr_key_footer(key);
+
 		/* XXX corruption */
-		if (ret < sizeof(struct scoutfs_xattr)) {
+		if (key->key_len < xattr_key_bytes(1) ||
+		    foot->null != '\0' || foot->part != 0) {
 			ret = -EIO;
 			break;
 		}
 
-		total += xat->name_len + 1;
+		name_len = xattr_key_name_len(key);
+
+		/* XXX corruption? */
+		if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN) {
+			ret = -EIO;
+			break;
+		}
+
+		total += name_len + 1;
 
 		if (size) {
-			if (!buffer || total > size) {
+			if (total > size) {
 				ret = -ERANGE;
 				break;
 			}
 
-			memcpy(buffer, xat->name, xat->name_len);
-			buffer += xat->name_len;
+			memcpy(buffer, xkey->name, name_len);
+			buffer += name_len;
 			*(buffer++) = '\0';
 		}
 
-		scoutfs_inc_key(&key);
+		set_xattr_key_part(key, 0xff);
 	}
 
 	up_read(&si->xattr_rwsem);
+out:
+	scoutfs_key_free(sb, key);
+	scoutfs_key_free(sb, last);
 
-	kfree(xat);
-
-	return ret < 0 ? ret : total;
+	return ret;
 }
 
 /*
- * Delete all the xattr items associted with this inode.  The caller
+ * Delete all the xattr items associated with this inode.  The caller
  * holds a transaction.
  *
- * The name and value hashes are sorted by the hash value instead of the
- * inode so we have to use the inode's xattr items to find them.  We
- * only remove the xattr item once the hash items are removed.
- *
- * Hash items can be shared amongst xattrs whose names or values hash to
- * the same hash value.  We don't bother trying to remove the hash items
- * as the last xattr is removed.  We always try to remove them and allow
- * failure when we try to remove a hash item that wasn't found.
+ * XXX This isn't great because it reads in all the items so that it can
+ * create deletion items for each.  It would be better to have the
+ * caller create range deletion items for all the items covered by the
+ * inode.  That wouldn't require reading at all.
  */
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 {
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
-	struct scoutfs_xattr *xat;
-	struct scoutfs_key last;
-	struct scoutfs_key key;
-	struct scoutfs_key name_key;
-	struct scoutfs_key val_key;
-	unsigned int item_len;
-	u64 val_hash;
+	struct scoutfs_key_buf *key;
+	struct scoutfs_key_buf *last;
 	int ret;
 
-	scoutfs_set_key(&key, ino, SCOUTFS_XATTR_KEY, 0);
-	scoutfs_set_key(&last, ino, SCOUTFS_XATTR_KEY, ~0ULL);
+	key = alloc_xattr_key(sb, ino, NULL, SCOUTFS_XATTR_MAX_NAME_LEN, 0);
+	last = alloc_xattr_key(sb, ino, last_xattr_name,
+			       SCOUTFS_XATTR_MAX_NAME_LEN, 0xff);
+	if (!key || !last) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
-	item_len = xat_bytes(SCOUTFS_MAX_XATTR_LEN, SCOUTFS_MAX_XATTR_LEN),
-	xat = kmalloc(item_len, GFP_KERNEL);
-	if (!xat)
-		return -ENOMEM;
-
-	scoutfs_btree_init_val(&val, xat, item_len);
+	/* the inode is dead so we don't need the xattr sem */
 
 	for (;;) {
-		ret = scoutfs_btree_next(sb, meta, &key, &last, &key, &val);
+		ret = scoutfs_item_next(sb, key, last, NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		/* XXX corruption */
-		if (ret < sizeof(struct scoutfs_xattr) ||
-		    ret != xat_bytes(xat->name_len, xat->value_len)) {
-			ret = -EIO;
-			break;
-		}
-
-		val_hash = scoutfs_name_hash(xat_value(xat), xat->value_len);
-		set_name_val_keys(&name_key, &val_key, &key, val_hash);
-
-		ret = scoutfs_btree_delete(sb, meta, &name_key);
-		if (ret && ret != -ENOENT)
+		ret = scoutfs_item_delete(sb, key);
+		if (ret)
 			break;
 
-		ret = scoutfs_btree_delete(sb, meta, &val_key);
-		if (ret && ret != -ENOENT)
-			break;
-
-		ret = scoutfs_btree_delete(sb, meta, &key);
-		if (ret && ret != -ENOENT)
-			break;
-
-		scoutfs_inc_key(&key);
+		/* don't need to increment past deleted key */
 	}
 
-	kfree(xat);
+out:
+	scoutfs_key_free(sb, key);
+	scoutfs_key_free(sb, last);
 
 	return ret;
+}
+
+int scoutfs_xattr_init(void)
+{
+	memset(last_xattr_name, 0xff, sizeof(last_xattr_name));
+
+	return 0;
 }

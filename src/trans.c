@@ -219,28 +219,27 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 }
 
 /*
- * I think the holder that creates the most dirty item data is
- * symlinking which can create an inode, the three dirent items with a
- * full file name, and a symlink item with a full path.
+ * The holder that creates the most dirty item data is adding a full
+ * size xattr.  The largest xattr can have a 255 byte name and 64KB
+ * value.
  *
  * XXX Assuming the worst case here too aggressively limits the number
  * of concurrent holders that can work without being blocked when they
  * know they'll dirty much less.  We may want to have callers pass in
  * their item, key, and val budgets if that's not too fragile.
- *
- * XXX fix to use real backref and symlink items, placeholders for now
  */
-#define HOLD_WORST_ITEMS 5
-#define HOLD_WORST_KEYS (sizeof(struct scoutfs_inode_key) +		\
-			 sizeof(struct scoutfs_dirent_key) + SCOUTFS_NAME_LEN +\
-			 sizeof(struct scoutfs_readdir_key) +		\
-			 sizeof(struct scoutfs_readdir_key) +		\
-			 sizeof(struct scoutfs_inode_key))
-#define HOLD_WORST_VALS (sizeof(struct scoutfs_inode) +			\
-			 sizeof(struct scoutfs_dirent) +		\
-			 sizeof(struct scoutfs_dirent) + SCOUTFS_NAME_LEN + \
-			 sizeof(struct scoutfs_dirent) + SCOUTFS_NAME_LEN + \
-			 SCOUTFS_SYMLINK_MAX_SIZE)
+#define HOLD_WORST_ITEMS \
+	SCOUTFS_XATTR_MAX_PARTS
+
+#define HOLD_WORST_KEYS \
+	(SCOUTFS_XATTR_MAX_PARTS *				\
+		(sizeof(struct scoutfs_xattr_key) +		\
+		 SCOUTFS_XATTR_MAX_NAME_LEN +			\
+		 sizeof(struct scoutfs_xattr_key_footer)))
+
+#define HOLD_WORST_VALS \
+	 (sizeof(struct scoutfs_xattr_val_header) +		\
+	  SCOUTFS_XATTR_MAX_SIZE)
 
 /*
  * We're able to hold the transaction if the current dirty item bytes

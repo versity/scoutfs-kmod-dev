@@ -312,6 +312,7 @@ static int __init scoutfs_module_init(void)
 
 	ret = scoutfs_inode_init() ?:
 	      scoutfs_dir_init() ?:
+	      scoutfs_xattr_init() ?:
 	      register_filesystem(&scoutfs_fs_type);
 	if (ret)
 		teardown_module();

@@ -35,8 +35,6 @@ struct scoutfs_sb_info;
 	__print_symbolic(type,						       \
 		{ SCOUTFS_INODE_KEY,		"INODE" },		       \
 		{ SCOUTFS_XATTR_KEY,		"XATTR" },		       \
-		{ SCOUTFS_XATTR_NAME_HASH_KEY,	"XATTR_NAME_HASH"},	       \
-		{ SCOUTFS_XATTR_VAL_HASH_KEY,	"XATTR_VAL_HASH" },	       \
 		{ SCOUTFS_DIRENT_KEY,		"DIRENT" },		       \
 		{ SCOUTFS_LINK_BACKREF_KEY,	"LINK_BACKREF"},	       \
 		{ SCOUTFS_SYMLINK_KEY,		"SYMLINK" },		       \

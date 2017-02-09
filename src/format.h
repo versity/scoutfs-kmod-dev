@@ -231,9 +231,7 @@ struct scoutfs_key {
  * have to stress about cleverly allocating the types.
  */
 #define SCOUTFS_INODE_KEY		1
-#define SCOUTFS_XATTR_KEY		2
-#define SCOUTFS_XATTR_NAME_HASH_KEY	3
-#define SCOUTFS_XATTR_VAL_HASH_KEY	4
+#define SCOUTFS_XATTR_KEY		3
 #define SCOUTFS_DIRENT_KEY		5
 #define SCOUTFS_READDIR_KEY		6
 #define SCOUTFS_LINK_BACKREF_KEY	7
@@ -284,6 +282,23 @@ struct scoutfs_data_key {
 	__u8 type;
 	__be64 ino;
 	__be64 block;
+} __packed;
+
+/* value is each item's part of the full xattr value for the off/len */
+struct scoutfs_xattr_key {
+	__u8 type;
+	__be64 ino;
+	__u8 name[0];
+} __packed;
+
+struct scoutfs_xattr_key_footer {
+	__u8 null;
+	__u8 part;
+} __packed;
+
+struct scoutfs_xattr_val_header {
+	__le16 part_len;
+	__u8 last_part;
 } __packed;
 
 struct scoutfs_btree_root {
@@ -447,6 +462,13 @@ struct scoutfs_dirent {
 /* S32_MAX avoids the (int) sign bit and might avoid sloppy bugs */
 #define SCOUTFS_LINK_MAX S32_MAX
 
+#define SCOUTFS_XATTR_MAX_NAME_LEN 255
+#define SCOUTFS_XATTR_MAX_SIZE 65536
+#define SCOUTFS_XATTR_PART_SIZE \
+	(SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_xattr_val_header))
+#define SCOUTFS_XATTR_MAX_PARTS \
+	DIV_ROUND_UP(SCOUTFS_XATTR_MAX_SIZE, SCOUTFS_XATTR_PART_SIZE)
+
 /*
  * We only use 31 bits for readdir positions so that we don't confuse
  * old signed 32bit f_pos applications or those on the other side of
@@ -469,15 +491,6 @@ enum {
 	SCOUTFS_DT_SOCK,
 	SCOUTFS_DT_WHT,
 };
-
-#define SCOUTFS_MAX_XATTR_LEN 255
-#define SCOUTFS_XATTR_NAME_HASH_MASK 7ULL
-
-struct scoutfs_xattr {
-	__u8 name_len;
-	__u8 value_len;
-	__u8 name[0];
-} __packed;
 
 struct scoutfs_extent {
 	__le64	blkno;

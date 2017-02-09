@@ -10,4 +10,6 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size);
 
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino);
 
+int scoutfs_xattr_init(void);
+
 #endif

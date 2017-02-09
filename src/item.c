@@ -40,6 +40,11 @@
  * clobber them in creation and skip them in lookups.
  */
 
+static bool invalid_flags(int sif)
+{
+	return (sif & SIF_EXCLUSIVE) && (sif & SIF_REPLACE);
+}
+
 struct item_cache {
 	spinlock_t lock;
 	struct rb_root items;
@@ -339,6 +344,23 @@ static void erase_item(struct super_block *sb, struct item_cache *cac,
 }
 
 /*
+ * Turn an item that the caller has found while holding the lock into a
+ * deletion item.  The caller will free whatever we put in the deletion
+ * value after releasing the lock.
+ */
+static void become_deletion_item(struct super_block *sb,
+				 struct item_cache *cac,
+				 struct cached_item *item,
+				 struct kvec *del_val)
+{
+	scoutfs_kvec_clone(del_val, item->val);
+	scoutfs_kvec_init_null(item->val);
+	item->deletion = 1;
+	mark_item_dirty(cac, item);
+	scoutfs_inc_counter(sb, item_delete);
+}
+
+/*
  * Try to insert the given item.  If there's already a non-deletion item
  * with the insertion key then return -EEXIST.  An existing deletion
  * item is replaced and freed.
@@ -572,6 +594,37 @@ int scoutfs_item_lookup_exact(struct super_block *sb,
 }
 
 /*
+ * Return the next linked node in the tree that isn't a deletion item
+ * and which is still within the last allowed key value.
+ */
+static struct cached_item *next_item_node(struct rb_root *root,
+					  struct cached_item *item,
+					  struct scoutfs_key_buf *last)
+{
+	struct rb_node *node;
+
+	while (item) {
+		node = rb_next(&item->node);
+		if (!node) {
+			item = NULL;
+			break;
+		}
+
+		item = container_of(node, struct cached_item, node);
+
+		if (scoutfs_key_compare(item->key, last) > 0) {
+			item = NULL;
+			break;
+		}
+
+		if (!item->deletion)
+			break;
+	}
+
+	return item;
+}
+
+/*
  * Find the next item to return from the "_next" item interface.  It's the
  * next item from the key that isn't a deletion item and is within the
  * bounds of the end of the cache and the caller's last key.
@@ -582,27 +635,17 @@ static struct cached_item *item_for_next(struct rb_root *root,
 					 struct scoutfs_key_buf *last)
 {
 	struct cached_item *item;
-	struct rb_node *node;
 
 	/* limit by the lesser of the two */
-	if (scoutfs_key_compare(range_end, last) < 0)
+	if (range_end && scoutfs_key_compare(range_end, last) < 0)
 		last = range_end;
 
 	item = next_item(root, key);
-	while (item) {
-		if (scoutfs_key_compare(item->key, last) > 0) {
+	if (item) {
+		if (scoutfs_key_compare(item->key, last) > 0)
 			item = NULL;
-			break;
-		}
-
-		if (!item->deletion)
-			break;
-
-		node = rb_next(&item->node);
-		if (node)
-			item = container_of(node, struct cached_item, node);
-		else
-			item = NULL;
+		else if (item->deletion)
+			item = next_item_node(root, item, last);
 	}
 
 	return item;
@@ -934,6 +977,123 @@ out:
 	return ret;
 }
 
+/*
+ * Atomically set the caller's items to be the only cached items in the
+ * caller's range.  Any existing items that overlap with the caller's
+ * items are replaced.  Any existing items in the range that aren't in
+ * the caller's list will be replaced with deletion items.  The deletion
+ * items and the caller's inserted items will all be marked dirty.
+ *
+ * In practice this is used for relatively few items at a time, at most
+ * on the order of 16.  So we're not too worried with it walking a small
+ * number of items a few times when the caller provides flags that have
+ * to check for existing items.
+ *
+ * Returns -ENODATA if SIF_REPLACE is set and a batch item doesn't have
+ * a matching existing item or -EEXIST if SIF_EXCLUSIVE is set and a
+ * batch item does have an existing item.
+ */
+int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
+			   struct scoutfs_key_buf *start,
+			   struct scoutfs_key_buf *end, int sif)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct scoutfs_key_buf *missing;
+	SCOUTFS_DECLARE_KVEC(del_val);
+	struct cached_item *exist;
+	struct cached_item *item;
+	struct cached_item *tmp;
+	unsigned long flags;
+	int cmp;
+	int ret;
+
+	if (WARN_ON_ONCE(invalid_flags(sif)))
+		return -EINVAL;
+
+//	trace_scoutfs_item_set_batch(sb, start, end);
+
+	if (WARN_ON_ONCE(scoutfs_key_compare(start, end) > 0))
+		return -EINVAL;
+
+	missing = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!missing)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	while (!check_range(sb, &cac->ranges, start, missing)) {
+
+		spin_unlock_irqrestore(&cac->lock, flags);
+		ret = scoutfs_manifest_read_items(sb, start, missing);
+		spin_lock_irqsave(&cac->lock, flags);
+
+		if (ret)
+			goto out;
+	}
+
+	/* check for _EXCLUSIVE or _REPLACE errors before destroying items */
+	if (!list_empty(list) && (sif & (SIF_EXCLUSIVE | SIF_REPLACE))) {
+
+		item = list_first_entry(list, struct cached_item, entry);
+		exist = item_for_next(&cac->items, start, NULL, end);
+
+		while (item) {
+			/* compare keys, with bias to finding _REPLACE err */
+			if (exist)
+				cmp = scoutfs_key_compare(item->key,
+							  exist->key);
+			else
+				cmp = -1;
+
+			if (cmp < 0) {
+				if (sif & SIF_REPLACE) {
+					ret = -ENODATA;
+					goto out;
+				}
+				if (item->entry.next != list)
+					item = list_next_entry(item, entry);
+				else
+					item = NULL;
+
+			} else if (cmp > 0) {
+				exist = next_item_node(&cac->items, exist, end);
+
+			} else {
+				/* cmp == 0 */
+				if (sif & SIF_EXCLUSIVE) {
+					ret = -EEXIST;
+					goto out;
+				}
+			}
+		}
+
+	}
+
+	/* delete everything in the range */
+	for (exist = item_for_next(&cac->items, start, NULL, end);
+	     exist; exist = next_item_node(&cac->items, exist, end)) {
+
+		scoutfs_kvec_init_null(del_val);
+		become_deletion_item(sb, cac, exist, del_val);
+		scoutfs_kvec_kfree(del_val);
+	}
+
+	/* insert the caller's items, overwriting any existing */
+	list_for_each_entry_safe(item, tmp, list, entry) {
+		list_del_init(&item->entry);
+		insert_item(sb, cac, item, true);
+		mark_item_dirty(cac, item);
+	}
+
+	ret = 0;
+out:
+	spin_unlock_irqrestore(&cac->lock, flags);
+	scoutfs_key_free(sb, missing);
+
+	return ret;
+}
+
 void scoutfs_item_free_batch(struct super_block *sb, struct list_head *list)
 {
 	struct cached_item *item;
@@ -1045,23 +1205,6 @@ out:
 
 	trace_printk("ret %d\n", ret);
 	return ret;
-}
-
-/*
- * Turn an item that the caller has found while holding the lock into a
- * deletion item.  The caller will free whatever we put in the deletion
- * value after releasing the lock.
- */
-static void become_deletion_item(struct super_block *sb,
-				 struct item_cache *cac,
-				 struct cached_item *item,
-				 struct kvec *del_val)
-{
-	scoutfs_kvec_clone(del_val, item->val);
-	scoutfs_kvec_init_null(item->val);
-	item->deletion = 1;
-	mark_item_dirty(cac, item);
-	scoutfs_inc_counter(sb, item_delete);
 }
 
 /*

@@ -301,6 +301,12 @@ struct scoutfs_xattr_val_header {
 	__u8 last_part;
 } __packed;
 
+/* value is the null terminated target path */
+struct scoutfs_symlink_key {
+	__u8 type;
+	__be64 ino;
+} __packed;
+
 struct scoutfs_btree_root {
 	u8 height;
 	struct scoutfs_block_ref ref;

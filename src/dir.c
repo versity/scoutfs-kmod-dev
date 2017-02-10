@@ -628,6 +628,15 @@ out:
 	return ret;
 }
 
+static void init_symlink_key(struct scoutfs_key_buf *key,
+			     struct scoutfs_symlink_key *skey, u64 ino)
+{
+	skey->type = SCOUTFS_SYMLINK_KEY;
+	skey->ino = cpu_to_be64(ino);
+
+	scoutfs_key_init(key, skey, sizeof(struct scoutfs_symlink_key));
+}
+
 /*
  * Full a buffer with the null terminated symlink, point nd at it, and
  * return it so put_link can free it once the vfs is done.
@@ -640,18 +649,12 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
 	loff_t size = i_size_read(inode);
-	struct scoutfs_btree_val val;
-	struct scoutfs_key key;
+	struct scoutfs_symlink_key skey;
+	struct scoutfs_key_buf key;
+	SCOUTFS_DECLARE_KVEC(val);
 	char *path;
-	int bytes;
-	int off;
 	int ret;
-	int k;
-
-	/* update for kvec items */
-	return ERR_PTR(-EINVAL);
 
 	/* XXX corruption */
 	if (size == 0 || size > SCOUTFS_SYMLINK_MAX_SIZE)
@@ -665,30 +668,17 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	if (!path)
 		return ERR_PTR(-ENOMEM);
 
-	for (off = 0, k = 0; off < size ; k++) {
-		scoutfs_set_key(&key, scoutfs_ino(inode),
-				SCOUTFS_SYMLINK_KEY, k);
-		bytes = min_t(int, size - off, SCOUTFS_MAX_ITEM_LEN);
-		scoutfs_btree_init_val(&val, path + off, bytes);
-		val.check_size_eq = 1;
+	init_symlink_key(&key, &skey, scoutfs_ino(inode));
+	scoutfs_kvec_init(val, path, size);
 
-		ret = scoutfs_btree_lookup(sb, meta, &key, &val);
-		if (ret < 0) {
-			/* XXX corruption */
-			if (ret == -ENOENT)
-				ret = -EIO;
-			break;
-		}
+	ret = scoutfs_item_lookup(sb, &key, val);
 
-		off += bytes;
-		ret = 0;
-	}
-
-	/* XXX corruption */
-	if (ret == 0 && (off != size || path[off - 1] != '\0'))
+	/* XXX corruption: missing item, wrong size, not null term */
+	if (ret == -ENOENT ||
+	    (ret >= 0 && (ret != size || path[size - 1] != '\0')))
 		ret = -EIO;
 
-	if (ret) {
+	if (ret < 0) {
 		kfree(path);
 		path = ERR_PTR(ret);
 	} else {
@@ -724,18 +714,12 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 			   const char *symname)
 {
 	struct super_block *sb = dir->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_btree_val val;
-	struct inode *inode = NULL;
-	struct scoutfs_key key;
 	const int name_len = strlen(symname) + 1;
-	int off;
-	int bytes;
+	struct scoutfs_symlink_key skey;
+	struct scoutfs_key_buf key;
+	struct inode *inode = NULL;
+	SCOUTFS_DECLARE_KVEC(val);
 	int ret;
-	int k = 0;
-
-	/* update for kvec items */
-	return -EINVAL;
 
 	/* path_max includes null as does our value for nd_set_link */
 	if (name_len > PATH_MAX || name_len > SCOUTFS_SYMLINK_MAX_SIZE)
@@ -755,17 +739,12 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
-	for (k = 0, off = 0; off < name_len; off += bytes, k++) {
-		scoutfs_set_key(&key, scoutfs_ino(inode), SCOUTFS_SYMLINK_KEY,
-				k);
-		bytes = min(name_len - off, SCOUTFS_MAX_ITEM_LEN);
+	init_symlink_key(&key, &skey, scoutfs_ino(inode));
+	scoutfs_kvec_init(val, (void *)symname, name_len);
 
-		scoutfs_btree_init_val(&val, (char *)symname + off, bytes);
-
-		ret = scoutfs_btree_insert(sb, meta, &key, &val);
-		if (ret)
-			goto out;
-	}
+	ret = scoutfs_item_create(sb, &key, val);
+	if (ret)
+		goto out;
 
 	ret = add_entry_items(dir, dentry, inode);
 	if (ret)
@@ -788,41 +767,24 @@ out:
 		if (!IS_ERR_OR_NULL(inode))
 			iput(inode);
 
-		while (k--) {
-			scoutfs_set_key(&key, scoutfs_ino(inode),
-					SCOUTFS_SYMLINK_KEY, k);
-			scoutfs_btree_delete(sb, meta, &key);
-		}
+		scoutfs_item_delete(sb, &key);
 	}
 
 	scoutfs_release_trans(sb);
 	return ret;
 }
 
-/*
- * Delete all the symlink items.  There should only ever be a handful of
- * these that contain the target path of the symlink.
- */
 int scoutfs_symlink_drop(struct super_block *sb, u64 ino)
 {
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_key key;
+	struct scoutfs_symlink_key skey;
+	struct scoutfs_key_buf key;
 	int ret;
-	int nr;
-	int k;
 
-	nr = DIV_ROUND_UP(SCOUTFS_SYMLINK_MAX_SIZE, SCOUTFS_MAX_ITEM_LEN);
+	init_symlink_key(&key, &skey, ino);
 
-	for (k = 0; k < nr; k++) {
-		scoutfs_set_key(&key, ino, SCOUTFS_SYMLINK_KEY, k);
-
-		ret = scoutfs_btree_delete(sb, meta, &key);
-		if (ret < 0) {
-			if (ret == -ENOENT)
-				ret = 0;
-			break;
-		}
-	}
+	ret = scoutfs_item_delete(sb, &key);
+	if (ret == -ENOENT)
+		ret = 0;
 
 	return ret;
 }

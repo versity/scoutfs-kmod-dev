@@ -483,9 +483,10 @@ struct scoutfs_dirent {
 
 #define SCOUTFS_DIRENT_OFF_BITS 31
 #define SCOUTFS_DIRENT_OFF_MASK ((1U << SCOUTFS_DIRENT_OFF_BITS) - 1)
-/* getdents returns next pos with an entry, no entry at (f_pos)~0 */
+/* entries begin after . and .. */
 #define SCOUTFS_DIRENT_FIRST_POS 2
-#define SCOUTFS_DIRENT_LAST_POS (INT_MAX - 1)
+/* getdents returns next pos with an entry, no entry at (f_pos)~0 */
+#define SCOUTFS_DIRENT_LAST_POS (U64_MAX - 1)
 
 enum {
 	SCOUTFS_DT_FIFO = 0,

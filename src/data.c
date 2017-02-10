@@ -25,7 +25,6 @@
 #include "trans.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
-#include "btree.h"
 #include "item.h"
 #include "ioctl.h"
 
@@ -113,86 +112,59 @@ struct data_info {
 #define BHA(bh)							\
 	(bh), (u64)(bh)->b_blocknr, (bh)->b_size, (bh)->b_state	\
 
+static void init_data_key(struct scoutfs_key_buf *key,
+			  struct scoutfs_data_key *dkey, u64 ino, u64 block)
+{
+	dkey->type = SCOUTFS_DATA_KEY;
+	dkey->ino = cpu_to_be64(ino);
+	dkey->block = cpu_to_be64(block);
+
+	scoutfs_key_init(key, dkey, sizeof(struct scoutfs_data_key));
+}
+
 /*
- * Free extents whose blocks fall inside the specified blocks.  The
- * caller holds a transaction.
- *
- * If 'release' is given then blocks are freed inside i_size but the
- * extent items are left behind and their _OFFLINE flag is set.
+ * Delete the data block items in the given region.
  *
  * This is the low level extent item truncate code.  Callers manage
  * higher order truncation and orphan cleanup.
+ *
+ * XXX
+ *  - restore support for releasing data.
+ *  - for final unlink this would be better as a range deletion
+ *  - probably don't want to read items to find them for removal
  */
 int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 				u64 len, bool offline)
 {
-	struct scoutfs_btree_root *meta = SCOUTFS_META(sb);
-	struct scoutfs_extent extent;
-	struct scoutfs_btree_val val;
-	struct scoutfs_key key;
-	struct scoutfs_key first;
-	u64 seq;
+	struct scoutfs_data_key last_dkey;
+	struct scoutfs_data_key dkey;
+	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf key;
 	int ret;
 
-	/* XXX not yet updated */
+	trace_printk("iblock %llu len %llu offline %u\n",
+		     iblock, len, offline);
 
-	scoutfs_set_key(&first, ino, SCOUTFS_EXTENT_KEY, iblock);
-	scoutfs_set_key(&key, ino, SCOUTFS_EXTENT_KEY, iblock + len - 1);
+	if (WARN_ON_ONCE(iblock + len <= iblock) ||
+	    WARN_ON_ONCE(offline))
+		return -EINVAL;
 
-	trace_printk("iblock %llu\n", iblock);
-
-	scoutfs_btree_init_val(&val, &extent, sizeof(extent));
-	val.check_size_eq = 1;
+	init_data_key(&key, &dkey, ino, iblock);
+	init_data_key(&last, &last_dkey, ino, iblock + len - 1);
 
 	for (;;) {
-		ret = scoutfs_btree_prev(sb, meta, &first, &key, &key, &seq,
-					 &val);
+		ret = scoutfs_item_next(sb, &key, &last, NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		len = le64_to_cpu(extent.len);
-		if (WARN_ON_ONCE(len != 1)) {
-			ret = -EIO;
+		/* XXX would set offline bit items here */
+
+		ret = scoutfs_item_delete(sb, &key);
+		if (ret)
 			break;
-		}
-
-		/* XXX corruption: offline and allocation are exclusive */
-		if (!!extent.blkno ==
-		    !!(extent.flags & SCOUTFS_EXTENT_FLAG_OFFLINE)) {
-			ret = -EIO;
-			break;
-		}
-
-		if (offline && (extent.flags & SCOUTFS_EXTENT_FLAG_OFFLINE))
-			continue;
-
-		/* make sure we can delete the extent after freeing */
-		if (extent.blkno) {
-			ret = scoutfs_btree_dirty(sb, meta, &key);
-			if (ret)
-				break;
-
-			ret = scoutfs_buddy_free(sb, cpu_to_le64(seq),
-						 le64_to_cpu(extent.blkno), 0);
-			if (ret)
-				break;
-		}
-
-		if (offline) {
-			extent.blkno = 0;
-			extent.flags |= SCOUTFS_EXTENT_FLAG_OFFLINE;
-			scoutfs_btree_update(sb, meta, &key, &val);
-		} else {
-			ret = scoutfs_btree_delete(sb, meta, &key);
-			if (ret)
-				break;
-		}
-
-		/* XXX sync transaction if it's enormous */
-		scoutfs_dec_key(&key);
 	}
 
 	return ret;
@@ -248,24 +220,13 @@ void scoutfs_data_end_writeback(struct super_block *sb, int err)
 	}
 }
 
-static void init_data_key(struct scoutfs_key_buf *key,
-			  struct scoutfs_data_key *dkey,
-			  struct inode *inode, u64 block)
-{
-	dkey->type = SCOUTFS_DATA_KEY;
-	dkey->ino = cpu_to_be64(scoutfs_ino(inode));
-	dkey->block = cpu_to_be64(block);
-
-	scoutfs_key_init(key, dkey, sizeof(struct scoutfs_data_key));
-}
-
-/* Iterate over all the data block items that make up the page. */
 #define for_each_page_block(page, start, loff, block, key, dkey, val)	   \
 	for (start = 0;							   \
 	     start < PAGE_CACHE_SIZE &&					   \
 		(loff = ((loff_t)page->index << PAGE_CACHE_SHIFT) + start, \
 		 block = loff >> SCOUTFS_BLOCK_SHIFT,			   \
-		 init_data_key(&key, &dkey, page->mapping->host, block),   \
+		 init_data_key(&key, &dkey,				   \
+			       scoutfs_ino(page->mapping->host), block),   \
 		 scoutfs_kvec_init(val, page_address(page) + start,	   \
 				   SCOUTFS_BLOCK_SIZE),			   \
 		 1);							   \

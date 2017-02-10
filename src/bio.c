@@ -197,6 +197,17 @@ int scoutfs_bio_read(struct super_block *sb, struct page **pages,
 	return scoutfs_bio_wait_comp(sb, &comp);
 }
 
+int scoutfs_bio_write(struct super_block *sb, struct page **pages,
+		      u64 blkno, unsigned int nr_blocks)
+{
+	struct scoutfs_bio_completion comp;
+
+	scoutfs_bio_init_comp(&comp);
+	scoutfs_bio_submit_comp(sb, WRITE, pages, blkno, nr_blocks, &comp);
+
+	return scoutfs_bio_wait_comp(sb, &comp);
+}
+
 /* return pointer to the blk 4k block offset amongst the pages */
 void *scoutfs_page_block_address(struct page **pages, unsigned int blk)
 {

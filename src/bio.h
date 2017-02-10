@@ -35,6 +35,8 @@ int scoutfs_bio_wait_comp(struct super_block *sb,
 
 int scoutfs_bio_read(struct super_block *sb, struct page **pages,
 		     u64 blkno, unsigned int nr_blocks);
+int scoutfs_bio_write(struct super_block *sb, struct page **pages,
+		      u64 blkno, unsigned int nr_blocks);
 
 void *scoutfs_page_block_address(struct page **pages, unsigned int blk);
 

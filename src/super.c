@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include <linux/pagemap.h>
 #include <linux/magic.h>
 #include <linux/random.h>
 #include <linux/statfs.h>
@@ -110,26 +111,28 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 /*
  * The caller is responsible for setting the super header's blkno
  * and seq to something reasonable.
+ *
+ * XXX it'd be pretty easy to preallocate to avoid failure here.
  */
 int scoutfs_write_dirty_super(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
-	struct scoutfs_block *bl;
+	struct page *page;
 	int ret;
 
-	/* XXX prealloc? */
-	bl = scoutfs_block_dirty(sb, le64_to_cpu(sbi->super.hdr.blkno));
-	if (WARN_ON_ONCE(IS_ERR(bl)))
-		return PTR_ERR(bl);
-	super = scoutfs_block_data(bl);
+	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!page)
+		return -ENOMEM;
 
+	super = page_address(page);
 	memcpy(super, &sbi->super, sizeof(*super));
-	scoutfs_block_zero(bl, sizeof(*super));
-	scoutfs_block_set_crc(bl);
 
-	ret = scoutfs_block_write_sync(bl);
-	scoutfs_block_put(bl);
+	ret = scoutfs_bio_write(sb, &page, le64_to_cpu(super->hdr.blkno), 1);
+	WARN_ON_ONCE(ret);
+
+	__free_page(page);
+
 	return ret;
 }
 

@@ -22,7 +22,6 @@
 #include <linux/aio.h>
 
 #include "format.h"
-#include "btree.h"
 #include "key.h"
 #include "dir.h"
 #include "name.h"
@@ -51,15 +50,16 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
 				     u8 type)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_btree_root *meta = SCOUTFS_STABLE_META(sb);
 	struct scoutfs_ioctl_inodes_since __user *uargs = (void __user *)arg;
 	struct scoutfs_ioctl_inodes_since args;
 	struct scoutfs_ioctl_ino_seq __user *uiseq;
 	struct scoutfs_ioctl_ino_seq iseq;
-	struct scoutfs_key key;
-	struct scoutfs_key last;
-	u64 seq;
+	struct scoutfs_inode_key last_ikey;
+	struct scoutfs_inode_key ikey;
+	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf key;
 	long bytes;
+	u64 seq;
 	int ret;
 
 	if (copy_from_user(&args, uargs, sizeof(args)))
@@ -69,20 +69,23 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
 	if (args.buf_len < sizeof(iseq) || args.buf_len > INT_MAX)
 		return -EINVAL;
 
-	scoutfs_set_key(&key, args.first_ino, type, 0);
-	scoutfs_set_key(&last, args.last_ino, type, 0);
+	scoutfs_inode_init_key(&key, &ikey, args.first_ino);
+	scoutfs_inode_init_key(&last, &last_ikey, args.last_ino);
 
 	bytes = 0;
 	for (;;) {
-		ret = scoutfs_btree_since(sb, meta, &key, &last, args.seq,
-					  &key, &seq, NULL);
+
+		/* XXX item cache needs to search by seq */
+		seq = !!sb;
+		ret = WARN_ON_ONCE(-EINVAL);
+//		ret = scoutfs_item_since(sb, &key, &last, args.seq, &seq, NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		iseq.ino = scoutfs_key_inode(&key);
+		iseq.ino = be64_to_cpu(ikey.ino);
 		iseq.seq = seq;
 
 		if (copy_to_user(uiseq, &iseq, sizeof(iseq))) {
@@ -97,7 +100,7 @@ static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
 			break;
 		}
 
-		key.inode = cpu_to_le64(iseq.ino + 1);
+		last_ikey.ino = cpu_to_be64(iseq.ino + 1);
 	}
 
 	if (bytes)
@@ -418,7 +421,7 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case SCOUTFS_IOC_INO_PATH:
 		return scoutfs_ioc_ino_path(file, arg);
 	case SCOUTFS_IOC_INODE_DATA_SINCE:
-		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_EXTENT_KEY);
+		return WARN_ON_ONCE(-EINVAL);
 	case SCOUTFS_IOC_DATA_VERSION:
 		return scoutfs_ioc_data_version(file, arg);
 	case SCOUTFS_IOC_RELEASE:

@@ -132,8 +132,8 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
 }
 
-static void init_inode_key(struct scoutfs_key_buf *key,
-			   struct scoutfs_inode_key *ikey, u64 ino)
+void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
+			    struct scoutfs_inode_key *ikey, u64 ino)
 {
 	ikey->type = SCOUTFS_INODE_KEY;
 	ikey->ino = cpu_to_be64(ino);
@@ -150,7 +150,7 @@ static int scoutfs_read_locked_inode(struct inode *inode)
 	SCOUTFS_DECLARE_KVEC(val);
 	int ret;
 
-	init_inode_key(&key, &ikey, scoutfs_ino(inode));
+	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode));
@@ -283,7 +283,7 @@ int scoutfs_dirty_inode_item(struct inode *inode)
 
 	store_inode(&sinode, inode);
 
-	init_inode_key(&key, &ikey, scoutfs_ino(inode));
+	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 
 	ret = scoutfs_item_dirty(sb, &key);
 	if (!ret)
@@ -311,7 +311,7 @@ void scoutfs_update_inode_item(struct inode *inode)
 
 	store_inode(&sinode, inode);
 
-	init_inode_key(&key, &ikey, scoutfs_ino(inode));
+	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	err = scoutfs_item_update(sb, &key, val);
@@ -426,7 +426,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	set_inode_ops(inode);
 
 	store_inode(&sinode, inode);
-	init_inode_key(&key, &ikey, scoutfs_ino(inode));
+	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	ret = scoutfs_item_create(sb, &key, val);
@@ -512,7 +512,7 @@ static void delete_inode(struct super_block *sb, u64 ino)
 	int ret;
 
 	/* sample the inode mode, XXX don't need to copy whole thing here */
-	init_inode_key(&key, &ikey, ino);
+	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode));
@@ -566,7 +566,7 @@ static int process_orphaned_inode(struct super_block *sb, u64 ino)
 	SCOUTFS_DECLARE_KVEC(val);
 	int ret;
 
-	init_inode_key(&key, &ikey, ino);
+	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode));

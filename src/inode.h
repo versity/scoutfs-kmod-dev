@@ -1,6 +1,8 @@
 #ifndef _SCOUTFS_INODE_H_
 #define _SCOUTFS_INODE_H_
 
+#include "key.h"
+
 struct scoutfs_inode_info {
 	u64 ino;
 	u32 salt;
@@ -27,6 +29,9 @@ static inline u64 scoutfs_ino(struct inode *inode)
 {
 	return SCOUTFS_I(inode)->ino;
 }
+
+void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
+			    struct scoutfs_inode_key *ikey, u64 ino);
 
 struct inode *scoutfs_alloc_inode(struct super_block *sb);
 void scoutfs_destroy_inode(struct inode *inode);

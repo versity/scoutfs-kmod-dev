@@ -25,10 +25,8 @@
 #include "dir.h"
 #include "xattr.h"
 #include "msg.h"
-#include "block.h"
 #include "counters.h"
 #include "trans.h"
-#include "buddy.h"
 #include "kvec.h"
 #include "scoutfs_trace.h"
 

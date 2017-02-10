@@ -22,7 +22,6 @@
 #include "super.h"
 #include "key.h"
 #include "inode.h"
-#include "btree.h"
 #include "dir.h"
 #include "data.h"
 #include "scoutfs_trace.h"
@@ -126,8 +125,6 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	inode->i_ctime.tv_sec = le64_to_cpu(cinode->ctime.sec);
 	inode->i_ctime.tv_nsec = le32_to_cpu(cinode->ctime.nsec);
 
-	ci->salt = le32_to_cpu(cinode->salt);
-	atomic64_set(&ci->link_counter, le64_to_cpu(cinode->link_counter));
 	ci->data_version = le64_to_cpu(cinode->data_version);
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
 }
@@ -247,8 +244,6 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->mtime.sec = cpu_to_le64(inode->i_mtime.tv_sec);
 	cinode->mtime.nsec = cpu_to_le32(inode->i_mtime.tv_nsec);
 
-	cinode->salt = cpu_to_le32(ci->salt);
-	cinode->link_counter = cpu_to_le64(atomic64_read(&ci->link_counter));
 	cinode->data_version = cpu_to_le64(ci->data_version);
 	cinode->next_readdir_pos = cpu_to_le64(ci->next_readdir_pos);
 }
@@ -415,8 +410,6 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->data_version = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->staging = false;
-	get_random_bytes(&ci->salt, sizeof(ci->salt));
-	atomic64_set(&ci->link_counter, 0);
 
 	inode->i_ino = ino; /* XXX overflow */
 	inode_init_owner(inode, dir, mode);

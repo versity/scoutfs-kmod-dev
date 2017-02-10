@@ -23,7 +23,6 @@
 #include "inode.h"
 #include "dir.h"
 #include "msg.h"
-#include "block.h"
 
 #define CREATE_TRACE_POINTS
 #include "scoutfs_trace.h"

@@ -35,9 +35,6 @@
  */
 #define SCOUTFS_SUPER_BLKNO ((64 * 1024) >> SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_SUPER_NR 2
-#define SCOUTFS_BUDDY_BLKNO (SCOUTFS_SUPER_BLKNO + SCOUTFS_SUPER_NR)
-
-#define SCOUTFS_MAX_TRANS_BLOCKS  (128 * 1024 * 1024 / SCOUTFS_BLOCK_SIZE)
 
 /*
  * This header is found at the start of every block so that we can
@@ -162,70 +159,6 @@ struct scoutfs_segment_block {
 } __packed;
 
 /*
- * Block references include the sequence number so that we can detect
- * readers racing with writers and so that we can tell that we don't
- * need to follow a reference when traversing based on seqs.
- */
-struct scoutfs_block_ref {
-	__le64 blkno;
-	__le64 seq;
-} __packed;
-
-/*
- * If the block was full of bits the largest possible order would be
- * the block size shift + 3 (BITS_PER_BYTE).  But the header uses
- * up some space and then the buddy bits mean two bits per block.
- * Then +1 for this being the number, not the greatest order.
- */
-#define SCOUTFS_BUDDY_ORDERS (SCOUTFS_BLOCK_SHIFT + 3 - 2 + 1)
-
-struct scoutfs_buddy_block {
-	struct scoutfs_block_header hdr;
-	__le16 first_set[SCOUTFS_BUDDY_ORDERS];
-	__u8 level;
-	__u8 __pad[3]; /* naturally align bits */
-	union {
-		struct scoutfs_buddy_slot {
-			__le64 seq;
-			__le16 free_orders;
-			/* XXX seems like we could hide a bit somewhere */
-			__u8 blkno_off;
-		} __packed slots[0];
-		__le64 bits[0];
-	} __packed;
-} __packed;
-
-/*
- * Each buddy leaf block references order 0 blocks with half of its
- * bitmap.  The other half of the bits are used for the higher order
- * bits.
- */
-#define SCOUTFS_BUDDY_ORDER0_BITS \
-	(((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_block)) * 8) / 2)
-
-#define SCOUTFS_BUDDY_SLOTS						\
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_buddy_block)) /	\
-		sizeof(struct scoutfs_buddy_slot))
-
-struct scoutfs_buddy_root {
-	struct scoutfs_buddy_slot slot;
-	__u8 height;
-} __packed;
-
-/* ((SCOUTFS_BUDDY_SLOTS^5) * SCOUTFS_BUDDY_ORDER0_BITS) > 2^52 */
-#define SCOUTFS_BUDDY_MAX_HEIGHT 6
-
-/*
- * We should be able to make the offset smaller if neither dirents nor
- * data items use the full 64 bits.
- */
-struct scoutfs_key {
-	__le64 inode;
-	u8 type;
-	__le64 offset;
-} __packed;
-
-/*
  * Currently we sort keys by the numeric value of the types, but that
  * isn't necessary.  We could have an arbitrary sort order.  So we don't
  * have to stress about cleverly allocating the types.
@@ -240,8 +173,6 @@ struct scoutfs_key {
 #define SCOUTFS_ORPHAN_KEY		10
 #define SCOUTFS_DATA_KEY		11
 #define SCOUTFS_MAX_UNUSED_KEY		255
-
-#define SCOUTFS_MAX_ITEM_LEN 512
 
 /* value is struct scoutfs_inode */
 struct scoutfs_inode_key {
@@ -307,65 +238,8 @@ struct scoutfs_symlink_key {
 	__be64 ino;
 } __packed;
 
-struct scoutfs_btree_root {
-	u8 height;
-	struct scoutfs_block_ref ref;
-} __packed;
-
-/*
- * @free_end: records the byte offset of the first byte after the free
- * space in the block between the header and the first item.  New items
- * are allocated by subtracting the space they need.
- *
- * @free_reclaim: records the number of bytes of free space amongst the
- * items after free_end.  If a block is compacted then this much new
- * free space would be reclaimed.
- */
-struct scoutfs_btree_block {
-	struct scoutfs_block_header hdr;
-	__le16 free_end;
-	__le16 free_reclaim;
-	__le16 nr_items;
-	__le16 item_offs[0];
-} __packed;
-
-/*
- * The item sequence number is set to the dirty block's sequence number
- * when the item is modified.  It is not changed by splits or merges.
- */
-struct scoutfs_btree_item {
-	struct scoutfs_key key;
-	__le64 seq;
-	__le16 val_len;
-	char val[0];
-} __packed;
-
-/* Blocks are no more than half free. */
-#define SCOUTFS_BTREE_FREE_LIMIT \
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) / 2)
-
 /* XXX does this exist upstream somewhere? */
 #define member_sizeof(TYPE, MEMBER) (sizeof(((TYPE *)0)->MEMBER))
-
-#define SCOUTFS_BTREE_MAX_ITEMS \
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) /	\
-	 (member_sizeof(struct scoutfs_btree_block, item_offs[0]) +	\
-          sizeof(struct scoutfs_btree_item)))
-
-/*
- * We can calculate the max tree depth by calculating how many leaf
- * blocks the tree could reference.  The block device can only reference
- * 2^64 bytes.  The tallest parent tree has half full parent blocks.
- *
- * So we have the relation:
- *
- * ceil(max_items / 2) ^ (max_depth - 1) >= 2^64 / block_size
- *
- * and solve for depth:
- *
- * max_depth = log(ceil(max_items / 2), 2^64 / block_size) + 1
- */
-#define SCOUTFS_BTREE_MAX_DEPTH 10
 
 #define SCOUTFS_UUID_BYTES 16
 
@@ -382,16 +256,11 @@ struct scoutfs_super_block {
 	__le64 alloc_uninit;
 	__le64 total_segs;
 	__le64 free_segs;
-	__le64 total_blocks;
-	__le64 free_blocks;
 	__le64 ring_blkno;
 	__le64 ring_blocks;
 	__le64 ring_tail_block;
 	__le64 ring_gen;
 	__le64 next_seg_seq;
-	__le64 buddy_blocks;
-        struct scoutfs_buddy_root buddy_root;
-        struct scoutfs_btree_root btree_root;
 	struct scoutfs_treap_root alloc_treap_root;
 	struct scoutfs_manifest manifest;
 } __packed;
@@ -418,7 +287,6 @@ struct scoutfs_timespec {
 struct scoutfs_inode {
 	__le64 size;
 	__le64 blocks;
-	__le64 link_counter;
 	__le64 data_version;
 	__le64 next_readdir_pos;
 	__le32 nlink;
@@ -426,7 +294,6 @@ struct scoutfs_inode {
 	__le32 gid;
 	__le32 mode;
 	__le32 rdev;
-	__le32 salt;
 	struct scoutfs_timespec atime;
 	struct scoutfs_timespec ctime;
 	struct scoutfs_timespec mtime;
@@ -449,20 +316,6 @@ struct scoutfs_dirent {
 	__u8 name[0];
 } __packed;
 
-/*
- * Dirent items are stored at keys with the offset set to the hash of
- * the name.  Creation can find that hash values collide and will
- * attempt to linearly probe this many following hash values looking for
- * an unused value.
- *
- * In small directories this doesn't really matter because hash values
- * will so very rarely collide.  At around 50k items we start to see our
- * first collisions.  16 slots is still pretty quick to scan in the
- * btree and it gets us up into the hundreds of millions of entries
- * before enospc is returned as we run out of hash values.
- */
-#define SCOUTFS_DIRENT_COLL_NR 16
-
 #define SCOUTFS_NAME_LEN 255
 
 /* S32_MAX avoids the (int) sign bit and might avoid sloppy bugs */
@@ -475,14 +328,6 @@ struct scoutfs_dirent {
 #define SCOUTFS_XATTR_MAX_PARTS \
 	DIV_ROUND_UP(SCOUTFS_XATTR_MAX_SIZE, SCOUTFS_XATTR_PART_SIZE)
 
-/*
- * We only use 31 bits for readdir positions so that we don't confuse
- * old signed 32bit f_pos applications or those on the other side of
- * network protocols that have limited readir positions.
- */
-
-#define SCOUTFS_DIRENT_OFF_BITS 31
-#define SCOUTFS_DIRENT_OFF_MASK ((1U << SCOUTFS_DIRENT_OFF_BITS) - 1)
 /* entries begin after . and .. */
 #define SCOUTFS_DIRENT_FIRST_POS 2
 /* getdents returns next pos with an entry, no entry at (f_pos)~0 */
@@ -498,14 +343,6 @@ enum {
 	SCOUTFS_DT_SOCK,
 	SCOUTFS_DT_WHT,
 };
-
-struct scoutfs_extent {
-	__le64	blkno;
-	__le64	len;
-	__u8	flags;
-} __packed;
-
-#define SCOUTFS_EXTENT_FLAG_OFFLINE (1 << 0)
 
 /* ino_path can search for backref items with a null term */
 #define SCOUTFS_MAX_KEY_SIZE \

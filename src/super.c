@@ -25,10 +25,8 @@
 #include "dir.h"
 #include "xattr.h"
 #include "msg.h"
-#include "block.h"
 #include "counters.h"
 #include "trans.h"
-#include "buddy.h"
 #include "item.h"
 #include "manifest.h"
 #include "seg.h"
@@ -95,8 +93,6 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-
-	sbi->stable_super = sbi->super;
 
 	le64_add_cpu(&super->hdr.blkno, 1);
 	if (le64_to_cpu(super->hdr.blkno) == (SCOUTFS_SUPER_BLKNO +
@@ -182,8 +178,6 @@ static int read_supers(struct super_block *sb)
 	scoutfs_info(sb, "using super %u with seq %llu",
 		     found, le64_to_cpu(sbi->super.hdr.seq));
 
-	sbi->stable_super = sbi->super;
-
 	return 0;
 }
 
@@ -204,22 +198,11 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 		return -ENOMEM;
 
 	spin_lock_init(&sbi->next_ino_lock);
-	spin_lock_init(&sbi->block_lock);
-	/* radix only inserted with NOFS _preload */
-	INIT_RADIX_TREE(&sbi->block_radix, GFP_ATOMIC);
-	init_waitqueue_head(&sbi->block_wq);
-	atomic_set(&sbi->block_writes, 0);
-	INIT_LIST_HEAD(&sbi->block_lru_list);
-	init_rwsem(&sbi->btree_rwsem);
 	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
-
-	sbi->block_shrinker.shrink = scoutfs_block_shrink;
-	sbi->block_shrinker.seeks = DEFAULT_SEEKS;
-	register_shrinker(&sbi->block_shrinker);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
@@ -269,16 +252,12 @@ static void scoutfs_kill_sb(struct super_block *sb)
 	if (sbi) {
 		scoutfs_compact_destroy(sb);
 		scoutfs_shutdown_trans(sb);
-		scoutfs_buddy_destroy(sb);
-		if (sbi->block_shrinker.shrink == scoutfs_block_shrink)
-			unregister_shrinker(&sbi->block_shrinker);
 		scoutfs_data_destroy(sb);
 		scoutfs_item_destroy(sb);
 		scoutfs_alloc_destroy(sb);
 		scoutfs_manifest_destroy(sb);
 		scoutfs_treap_destroy(sb);
 		scoutfs_seg_destroy(sb);
-		scoutfs_block_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)
 			kset_unregister(sbi->kset);

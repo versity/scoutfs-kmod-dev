@@ -5,7 +5,6 @@
 
 struct scoutfs_inode_info {
 	u64 ino;
-	u32 salt;
 
 	seqcount_t seqcount;
 	u64 data_version;
@@ -14,7 +13,6 @@ struct scoutfs_inode_info {
 	/* holder of i_mutex is staging */
 	bool staging;
 
-	atomic64_t link_counter;
 	struct rw_semaphore xattr_rwsem;
 
 	struct inode inode;

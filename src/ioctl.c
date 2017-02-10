@@ -24,7 +24,6 @@
 #include "format.h"
 #include "key.h"
 #include "dir.h"
-#include "name.h"
 #include "ioctl.h"
 #include "super.h"
 #include "inode.h"

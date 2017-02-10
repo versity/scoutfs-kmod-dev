@@ -18,9 +18,7 @@
 #include <linux/writeback.h>
 
 #include "super.h"
-#include "block.h"
 #include "trans.h"
-#include "buddy.h"
 #include "data.h"
 #include "bio.h"
 #include "item.h"

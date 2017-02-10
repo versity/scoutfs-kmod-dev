@@ -22,7 +22,6 @@
 #include "kvec.h"
 #include "item.h"
 #include "trans.h"
-#include "name.h"
 #include "xattr.h"
 
 /*

@@ -28,6 +28,7 @@
 #include "key.h"
 #include "format.h"
 #include "kvec.h"
+#include "lock.h"
 
 struct scoutfs_sb_info;
 
@@ -229,6 +230,59 @@ TRACE_EVENT(scoutfs_item_insert_batch,
 		scoutfs_key_str(__get_dynamic_array(end), end);
         ),
         TP_printk("start %s end %s", __get_str(start), __get_str(end))
+);
+
+#define lock_mode(mode)							\
+	__print_symbolic(mode,						\
+		{ SCOUTFS_LOCK_MODE_READ,	"READ" },		\
+		{ SCOUTFS_LOCK_MODE_WRITE,	"WRITE" })
+
+DECLARE_EVENT_CLASS(scoutfs_lock_class,
+        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+        TP_ARGS(sb, lck),
+        TP_STRUCT__entry(
+		__field(int, mode)
+                __dynamic_array(char, start, scoutfs_key_str(NULL, lck->start))
+                __dynamic_array(char, end, scoutfs_key_str(NULL, lck->end))
+        ),
+        TP_fast_assign(
+		__entry->mode = lck->mode;
+		scoutfs_key_str(__get_dynamic_array(start), lck->start);
+		scoutfs_key_str(__get_dynamic_array(end), lck->end);
+        ),
+        TP_printk("mode %s start %s end %s",
+		  lock_mode(__entry->mode), __get_str(start), __get_str(end))
+);
+
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_range,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_unlock_range,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+TRACE_EVENT(scoutfs_lock_invalidate_sb,
+        TP_PROTO(struct super_block *sb, int mode,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, mode, start, end),
+        TP_STRUCT__entry(
+		__field(void *, sb)
+		__field(int, mode)
+                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
+                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
+        ),
+        TP_fast_assign(
+		__entry->sb = sb;
+		__entry->mode = mode;
+		scoutfs_key_str(__get_dynamic_array(start), start);
+		scoutfs_key_str(__get_dynamic_array(end), end);
+        ),
+        TP_printk("sb %p mode %s start %s end %s",
+		  __entry->sb, lock_mode(__entry->mode),
+		  __get_str(start), __get_str(end))
 );
 
 #endif /* _TRACE_SCOUTFS_H */

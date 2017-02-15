@@ -99,6 +99,8 @@ static int invalidate_caches(struct super_block *sb, int mode,
 {
 	int ret;
 
+	trace_scoutfs_lock_invalidate_sb(sb, mode, start, end);
+
 	ret = scoutfs_item_writeback(sb, start, end);
 	if (ret)
 		return ret;
@@ -176,6 +178,8 @@ int scoutfs_lock_range(struct super_block *sb, int mode,
 	lck->end = end;
 	lck->mode = mode;
 
+	trace_scoutfs_lock_range(sb, lck);
+
 	ret = wait_event_interruptible(held->waitq, lock_added(held, lck));
 	if (ret == 0) {
 		ret = invalidate_others(sb, mode, start, end);
@@ -190,6 +194,8 @@ void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lck)
 {
 	DECLARE_LOCK_INFO(sb, linf);
 	struct held_locks *held = linf->held;
+
+	trace_scoutfs_unlock_range(sb, lck);
 
 	unlock(held, lck);
 }

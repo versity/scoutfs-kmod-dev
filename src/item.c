@@ -539,7 +539,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 	unsigned long flags;
 	int ret;
 
-//	trace_scoutfs_item_lookup(sb, key, val);
+	trace_scoutfs_item_lookup(sb, key, val);
 
 	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
 	if (!end) {
@@ -944,7 +944,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 	unsigned long flags;
 	int ret;
 
-//	trace_scoutfs_item_insert_batch(sb, start, end);
+	trace_scoutfs_item_insert_batch(sb, start, end);
 
 	if (WARN_ON_ONCE(scoutfs_key_compare(start, end) > 0))
 		return -EINVAL;

@@ -19,6 +19,8 @@ void scoutfs_key_inc_cur_len(struct scoutfs_key_buf *key);
 void scoutfs_key_dec(struct scoutfs_key_buf *key);
 void scoutfs_key_dec_cur_len(struct scoutfs_key_buf *key);
 
+int scoutfs_key_str(char *buf, struct scoutfs_key_buf *key);
+
 /*
  * Initialize a small key in a larger allocated buffer.  This lets
  * callers, for example, search for a small key and get a larger key

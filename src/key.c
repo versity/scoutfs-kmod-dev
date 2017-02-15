@@ -106,3 +106,70 @@ void scoutfs_key_dec(struct scoutfs_key_buf *key)
 	extend_zeros(key);
 	scoutfs_key_dec_cur_len(key);
 }
+
+/* return the bytes of the string including the null term */
+#define snprintf_null(buf, size, fmt, args...) \
+	(snprintf((buf), (size), fmt, ##args) + 1)
+
+/*
+ * Write the null-terminated string that describes the key to the
+ * buffer.  The bytes copied (including the null) is returned.  A null
+ * buffer can be used to find the string size without writing anything.
+ *
+ * XXX nonprintable characters in the trace?
+ */
+int scoutfs_key_str(char *buf, struct scoutfs_key_buf *key)
+{
+	size_t size = buf ? INT_MAX : 0;
+	int len;
+	u8 type;
+
+	if (key->key_len == 0)
+		return snprintf_null(buf, size, "[0 len]");
+
+	type = *(u8 *)key->data;
+
+	switch(type) {
+
+	case SCOUTFS_INODE_KEY: {
+		struct scoutfs_inode_key *ikey = key->data;
+
+		if (key->key_len < sizeof(struct scoutfs_inode_key))
+			break;
+
+		return snprintf_null(buf, size, "ino.%llu",
+				     be64_to_cpu(ikey->ino));
+	}
+
+	case SCOUTFS_XATTR_KEY: {
+		struct scoutfs_xattr_key *xkey = key->data;
+
+		len = (int)key->key_len - offsetof(struct scoutfs_xattr_key,
+						   name[1]);
+		if (len <= 0)
+			break;
+
+		return snprintf_null(buf, size, "xat.%llu.%.*s",
+				     be64_to_cpu(xkey->ino), len, xkey->name);
+	}
+
+	case SCOUTFS_DIRENT_KEY: {
+		struct scoutfs_dirent_key *dkey = key->data;
+
+		len = (int)key->key_len - offsetof(struct scoutfs_dirent_key,
+						   name[1]);
+		if (len <= 0)
+			break;
+
+		return snprintf_null(buf, size, "dnt.%llu.%.*s",
+				     be64_to_cpu(dkey->ino), len, dkey->name);
+	}
+
+	default:
+		return snprintf_null(buf, size, "[unknown type %u len %u]",
+				     type, key->key_len);
+	}
+
+	return snprintf_null(buf, size, "[truncated type %u len %u]",
+			     type, key->key_len);
+}

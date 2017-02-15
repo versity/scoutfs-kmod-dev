@@ -181,19 +181,19 @@ TRACE_EVENT(scoutfs_scan_orphans,
 );
 
 TRACE_EVENT(scoutfs_manifest_add,
-        TP_PROTO(struct super_block *sb, struct kvec *first,
-		 struct kvec *last, u64 segno, u64 seq, u8 level),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *first,
+		 struct scoutfs_key_buf *last, u64 segno, u64 seq, u8 level),
         TP_ARGS(sb, first, last, segno, seq, level),
         TP_STRUCT__entry(
-                __dynamic_array(char, first, scoutfs_kvec_key_strlen(first))
-                __dynamic_array(char, last, scoutfs_kvec_key_strlen(last))
+                __dynamic_array(char, first, scoutfs_key_str(NULL, first))
+                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
 		__field(u64, segno)
 		__field(u64, seq)
 		__field(u8, level)
         ),
         TP_fast_assign(
-		scoutfs_kvec_key_sprintf(__get_dynamic_array(first), first);
-		scoutfs_kvec_key_sprintf(__get_dynamic_array(last), last);
+		scoutfs_key_str(__get_dynamic_array(first), first);
+		scoutfs_key_str(__get_dynamic_array(last), last);
 		__entry->segno = segno;
 		__entry->seq = seq;
 		__entry->level = level;
@@ -204,27 +204,29 @@ TRACE_EVENT(scoutfs_manifest_add,
 );
 
 TRACE_EVENT(scoutfs_item_lookup,
-        TP_PROTO(struct super_block *sb, struct kvec *key, struct kvec *val),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key,
+		 struct kvec *val),
         TP_ARGS(sb, key, val),
         TP_STRUCT__entry(
-                __dynamic_array(char, key, scoutfs_kvec_key_strlen(key))
+                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
         ),
         TP_fast_assign(
-		scoutfs_kvec_key_sprintf(__get_dynamic_array(key), key);
+		scoutfs_key_str(__get_dynamic_array(key), key);
         ),
         TP_printk("key %s", __get_str(key))
 );
 
 TRACE_EVENT(scoutfs_item_insert_batch,
-        TP_PROTO(struct super_block *sb, struct kvec *start, struct kvec *end),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
+		 struct scoutfs_key_buf *end),
         TP_ARGS(sb, start, end),
         TP_STRUCT__entry(
-                __dynamic_array(char, start, scoutfs_kvec_key_strlen(start))
-                __dynamic_array(char, end, scoutfs_kvec_key_strlen(end))
+                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
+                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
         ),
         TP_fast_assign(
-		scoutfs_kvec_key_sprintf(__get_dynamic_array(start), start);
-		scoutfs_kvec_key_sprintf(__get_dynamic_array(end), end);
+		scoutfs_key_str(__get_dynamic_array(start), start);
+		scoutfs_key_str(__get_dynamic_array(end), end);
         ),
         TP_printk("start %s end %s", __get_str(start), __get_str(end))
 );

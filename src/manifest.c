@@ -194,7 +194,7 @@ int scoutfs_manifest_add(struct super_block *sb,
 	unsigned bytes;
 	int ret;
 
-//	trace_scoutfs_manifest_add(sb, first, last, segno, seq, level);
+	trace_scoutfs_manifest_add(sb, first, last, segno, seq, level);
 
 	key_bytes = first->key_len + last->key_len;
 	bytes = offsetof(struct scoutfs_manifest_entry, keys[key_bytes]);

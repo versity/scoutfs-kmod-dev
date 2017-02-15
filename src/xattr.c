@@ -23,6 +23,7 @@
 #include "item.h"
 #include "trans.h"
 #include "xattr.h"
+#include "lock.h"
 
 /*
  * In the simple case an xattr is stored in a single item whose key and
@@ -149,7 +150,9 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct scoutfs_xattr_val_header vh;
 	struct scoutfs_key_buf *key = NULL;
+	struct scoutfs_key_buf *last = NULL;
 	SCOUTFS_DECLARE_KVEC(val);
+	struct scoutfs_lock lck;
 	unsigned int total;
 	unsigned int bytes;
 	unsigned int off;
@@ -169,8 +172,15 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 		return SCOUTFS_XATTR_MAX_SIZE;
 
 	key = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0);
-	if (!key)
-		return -ENOMEM;
+	last = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0xff);
+	if (!key || !last) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_READ, key, last, &lck);
+	if (ret)
+		goto out;
 
 	down_read(&si->xattr_rwsem);
 
@@ -219,8 +229,11 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 		ret = -ERANGE;
 
 	up_read(&si->xattr_rwsem);
-	scoutfs_key_free(sb, key);
+	scoutfs_unlock_range(sb, &lck);
 
+out:
+	scoutfs_key_free(sb, key);
+	scoutfs_key_free(sb, last);
 	return ret;
 }
 
@@ -250,6 +263,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct scoutfs_xattr_val_header vh;
 	size_t name_len = strlen(name);
 	SCOUTFS_DECLARE_KVEC(val);
+	struct scoutfs_lock lck;
 	unsigned int bytes;
 	unsigned int off;
 	LIST_HEAD(list);
@@ -274,6 +288,10 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		goto out;
 	}
 
+	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_WRITE, key, last, &lck);
+	if (ret)
+		goto out;
+
 	/* build up batch of new items for the new xattr */
 	if (value) {
 		for_each_xattr_item(key, val, &vh, (void *)value, size,
@@ -281,7 +299,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 
 			ret = scoutfs_item_add_batch(sb, &list, key, val);
 			if (ret)
-				goto out;
+				goto unlock;
 		}
 	}
 
@@ -299,7 +317,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 
 	ret = scoutfs_hold_trans(sb);
 	if (ret)
-		goto out;
+		goto unlock;
 
 	down_write(&si->xattr_rwsem);
 
@@ -314,6 +332,9 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 
 	up_write(&si->xattr_rwsem);
 	scoutfs_release_trans(sb);
+
+unlock:
+	scoutfs_unlock_range(sb, &lck);
 
 out:
 	scoutfs_item_free_batch(sb, &list);
@@ -346,6 +367,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct scoutfs_xattr_key *xkey;
 	struct scoutfs_key_buf *key;
 	struct scoutfs_key_buf *last;
+	struct scoutfs_lock lck;
 	ssize_t total;
 	int name_len;
 	int ret;
@@ -361,6 +383,10 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 	xkey = key->data;
 	xkey->name[0] = '\0';
+
+	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_READ, key, last, &lck);
+	if (ret)
+		goto out;
 
 	down_read(&si->xattr_rwsem);
 
@@ -408,6 +434,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	}
 
 	up_read(&si->xattr_rwsem);
+	scoutfs_unlock_range(sb, &lck);
 out:
 	scoutfs_key_free(sb, key);
 	scoutfs_key_free(sb, last);
@@ -428,6 +455,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 {
 	struct scoutfs_key_buf *key;
 	struct scoutfs_key_buf *last;
+	struct scoutfs_lock lck;
 	int ret;
 
 	key = alloc_xattr_key(sb, ino, NULL, SCOUTFS_XATTR_MAX_NAME_LEN, 0);
@@ -437,6 +465,11 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 		ret = -ENOMEM;
 		goto out;
 	}
+
+	/* while we read to delete we need to writeback others */
+	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_WRITE, key, last, &lck);
+	if (ret)
+		goto out;
 
 	/* the inode is dead so we don't need the xattr sem */
 
@@ -454,6 +487,8 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 
 		/* don't need to increment past deleted key */
 	}
+
+	scoutfs_unlock_range(sb, &lck);
 
 out:
 	scoutfs_key_free(sb, key);

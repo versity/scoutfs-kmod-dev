@@ -24,6 +24,7 @@
 #include "seg.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
+#include "trans.h"
 
 /*
  * A simple rbtree of cached items isolates the item API callers from
@@ -1534,6 +1535,79 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 	}
 
 	return 0;
+}
+
+/*
+ * The caller wants us to write out any dirty items within the given
+ * range.  We look for any dirty items within the range and if we find
+ * any we issue a sync which writes out all the dirty items.
+ */
+int scoutfs_item_writeback(struct super_block *sb,
+			   struct scoutfs_key_buf *start,
+			   struct scoutfs_key_buf *end)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *item;
+	unsigned long flags;
+	bool sync = false;
+	int ret = 0;
+
+	/* XXX think about racing with trans write */
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	if (cac->nr_dirty_items) {
+		item = next_item(&cac->items, start);
+		if (item && !(item->dirty & ITEM_DIRTY))
+			item = next_dirty(item);
+		if (item && scoutfs_key_compare(item->key, end) <= 0)
+			sync = true;
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	if (sync)
+		ret = scoutfs_sync_fs(sb, 1);
+
+	return ret;
+}
+
+/*
+ * The caller wants us to drop any items within the range on the floor.
+ * They should have ensured that items in this range won't be dirty.
+ */
+void scoutfs_item_invalidate(struct super_block *sb,
+			     struct scoutfs_key_buf *start,
+			     struct scoutfs_key_buf *end)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *next;
+	struct cached_item *item;
+	struct rb_node *node;
+	unsigned long flags;
+
+	/* XXX think about racing with trans write */
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	for (item = next_item(&cac->items, start);
+	     item && scoutfs_key_compare(item->key, end) <= 0;
+	     item = next) {
+
+		/* XXX seems like this should be a helper? */
+		node = rb_next(&item->node);
+		if (node)
+			next = container_of(node, struct cached_item, node);
+		else
+			next = NULL;
+
+		WARN_ON_ONCE(item->dirty & ITEM_DIRTY);
+		erase_item(sb, cac, item);
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
 }
 
 int scoutfs_item_setup(struct super_block *sb)

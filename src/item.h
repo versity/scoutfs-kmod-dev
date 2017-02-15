@@ -57,6 +57,12 @@ bool scoutfs_item_has_dirty(struct super_block *sb);
 bool scoutfs_item_dirty_fits_single(struct super_block *sb, u32 nr_items,
 			            u32 key_bytes, u32 val_bytes);
 int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg);
+int scoutfs_item_writeback(struct super_block *sb,
+			   struct scoutfs_key_buf *start,
+			   struct scoutfs_key_buf *end);
+void scoutfs_item_invalidate(struct super_block *sb,
+			     struct scoutfs_key_buf *start,
+			     struct scoutfs_key_buf *end);
 
 int scoutfs_item_setup(struct super_block *sb);
 void scoutfs_item_destroy(struct super_block *sb);

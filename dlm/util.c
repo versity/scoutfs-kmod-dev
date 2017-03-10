@@ -105,6 +105,15 @@ void dlm_message_out(struct dlm_message *ms)
 	ms->m_bastmode		= cpu_to_le32(ms->m_bastmode);
 	ms->m_asts		= cpu_to_le32(ms->m_asts);
 	ms->m_result		= cpu_to_le32(to_dlm_errno(ms->m_result));
+
+	ms->m_grstart_len	= cpu_to_le16(ms->m_grstart_len);
+	ms->m_grend_len		= cpu_to_le16(ms->m_grend_len);
+
+	ms->m_rqstart_len	= cpu_to_le16(ms->m_rqstart_len);
+	ms->m_rqend_len		= cpu_to_le16(ms->m_rqend_len);
+
+	ms->m_baststart_len	= cpu_to_le16(ms->m_baststart_len);
+	ms->m_bastend_len	= cpu_to_le16(ms->m_bastend_len);
 }
 
 void dlm_message_in(struct dlm_message *ms)
@@ -129,6 +138,15 @@ void dlm_message_in(struct dlm_message *ms)
 	ms->m_bastmode		= le32_to_cpu(ms->m_bastmode);
 	ms->m_asts		= le32_to_cpu(ms->m_asts);
 	ms->m_result		= from_dlm_errno(le32_to_cpu(ms->m_result));
+
+	ms->m_grstart_len	= le16_to_cpu(ms->m_grstart_len);
+	ms->m_grend_len		= le16_to_cpu(ms->m_grend_len);
+
+	ms->m_rqstart_len	= le16_to_cpu(ms->m_rqstart_len);
+	ms->m_rqend_len		= le16_to_cpu(ms->m_rqend_len);
+
+	ms->m_baststart_len	= le16_to_cpu(ms->m_baststart_len);
+	ms->m_bastend_len	= le16_to_cpu(ms->m_bastend_len);
 }
 
 void dlm_rcom_out(struct dlm_rcom *rc)

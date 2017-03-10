@@ -15,7 +15,7 @@
 #include <linux/poll.h>
 #include <linux/signal.h>
 #include <linux/spinlock.h>
-#include <linux/dlm.h>
+#include "include/linux/dlm.h"
 #include <linux/dlm_device.h>
 #include <linux/slab.h>
 
@@ -207,7 +207,7 @@ void dlm_user_add_ast(struct dlm_lkb *lkb, uint32_t flags, int mode,
 
 	spin_lock(&proc->asts_spin);
 
-	rv = dlm_add_lkb_callback(lkb, flags, mode, status, sbflags, seq);
+	rv = dlm_add_lkb_callback(lkb, flags, mode, NULL, status, sbflags, seq);
 	if (rv < 0) {
 		spin_unlock(&proc->asts_spin);
 		goto out;

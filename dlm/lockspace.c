@@ -632,9 +632,9 @@ static int new_lockspace(const char *name, const char *cluster,
 	error = do_uevent(ls, 1);
 	if (error)
 		goto out_recoverd;
-
 	wait_for_completion(&ls->ls_members_done);
 	error = ls->ls_members_result;
+
 	if (error)
 		goto out_members;
 

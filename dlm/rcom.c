@@ -399,7 +399,7 @@ static void pack_rcom_lock(struct dlm_rsb *r, struct dlm_lkb *lkb,
 	rl->rl_status = lkb->lkb_status;
 	rl->rl_wait_type = cpu_to_le16(lkb->lkb_wait_type);
 
-	if (lkb->lkb_bastfn)
+	if (lkb->lkb_bastfn || lkb->lkb_rbastfn)
 		rl->rl_asts |= DLM_CB_BAST;
 	if (lkb->lkb_astfn)
 		rl->rl_asts |= DLM_CB_CAST;

@@ -169,4 +169,25 @@ int dlm_unlock(dlm_lockspace_t *lockspace,
 	       struct dlm_lksb *lksb,
 	       void *astarg);
 
+struct dlm_key {
+	void	*val;
+	int	len;
+};
+
+int dlm_lock_range(dlm_lockspace_t *lockspace,
+		   int mode,
+		   struct dlm_key *start,
+		   struct dlm_key *end,
+		   struct dlm_lksb *lksb,
+		   uint32_t flags,
+		   void *name,
+		   unsigned int namelen,
+		   uint32_t parent_lkid,
+		   void (*lockast) (void *astarg),
+		   void *astarg,
+		   void (*rbast) (void *astarg, int mode,
+				  struct dlm_key *start, struct dlm_key *end));
+
+#define	dlm_unlock_range	dlm_unlock
+
 #endif				/* __DLM_DOT_H__ */

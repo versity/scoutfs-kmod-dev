@@ -49,13 +49,35 @@ static void dlm_dump_lkb_callbacks(struct dlm_lkb *lkb)
 	}
 }
 
+static void fixup_cb_pointers(struct dlm_callback *cb)
+{
+	struct dlm_key *start = &cb->start;
+	struct dlm_key *end = &cb->end;
+
+	cb->range.start = start;
+	cb->range.end = end;
+	start->val = &cb->startval;
+	end->val = &cb->endval;
+}
+
+/*
+ * Range must not be NULL for DLM_CB_BAST.
+ */
 int dlm_add_lkb_callback(struct dlm_lkb *lkb, uint32_t flags, int mode,
-			 int status, uint32_t sbflags, uint64_t seq)
+			 struct dlm_range *range, int status, uint32_t sbflags,
+			 uint64_t seq)
 {
 	struct dlm_ls *ls = lkb->lkb_resource->res_ls;
 	uint64_t prev_seq;
 	int prev_mode;
 	int i, rv;
+	struct dlm_range *prev_range;
+
+	if ((flags & DLM_CB_BAST) && !range) {
+		/* XXX: user.c doesn't handle this yet, fail for now */
+		WARN_ON_ONCE(1);
+		return -EINVAL;
+	}
 
 	for (i = 0; i < DLM_CALLBACKS_SIZE; i++) {
 		if (lkb->lkb_callbacks[i].seq)
@@ -73,9 +95,12 @@ int dlm_add_lkb_callback(struct dlm_lkb *lkb, uint32_t flags, int mode,
 
 			prev_seq = lkb->lkb_callbacks[i-1].seq;
 			prev_mode = lkb->lkb_callbacks[i-1].mode;
+			prev_range = &lkb->lkb_callbacks[i-1].range;
 
-			if ((prev_mode == mode) ||
-			    (prev_mode > mode && prev_mode > DLM_LOCK_PR)) {
+			/* Below check needs to look at range */
+			if (ranges_overlap(prev_range, range) &&
+			    ((prev_mode == mode) ||
+			     (prev_mode > mode && prev_mode > DLM_LOCK_PR))) {
 
 				log_debug(ls, "skip %x add bast %llu mode %d "
 					  "for bast %llu mode %d",
@@ -94,6 +119,21 @@ int dlm_add_lkb_callback(struct dlm_lkb *lkb, uint32_t flags, int mode,
 		lkb->lkb_callbacks[i].mode = mode;
 		lkb->lkb_callbacks[i].sb_status = status;
 		lkb->lkb_callbacks[i].sb_flags = (sbflags & 0x000000FF);
+
+		if (range) {
+			struct dlm_key *start = &lkb->lkb_callbacks[i].start;
+			struct dlm_key *end = &lkb->lkb_callbacks[i].end;
+
+			lkb->lkb_callbacks[i].range.start = start;
+			lkb->lkb_callbacks[i].range.end = end;
+
+			start->len = range->start->len;
+			start->val = &lkb->lkb_callbacks[i].startval;
+			end->len = range->end->len;
+			end->val = &lkb->lkb_callbacks[i].endval;
+			memcpy(start->val, range->start->val, range->start->len);
+			memcpy(end->val, range->end->val, range->end->len);
+		}
 		rv = 0;
 		break;
 	}
@@ -126,6 +166,7 @@ int dlm_rem_lkb_callback(struct dlm_ls *ls, struct dlm_lkb *lkb,
 
 	memcpy(cb, &lkb->lkb_callbacks[0], sizeof(struct dlm_callback));
 	memset(&lkb->lkb_callbacks[0], 0, sizeof(struct dlm_callback));
+	fixup_cb_pointers(cb);
 
 	/* shift others down */
 
@@ -171,8 +212,8 @@ int dlm_rem_lkb_callback(struct dlm_ls *ls, struct dlm_lkb *lkb,
 	return rv;
 }
 
-void dlm_add_cb(struct dlm_lkb *lkb, uint32_t flags, int mode, int status,
-		uint32_t sbflags)
+void dlm_add_cb(struct dlm_lkb *lkb, uint32_t flags, int mode,
+		struct dlm_range *range, int status, uint32_t sbflags)
 {
 	struct dlm_ls *ls = lkb->lkb_resource->res_ls;
 	uint64_t new_seq, prev_seq;
@@ -190,7 +231,8 @@ void dlm_add_cb(struct dlm_lkb *lkb, uint32_t flags, int mode, int status,
 	mutex_lock(&lkb->lkb_cb_mutex);
 	prev_seq = lkb->lkb_callbacks[0].seq;
 
-	rv = dlm_add_lkb_callback(lkb, flags, mode, status, sbflags, new_seq);
+	rv = dlm_add_lkb_callback(lkb, flags, mode, range, status, sbflags,
+				  new_seq);
 	if (rv < 0)
 		goto out;
 
@@ -215,10 +257,21 @@ void dlm_callback_work(struct work_struct *work)
 	struct dlm_ls *ls = lkb->lkb_resource->res_ls;
 	void (*castfn) (void *astparam);
 	void (*bastfn) (void *astparam, int mode);
-	struct dlm_callback callbacks[DLM_CALLBACKS_SIZE];
+	void (*rbastfn) (void *astarg, int mode, struct dlm_key *start,
+			 struct dlm_key *end);
+	/*
+	 * XXX: This used to be on the stack, but the inline buffers
+	 * added for range support blow out our stack.
+	 *
+	 * struct dlm_callback callbacks[DLM_CALLBACKS_SIZE];
+	 */
+	struct dlm_callback *callbacks;
 	int i, rv, resid;
 
-	memset(&callbacks, 0, sizeof(callbacks));
+	callbacks = kcalloc(DLM_CALLBACKS_SIZE, sizeof(*callbacks), GFP_NOFS);
+	WARN_ON_ONCE(!callbacks);
+	if (!callbacks)
+		return;
 
 	mutex_lock(&lkb->lkb_cb_mutex);
 	if (!lkb->lkb_callbacks[0].seq) {
@@ -245,6 +298,7 @@ void dlm_callback_work(struct work_struct *work)
 
 	castfn = lkb->lkb_astfn;
 	bastfn = lkb->lkb_bastfn;
+	rbastfn = lkb->lkb_rbastfn;
 
 	for (i = 0; i < DLM_CALLBACKS_SIZE; i++) {
 		if (!callbacks[i].seq)
@@ -252,7 +306,11 @@ void dlm_callback_work(struct work_struct *work)
 		if (callbacks[i].flags & DLM_CB_SKIP) {
 			continue;
 		} else if (callbacks[i].flags & DLM_CB_BAST) {
-			bastfn(lkb->lkb_astparam, callbacks[i].mode);
+			if (rbastfn)
+				rbastfn(lkb->lkb_astparam, callbacks[i].mode,
+					&callbacks[i].start, &callbacks[i].end);
+			else
+				bastfn(lkb->lkb_astparam, callbacks[i].mode);
 		} else if (callbacks[i].flags & DLM_CB_CAST) {
 			lkb->lkb_lksb->sb_status = callbacks[i].sb_status;
 			lkb->lkb_lksb->sb_flags = callbacks[i].sb_flags;
@@ -262,6 +320,7 @@ void dlm_callback_work(struct work_struct *work)
 
 	/* undo kref_get from dlm_add_callback, may cause lkb to be freed */
 	dlm_put_lkb(lkb);
+	kfree(callbacks);
 }
 
 int dlm_callback_start(struct dlm_ls *ls)

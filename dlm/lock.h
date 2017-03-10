@@ -76,5 +76,7 @@ static inline void unlock_rsb(struct dlm_rsb *r)
 	mutex_unlock(&r->res_mutex);
 }
 
+int ranges_overlap(struct dlm_range *range1, struct dlm_range *range2);
+
 #endif
 

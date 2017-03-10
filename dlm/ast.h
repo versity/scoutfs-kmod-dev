@@ -15,11 +15,12 @@
 
 void dlm_del_ast(struct dlm_lkb *lkb);
 int dlm_add_lkb_callback(struct dlm_lkb *lkb, uint32_t flags, int mode,
-                         int status, uint32_t sbflags, uint64_t seq);
+                         struct dlm_range *range, int status, uint32_t sbflags,
+			 uint64_t seq);
 int dlm_rem_lkb_callback(struct dlm_ls *ls, struct dlm_lkb *lkb,
                          struct dlm_callback *cb, int *resid);
-void dlm_add_cb(struct dlm_lkb *lkb, uint32_t flags, int mode, int status,
-                uint32_t sbflags);
+void dlm_add_cb(struct dlm_lkb *lkb, uint32_t flags, int mode,
+		struct dlm_range *range, int status, uint32_t sbflags);
 
 void dlm_callback_work(struct work_struct *work);
 int dlm_callback_start(struct dlm_ls *ls);

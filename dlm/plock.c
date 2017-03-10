@@ -9,7 +9,7 @@
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/poll.h>
-#include <linux/dlm.h>
+#include "include/linux/dlm.h"
 #include <linux/dlm_plock.h>
 #include <linux/slab.h>
 

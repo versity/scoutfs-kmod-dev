@@ -40,8 +40,9 @@
 #include <linux/idr.h>
 #include <linux/ratelimit.h>
 #include <asm/uaccess.h>
+#include <linux/rbtree.h>
 
-#include <linux/dlm.h>
+#include "include/linux/dlm.h"
 #include "config.h"
 
 /* Size of the temp buffer midcomms allocates on the stack.
@@ -95,6 +96,10 @@ do { \
   } \
 }
 
+struct dlm_range {
+	struct dlm_key	*start;
+	struct dlm_key	*end;
+};
 
 #define DLM_RTF_SHRINK		0x00000001
 
@@ -140,7 +145,11 @@ struct dlm_args {
 	void			(*astfn) (void *astparam);
 	void			*astparam;
 	void			(*bastfn) (void *astparam, int mode);
+	void			(*rbastfn) (void *astarg, int mode,
+					    struct dlm_key *start,
+					    struct dlm_key *end);
 	int			mode;
+	struct dlm_range	range;
 	struct dlm_lksb		*lksb;
 	unsigned long		timeout;
 };
@@ -213,12 +222,22 @@ struct dlm_args {
 #define DLM_CB_BAST		0x00000002
 #define DLM_CB_SKIP		0x00000004
 
+
+#define	DLM_KEY_LEN		296
+
 struct dlm_callback {
 	uint64_t		seq;
 	uint32_t		flags;		/* DLM_CBF_ */
 	int			sb_status;	/* copy to lksb status */
 	uint8_t			sb_flags;	/* copy to lksb flags */
 	int8_t			mode; /* rq mode of bast, gr mode of cast */
+	struct dlm_range	range;
+
+	/* XXX: This should be dynamically allocated */
+	struct dlm_key		start;
+	struct dlm_key		end;
+	char			startval[DLM_KEY_LEN];
+	char			endval[DLM_KEY_LEN];
 };
 
 struct dlm_lkb {
@@ -237,12 +256,18 @@ struct dlm_lkb {
 	int8_t			lkb_rqmode;	/* requested lock mode */
 	int8_t			lkb_grmode;	/* granted lock mode */
 	int8_t			lkb_highbast;	/* highest mode bast sent for */
+	/* XXX: Keep some history of bast ranges here? */
+
+	struct dlm_range	lkb_rqrange;
+	struct dlm_range	lkb_grrange;
 
 	int8_t			lkb_wait_type;	/* type of reply waiting for */
 	int8_t			lkb_wait_count;
 	int			lkb_wait_nodeid; /* for debugging */
 
 	struct list_head	lkb_statequeue;	/* rsb g/c/w list */
+	struct rb_node		lkb_statenode; /* rsb g/c/w interval tree */
+	struct dlm_key		*lkb_subtree_last; /* rsb g/c/w interval tree */
 	struct list_head	lkb_rsb_lookup;	/* waiting for rsb lookup */
 	struct list_head	lkb_wait_reply;	/* waiting for remote reply */
 	struct list_head	lkb_ownqueue;	/* list of locks for a process */
@@ -266,6 +291,9 @@ struct dlm_lkb {
 	struct dlm_lksb		*lkb_lksb;      /* caller's status block */
 	void			(*lkb_astfn) (void *astparam);
 	void			(*lkb_bastfn) (void *astparam, int mode);
+	void			(*lkb_rbastfn) (void *astparam, int mode,
+						struct dlm_key *start,
+						struct dlm_key *end);
 	union {
 		void			*lkb_astparam;	/* caller's ast arg */
 		struct dlm_user_args	*lkb_ua;
@@ -303,7 +331,9 @@ struct dlm_rsb {
 		struct rb_node		res_hashnode;	/* rsbtbl */
 	};
 	struct list_head	res_grantqueue;
+	struct rb_root		res_grantroot;
 	struct list_head	res_convertqueue;
+	struct rb_root		res_convertroot;
 	struct list_head	res_waitqueue;
 
 	struct list_head	res_root_list;	    /* used for recovery */
@@ -414,6 +444,25 @@ struct dlm_message {
 	int			m_bastmode;
 	int			m_asts;
 	int			m_result;	/* 0 or -EXXX */
+	/*
+	 * XXX: These should start *after* m_extra to preserve
+	 * compatibility with the old message format
+	 */
+	char			m_grstart[DLM_KEY_LEN];
+	char			m_grend[DLM_KEY_LEN];
+	uint16_t		m_grstart_len;
+	uint16_t		m_grend_len;
+
+	char			m_rqstart[DLM_KEY_LEN];
+	char			m_rqend[DLM_KEY_LEN];
+	uint16_t		m_rqstart_len;
+	uint16_t		m_rqend_len;
+
+	char			m_baststart[DLM_KEY_LEN];
+	char			m_bastend[DLM_KEY_LEN];
+	uint16_t		m_baststart_len;
+	uint16_t		m_bastend_len;
+
 	char			m_extra[0];	/* name or lvb */
 };
 

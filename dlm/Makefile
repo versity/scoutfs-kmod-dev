@@ -1,4 +1,4 @@
-obj-$(CONFIG_DLM) +=		dlm.o
+obj-$(CONFIG_DLM) +=		dlm.o dlmtest.o
 dlm-y :=			ast.o \
 				config.o \
 				dir.o \
@@ -16,5 +16,5 @@ dlm-y :=			ast.o \
 				recoverd.o \
 				requestqueue.o \
 				user.o \
-				util.o 
+				util.o
 dlm-$(CONFIG_DLM_DEBUG) +=	debug_fs.o

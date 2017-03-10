@@ -18,9 +18,15 @@ int scoutfs_lock_range(struct super_block *sb, int mode,
 		       struct scoutfs_key_buf *start,
 		       struct scoutfs_key_buf *end,
 		       struct scoutfs_lock *lck);
+int scoutfs_lock_range_lvb(struct super_block *sb, int mode,
+			   struct scoutfs_key_buf *start,
+			   struct scoutfs_key_buf *end,
+			   void *caller_lvb, unsigned lvb_len,
+			   struct scoutfs_lock *lck);
 void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lck);
 
 int scoutfs_lock_setup(struct super_block *sb);
+void scoutfs_lock_shutdown(struct super_block *sb);
 void scoutfs_lock_destroy(struct super_block *sb);
 
 #endif

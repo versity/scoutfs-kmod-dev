@@ -172,7 +172,10 @@ struct scoutfs_segment_block {
 #define SCOUTFS_EXTENT_KEY		9
 #define SCOUTFS_ORPHAN_KEY		10
 #define SCOUTFS_DATA_KEY		11
-#define SCOUTFS_MAX_UNUSED_KEY		255
+/* not found in the fs */
+#define SCOUTFS_MAX_UNUSED_KEY		253
+#define SCOUTFS_NET_ADDR_KEY		254
+#define SCOUTFS_NET_LISTEN_KEY		255
 
 /* value is struct scoutfs_inode */
 struct scoutfs_inode_key {
@@ -347,5 +350,43 @@ enum {
 /* ino_path can search for backref items with a null term */
 #define SCOUTFS_MAX_KEY_SIZE \
 	offsetof(struct scoutfs_link_backref_key, name[SCOUTFS_NAME_LEN + 1])
+
+/*
+ * messages over the wire.
+ */
+
+/* XXX ipv6 */
+struct scoutfs_inet_addr {
+	__le32 addr;
+	__le16 port;
+} __packed;
+
+/*
+ * This header precedes and describes all network messages sent over
+ * sockets.  The id is set by the request and sent in the reply.  The
+ * type is strictly redundant in the reply because the id will find the
+ * send but we include it in both packets to make it easier to observe
+ * replies without having the id from their previous request.
+ */
+struct scoutfs_net_header {
+	__le64 id;
+	__le16 data_len;
+	__u8 type;
+	__u8 status;
+	__u8 data[0];
+};
+
+enum {
+	/* sends and receives a struct scoutfs_timeval */
+	SCOUTFS_NET_TRADE_TIME = 0,
+	SCOUTFS_NET_UNKNOWN,
+};
+
+enum {
+	SCOUTFS_NET_STATUS_REQUEST = 0,
+	SCOUTFS_NET_STATUS_SUCCESS,
+	SCOUTFS_NET_STATUS_ERROR,
+	SCOUTFS_NET_STATUS_UNKNOWN,
+};
 
 #endif

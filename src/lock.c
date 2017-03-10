@@ -35,8 +35,13 @@ struct held_locks {
 	spinlock_t lock;
 	struct list_head list;
 	wait_queue_head_t waitq;
-};
 
+	/* super hacky fake lvb that only allows one specific key */
+	char fake_lvb[sizeof(struct scoutfs_inet_addr)];
+	struct scoutfs_key_buf fake_lvb_key;
+	char fake_lvb_key_data[SCOUTFS_MAX_KEY_SIZE];
+
+};
 
 /*
  * allocated per-super.  Stored in the global list for finding supers
@@ -45,6 +50,7 @@ struct held_locks {
  */
 struct lock_info {
 	struct super_block *sb;
+	bool shutdown;
 	struct held_locks *held;
 	struct list_head id_head;
 	struct list_head global_head;
@@ -65,12 +71,19 @@ static bool compatible_locks(struct scoutfs_lock *a, struct scoutfs_lock *b)
 	       scoutfs_key_compare_ranges(a->start, a->end, b->start, b->end);
 }
 
-static bool lock_added(struct held_locks *held, struct scoutfs_lock *add)
+/* also returns true if we're shutting down, caller tests after waiting */
+static bool lock_added(struct lock_info *linf, struct scoutfs_lock *add)
 {
+	struct held_locks *held = linf->held;
 	struct scoutfs_lock *lck;
 	bool added = true;
 
 	spin_lock(&held->lock);
+
+	if (linf->shutdown) {
+		added = true;
+		goto out;
+	}
 
 	list_for_each_entry(lck, &held->list, head) {
 		if (!compatible_locks(lck, add)) {
@@ -82,6 +95,7 @@ static bool lock_added(struct held_locks *held, struct scoutfs_lock *add)
 	if (added)
 		list_add(&add->head, &held->list);
 
+out:
 	spin_unlock(&held->lock);
 
 	return added;
@@ -154,6 +168,74 @@ static void unlock(struct held_locks *held, struct scoutfs_lock *lck)
 	wake_up(&held->waitq);
 }
 
+static void assert_fake_lvb(struct held_locks *held,
+			    struct scoutfs_key_buf *start,
+			    struct scoutfs_key_buf *end, unsigned lvb_len)
+{
+
+	BUG_ON(scoutfs_key_compare(start, end));
+	BUG_ON(lvb_len != sizeof(held->fake_lvb));
+	BUG_ON(held->fake_lvb_key.key_len &&
+	       scoutfs_key_compare(&held->fake_lvb_key, start));
+}
+
+/*
+ * Acquire a coherent lock on the given range of keys.  While the lock
+ * is held other lockers are serialized.  Cache coherency is maintained
+ * by the locking infrastructure.  Lock acquisition causes writeout from
+ * or invalidation of other caches.
+ *
+ * The caller provides the opaque lock structure used for storage and
+ * their start and end pointers will be accessed while the lock is held.
+ */
+int scoutfs_lock_range_lvb(struct super_block *sb, int mode,
+			   struct scoutfs_key_buf *start,
+			   struct scoutfs_key_buf *end,
+			   void *caller_lvb, unsigned lvb_len,
+			   struct scoutfs_lock *lck)
+{
+	DECLARE_LOCK_INFO(sb, linf);
+	struct held_locks *held = linf->held;
+	int ret;
+
+	INIT_LIST_HEAD(&lck->head);
+	lck->sb = sb;
+	lck->start = start;
+	lck->end = end;
+	lck->mode = mode;
+
+	trace_scoutfs_lock_range(sb, lck);
+
+	ret = wait_event_interruptible(held->waitq, lock_added(linf, lck));
+	if (ret)
+		goto out;
+
+	if (linf->shutdown) {
+		/* unlocked, but we own it */
+		if (!list_empty(&lck->head))
+			unlock(held, lck);
+		ret = -ESHUTDOWN;
+		goto out;
+	}
+
+	ret = invalidate_others(sb, mode, start, end);
+	if (ret)
+		goto out;
+
+	if (caller_lvb) {
+		assert_fake_lvb(held, start, end, lvb_len);
+		if (mode == SCOUTFS_LOCK_MODE_WRITE) {
+			memcpy(held->fake_lvb, caller_lvb, lvb_len);
+			scoutfs_key_copy(&held->fake_lvb_key, start);
+		} else {
+			memcpy(caller_lvb, held->fake_lvb, lvb_len);
+		}
+	}
+
+out:
+	return ret;
+}
+
 /*
  * Acquire a coherent lock on the given range of keys.  While the lock
  * is held other lockers are serialized.  Cache coherency is maintained
@@ -168,26 +250,7 @@ int scoutfs_lock_range(struct super_block *sb, int mode,
 		       struct scoutfs_key_buf *end,
 		       struct scoutfs_lock *lck)
 {
-	DECLARE_LOCK_INFO(sb, linf);
-	struct held_locks *held = linf->held;
-	int ret;
-
-	INIT_LIST_HEAD(&lck->head);
-	lck->sb = sb;
-	lck->start = start;
-	lck->end = end;
-	lck->mode = mode;
-
-	trace_scoutfs_lock_range(sb, lck);
-
-	ret = wait_event_interruptible(held->waitq, lock_added(held, lck));
-	if (ret == 0) {
-		ret = invalidate_others(sb, mode, start, end);
-		if (ret)
-			unlock(held, lck);
-	}
-
-	return ret;
+	return scoutfs_lock_range_lvb(sb, mode, start, end, NULL, 0, lck);
 }
 
 void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lck)
@@ -216,7 +279,7 @@ int scoutfs_lock_setup(struct super_block *sb)
 	if (!linf)
 		return -ENOMEM;
 
-	held = kmalloc(sizeof(struct held_locks), GFP_KERNEL);
+	held = kzalloc(sizeof(struct held_locks), GFP_KERNEL);
 	if (!held) {
 		kfree(linf);
 		return -ENOMEM;
@@ -225,8 +288,11 @@ int scoutfs_lock_setup(struct super_block *sb)
 	spin_lock_init(&held->lock);
 	INIT_LIST_HEAD(&held->list);
 	init_waitqueue_head(&held->waitq);
+	scoutfs_key_init_buf_len(&held->fake_lvb_key, &held->fake_lvb_key_data,
+				 0, sizeof(held->fake_lvb_key_data));
 
 	linf->sb = sb;
+	linf->shutdown = false;
 	linf->held = held;
 	INIT_LIST_HEAD(&linf->id_head);
 	INIT_LIST_HEAD(&linf->global_head);
@@ -257,6 +323,24 @@ int scoutfs_lock_setup(struct super_block *sb)
 		kfree(held);
 
 	return 0;
+}
+
+/*
+ * Cause all lock attempts from our super to fail, waking anyone who is
+ * currently blocked attempting to lock.  Now that locks can't block we
+ * can easily tear down subsystems that use locking before freeing lock
+ * infrastructure.
+ */
+void scoutfs_lock_shutdown(struct super_block *sb)
+{
+	DECLARE_LOCK_INFO(sb, linf);
+	struct held_locks *held = linf->held;
+
+	spin_lock(&held->lock);
+	linf->shutdown = true;
+	spin_unlock(&held->lock);
+
+	wake_up(&held->waitq);
 }
 
 void scoutfs_lock_destroy(struct super_block *sb)

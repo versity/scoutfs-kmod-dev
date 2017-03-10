@@ -14,6 +14,7 @@ struct treap_info;
 struct compact_info;
 struct data_info;
 struct lock_info;
+struct net_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -42,6 +43,7 @@ struct scoutfs_sb_info {
 	struct workqueue_struct *trans_write_workq;
 
 	struct lock_info *lock_info;
+	struct net_info *net_info;
 
 	/* $sysfs/fs/scoutfs/$id/ */
 	struct kset *kset;

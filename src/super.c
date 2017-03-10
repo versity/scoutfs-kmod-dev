@@ -36,6 +36,7 @@
 #include "compact.h"
 #include "data.h"
 #include "lock.h"
+#include "net.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -221,9 +222,12 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 //	      scoutfs_buddy_setup(sb) ?:
 	      scoutfs_compact_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:
-	      scoutfs_lock_setup(sb);
+	      scoutfs_lock_setup(sb) ?:
+	      scoutfs_net_setup(sb);
 	if (ret)
 		return ret;
+
+	scoutfs_net_trade_time(sb);
 
 	scoutfs_advance_dirty_super(sb);
 
@@ -252,6 +256,8 @@ static void scoutfs_kill_sb(struct super_block *sb)
 
 	kill_block_super(sb);
 	if (sbi) {
+		scoutfs_lock_shutdown(sb);
+		scoutfs_net_destroy(sb);
 		scoutfs_lock_destroy(sb);
 		scoutfs_compact_destroy(sb);
 		scoutfs_shutdown_trans(sb);

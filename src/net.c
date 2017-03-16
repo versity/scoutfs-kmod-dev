@@ -131,9 +131,6 @@ struct sock_info {
 	struct work_struct shutdown_work;
 
 	struct socket *sock;
-	void (*orig_state_change)(struct sock *sk);
-	void (*orig_data_ready)(struct sock *sk, int bytes);
-	void (*orig_write_space)(struct sock *sk);
 };
 
 /*
@@ -179,18 +176,6 @@ static void queue_sock_work(struct sock_info *sinf, struct work_struct *work)
 
 	if (!sinf->shutting_down)
 		queue_work(nti->sock_wq, work);
-}
-
-/*
- * By giving all the sockets all the work funcs we can have one set of
- * socket callbacks that queue the appropriate work only if the func has
- * been set.
- */
-static void queue_sock_work_if_func(struct sock_info *sinf,
-				    struct work_struct *work)
-{
-	if (work->func)
-		queue_sock_work(sinf, work);
 }
 
 /*
@@ -519,32 +504,21 @@ static void scoutfs_net_recv_func(struct work_struct *work)
  */
 static void scoutfs_net_state_change(struct sock *sk)
 {
-	void (*state_change)(struct sock *sk);
-	struct sock_info *sinf;
+	struct sock_info *sinf = sk->sk_user_data;
 
-	read_lock(&sk->sk_callback_lock);
+	trace_printk("sk %p state %u sinf %p\n", sk, sk->sk_state, sinf);
 
-	sinf = sk->sk_user_data;
-	if (sinf == NULL) {
-		state_change = sk->sk_state_change;
-		goto out;
+	if (sinf && sinf->sock->sk == sk) {
+		switch(sk->sk_state) {
+			case TCP_ESTABLISHED:
+				queue_sock_work(sinf, &sinf->send_work);
+				queue_sock_work(sinf, &sinf->recv_work);
+				break;
+			case TCP_CLOSE:
+				queue_sock_work(sinf, &sinf->shutdown_work);
+				break;
+		}
 	}
-
-	trace_printk("sinf %p state %u\n", sinf, sk->sk_state);
-
-	switch(sk->sk_state) {
-		case TCP_ESTABLISHED:
-			queue_sock_work_if_func(sinf, &sinf->send_work);
-			queue_sock_work_if_func(sinf, &sinf->recv_work);
-			break;
-		case TCP_CLOSE:
-			queue_sock_work(sinf, &sinf->shutdown_work);
-			break;
-	}
-	state_change = sinf->orig_state_change;
-out:
-	read_unlock(&sk->sk_callback_lock);
-	state_change(sk);
 }
 
 /*
@@ -553,25 +527,16 @@ out:
  */
 static void scoutfs_net_data_ready(struct sock *sk, int bytes)
 {
-	void (*data_ready)(struct sock *sk, int bytes);
-	struct sock_info *sinf;
+	struct sock_info *sinf = sk->sk_user_data;
 
-	read_lock(&sk->sk_callback_lock);
+	trace_printk("sk %p bytes %d sinf %p\n", sk, bytes, sinf);
 
-	sinf = sk->sk_user_data;
-	if (sinf == NULL) {
-		data_ready = sk->sk_data_ready;
-		goto out;
+	if (sinf && sinf->sock->sk == sk) {
+		if (sk->sk_state == TCP_LISTEN)
+			queue_sock_work(sinf, &sinf->accept_work);
+		else
+			queue_sock_work(sinf, &sinf->recv_work);
 	}
-
-	trace_printk("sinf %p bytes %d\n", sinf, bytes);
-
-	queue_sock_work_if_func(sinf, &sinf->recv_work);
-	queue_sock_work_if_func(sinf, &sinf->accept_work);
-	data_ready = sinf->orig_data_ready;
-out:
-	read_unlock(&sk->sk_callback_lock);
-	data_ready(sk, bytes);
 }
 
 /*
@@ -580,48 +545,32 @@ out:
  */
 static void scoutfs_net_write_space(struct sock *sk)
 {
-	void (*write_space)(struct sock *sk);
-	struct sock_info *sinf;
+	struct sock_info *sinf = sk->sk_user_data;
 
-	read_lock(&sk->sk_callback_lock);
+	trace_printk("sk %p sinf %p\n", sk, sinf);
 
-	sinf = sk->sk_user_data;
-	if (sinf == NULL) {
-		write_space = sk->sk_write_space;
-		goto out;
+	if (sinf && sinf->sock->sk == sk) {
+		if (sk_stream_is_writeable(sk))
+			clear_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+		queue_sock_work(sinf, &sinf->send_work);
 	}
-
-	trace_printk("sinf %p\n", sinf);
-
-	queue_sock_work_if_func(sinf, &sinf->send_work);
-	write_space = sinf->orig_write_space;
-out:
-	read_unlock(&sk->sk_callback_lock);
-	write_space(sk);
 }
 
 /*
- * For accepted sockets our callbacks can execute and queue work the
- * moment user_data is set so this should only be called once the socket
- * info is fully initialized.
+ * Accepted sockets inherit the sk fields from the listening socket so
+ * all the callbacks check that the sinf they're working on points to
+ * the socket executing the callback.  This ensures that we'll only get
+ * callbacks doing work once we've initialized sinf for the socket.
  */
 static void set_sock_callbacks(struct sock_info *sinf)
 {
-	struct socket *sock = sinf->sock;
-	struct sock *sk = sock->sk;
-
-	write_lock_bh(&sk->sk_callback_lock);
-
-	sinf->orig_state_change = sk->sk_state_change;
-	sinf->orig_data_ready = sk->sk_data_ready;
-	sinf->orig_write_space = sk->sk_write_space;
+	struct sock *sk = sinf->sock->sk;
 
 	sk->sk_state_change = scoutfs_net_state_change;
 	sk->sk_data_ready = scoutfs_net_data_ready;
 	sk->sk_write_space = scoutfs_net_write_space;
 	sk->sk_user_data = sinf;
 
-	write_unlock_bh(&sk->sk_callback_lock);
 }
 
 /* get or set the address of the listening server depending on mode */
@@ -693,7 +642,6 @@ static void scoutfs_net_shutdown_func(struct work_struct *work)
 	struct super_block *sb = sinf->sb;
 	DECLARE_NET_INFO(sb, nti);
 	struct socket *sock = sinf->sock;
-	struct sock *sk;
 
 	trace_printk("sinf %p sock %p shutting_down %d\n",
 		     sinf, sock, sinf->shutting_down);
@@ -704,16 +652,7 @@ static void scoutfs_net_shutdown_func(struct work_struct *work)
 		return;
 	}
 
-	if (sock) {
-		sk = sock->sk;
-
-		write_lock_bh(&sk->sk_callback_lock);
-		sk->sk_state_change = sinf->orig_state_change;
-		sk->sk_data_ready = sinf->orig_data_ready;
-		sk->sk_write_space = sinf->orig_write_space;
-		sk->sk_user_data = NULL;
-		write_unlock_bh(&sk->sk_callback_lock);
-	}
+	kernel_sock_shutdown(sock, SHUT_RDWR);
 
 	mutex_lock(&nti->mutex);
 
@@ -860,6 +799,9 @@ static void scoutfs_net_accept_func(struct work_struct *work)
 			break;
 		}
 
+		trace_printk("accepted sinf %p sock %p sk %p\n",
+			     new_sinf, new_sock, new_sock->sk);
+
 		new_sinf->sock = new_sock;
 		INIT_WORK(&new_sinf->send_work, scoutfs_net_send_func);
 		INIT_WORK(&new_sinf->recv_work, scoutfs_net_recv_func);
@@ -910,6 +852,9 @@ static void scoutfs_net_listen_func(struct work_struct *work)
 	if (ret)
 		goto out;
 
+	trace_printk("listening sinf %p sock %p sk %p\n",
+		     sinf, sock, sock->sk);
+
 	sinf->sock = sock;
 	INIT_WORK(&sinf->accept_work, scoutfs_net_accept_func);
 
@@ -955,6 +900,9 @@ static void scoutfs_net_connect_func(struct work_struct *work)
 	ret = sock_create_kern(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
 	if (ret)
 		goto out;
+
+	trace_printk("connecting sinf %p sock %p sk %p\n",
+		     sinf, sock, sock->sk);
 
 	sinf->sock = sock;
 

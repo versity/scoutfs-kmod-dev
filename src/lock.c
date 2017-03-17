@@ -144,7 +144,7 @@ static int invalidate_others(struct super_block *from, int mode,
 {
 	DECLARE_LOCK_INFO(from, from_linf);
 	struct lock_info *linf;
-	int ret;
+	int ret = 0;
 
 	down_read(&global_rwsem);
 

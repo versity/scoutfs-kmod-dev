@@ -525,6 +525,92 @@ restart:
 }
 
 /*
+ * Remove a given cached range.  The caller has already removed all the
+ * items that fell within the range.  There can be any number of
+ * existing cached ranges that overlap with the range that should be
+ * removed.
+ *
+ * The caller's range has full precision keys that specify the endpoints
+ * that will not be considered cached.  If we use them to set the new
+ * bounds of existing ranges then we have to dec/inc them into the range
+ * to have them represent the last/first valid key, not the first/last
+ * key to be removed.
+ *
+ * Like insert_, we're responsible for freeing the caller's range.  We
+ * might insert it into the tree to track the other half of a range
+ * that's split by the removal.
+ */
+static void remove_range(struct super_block *sb, struct rb_root *root,
+			 struct cached_range *rem)
+{
+	struct cached_range *rng;
+	struct rb_node *parent;
+	struct rb_node **node;
+	bool insert = false;
+	int start_cmp;
+	int end_cmp;
+	int cmp;
+
+restart:
+	parent = NULL;
+	node = &root->rb_node;
+	while (*node) {
+		parent = *node;
+		rng = container_of(*node, struct cached_range, node);
+
+		cmp = scoutfs_key_compare_ranges(rem->start, rem->end,
+						 rng->start, rng->end);
+		/* simple iteration until we overlap */
+		if (cmp < 0) {
+			node = &(*node)->rb_left;
+			continue;
+		} else if (cmp > 0) {
+			node = &(*node)->rb_right;
+			continue;
+		}
+
+		start_cmp = scoutfs_key_compare(rem->start, rng->start);
+		end_cmp = scoutfs_key_compare(rem->end, rng->end);
+
+		/* remove the middle of an existing range, insert other half */
+		if (start_cmp > 0 && end_cmp < 0) {
+			swap(rng->end, rem->start);
+			scoutfs_key_dec(rng->end);
+
+			swap(rem->start, rem->end);
+			scoutfs_key_inc(rem->start);
+			insert = true;
+			goto restart;
+		}
+
+		/* remove partial overlap from existing */
+		if (start_cmp < 0 && end_cmp < 0) {
+			swap(rem->end, rng->start);
+			scoutfs_key_inc(rng->start);
+			continue;
+		}
+
+		if (start_cmp > 0 && end_cmp > 0) {
+			swap(rem->start, rng->end);
+			scoutfs_key_dec(rng->end);
+			continue;
+		}
+
+		/* erase and free existing surrounded by removal */
+		rb_erase(&rng->node, root);
+		free_range(sb, rng);
+		goto restart;
+	}
+
+	if (insert) {
+		rb_link_node(&rem->node, parent, node);
+		rb_insert_color(&rem->node, root);
+	} else {
+		free_range(sb, rem);
+	}
+}
+
+/*
  * Find an item with the given key and copy its value into the caller's
  * value vector.  The amount of bytes copied is returned which can be 0
  * or truncated if the caller's buffer isn't big enough.
@@ -1577,18 +1663,34 @@ int scoutfs_item_writeback(struct super_block *sb,
  * The caller wants us to drop any items within the range on the floor.
  * They should have ensured that items in this range won't be dirty.
  */
-void scoutfs_item_invalidate(struct super_block *sb,
-			     struct scoutfs_key_buf *start,
-			     struct scoutfs_key_buf *end)
+int scoutfs_item_invalidate(struct super_block *sb,
+			    struct scoutfs_key_buf *start,
+			    struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
+	struct cached_range *rng;
 	struct cached_item *next;
 	struct cached_item *item;
 	struct rb_node *node;
 	unsigned long flags;
+	int ret;
 
 	/* XXX think about racing with trans write */
+
+	rng = kzalloc(sizeof(struct cached_range), GFP_NOFS);
+	if (rng) {
+	       rng->start = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	       rng->end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	}
+	if (!rng || !rng->start || !rng->end) {
+		free_range(sb, rng);
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	scoutfs_key_copy(rng->start, start);
+	scoutfs_key_copy(rng->end, end);
 
 	spin_lock_irqsave(&cac->lock, flags);
 
@@ -1607,7 +1709,13 @@ void scoutfs_item_invalidate(struct super_block *sb,
 		erase_item(sb, cac, item);
 	}
 
+	remove_range(sb, &cac->ranges, rng);
+
 	spin_unlock_irqrestore(&cac->lock, flags);
+
+	ret = 0;
+out:
+	return ret;
 }
 
 int scoutfs_item_setup(struct super_block *sb)

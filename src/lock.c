@@ -120,7 +120,7 @@ static int invalidate_caches(struct super_block *sb, int mode,
 		return ret;
 
 	if (mode == SCOUTFS_LOCK_MODE_WRITE) {
-		scoutfs_item_invalidate(sb, start, end);
+		ret = scoutfs_item_invalidate(sb, start, end);
 #if 0
 		scoutfs_dir_invalidate(sb, start, end) ?:
 		scoutfs_inode_invalidate(sb, start, end) ?:
@@ -128,7 +128,7 @@ static int invalidate_caches(struct super_block *sb, int mode,
 #endif
 	}
 
-	return 0;
+	return ret;
 }
 
 #define for_each_other_linf(linf, from_linf)				  \

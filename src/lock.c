@@ -211,9 +211,6 @@ int scoutfs_lock_range_lvb(struct super_block *sb, int mode,
 		goto out;
 
 	if (linf->shutdown) {
-		/* unlocked, but we own it */
-		if (!list_empty(&lck->head))
-			unlock(held, lck);
 		ret = -ESHUTDOWN;
 		goto out;
 	}
@@ -231,8 +228,11 @@ int scoutfs_lock_range_lvb(struct super_block *sb, int mode,
 			memcpy(caller_lvb, held->fake_lvb, lvb_len);
 		}
 	}
+	ret = 0;
 
 out:
+	if (ret < 0 && !list_empty(&lck->head))
+		unlock(held, lck);
 	return ret;
 }
 

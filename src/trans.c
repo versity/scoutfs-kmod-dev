@@ -25,7 +25,7 @@
 #include "manifest.h"
 #include "seg.h"
 #include "alloc.h"
-#include "treap.h"
+#include "ring.h"
 #include "compact.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
@@ -115,14 +115,15 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	}
 
 	if (scoutfs_manifest_has_dirty(sb) || scoutfs_alloc_has_dirty(sb)) {
-		ret = scoutfs_manifest_dirty_ring(sb) ?:
-		      scoutfs_alloc_dirty_ring(sb) ?:
-		      scoutfs_treap_submit_write(sb, &comp) ?:
+		ret = scoutfs_manifest_submit_write(sb, &comp) ?:
+		      scoutfs_alloc_submit_write(sb, &comp) ?:
 		      scoutfs_bio_wait_comp(sb, &comp) ?:
 		      scoutfs_write_dirty_super(sb);
 		if (ret)
 			goto out;
 
+		scoutfs_manifest_write_complete(sb);
+		scoutfs_alloc_write_complete(sb);
 		advance = true;
 	}
 

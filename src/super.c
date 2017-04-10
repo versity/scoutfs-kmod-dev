@@ -32,7 +32,6 @@
 #include "seg.h"
 #include "bio.h"
 #include "alloc.h"
-#include "treap.h"
 #include "compact.h"
 #include "data.h"
 #include "lock.h"
@@ -218,8 +217,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_item_setup(sb) ?:
 	      scoutfs_data_setup(sb) ?:
 	      scoutfs_alloc_setup(sb) ?:
-	      scoutfs_treap_setup(sb) ?:
-//	      scoutfs_buddy_setup(sb) ?:
 	      scoutfs_compact_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:
 	      scoutfs_lock_setup(sb) ?:
@@ -265,7 +262,6 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		scoutfs_item_destroy(sb);
 		scoutfs_alloc_destroy(sb);
 		scoutfs_manifest_destroy(sb);
-		scoutfs_treap_destroy(sb);
 		scoutfs_seg_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)

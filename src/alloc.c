@@ -17,13 +17,13 @@
 
 #include "super.h"
 #include "format.h"
-#include "treap.h"
+#include "ring.h"
 #include "cmp.h"
 #include "alloc.h"
 #include "counters.h"
 
 /*
- * scoutfs allocates segments by storing regions of a bitmap in treap
+ * scoutfs allocates segments by storing regions of a bitmap in ring
  * nodes.
  *
  * Freed segments are recorded in nodes in an rbtree.  The frees can't
@@ -40,7 +40,7 @@
 struct seg_alloc {
 	struct rw_semaphore rwsem;
 	struct rb_root pending_root;
-	struct scoutfs_treap *treap;
+	struct scoutfs_ring_info ring;
 	u64 next_segno;
 };
 
@@ -132,7 +132,7 @@ int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 	nr = sal->next_segno & SCOUTFS_ALLOC_REGION_MASK;
 
 	do {
-		reg = scoutfs_treap_lookup_next_dirty(sal->treap, &ind);
+		reg = scoutfs_ring_lookup_next(&sal->ring, &ind);
 	} while (reg == NULL && ind && (ind = 0, nr = 0, 1));
 
 	if (IS_ERR_OR_NULL(reg)) {
@@ -142,6 +142,8 @@ int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 			ret = -ENOSPC;
 		goto out;
 	}
+
+	scoutfs_ring_dirty(&sal->ring, reg);
 
 	nr = find_next_bit_le(reg->bits, SCOUTFS_ALLOC_REGION_BITS, nr);
 	if (nr >= SCOUTFS_ALLOC_REGION_BITS) {
@@ -154,12 +156,8 @@ int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 
 	clear_bit_le(nr, reg->bits);
 
-	if (empty_region(reg)) {
-		ret = scoutfs_treap_delete(sal->treap, &ind);
-		/* XXX figure out what to do about this inconsistency */
-		if (WARN_ON_ONCE(ret))
-			goto out;
-	}
+	if (empty_region(reg))
+		scoutfs_ring_delete(&sal->ring, reg);
 
 	*segno = (ind << SCOUTFS_ALLOC_REGION_SHIFT) + nr;
 	sal->next_segno = *segno + 1;
@@ -178,7 +176,7 @@ out:
 
 /*
  * Record newly freed sgements in pending regions.  These are applied to
- * treap nodes as the transaction commits.
+ * ring nodes as the transaction commits.
  */
 int scoutfs_alloc_free(struct super_block *sb, u64 segno)
 {
@@ -234,7 +232,8 @@ int scoutfs_alloc_has_dirty(struct super_block *sb)
 	int ret;
 
 	down_write(&sal->rwsem);
-	ret = scoutfs_treap_has_dirty(sal->treap);
+	ret = !!(scoutfs_ring_has_dirty(&sal->ring) ||
+		 !RB_EMPTY_ROOT(&sal->pending_root));
 	up_write(&sal->rwsem);
 
 	return ret;
@@ -242,13 +241,12 @@ int scoutfs_alloc_has_dirty(struct super_block *sb)
 
 /*
  * First we apply the pending frees to create the final set of dirty
- * region nodes and then ask the treap to write them to ring pages.
+ * region nodes and then ask the ring to write them to the ring.
  */
-int scoutfs_alloc_dirty_ring(struct super_block *sb)
+int scoutfs_alloc_submit_write(struct super_block *sb,
+			       struct scoutfs_bio_completion *comp)
 {
 	DECLARE_SEG_ALLOC(sb, sal);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_alloc_region *reg;
 	struct pending_region *pend;
 	struct rb_node *node;
@@ -262,28 +260,39 @@ int scoutfs_alloc_dirty_ring(struct super_block *sb)
 
 		ind = le64_to_cpu(pend->reg.index);
 
-		reg = scoutfs_treap_lookup_dirty(sal->treap, &ind);
-		if (!reg)
-			reg = scoutfs_treap_insert(sal->treap, &ind,
-					sizeof(struct scoutfs_alloc_region),
-					&ind);
-		if (IS_ERR(reg)) {
-			ret = PTR_ERR(reg);
-			goto out;
+		reg = scoutfs_ring_lookup(&sal->ring, &ind);
+		if (!reg) {
+			reg = scoutfs_ring_insert(&sal->ring, &ind,
+					sizeof(struct scoutfs_alloc_region));
+			if (!reg) {
+				ret = -ENOMEM;
+				goto out;
+			}
+
+			memset(reg, 0, sizeof(struct scoutfs_alloc_region));
+			reg->index = cpu_to_le64(ind);
 		}
 
-		reg->index = pend->reg.index;
 		or_region_bits(reg, &pend->reg);
+		scoutfs_ring_dirty(&sal->ring, reg);
 
 		rb_erase(&pend->node, &sal->pending_root);
 		kfree(pend);
 	}
 
-	scoutfs_treap_dirty_ring(sal->treap, &super->alloc_treap_root);
-	ret = 0;
+	ret = scoutfs_ring_submit_write(sb, &sal->ring, comp);
 out:
 	up_write(&sal->rwsem);
 	return ret;
+}
+
+void scoutfs_alloc_write_complete(struct super_block *sb)
+{
+	DECLARE_SEG_ALLOC(sb, sal);
+
+	down_write(&sal->rwsem);
+	scoutfs_ring_write_complete(&sal->ring);
+	up_write(&sal->rwsem);
 }
 
 /*
@@ -303,7 +312,7 @@ u64 scoutfs_alloc_bfree(struct super_block *sb)
 	return bfree;
 }
 
-static int alloc_treap_compare(void *key, void *data)
+static int alloc_ring_compare_key(void *key, void *data)
 {
 	u64 *ind = key;
 	struct scoutfs_alloc_region *reg = data;
@@ -311,25 +320,20 @@ static int alloc_treap_compare(void *key, void *data)
 	return scoutfs_cmp_u64s(*ind, le64_to_cpu(reg->index));
 }
 
-static void alloc_treap_fill(void *data, void *fill_arg)
+static int alloc_ring_compare_data(void *A, void *B)
 {
-	struct scoutfs_alloc_region *reg = data;
-	u64 *ind = fill_arg;
+	struct scoutfs_alloc_region *a = A;
+	struct scoutfs_alloc_region *b = B;
 
-	memset(reg, 0, sizeof(struct scoutfs_alloc_region));
-	reg->index = cpu_to_le64p(ind);
+	return scoutfs_cmp_u64s(le64_to_cpu(a->index), le64_to_cpu(b->index));
 }
-
-static struct scoutfs_treap_ops alloc_treap_ops = {
-	.compare = alloc_treap_compare,
-	.fill = alloc_treap_fill,
-};
 
 int scoutfs_alloc_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct seg_alloc *sal;
+	int ret;
 
 	/* bits need to be aligned so hosts can use native bitops */
 	BUILD_BUG_ON(offsetof(struct scoutfs_alloc_region, bits) &
@@ -341,11 +345,13 @@ int scoutfs_alloc_setup(struct super_block *sb)
 
 	init_rwsem(&sal->rwsem);
 	sal->pending_root = RB_ROOT;
-	sal->treap = scoutfs_treap_alloc(sb, &alloc_treap_ops,
-					 &super->alloc_treap_root);
-	if (!sal->treap) {
+	scoutfs_ring_init(&sal->ring, &super->alloc_ring,
+			  alloc_ring_compare_key, alloc_ring_compare_data);
+
+	ret = scoutfs_ring_load(sb, &sal->ring);
+	if (ret) {
 		kfree(sal);
-		return -ENOMEM;
+		return ret;
 	}
 
 	/* XXX read next_segno from super? */
@@ -362,7 +368,7 @@ void scoutfs_alloc_destroy(struct super_block *sb)
 	struct rb_node *node;
 
 	if (sal) {
-		scoutfs_treap_free(sal->treap);
+		scoutfs_ring_destroy(&sal->ring);
 		while ((node = rb_first(&sal->pending_root))) {
 			pend = container_of(node, struct pending_region, node);
 			rb_erase(&pend->node, &sal->pending_root);

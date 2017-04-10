@@ -522,11 +522,12 @@ out:
 
 /*
  * Atomically update the manifest.  We lock down the manifest so no one
- * can use it while we're mucking with it.  We can always delete dirty
- * treap nodes without failure.  So we first dirty the deletion nodes
- * before modifying anything.  Then we add and if any of those fail we
- * can delete the dirty previous additions.  Then we can delete the
- * dirty existing entries without failure.
+ * can use it while we're mucking with it.  While the current ring can
+ * always delete without failure we will probably have a manifest
+ * storage layer eventually that could return errors on deletion.  We
+ * also also have corrupted something and try to delete an entry that
+ * doesn't exist.  So we use an initial dirtying step to ensure that our
+ * later deletions succeed.
  *
  * XXX does locking the manifest prevent commits?  I would think so?
  */

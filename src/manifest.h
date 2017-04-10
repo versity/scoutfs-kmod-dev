@@ -2,6 +2,7 @@
 #define _SCOUTFS_MANIFEST_H_
 
 struct scoutfs_key_buf;
+struct scoutfs_bio_completion;
 
 int scoutfs_manifest_add(struct super_block *sb,
 			 struct scoutfs_key_buf *first,
@@ -12,7 +13,9 @@ int scoutfs_manifest_dirty(struct super_block *sb,
 int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
 			 u64 seq, u8 level);
 int scoutfs_manifest_has_dirty(struct super_block *sb);
-int scoutfs_manifest_dirty_ring(struct super_block *sb);
+int scoutfs_manifest_submit_write(struct super_block *sb,
+				  struct scoutfs_bio_completion *comp);
+void scoutfs_manifest_write_complete(struct super_block *sb);
 
 int scoutfs_manifest_lock(struct super_block *sb);
 int scoutfs_manifest_unlock(struct super_block *sb);

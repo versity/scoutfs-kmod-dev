@@ -10,7 +10,6 @@ struct scoutfs_counters;
 struct item_cache;
 struct manifest;
 struct segment_cache;
-struct treap_info;
 struct compact_info;
 struct data_info;
 struct lock_info;
@@ -27,7 +26,6 @@ struct scoutfs_sb_info {
 	struct item_cache *item_cache;
 	struct segment_cache *segment_cache;
 	struct seg_alloc *seg_alloc;
-	struct treap_info *treap_info;
 	struct compact_info *compact_info;
 	struct data_info *data_info;
 

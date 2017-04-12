@@ -215,6 +215,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_manifest_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
+	      scoutfs_inode_setup(sb) ?:
 	      scoutfs_data_setup(sb) ?:
 	      scoutfs_alloc_setup(sb) ?:
 	      scoutfs_compact_setup(sb) ?:
@@ -259,6 +260,7 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		scoutfs_compact_destroy(sb);
 		scoutfs_shutdown_trans(sb);
 		scoutfs_data_destroy(sb);
+		scoutfs_inode_destroy(sb);
 		scoutfs_item_destroy(sb);
 		scoutfs_alloc_destroy(sb);
 		scoutfs_manifest_destroy(sb);

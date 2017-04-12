@@ -41,6 +41,7 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
 int scoutfs_dirty_inode_item(struct inode *inode);
 void scoutfs_dirty_inode(struct inode *inode, int flags);
 void scoutfs_update_inode_item(struct inode *inode);
+void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev);
 void scoutfs_inode_inc_data_version(struct inode *inode);
@@ -53,7 +54,7 @@ u64 scoutfs_last_ino(struct super_block *sb);
 void scoutfs_inode_exit(void);
 int scoutfs_inode_init(void);
 
-int scoutfs_item_setup(struct super_block *sb);
-void scoutfs_item_destroy(struct super_block *sb);
+int scoutfs_inode_setup(struct super_block *sb);
+void scoutfs_inode_destroy(struct super_block *sb);
 
 #endif

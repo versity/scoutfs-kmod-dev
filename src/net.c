@@ -22,6 +22,7 @@
 #include "format.h"
 #include "net.h"
 #include "counters.h"
+#include "inode.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -254,6 +255,47 @@ static struct send_buf *alloc_sbuf(unsigned data_len)
 }
 
 /*
+ * XXX should this call into inodes?  not sure about the layering here.
+ */
+static struct send_buf *process_alloc_inodes(struct super_block *sb,
+					     void *req, int req_len)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_net_inode_alloc *ial;
+	struct send_buf *sbuf;
+	int ret;
+	u64 ino;
+	u64 nr;
+
+	if (req_len != 0)
+		return ERR_PTR(-EINVAL);
+
+	sbuf = alloc_sbuf(sizeof(struct scoutfs_net_inode_alloc));
+	if (!sbuf)
+		return ERR_PTR(-ENOMEM);
+
+	spin_lock(&sbi->next_ino_lock);
+
+	ino = le64_to_cpu(super->next_ino);
+	nr = min(100000ULL, ~0ULL - ino);
+	le64_add_cpu(&super->next_ino, nr);
+
+	spin_unlock(&sbi->next_ino_lock);
+
+	/* XXX think about server ring commits */
+	ret = 0; //sync_or_something();
+
+	ial = (void *)sbuf->nh->data;
+	ial->ino = cpu_to_le64(ino);
+	ial->nr = cpu_to_le64(nr);
+
+	sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+
+	return sbuf;
+}
+
+/*
  * Log the time in the request and reply with our current time.
  */
 static struct send_buf *process_trade_time(struct super_block *sb,
@@ -300,6 +342,9 @@ static int process_request(struct net_info *nti, struct recv_buf *rbuf)
 	if (rbuf->nh->type == SCOUTFS_NET_TRADE_TIME)
 		sbuf = process_trade_time(sb, (void *)rbuf->nh->data,
 					  data_len);
+	else if (rbuf->nh->type == SCOUTFS_NET_ALLOC_INODES)
+		sbuf = process_alloc_inodes(sb, (void *)rbuf->nh->data,
+					    data_len);
 	else
 		sbuf = ERR_PTR(-EINVAL);
 
@@ -702,7 +747,8 @@ static int add_send_buf(struct super_block *sb, int type, void *data,
 
 	nh = sbuf->nh;
 	nh->type = type;
-	memcpy(nh->data, data, data_len);
+	if (data_len)
+		memcpy(nh->data, data, data_len);
 
 	mutex_lock(&nti->mutex);
 
@@ -719,6 +765,43 @@ static int add_send_buf(struct super_block *sb, int type, void *data,
 	mutex_unlock(&nti->mutex);
 
 	return 0;
+}
+
+static int alloc_inodes_reply(struct super_block *sb, void *reply, int ret)
+{
+	struct scoutfs_net_inode_alloc *ial = reply;
+	u64 ino;
+	u64 nr;
+
+	if (ret != sizeof(*ial)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ino = le64_to_cpu(ial->ino);
+	nr = le64_to_cpu(ial->nr);
+
+	/* catch wrapping */
+	if (ino + nr < ino) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* XXX compare to greatest inode we've seen? */
+
+	ret = 0;
+out:
+	if (ret < 0)
+		scoutfs_inode_fill_pool(sb, 0, 0);
+	else
+		scoutfs_inode_fill_pool(sb, ino, nr);
+	return ret;
+}
+
+int scoutfs_net_alloc_inodes(struct super_block *sb)
+{
+	return add_send_buf(sb, SCOUTFS_NET_ALLOC_INODES, NULL, 0,
+			    alloc_inodes_reply);
 }
 
 static int trade_time_reply(struct super_block *sb, void *reply, int ret)

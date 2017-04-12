@@ -362,11 +362,21 @@ struct scoutfs_net_header {
 	__u8 type;
 	__u8 status;
 	__u8 data[0];
-};
+} __packed;
+
+/*
+ * When there's no more free inodes this will be sent with ino = ~0 and
+ * nr = 0.
+ */
+struct scoutfs_net_inode_alloc {
+	__le64 ino;
+	__le64 nr;
+} __packed;
 
 enum {
 	/* sends and receives a struct scoutfs_timeval */
 	SCOUTFS_NET_TRADE_TIME = 0,
+	SCOUTFS_NET_ALLOC_INODES,
 	SCOUTFS_NET_UNKNOWN,
 };
 

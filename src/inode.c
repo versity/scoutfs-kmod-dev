@@ -17,6 +17,7 @@
 #include <linux/xattr.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
+#include <linux/sched.h>
 
 #include "format.h"
 #include "super.h"
@@ -30,12 +31,21 @@
 #include "msg.h"
 #include "kvec.h"
 #include "item.h"
+#include "net.h"
 
 /*
  * XXX
  *  - worry about i_ino trunctation, not sure if we do anything
  *  - use inode item value lengths for forward/back compat
  */
+
+struct free_ino_pool {
+	wait_queue_head_t waitq;
+	spinlock_t lock;
+	u64 ino;
+	u64 nr;
+	bool in_flight;
+};
 
 static struct kmem_cache *scoutfs_inode_cachep;
 
@@ -359,24 +369,98 @@ u64 scoutfs_last_ino(struct super_block *sb)
 	return last;
 }
 
+/*
+ * Network replies refill the pool, providing ino = ~0ULL nr = 0 when
+ * there's no more inodes (which should never happen in practice.)
+ */
+void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr)
+{
+	struct free_ino_pool *pool = SCOUTFS_SB(sb)->free_ino_pool;
+
+	trace_printk("filling ino %llu nr %llu\n", ino, nr);
+
+	spin_lock(&pool->lock);
+
+	pool->ino = ino;
+	pool->nr = nr;
+	pool->in_flight = false;
+
+	spin_unlock(&pool->lock);
+
+	wake_up(&pool->waitq);
+}
+
+static bool pool_in_flight(struct free_ino_pool *pool)
+{
+	bool in_flight;
+
+	spin_lock(&pool->lock);
+	in_flight = pool->in_flight;
+	spin_unlock(&pool->lock);
+
+	return in_flight;
+}
+
+/*
+ * We have a pool of free inodes given to us by the server.  If it
+ * empties we only ever have one request for new inodes in flight.  The
+ * net layer calls us when it gets a reply.  If there's no more inodes
+ * we'll get ino == ~0 and nr == 0.
+ */
 static int alloc_ino(struct super_block *sb, u64 *ino)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
+	struct free_ino_pool *pool = SCOUTFS_SB(sb)->free_ino_pool;
+	bool request;
 	int ret;
 
-	spin_lock(&sbi->next_ino_lock);
+	*ino = 0;
 
-	if (super->next_ino == 0) {
-		ret = -ENOSPC;
-	} else {
-		*ino = le64_to_cpu(super->next_ino);
-		le64_add_cpu(&super->next_ino, 1);
-		ret = 0;
+	spin_lock(&pool->lock);
+
+	while (pool->nr == 0 && pool->ino != ~0ULL) {
+		if (pool->in_flight) {
+			request = false;
+		} else {
+			pool->in_flight = true;
+			request = true;
+		}
+
+		spin_unlock(&pool->lock);
+
+		if (request) {
+			ret = scoutfs_net_alloc_inodes(sb);
+			if (ret) {
+				spin_lock(&pool->lock);
+				pool->in_flight = false;
+				spin_unlock(&pool->lock);
+				wake_up(&pool->waitq);
+				goto out;
+			}
+		}
+
+		ret = wait_event_interruptible(pool->waitq,
+					       !pool_in_flight(pool));
+		if (ret)
+			goto out;
+
+		spin_lock(&pool->lock);
 	}
 
-	spin_unlock(&sbi->next_ino_lock);
+	if (pool->nr == 0) {
+		*ino = 0;
+		ret = -ENOSPC;
+	} else {
+		*ino = pool->ino++;
+		pool->nr--;
+		ret = 0;
 
+	}
+
+	spin_unlock(&pool->lock);
+
+out:
+	trace_printk("ret %d ino %llu pool ino %llu nr %llu req %u (racey)\n",
+		     ret, *ino, pool->ino, pool->nr, pool->in_flight);
 	return ret;
 }
 
@@ -631,6 +715,30 @@ int scoutfs_orphan_inode(struct inode *inode)
 	ret = scoutfs_item_create(sb, &key, NULL);
 
 	return ret;
+}
+
+int scoutfs_inode_setup(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct free_ino_pool *pool;
+
+	pool = kzalloc(sizeof(struct free_ino_pool), GFP_KERNEL);
+	if (!pool)
+		return -ENOMEM;
+
+	init_waitqueue_head(&pool->waitq);
+	spin_lock_init(&pool->lock);
+
+	sbi->free_ino_pool = pool;
+
+	return 0;
+}
+
+void scoutfs_inode_destroy(struct super_block *sb)
+{
+	struct free_ino_pool *pool = SCOUTFS_SB(sb)->free_ino_pool;
+
+	kfree(pool);
 }
 
 void scoutfs_inode_exit(void)

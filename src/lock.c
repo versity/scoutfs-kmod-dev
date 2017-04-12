@@ -336,11 +336,14 @@ void scoutfs_lock_shutdown(struct super_block *sb)
 	DECLARE_LOCK_INFO(sb, linf);
 	struct held_locks *held = linf->held;
 
-	spin_lock(&held->lock);
-	linf->shutdown = true;
-	spin_unlock(&held->lock);
+	if (linf) {
+		held = linf->held;
+		spin_lock(&held->lock);
+		linf->shutdown = true;
+		spin_unlock(&held->lock);
 
-	wake_up(&held->waitq);
+		wake_up(&held->waitq);
+	}
 }
 
 void scoutfs_lock_destroy(struct super_block *sb)

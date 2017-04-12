@@ -289,6 +289,10 @@ void *scoutfs_ring_insert(struct scoutfs_ring_info *ring, void *key,
 	list_add_tail(&rnode->head, &ring->dirty_list);
 	mark_node_dirty(ring, rnode, true);
 
+	trace_printk("inserted rnode %p in %u deleted %u dirty %u\n",
+			rnode, rnode->in_ring, rnode->deleted,
+			rnode->dirty);
+
 	return rnode->data;
 }
 
@@ -429,6 +433,9 @@ void scoutfs_ring_delete(struct scoutfs_ring_info *ring, void *data)
 {
 	struct ring_node *rnode = data_rnode(data);
 
+	trace_printk("deleting rnode %p in %u deleted %u dirty %u\n",
+		      rnode, rnode->in_ring, rnode->deleted, rnode->dirty);
+
 	BUG_ON(rnode->deleted);
 
 	if (rnode->in_ring) {
@@ -456,11 +463,15 @@ static int load_ring_block(struct scoutfs_ring_info *ring,
 	int ret = 0;
 	int cmp;
 
+	trace_printk("block %llu\n", le64_to_cpu(rblk->block));
+
 	rent = rblk->entries;
 	for (i = 0; i < le32_to_cpu(rblk->nr_entries); i++) {
 
 		/* XXX verify fields? */
 		data_len = le16_to_cpu(rent->data_len);
+
+		trace_printk("rent %u data_len %u\n", i, data_len);
 
 		if (rent->flags & SCOUTFS_RING_ENTRY_FLAG_DELETION) {
 			rnode = ring_rb_walk(ring, NULL, rent->data, NULL,
@@ -668,6 +679,11 @@ int scoutfs_ring_submit_write(struct super_block *sb,
 		rent = rblk->entries;
 
 		while (rnode && &rent->data[rnode->data_len] <= end) {
+
+			trace_printk("writing ent %u rnode %p in %u deleted %u dirty %u\n",
+					le32_to_cpu(rblk->nr_entries),
+					rnode, rnode->in_ring, rnode->deleted,
+					rnode->dirty);
 
 			rent->data_len = cpu_to_le16(rnode->data_len);
 			if (rnode->deleted)

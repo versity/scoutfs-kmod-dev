@@ -26,6 +26,7 @@
 #include "manifest.h"
 #include "trans.h"
 #include "counters.h"
+#include "net.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -257,6 +258,17 @@ int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
 }
 
 /*
+ * Return the total number of bytes used by the given manifest entry,
+ * including its struct.
+ */
+int scoutfs_manifest_bytes(struct scoutfs_manifest_entry *ment)
+{
+	return sizeof(struct scoutfs_manifest_entry) +
+	       le16_to_cpu(ment->first_key_len) +
+	       le16_to_cpu(ment->last_key_len);
+}
+
+/*
  * XXX This feels pretty gross, but it's a simple way to give compaction
  * atomic updates.  It'll go away once compactions go to the trouble of
  * communicating their atomic results in a message instead of a series
@@ -291,12 +303,20 @@ static void free_ref(struct super_block *sb, struct manifest_ref *ref)
 	}
 }
 
-static int alloc_add_ref(struct super_block *sb, struct list_head *list,
-			 struct scoutfs_manifest_entry *ment)
+/*
+ * Allocate a native manifest ref so that we can work with segments described
+ * by the callers manifest entry.
+ (*
+ * This frees all the elements on the list if it returns an error.
+ */
+int scoutfs_manifest_add_ment_ref(struct super_block *sb,
+				  struct list_head *list,
+				  struct scoutfs_manifest_entry *ment)
 {
 	struct scoutfs_key_buf ment_first;
 	struct scoutfs_key_buf ment_last;
 	struct manifest_ref *ref;
+	struct manifest_ref *tmp;
 
 	init_ment_keys(ment, &ment_first, &ment_last);
 
@@ -307,6 +327,10 @@ static int alloc_add_ref(struct super_block *sb, struct list_head *list,
 	}
 	if (!ref || !ref->first || !ref->last) {
 		free_ref(sb, ref);
+		list_for_each_entry_safe(ref, tmp, list, entry) {
+			list_del_init(&ref->entry);
+			free_ref(sb, ref);
+		}
 		return -ENOMEM;
 	}
 
@@ -320,8 +344,10 @@ static int alloc_add_ref(struct super_block *sb, struct list_head *list,
 }
 
 /*
- * Get refs on all the segments in the manifest that we'll need to
- * search to populate the cache with the given range.
+ * Return an array of pointers to the entries in the manifest that
+ * intersect with the given key range.  The entries will be ordered by
+ * the order that they should be read: level 0 from newest to oldest
+ * then increasing higher order levels.
  *
  * We have to get all the level 0 segments that intersect with the range
  * of items that we want to search because the level 0 segments can
@@ -330,22 +356,40 @@ static int alloc_add_ref(struct super_block *sb, struct list_head *list,
  * We only need to search for the starting key in all the higher levels.
  * They do not overlap so we can iterate through the key space in each
  * segment starting with the key.
+ *
+ * This is called by the server who is processing manifest search
+ * messages from mounts.  The server locks down the manifest while it
+ * gets these pointers and then uses them to allocate and fill a reply
+ * message.
  */
-static int get_range_refs(struct super_block *sb, struct manifest *mani,
-			  struct scoutfs_key_buf *key,
-			  struct scoutfs_key_buf *end,
-			  struct list_head *ref_list)
+struct scoutfs_manifest_entry **
+scoutfs_manifest_find_range_entries(struct super_block *sb,
+				    struct scoutfs_key_buf *key,
+				    struct scoutfs_key_buf *end,
+				    unsigned *found_bytes)
 {
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_manifest_entry **found;
 	struct scoutfs_manifest_entry *ment;
 	struct manifest_search_key skey;
-	struct scoutfs_key_buf first;
-	struct scoutfs_key_buf last;
-	struct manifest_ref *ref;
-	struct manifest_ref *tmp;
-	int ret;
+	unsigned nr;
 	int i;
 
-	down_write(&mani->rwsem);
+	lockdep_assert_held(&mani->rwsem);
+
+	*found_bytes = 0;
+
+	/* at most we get all level 0,  one from other levels, and null term */
+	nr = get_level_count(mani, super, 0) + mani->nr_levels + 1;
+
+	found = kcalloc(nr, sizeof(struct scoutfs_manifest_entry *), GFP_NOFS);
+	if (!found) {
+		found = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	nr = 0;
 
 	/* get level 0 segments that overlap with the missing range */
 	skey.level = 0;
@@ -353,9 +397,8 @@ static int get_range_refs(struct super_block *sb, struct manifest *mani,
 	ment = scoutfs_ring_lookup_prev(&mani->ring, &skey);
 	while (ment) {
 		if (cmp_range_ment(key, end, ment) == 0) {
-			ret = alloc_add_ref(sb, ref_list, ment);
-			if (ret)
-				goto out;
+			found[nr++] = ment;
+			*found_bytes += scoutfs_manifest_bytes(ment);
 		}
 
 		ment = scoutfs_ring_prev(&mani->ring, ment);
@@ -371,27 +414,16 @@ static int get_range_refs(struct super_block *sb, struct manifest *mani,
 
 		ment = scoutfs_ring_lookup(&mani->ring, &skey);
 		if (ment) {
-			init_ment_keys(ment, &first, &last);
-			ret = alloc_add_ref(sb, ref_list, ment);
-			if (ret)
-				goto out;
+			found[nr++] = ment;
+			*found_bytes += scoutfs_manifest_bytes(ment);
 		}
 	}
 
-	ret = 0;
+	/* null terminate */
+	found[nr++] = NULL;
 
 out:
-	up_write(&mani->rwsem);
-
-	if (ret) {
-		list_for_each_entry_safe(ref, tmp, ref_list, entry) {
-			list_del_init(&ref->entry);
-			free_ref(sb, ref);
-		}
-	}
-
-	trace_printk("ret %d\n", ret);
-	return ret;
+	return found;
 }
 
 /*
@@ -425,7 +457,6 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 				struct scoutfs_key_buf *key,
 				struct scoutfs_key_buf *end)
 {
-	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_key_buf item_key;
 	struct scoutfs_key_buf found_key;
 	struct scoutfs_key_buf batch_end;
@@ -449,9 +480,9 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	trace_printk("reading items\n");
 
 	/* get refs on all the segments */
-	ret = get_range_refs(sb, mani, key, end, &ref_list);
+	ret = scoutfs_net_manifest_range_entries(sb, key, end, &ref_list);
 	if (ret)
-		return ret;
+		goto out;
 
 	/* submit reads for all the segments */
 	list_for_each_entry(ref, &ref_list, entry) {

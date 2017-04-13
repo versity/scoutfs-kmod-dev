@@ -23,6 +23,7 @@
 #include "net.h"
 #include "counters.h"
 #include "inode.h"
+#include "manifest.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -82,7 +83,8 @@ struct net_info {
 #define DECLARE_NET_INFO(sb, name) \
 	struct net_info *name = SCOUTFS_SB(sb)->net_info
 
-typedef int (*reply_func_t)(struct super_block *sb, void *recv, int bytes);
+typedef int (*reply_func_t)(struct super_block *sb, void *recv, int bytes,
+			    void *arg);
 
 /*
  * Send buffers are allocated either by clients who send requests or by
@@ -93,6 +95,7 @@ typedef int (*reply_func_t)(struct super_block *sb, void *recv, int bytes);
 struct send_buf {
 	struct list_head head;
 	reply_func_t func;
+	void *arg;
 	struct scoutfs_net_header nh[0];
 };
 
@@ -255,6 +258,73 @@ static struct send_buf *alloc_sbuf(unsigned data_len)
 }
 
 /*
+ * Find the manifest entries that intersect with the request's key
+ * range.  We lock the manifest and get pointers to the manifest entries
+ * that intersect.  We then allocate a reply buffer and copy them over.
+ */
+static struct send_buf *process_manifest_range_entries(struct super_block *sb,
+					               void *req, int req_len)
+{
+	struct scoutfs_net_key_range *kr = req;
+	struct scoutfs_net_manifest_entries *ments;
+	struct scoutfs_manifest_entry **found = NULL;
+	struct scoutfs_manifest_entry *ment;
+	struct scoutfs_key_buf start;
+	struct scoutfs_key_buf end;
+	struct send_buf *sbuf;
+	unsigned total;
+	unsigned bytes;
+	int i;
+
+	/* XXX this is a write lock and should be a read lock */
+	scoutfs_manifest_lock(sb);
+
+	if (req_len < sizeof(struct scoutfs_net_key_range) ||
+	    req_len < offsetof(struct scoutfs_net_key_range,
+			       key_bytes[le16_to_cpu(kr->start_len) +
+					 le16_to_cpu(kr->end_len)])) {
+		sbuf = ERR_PTR(-EINVAL);
+		goto out;
+	}
+
+	scoutfs_key_init(&start, kr->key_bytes, le16_to_cpu(kr->start_len));
+	scoutfs_key_init(&end, kr->key_bytes + le16_to_cpu(kr->start_len),
+			 le16_to_cpu(kr->end_len));
+
+	found = scoutfs_manifest_find_range_entries(sb, &start, &end, &total);
+	if (IS_ERR(found)) {
+		sbuf = ERR_CAST(found);
+		goto out;
+	}
+
+	total += sizeof(struct scoutfs_net_manifest_entries);
+
+	sbuf = alloc_sbuf(total);
+	if (!sbuf) {
+		sbuf = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	ments = (void *)sbuf->nh->data;
+	ment = ments->ments;
+
+	for (i = 0; found[i]; i++) {
+		bytes = scoutfs_manifest_bytes(found[i]);
+		memcpy(ment, found[i], bytes);
+		ment = (void *)((char *)ment + bytes);
+	}
+
+	ments->nr = cpu_to_le16(i);
+	sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+
+out:
+	scoutfs_manifest_unlock(sb);
+	if (!IS_ERR_OR_NULL(found))
+		kfree(found);
+	return sbuf;
+}
+
+/*
  * XXX should this call into inodes?  not sure about the layering here.
  */
 static struct send_buf *process_alloc_inodes(struct super_block *sb,
@@ -345,6 +415,10 @@ static int process_request(struct net_info *nti, struct recv_buf *rbuf)
 	else if (rbuf->nh->type == SCOUTFS_NET_ALLOC_INODES)
 		sbuf = process_alloc_inodes(sb, (void *)rbuf->nh->data,
 					    data_len);
+	else if (rbuf->nh->type == SCOUTFS_NET_MANIFEST_RANGE_ENTRIES)
+		sbuf = process_manifest_range_entries(sb,
+						      (void *)rbuf->nh->data,
+						      data_len);
 	else
 		sbuf = ERR_PTR(-EINVAL);
 
@@ -379,6 +453,7 @@ static int process_reply(struct net_info *nti, struct recv_buf *rbuf)
 	struct super_block *sb = nti->sb;
 	reply_func_t func = NULL;
 	struct send_buf *sbuf;
+	void *arg;
 	int ret;
 
 	mutex_lock(&nti->mutex);
@@ -388,6 +463,7 @@ static int process_reply(struct net_info *nti, struct recv_buf *rbuf)
 			if (sbuf->nh->id == rbuf->nh->id) {
 				list_del_init(&sbuf->head);
 				func = sbuf->func;
+				arg = sbuf->arg;
 				kfree(sbuf);
 				sbuf = NULL;
 				break;
@@ -405,7 +481,7 @@ static int process_reply(struct net_info *nti, struct recv_buf *rbuf)
 	else
 		ret = -EIO;
 
-	return func(sb, rbuf->nh->data, ret);
+	return func(sb, rbuf->nh->data, ret, arg);
 }
 
 /*
@@ -646,7 +722,7 @@ static void free_sbuf_list(struct super_block *sb, struct list_head *list,
 	list_for_each_entry_safe(sbuf, pos, list, head) {
 		list_del_init(&sbuf->head);
 		if (ret && sbuf->func)
-			sbuf->func(sb, NULL, ret);
+			sbuf->func(sb, NULL, ret, sbuf->arg);
 		kfree(sbuf);
 	}
 }
@@ -731,7 +807,7 @@ static void scoutfs_net_shutdown_func(struct work_struct *work)
 }
 
 static int add_send_buf(struct super_block *sb, int type, void *data,
-			unsigned data_len, reply_func_t func)
+			unsigned data_len, reply_func_t func, void *arg)
 {
 	DECLARE_NET_INFO(sb, nti);
 	struct scoutfs_net_header *nh;
@@ -743,6 +819,7 @@ static int add_send_buf(struct super_block *sb, int type, void *data,
 		return -ENOMEM;
 
 	sbuf->func = func;
+	sbuf->arg = arg;
 	sbuf->nh->status = SCOUTFS_NET_STATUS_REQUEST;
 
 	nh = sbuf->nh;
@@ -767,7 +844,121 @@ static int add_send_buf(struct super_block *sb, int type, void *data,
 	return 0;
 }
 
-static int alloc_inodes_reply(struct super_block *sb, void *reply, int ret)
+struct manifest_range_entries_args {
+	struct list_head *list;
+	struct completion comp;
+	int ret;
+};
+
+/*
+ * The server has given us entries that intersect with our request's
+ * key range.  Our caller is still blocked waiting for our completion.
+ * We walk the manifest entries and add native manifest refs to their
+ * list and wake them.
+ */
+static int manifest_range_entries_reply(struct super_block *sb, void *reply,
+					int reply_bytes, void *arg)
+{
+	struct manifest_range_entries_args *args = arg;
+	struct scoutfs_net_manifest_entries *ments = reply;
+	struct scoutfs_manifest_entry *ment;
+	unsigned bytes;
+	int ret = 0;
+	int i;
+
+	if (reply_bytes < 0) {
+		ret = reply_bytes;
+		goto out;
+	}
+
+	reply_bytes -= sizeof(struct scoutfs_net_manifest_entries);
+	if (reply_bytes < 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ment = ments->ments;
+	for (i = 0; i < le16_to_cpu(ments->nr); i++) {
+
+
+		if (reply_bytes < sizeof(struct scoutfs_manifest_entry)) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		bytes = scoutfs_manifest_bytes(ment);
+		reply_bytes -= bytes;
+		if (reply_bytes < 0) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		ret = scoutfs_manifest_add_ment_ref(sb, args->list, ment);
+		if (ret)
+			break;
+
+		ment = (void *)((char *)ment + bytes);
+	}
+
+out:
+	args->ret = ret;
+	complete(&args->comp); /* args can be freed from this point */
+	return ret;
+}
+
+/*
+ * Ask the manifest server for the manifest entries whose key range
+ * intersects with the callers key range.  The reply func will fill the
+ * caller's list with the reply's entries.
+ *
+ * XXX for now this can't be interrupted.  The reply func which is off
+ * in work in a worker thread is blocking to allocate and put things on
+ * a list in our stack.  We'd need better lifetime support to let it
+ * find out that we've returned and that it should stop processing the
+ * reply.
+ */
+int scoutfs_net_manifest_range_entries(struct super_block *sb,
+				       struct scoutfs_key_buf *start,
+				       struct scoutfs_key_buf *end,
+				       struct list_head *list)
+{
+	struct manifest_range_entries_args args;
+	struct scoutfs_net_key_range *kr;
+	struct scoutfs_key_buf start_key;
+	struct scoutfs_key_buf end_key;
+	unsigned len;
+	int ret;
+
+	len = sizeof(struct scoutfs_net_key_range) +
+	      start->key_len + end->key_len;
+	kr = kmalloc(len, GFP_NOFS);
+	if (!kr)
+		return -ENOMEM;
+
+	kr->start_len = cpu_to_le16(start->key_len);
+	kr->end_len = cpu_to_le16(end->key_len);
+
+	scoutfs_key_init(&start_key, kr->key_bytes, start->key_len);
+	scoutfs_key_init(&end_key, kr->key_bytes + start->key_len,
+			 end->key_len);
+	scoutfs_key_copy(&start_key, start);
+	scoutfs_key_copy(&end_key, end);
+
+	args.list = list;
+	init_completion(&args.comp);
+
+	ret = add_send_buf(sb, SCOUTFS_NET_MANIFEST_RANGE_ENTRIES, kr, len,
+			   manifest_range_entries_reply, &args);
+	kfree(kr);
+	if (ret)
+		return ret;
+
+	wait_for_completion(&args.comp);
+	return args.ret;
+}
+
+static int alloc_inodes_reply(struct super_block *sb, void *reply, int ret,
+			      void *arg)
 {
 	struct scoutfs_net_inode_alloc *ial = reply;
 	u64 ino;
@@ -801,10 +992,11 @@ out:
 int scoutfs_net_alloc_inodes(struct super_block *sb)
 {
 	return add_send_buf(sb, SCOUTFS_NET_ALLOC_INODES, NULL, 0,
-			    alloc_inodes_reply);
+			    alloc_inodes_reply, NULL);
 }
 
-static int trade_time_reply(struct super_block *sb, void *reply, int ret)
+static int trade_time_reply(struct super_block *sb, void *reply, int ret,
+			    void *arg)
 {
 	struct scoutfs_timespec *ts = reply;
 
@@ -828,7 +1020,7 @@ int scoutfs_net_trade_time(struct super_block *sb)
 	send.nsec = cpu_to_le32(ts.tv_nsec);
 
 	ret = add_send_buf(sb, SCOUTFS_NET_TRADE_TIME, &send,
-			     sizeof(send), trade_time_reply);
+			     sizeof(send), trade_time_reply, NULL);
 
 	trace_printk("sent %llu.%lu ret %d\n",
 		     (u64)ts.tv_sec, ts.tv_nsec, ret);

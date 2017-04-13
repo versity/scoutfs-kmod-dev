@@ -373,10 +373,22 @@ struct scoutfs_net_inode_alloc {
 	__le64 nr;
 } __packed;
 
+struct scoutfs_net_key_range {
+	__le16 start_len;
+	__le16 end_len;
+	__u8 key_bytes[0];
+} __packed;
+
+struct scoutfs_net_manifest_entries {
+	__le16 nr;
+	struct scoutfs_manifest_entry ments[0];
+} __packed;
+
 enum {
 	/* sends and receives a struct scoutfs_timeval */
 	SCOUTFS_NET_TRADE_TIME = 0,
 	SCOUTFS_NET_ALLOC_INODES,
+	SCOUTFS_NET_MANIFEST_RANGE_ENTRIES,
 	SCOUTFS_NET_UNKNOWN,
 };
 

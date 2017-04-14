@@ -24,7 +24,6 @@
 #include "item.h"
 #include "manifest.h"
 #include "seg.h"
-#include "compact.h"
 #include "counters.h"
 #include "net.h"
 #include "scoutfs_trace.h"
@@ -239,11 +238,13 @@ static bool hold_acquired(struct super_block *sb)
 		if (holds < 0)
 			return false;
 
+#if 0 /* XXX where will we do this in the shared universe? */
 		/* only hold when there's no level 0 segments, XXX for now */
 		if (scoutfs_manifest_level_count(sb, 0) > 0) {
 			scoutfs_compact_kick(sb);
 			return false;
 		}
+#endif
 
 		/* see if we all would fill the segment */
 		with_us = holds + 1;

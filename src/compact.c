@@ -22,7 +22,6 @@
 #include "cmp.h"
 #include "compact.h"
 #include "manifest.h"
-#include "trans.h"
 #include "counters.h"
 #include "alloc.h"
 #include "scoutfs_trace.h"
@@ -645,8 +644,13 @@ static void scoutfs_compact_func(struct work_struct *work)
 
 	ret = update_manifest(sb, &curs, &results);
 	if (ret == 0) {
+#if 0 /* XXX this is busted, fixing soon */
 		scoutfs_sync_fs(sb, 0);
+#endif
+
+#if 0 /* XXX where do we do this in shared? */
 		scoutfs_trans_wake_holders(sb);
+#endif
 		scoutfs_compact_kick(sb);
 	}
 out:
@@ -695,10 +699,12 @@ int scoutfs_compact_setup(struct super_block *sb)
  */
 void scoutfs_compact_destroy(struct super_block *sb)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_COMPACT_INFO(sb, ci);
 
 	if (ci) {
 		flush_work(&ci->work);
 		destroy_workqueue(ci->workq);
+		sbi->compact_info = NULL;
 	}
 }

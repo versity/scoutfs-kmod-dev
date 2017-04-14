@@ -56,6 +56,7 @@ static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
+int scoutfs_read_supers(struct super_block *sb);
 void scoutfs_advance_dirty_super(struct super_block *sb);
 int scoutfs_write_dirty_super(struct super_block *sb);
 

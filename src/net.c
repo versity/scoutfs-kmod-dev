@@ -27,6 +27,7 @@
 #include "bio.h"
 #include "alloc.h"
 #include "seg.h"
+#include "compact.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -73,6 +74,7 @@ struct net_info {
 	/* server listens and processes requests */
 	struct delayed_work server_work;
 	struct sock_info *listening_sinf;
+	bool server_loaded;
 
 	/* server commits ring changes while processing requests */
 	struct rw_semaphore ring_commit_rwsem;
@@ -696,6 +698,13 @@ static int process_reply(struct net_info *nti, struct recv_buf *rbuf)
 	return func(sb, rbuf->nh->data, ret, arg);
 }
 
+static void destroy_server_state(struct super_block *sb)
+{
+	scoutfs_alloc_destroy(sb);
+	scoutfs_manifest_destroy(sb);
+	scoutfs_compact_destroy(sb);
+}
+
 /*
  * Process each received message in its own non-reentrant work so we get
  * concurrent request processing.
@@ -704,7 +713,35 @@ static void scoutfs_net_proc_func(struct work_struct *work)
 {
 	struct recv_buf *rbuf = container_of(work, struct recv_buf, proc_work);
 	struct net_info *nti = rbuf->nti;
-	int ret;
+	struct super_block *sb = nti->sb;
+	int ret = 0;
+
+	/*
+	 * This is the first blocking context we have once all the
+	 * server locking and networking is set up so we bring up the
+	 * rest of the server state the first time we get here.
+	 */
+	while (!nti->server_loaded) {
+		mutex_lock(&nti->mutex);
+		if (!nti->server_loaded) {
+			ret = scoutfs_read_supers(sb) ?:
+			      scoutfs_manifest_setup(sb) ?:
+			      scoutfs_alloc_setup(sb) ?:
+			      scoutfs_compact_setup(sb);
+			if (ret == 0) {
+				scoutfs_advance_dirty_super(sb);
+				nti->server_loaded = true;
+			} else {
+				destroy_server_state(sb);
+			}
+		}
+		mutex_unlock(&nti->mutex);
+		if (ret) {
+			trace_printk("server setup failed %d\n", ret);
+			queue_sock_work(rbuf->sinf, &rbuf->sinf->shutdown_work);
+			return;
+		}
+	}
 
 	if (rbuf->nh->status == SCOUTFS_NET_STATUS_REQUEST)
 		ret = process_request(nti, rbuf);
@@ -990,8 +1027,13 @@ static void scoutfs_net_shutdown_func(struct work_struct *work)
 	mutex_lock(&nti->mutex);
 
 	if (sinf == nti->listening_sinf) {
-		/* clear addr lvb and try to reacquire lock and listen */
 		nti->listening_sinf = NULL;
+
+		/* shutdown the server, processing won't leave rings dirty */
+		destroy_server_state(sb);
+		nti->server_loaded = false;
+
+		/* clear addr lvb and try to reacquire lock and listen */
 		memset(&sinf->addr, 0, sizeof(sinf->addr));
 		lock_addr_lvb(sb, SCOUTFS_LOCK_MODE_WRITE, &sinf->addr);
 		scoutfs_unlock_range(sb, &sinf->listen_lck);

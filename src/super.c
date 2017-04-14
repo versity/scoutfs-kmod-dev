@@ -133,7 +133,13 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 	return ret;
 }
 
-static int read_supers(struct super_block *sb)
+/*
+ * Read the pair of super blocks and store the most recent one in the sb
+ * info.  Clients reference but don't modify the super.  The server has
+ * to re-read the super every time it comes up so that it can work from
+ * the most recent persistent state.
+ */
+int scoutfs_read_supers(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
@@ -211,14 +217,11 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 		return -ENOMEM;
 
 	ret = scoutfs_setup_counters(sb) ?:
-	      read_supers(sb) ?:
+	      scoutfs_read_supers(sb) ?:
 	      scoutfs_seg_setup(sb) ?:
-	      scoutfs_manifest_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
 	      scoutfs_inode_setup(sb) ?:
 	      scoutfs_data_setup(sb) ?:
-	      scoutfs_alloc_setup(sb) ?:
-	      scoutfs_compact_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:
 	      scoutfs_lock_setup(sb) ?:
 	      scoutfs_net_setup(sb);
@@ -226,8 +229,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 		return ret;
 
 	scoutfs_net_trade_time(sb);
-
-	scoutfs_advance_dirty_super(sb);
 
 	inode = scoutfs_iget(sb, SCOUTFS_ROOT_INO);
 	if (IS_ERR(inode))

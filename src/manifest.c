@@ -1004,5 +1004,6 @@ void scoutfs_manifest_destroy(struct super_block *sb)
 		for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++)
 			scoutfs_key_free(sb, mani->compact_keys[i]);
 		kfree(mani);
+		sbi->manifest = NULL;
 	}
 }

@@ -363,6 +363,7 @@ int scoutfs_alloc_setup(struct super_block *sb)
 
 void scoutfs_alloc_destroy(struct super_block *sb)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_SEG_ALLOC(sb, sal);
 	struct pending_region *pend;
 	struct rb_node *node;
@@ -375,5 +376,6 @@ void scoutfs_alloc_destroy(struct super_block *sb)
 			kfree(pend);
 		}
 		kfree(sal);
+		sbi->seg_alloc = NULL;
 	}
 }

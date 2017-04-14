@@ -8,6 +8,8 @@ int scoutfs_manifest_add(struct super_block *sb,
 			 struct scoutfs_key_buf *first,
 			 struct scoutfs_key_buf *last, u64 segno, u64 seq,
 			 u8 level);
+int scoutfs_manifest_add_ment(struct super_block *sb,
+			      struct scoutfs_manifest_entry *add);
 int scoutfs_manifest_dirty(struct super_block *sb,
 			   struct scoutfs_key_buf *first, u64 seq, u8 level);
 int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
@@ -18,6 +20,12 @@ int scoutfs_manifest_submit_write(struct super_block *sb,
 void scoutfs_manifest_write_complete(struct super_block *sb);
 
 int scoutfs_manifest_bytes(struct scoutfs_manifest_entry *ment);
+
+struct scoutfs_manifest_entry *
+scoutfs_manifest_alloc_entry(struct super_block *sb,
+			     struct scoutfs_key_buf *first,
+			     struct scoutfs_key_buf *last, u64 segno, u64 seq,
+			     u8 level);
 
 int scoutfs_manifest_lock(struct super_block *sb);
 int scoutfs_manifest_unlock(struct super_block *sb);

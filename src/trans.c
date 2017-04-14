@@ -24,10 +24,9 @@
 #include "item.h"
 #include "manifest.h"
 #include "seg.h"
-#include "alloc.h"
-#include "ring.h"
 #include "compact.h"
 #include "counters.h"
+#include "net.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -82,7 +81,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	struct super_block *sb = sbi->sb;
 	struct scoutfs_bio_completion comp;
 	struct scoutfs_segment *seg;
-	bool advance = false;
+	u64 segno;
 	int ret = 0;
 
 	scoutfs_bio_init_comp(&comp);
@@ -91,42 +90,25 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	wait_event(sbi->trans_hold_wq,
 		   atomic_cmpxchg(&sbi->trans_holds, 0, -1) == 0);
 
-	trace_printk("items dirty %d manifest dirty %d alloc dirty %d\n",
-		     scoutfs_item_has_dirty(sb),
-		     scoutfs_manifest_has_dirty(sb),
-		     scoutfs_alloc_has_dirty(sb));
+	trace_printk("items dirty %d\n", scoutfs_item_has_dirty(sb));
 
-	/*
-	 * XXX this needs serious work to handle errors.
-	 */
-	while (scoutfs_item_has_dirty(sb)) {
-		seg = NULL;
-		ret = scoutfs_seg_alloc(sb, &seg) ?:
+	if (scoutfs_item_has_dirty(sb)) {
+		/*
+		 * XXX only straight pass through, we're not worrying
+		 * about leaking segnos nor duplicate manifest entries
+		 * on crashes between us and the server.
+		 */
+		ret = scoutfs_net_alloc_segno(sb, &segno) ?:
+		      scoutfs_seg_alloc(sb, segno, &seg) ?:
 		      scoutfs_item_dirty_seg(sb, seg) ?:
-		      scoutfs_manifest_lock(sb) ?:
-		      scoutfs_seg_manifest_add(sb, seg, 0) ?:
-		      scoutfs_manifest_unlock(sb) ?:
-		      scoutfs_seg_submit_write(sb, seg, &comp);
-		scoutfs_seg_put(seg);
+		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
+		      scoutfs_bio_wait_comp(sb, &comp) ?:
+		      scoutfs_net_record_segment(sb, seg, 0);
 		if (ret)
 			goto out;
 
 		scoutfs_inc_counter(sb, trans_level0_seg_write);
 	}
-
-	if (scoutfs_manifest_has_dirty(sb) || scoutfs_alloc_has_dirty(sb)) {
-		ret = scoutfs_manifest_submit_write(sb, &comp) ?:
-		      scoutfs_alloc_submit_write(sb, &comp) ?:
-		      scoutfs_bio_wait_comp(sb, &comp) ?:
-		      scoutfs_write_dirty_super(sb);
-		if (ret)
-			goto out;
-
-		scoutfs_manifest_write_complete(sb);
-		scoutfs_alloc_write_complete(sb);
-		advance = true;
-	}
-
 out:
 	/* XXX this all needs serious work for dealing with errors */
 	WARN_ON_ONCE(ret);
@@ -135,8 +117,6 @@ out:
 	scoutfs_data_end_writeback(sb, ret);
 
 	spin_lock(&sbi->trans_write_lock);
-	if (advance)
-		scoutfs_advance_dirty_super(sb);
 	sbi->trans_write_count++;
 	sbi->trans_write_ret = ret;
 	spin_unlock(&sbi->trans_write_lock);
@@ -149,7 +129,6 @@ out:
 }
 
 struct write_attempt {
-	u64 seq;
 	u64 count;
 	int ret;
 };
@@ -161,9 +140,7 @@ static int write_attempted(struct scoutfs_sb_info *sbi,
 	int done = 1;
 
 	spin_lock(&sbi->trans_write_lock);
-	if (le64_to_cpu(sbi->super.hdr.seq) > attempt->seq)
-		attempt->ret = 0;
-	else if (sbi->trans_write_count > attempt->count)
+	if (sbi->trans_write_count > attempt->count)
 		attempt->ret = sbi->trans_write_ret;
 	else
 		done = 0;
@@ -178,10 +155,12 @@ static void queue_trans_work(struct scoutfs_sb_info *sbi)
 }
 
 /*
- * sync records the current dirty seq and write count and waits for
- * either to change.  If there's nothing to write or the write returned
- * an error then only the write count advances and sets the appropriate
- * return code.
+ * Wait for a trans commit to finish and return its error code.  There
+ * can already be one in flight that we end up waiting for the
+ * completion of.  This is safe because dirtying and trans commits are
+ * serialized.  There's no way that there could have been dirty data
+ * before the caller got here that wouldn't be covered by a commit
+ * that's in flight. 
  */
 int scoutfs_sync_fs(struct super_block *sb, int wait)
 {
@@ -197,7 +176,6 @@ int scoutfs_sync_fs(struct super_block *sb, int wait)
 	}
 
 	spin_lock(&sbi->trans_write_lock);
-	attempt.seq = le64_to_cpu(sbi->super.hdr.seq);
 	attempt.count = sbi->trans_write_count;
 	spin_unlock(&sbi->trans_write_lock);
 

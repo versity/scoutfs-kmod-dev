@@ -24,6 +24,7 @@
 #include "manifest.h"
 #include "trans.h"
 #include "counters.h"
+#include "alloc.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -347,6 +348,7 @@ static int compact_segments(struct super_block *sb,
 	struct compact_seg *lower;
 	u32 key_bytes;
 	u32 nr_items;
+	u64 segno;
 	int ret;
 
 	scoutfs_inc_counter(sb, compact_operations);
@@ -444,8 +446,15 @@ static int compact_segments(struct super_block *sb,
 			break;
 		}
 
-		ret = scoutfs_seg_alloc(sb, &seg);
+		ret = scoutfs_alloc_segno(sb, &segno);
 		if (ret) {
+			kfree(cseg);
+			break;
+		}
+
+		ret = scoutfs_seg_alloc(sb, segno, &seg);
+		if (ret) {
+			scoutfs_alloc_free(sb, segno);
 			kfree(cseg);
 			break;
 		}

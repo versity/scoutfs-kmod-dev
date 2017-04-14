@@ -211,6 +211,45 @@ int scoutfs_manifest_add(struct super_block *sb,
 }
 
 /*
+ * Add a manifest entry as provided by the caller instead of exploded
+ * out into arguments.
+ *
+ * This must be called with the manifest lock held.
+ */
+int scoutfs_manifest_add_ment(struct super_block *sb,
+			      struct scoutfs_manifest_entry *add)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_manifest_entry *ment;
+	struct manifest_search_key skey;
+	struct scoutfs_key_buf first;
+	unsigned bytes;
+
+	lockdep_assert_held(&mani->rwsem);
+
+	init_ment_keys(add, &first, NULL);
+
+	skey.key = &first;
+	skey.level = add->level;
+	skey.seq = le64_to_cpu(add->seq);
+
+	bytes = scoutfs_manifest_bytes(add);
+
+	ment = scoutfs_ring_insert(&mani->ring, &skey, bytes);
+	if (!ment)
+		return -ENOMEM;
+
+	memcpy(ment, add, bytes);
+
+	mani->nr_levels = max_t(u8, mani->nr_levels, add->level + 1);
+	add_level_count(sb, mani, super, add->level, 1);
+
+	return 0;
+}
+
+/*
  * This must be called with the manifest lock held.
  */
 int scoutfs_manifest_dirty(struct super_block *sb,
@@ -266,6 +305,41 @@ int scoutfs_manifest_bytes(struct scoutfs_manifest_entry *ment)
 	return sizeof(struct scoutfs_manifest_entry) +
 	       le16_to_cpu(ment->first_key_len) +
 	       le16_to_cpu(ment->last_key_len);
+}
+
+/*
+ * Return an allocated and filled in manifest entry.
+ */
+struct scoutfs_manifest_entry *
+scoutfs_manifest_alloc_entry(struct super_block *sb,
+			     struct scoutfs_key_buf *first,
+			     struct scoutfs_key_buf *last, u64 segno, u64 seq,
+			     u8 level)
+{
+	struct scoutfs_manifest_entry *ment;
+	struct scoutfs_key_buf ment_first;
+	struct scoutfs_key_buf ment_last;
+	unsigned key_bytes;
+	unsigned bytes;
+
+	key_bytes = first->key_len + last->key_len;
+	bytes = offsetof(struct scoutfs_manifest_entry, keys[key_bytes]);
+
+	ment = kmalloc(bytes, GFP_NOFS);
+	if (!ment)
+		return NULL;
+
+	ment->segno = cpu_to_le64(segno);
+	ment->seq = cpu_to_le64(seq);
+	ment->first_key_len = cpu_to_le16(first->key_len);
+	ment->last_key_len = cpu_to_le16(last->key_len);
+	ment->level = level;
+
+	init_ment_keys(ment, &ment_first, &ment_last);
+	scoutfs_key_copy(&ment_first, first);
+	scoutfs_key_copy(&ment_last, last);
+
+	return ment;
 }
 
 /*

@@ -245,26 +245,18 @@ static u64 segno_to_blkno(u64 blkno)
 	return blkno << (SCOUTFS_SEGMENT_SHIFT - SCOUTFS_BLOCK_SHIFT);
 }
 
-int scoutfs_seg_alloc(struct super_block *sb, struct scoutfs_segment **seg_ret)
+int scoutfs_seg_alloc(struct super_block *sb, u64 segno,
+		      struct scoutfs_segment **seg_ret)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct segment_cache *cac = sbi->segment_cache;
 	struct scoutfs_segment *existing;
 	struct scoutfs_segment *seg;
 	unsigned long flags;
-	u64 segno;
 	int ret;
-
-	*seg_ret = NULL;
-
-	ret = scoutfs_alloc_segno(sb, &segno);
-	if (ret)
-		goto out;
 
 	seg = alloc_seg(segno);
 	if (!seg) {
-		ret = scoutfs_alloc_free(sb, segno);
-		BUG_ON(ret); /* XXX could make pending when allocating */
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -281,9 +273,9 @@ int scoutfs_seg_alloc(struct super_block *sb, struct scoutfs_segment **seg_ret)
 	if (existing)
 		scoutfs_seg_put(existing);
 
-	*seg_ret = seg;
 	ret = 0;
 out:
+	*seg_ret = seg;
 	return ret;
 
 }
@@ -630,6 +622,32 @@ int scoutfs_seg_manifest_del(struct super_block *sb,
 				 le16_to_cpu(item->key_len));
 
 	return scoutfs_manifest_del(sb, &first, le64_to_cpu(sblk->seq), level);
+}
+
+/*
+ * Return an allocated manifest entry that describes the segment, returns
+ * NULL if it couldn't allocate.
+ */
+struct scoutfs_manifest_entry *
+scoutfs_seg_manifest_entry(struct super_block *sb,
+			   struct scoutfs_segment *seg, u8 level)
+{
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	struct scoutfs_segment_item *item;
+	struct scoutfs_key_buf first;
+	struct scoutfs_key_buf last;
+
+	item = pos_ptr(seg, 0);
+	scoutfs_key_init(&first, off_ptr(seg, le32_to_cpu(item->key_off)),
+				 le16_to_cpu(item->key_len));
+
+	item = pos_ptr(seg, le32_to_cpu(sblk->nr_items) - 1);
+	scoutfs_key_init(&last, off_ptr(seg, le32_to_cpu(item->key_off)),
+				 le16_to_cpu(item->key_len));
+
+	return scoutfs_manifest_alloc_entry(sb, &first, &last,
+					    le64_to_cpu(sblk->segno),
+					    le64_to_cpu(sblk->seq), level);
 }
 
 /*

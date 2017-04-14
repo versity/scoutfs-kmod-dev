@@ -24,6 +24,9 @@
 #include "counters.h"
 #include "inode.h"
 #include "manifest.h"
+#include "bio.h"
+#include "alloc.h"
+#include "seg.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -70,6 +73,11 @@ struct net_info {
 	/* server listens and processes requests */
 	struct delayed_work server_work;
 	struct sock_info *listening_sinf;
+
+	/* server commits ring changes while processing requests */
+	struct rw_semaphore ring_commit_rwsem;
+	struct llist_head ring_commit_waiters;
+	struct work_struct ring_commit_work;
 
 	/* both track active sockets for destruction */
 	struct list_head active_socks;
@@ -243,6 +251,102 @@ static void scoutfs_net_send_func(struct work_struct *work)
 	mutex_unlock(&nti->mutex);
 }
 
+struct commit_waiter {
+	struct completion comp;
+	struct llist_node node;
+	int ret;
+};
+
+/*
+ * This is called while still holding the rwsem that prevents commits so
+ * that the caller can be sure to be woken by the next commit after they
+ * queue and release the lock.
+ *
+ * This could queue delayed work but we're first trying to have batching
+ * work by having concurrent modification line up behind a commit in
+ * flight.  Once the commit finishes it'll unlock and hopefully everyone
+ * will race to make their changes and they'll all be applied by the
+ * next commit after that.
+ */
+static void queue_commit_work(struct net_info *nti, struct commit_waiter *cw)
+{
+	lockdep_assert_held(&nti->ring_commit_rwsem);
+
+	cw->ret = 0;
+	init_completion(&cw->comp);
+	llist_add(&cw->node, &nti->ring_commit_waiters);
+	queue_work(nti->proc_wq, &nti->ring_commit_work);
+}
+
+static int wait_for_commit(struct commit_waiter *cw)
+{
+	wait_for_completion(&cw->comp);
+	return cw->ret;
+}
+
+/*
+ * A core function of request processing is to modify the manifest and
+ * allocator.  Often the processing needs to make the modifications
+ * persistent before replying.  We'd like to batch these commits as much
+ * as is reasonable so that we don't degrade to a few IO round trips per
+ * request.
+ *
+ * Getting that batching right is bound up in the concurrency of request
+ * processing so a clear way to implement the batched commits is to
+ * implement commits with work funcs like the processing.  This ring
+ * commit work is queued on the non-reentrant proc_wq so there will only
+ * ever be one commit executing at a time.
+ *
+ * Processing paths acquire the rwsem for reading while they're making
+ * multiple dependent changes.  When they're done and want it persistent
+ * they add themselves to the list of waiters and queue the commit work.
+ * This work runs, acquires the lock to exclude other writers, and
+ * performs the commit.  Readers can run concurrently with these
+ * commits.
+ */
+static void scoutfs_net_ring_commit_func(struct work_struct *work)
+{
+	struct net_info *nti = container_of(work, struct net_info,
+					    ring_commit_work);
+	struct super_block *sb = nti->sb;
+	struct scoutfs_bio_completion comp;
+	struct commit_waiter *cw;
+	struct commit_waiter *pos;
+	struct llist_node *node;
+	int ret;
+
+	scoutfs_bio_init_comp(&comp);
+
+	down_write(&nti->ring_commit_rwsem);
+
+	if (scoutfs_manifest_has_dirty(sb) || scoutfs_alloc_has_dirty(sb)) {
+		ret = scoutfs_manifest_submit_write(sb, &comp) ?:
+		      scoutfs_alloc_submit_write(sb, &comp) ?:
+		      scoutfs_bio_wait_comp(sb, &comp) ?:
+		      scoutfs_write_dirty_super(sb);
+
+		/* we'd need to loop or something */
+		BUG_ON(ret);
+
+		scoutfs_manifest_write_complete(sb);
+		scoutfs_alloc_write_complete(sb);
+
+		scoutfs_advance_dirty_super(sb);
+	} else {
+		ret = 0;
+	}
+
+	node = llist_del_all(&nti->ring_commit_waiters);
+
+	/* waiters always wait on completion, cw could be free after complete */
+	llist_for_each_entry_safe(cw, pos, node, node) {
+		cw->ret = ret;
+		complete(&cw->comp);
+	}
+
+	up_write(&nti->ring_commit_rwsem);
+}
+
 static struct send_buf *alloc_sbuf(unsigned data_len)
 {
 	unsigned len = offsetof(struct send_buf, nh[0].data[data_len]);
@@ -254,6 +358,98 @@ static struct send_buf *alloc_sbuf(unsigned data_len)
 		sbuf->nh->data_len = cpu_to_le16(data_len);
 	}
 
+	return sbuf;
+}
+
+static struct send_buf *process_record_segment(struct super_block *sb,
+					       void *req, int req_len)
+{
+	DECLARE_NET_INFO(sb, nti);
+	struct scoutfs_manifest_entry *ment;
+	struct commit_waiter cw;
+	struct send_buf *sbuf;
+	int ret;
+
+	if (req_len < sizeof(struct scoutfs_manifest_entry)) {
+		sbuf = ERR_PTR(-EINVAL);
+		goto out;
+	}
+
+	ment = req;
+
+	if (req_len != scoutfs_manifest_bytes(ment)) {
+		sbuf = ERR_PTR(-EINVAL);
+		goto out;
+	}
+
+	down_read(&nti->ring_commit_rwsem);
+
+	scoutfs_manifest_lock(sb);
+	ret = scoutfs_manifest_add_ment(sb, ment);
+	scoutfs_manifest_unlock(sb);
+
+	if (ret == 0)
+		queue_commit_work(nti, &cw);
+	up_read(&nti->ring_commit_rwsem);
+
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
+	sbuf = alloc_sbuf(0);
+	if (!sbuf) {
+		sbuf = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	if (ret)
+		sbuf->nh->status = SCOUTFS_NET_STATUS_ERROR;
+	else
+		sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+out:
+	return sbuf;
+}
+
+static struct send_buf *process_alloc_segno(struct super_block *sb,
+					    void *req, int req_len)
+{
+	DECLARE_NET_INFO(sb, nti);
+	__le64 * __packed lesegno;
+	struct commit_waiter cw;
+	struct send_buf *sbuf;
+	u64 segno;
+	int ret;
+
+	if (req_len != 0) {
+		sbuf = ERR_PTR(-EINVAL);
+		goto out;
+	}
+
+	down_read(&nti->ring_commit_rwsem);
+
+	ret = scoutfs_alloc_segno(sb, &segno);
+	if (ret == 0)
+		queue_commit_work(nti, &cw);
+
+	up_read(&nti->ring_commit_rwsem);
+
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
+	sbuf = alloc_sbuf(sizeof(__le64));
+	if (!sbuf) {
+		sbuf = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	if (ret) {
+		sbuf->nh->status = SCOUTFS_NET_STATUS_ERROR;
+	} else {
+		lesegno = (void *)sbuf->nh->data;
+		*lesegno = cpu_to_le64(segno);
+		sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+	}
+
+out:
 	return sbuf;
 }
 
@@ -330,9 +526,11 @@ out:
 static struct send_buf *process_alloc_inodes(struct super_block *sb,
 					     void *req, int req_len)
 {
+	DECLARE_NET_INFO(sb, nti);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_net_inode_alloc *ial;
+	struct commit_waiter cw;
 	struct send_buf *sbuf;
 	int ret;
 	u64 ino;
@@ -345,22 +543,27 @@ static struct send_buf *process_alloc_inodes(struct super_block *sb,
 	if (!sbuf)
 		return ERR_PTR(-ENOMEM);
 
-	spin_lock(&sbi->next_ino_lock);
+	down_read(&nti->ring_commit_rwsem);
 
+	spin_lock(&sbi->next_ino_lock);
 	ino = le64_to_cpu(super->next_ino);
 	nr = min(100000ULL, ~0ULL - ino);
 	le64_add_cpu(&super->next_ino, nr);
-
 	spin_unlock(&sbi->next_ino_lock);
 
-	/* XXX think about server ring commits */
-	ret = 0; //sync_or_something();
+	queue_commit_work(nti, &cw);
+	up_read(&nti->ring_commit_rwsem);
+
+	ret = wait_for_commit(&cw);
 
 	ial = (void *)sbuf->nh->data;
 	ial->ino = cpu_to_le64(ino);
 	ial->nr = cpu_to_le64(nr);
 
-	sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+	if (ret < 0)
+		sbuf->nh->status = SCOUTFS_NET_STATUS_ERROR;
+	else
+		sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
 
 	return sbuf;
 }
@@ -369,9 +572,9 @@ static struct send_buf *process_alloc_inodes(struct super_block *sb,
  * Log the time in the request and reply with our current time.
  */
 static struct send_buf *process_trade_time(struct super_block *sb,
-					   struct scoutfs_timespec *req,
-					   int req_len)
+					   void *r, int req_len)
 {
+	struct scoutfs_timespec *req = r;
 	struct scoutfs_timespec *reply;
 	struct send_buf *sbuf;
 	struct timespec64 ts;
@@ -397,6 +600,23 @@ static struct send_buf *process_trade_time(struct super_block *sb,
 	return sbuf;
 }
 
+typedef struct send_buf *(*proc_func_t)(struct super_block *sb, void *req,
+				        int req_len);
+
+static proc_func_t type_proc_func(u8 type)
+{
+	static proc_func_t funcs[] = {
+		[SCOUTFS_NET_TRADE_TIME] = process_trade_time,
+		[SCOUTFS_NET_ALLOC_INODES] = process_alloc_inodes,
+		[SCOUTFS_NET_MANIFEST_RANGE_ENTRIES] =
+			process_manifest_range_entries,
+		[SCOUTFS_NET_ALLOC_SEGNO] = process_alloc_segno,
+		[SCOUTFS_NET_RECORD_SEGMENT] = process_record_segment,
+	};
+
+	return type < SCOUTFS_NET_UNKNOWN ? funcs[type] : NULL;
+}
+
 /*
  * Process an incoming request and queue its reply to send if the socket
  * is still open by the time we have the reply.
@@ -405,23 +625,15 @@ static int process_request(struct net_info *nti, struct recv_buf *rbuf)
 {
 	struct super_block *sb = nti->sb;
 	struct send_buf *sbuf;
+	proc_func_t proc;
 	unsigned data_len;
 
 	data_len = le16_to_cpu(rbuf->nh->data_len);
-
-	if (rbuf->nh->type == SCOUTFS_NET_TRADE_TIME)
-		sbuf = process_trade_time(sb, (void *)rbuf->nh->data,
-					  data_len);
-	else if (rbuf->nh->type == SCOUTFS_NET_ALLOC_INODES)
-		sbuf = process_alloc_inodes(sb, (void *)rbuf->nh->data,
-					    data_len);
-	else if (rbuf->nh->type == SCOUTFS_NET_MANIFEST_RANGE_ENTRIES)
-		sbuf = process_manifest_range_entries(sb,
-						      (void *)rbuf->nh->data,
-						      data_len);
+	proc = type_proc_func(rbuf->nh->type);
+	if (proc)
+		sbuf = proc(sb, (void *)rbuf->nh->data, data_len);
 	else
 		sbuf = ERR_PTR(-EINVAL);
-
 	if (IS_ERR(sbuf))
 		return PTR_ERR(sbuf);
 
@@ -842,6 +1054,93 @@ static int add_send_buf(struct super_block *sb, int type, void *data,
 	mutex_unlock(&nti->mutex);
 
 	return 0;
+}
+
+struct record_segment_args {
+	struct completion comp;
+	int ret;
+};
+
+static int record_segment_reply(struct super_block *sb, void *reply, int ret,
+				void *arg)
+{
+	struct record_segment_args *args = arg;
+
+	if (ret > 0)
+		ret = -EINVAL;
+
+	args->ret = ret;
+	complete(&args->comp);
+	return args->ret;
+}
+
+int scoutfs_net_record_segment(struct super_block *sb,
+			       struct scoutfs_segment *seg, u8 level)
+{
+	struct scoutfs_manifest_entry *ment;
+	struct record_segment_args args;
+	int ret;
+
+	ment = scoutfs_seg_manifest_entry(sb, seg, level);
+	if (!ment) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	init_completion(&args.comp);
+
+	ret = add_send_buf(sb, SCOUTFS_NET_RECORD_SEGMENT, ment,
+			   scoutfs_manifest_bytes(ment),
+			   record_segment_reply, &args);
+	kfree(ment);
+	if (ret == 0) {
+		wait_for_completion(&args.comp);
+		ret = args.ret;
+	}
+out:
+	return ret;
+}
+
+struct alloc_segno_args {
+	u64 segno;
+	struct completion comp;
+	int ret;
+};
+
+static int alloc_segno_reply(struct super_block *sb, void *reply, int ret,
+			     void *arg)
+{
+	struct alloc_segno_args *args = arg;
+	__le64 * __packed segno = reply;
+
+	if (ret == sizeof(__le64)) {
+		args->segno = le64_to_cpup(segno);
+		args->ret = 0;
+	} else {
+		args->ret = -EINVAL;
+	}
+
+	complete(&args->comp); /* args can be freed from this point */
+	return args->ret;
+}
+
+int scoutfs_net_alloc_segno(struct super_block *sb, u64 *segno)
+{
+	struct alloc_segno_args args;
+	int ret;
+
+	init_completion(&args.comp);
+
+	ret = add_send_buf(sb, SCOUTFS_NET_ALLOC_SEGNO, NULL, 0,
+			   alloc_segno_reply, &args);
+	if (ret == 0) {
+		wait_for_completion(&args.comp);
+		*segno = args.segno;
+		ret = args.ret;
+		if (ret == 0 && *segno == 0)
+			ret = -ENOSPC;
+	}
+	return ret;
 }
 
 struct manifest_range_entries_args {
@@ -1337,6 +1636,9 @@ int scoutfs_net_setup(struct super_block *sb)
 	INIT_LIST_HEAD(&nti->to_send);
 	nti->next_id = 1;
 	INIT_DELAYED_WORK(&nti->server_work, scoutfs_net_server_func);
+	init_rwsem(&nti->ring_commit_rwsem);
+	init_llist_head(&nti->ring_commit_waiters);
+	INIT_WORK(&nti->ring_commit_work, scoutfs_net_ring_commit_func);
 	INIT_LIST_HEAD(&nti->active_socks);
 
 	sbi->net_info = nti;
@@ -1383,8 +1685,8 @@ void scoutfs_net_destroy(struct super_block *sb)
 		mutex_unlock(&nti->mutex);
 		drain_workqueue(nti->sock_wq);
 
-		/* wait for processing to finish and free rbufs */
-		flush_workqueue(nti->proc_wq);
+		/* wait for processing (and commits) to finish and free rbufs */
+		drain_workqueue(nti->proc_wq);
 
 		/* make sure client/server work isn't queued */
 		cancel_delayed_work_sync(&nti->server_work);

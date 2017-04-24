@@ -253,18 +253,22 @@ static void scoutfs_kill_sb(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 
-	kill_block_super(sb);
+	/* make sure all dirty work is settled before killing the super */
 	if (sbi) {
+		sync_filesystem(sb);
+
 		scoutfs_lock_shutdown(sb);
 		scoutfs_net_destroy(sb);
+	}
+
+	kill_block_super(sb);
+
+	if (sbi) {
 		scoutfs_lock_destroy(sb);
-		scoutfs_compact_destroy(sb);
 		scoutfs_shutdown_trans(sb);
 		scoutfs_data_destroy(sb);
 		scoutfs_inode_destroy(sb);
 		scoutfs_item_destroy(sb);
-		scoutfs_alloc_destroy(sb);
-		scoutfs_manifest_destroy(sb);
 		scoutfs_seg_destroy(sb);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)

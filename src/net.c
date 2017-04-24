@@ -397,6 +397,8 @@ static struct send_buf *process_record_segment(struct super_block *sb,
 	if (ret == 0)
 		ret = wait_for_commit(&cw);
 
+	scoutfs_compact_kick(sb);
+
 	sbuf = alloc_sbuf(0);
 	if (!sbuf) {
 		sbuf = ERR_PTR(-ENOMEM);
@@ -700,9 +702,9 @@ static int process_reply(struct net_info *nti, struct recv_buf *rbuf)
 
 static void destroy_server_state(struct super_block *sb)
 {
+	scoutfs_compact_destroy(sb);
 	scoutfs_alloc_destroy(sb);
 	scoutfs_manifest_destroy(sb);
-	scoutfs_compact_destroy(sb);
 }
 
 /*
@@ -1096,6 +1098,87 @@ static int add_send_buf(struct super_block *sb, int type, void *data,
 	mutex_unlock(&nti->mutex);
 
 	return 0;
+}
+
+/*
+ * Eventually we're going to have messages that control compaction.
+ * Each client mount would have long-lived work that sends requests
+ * which are stuck in processing until there's work to do.  They'd get
+ * their entries, perform the compaction, and send a reply.  But we're
+ * not there yet.
+ *
+ * This is a short circuit that's called directly by a work function
+ * that's only queued on the server.  It makes compaction work inside
+ * the ring update consistency mechanics inside net message processing
+ * and demonstrates the moving pieces that we'd need to cut up into a
+ * series of messages and replies.
+ *
+ * The compaction work caller cleans up everything on errors.
+ */
+int scoutfs_net_get_compaction(struct super_block *sb, void *curs)
+{
+	DECLARE_NET_INFO(sb, nti);
+	struct commit_waiter cw;
+	u64 segno;
+	int ret = 0;
+	int nr;
+	int i;
+
+	down_read(&nti->ring_commit_rwsem);
+
+	nr = scoutfs_manifest_next_compact(sb, curs);
+	if (nr <= 0) {
+		up_read(&nti->ring_commit_rwsem);
+		return nr;
+	}
+
+	for (i = 0; i < nr; i++) {
+		ret = scoutfs_alloc_segno(sb, &segno);
+		if (ret < 0)
+			break;
+		scoutfs_compact_add_segno(sb, curs, segno);
+	}
+
+	if (ret == 0)
+		queue_commit_work(nti, &cw);
+	up_read(&nti->ring_commit_rwsem);
+
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
+	return ret;
+}
+
+/*
+ * This is a stub for recording the results of a compaction.  We just
+ * call back into compaction to have it call the manifest and allocator
+ * updates.
+ *
+ * In the future we'd encode the manifest and segnos in requests sent to
+ * the server who'd update the manifest and allocator in request
+ * processing.
+ */
+int scoutfs_net_finish_compaction(struct super_block *sb, void *curs,
+				  void *list)
+{
+	DECLARE_NET_INFO(sb, nti);
+	struct commit_waiter cw;
+	int ret;
+
+	down_read(&nti->ring_commit_rwsem);
+
+	ret = scoutfs_compact_commit(sb, curs, list);
+
+	if (ret == 0)
+		queue_commit_work(nti, &cw);
+	up_read(&nti->ring_commit_rwsem);
+
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
+	scoutfs_compact_kick(sb);
+
+	return ret;
 }
 
 struct record_segment_args {

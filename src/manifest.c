@@ -39,7 +39,6 @@
 
 struct manifest {
 	struct rw_semaphore rwsem;
-	seqcount_t seqcount;
 	struct scoutfs_ring_info ring;
 	u8 nr_levels;
 
@@ -110,57 +109,6 @@ static bool cmp_range_ment(struct scoutfs_key_buf *key,
 	return scoutfs_key_compare_ranges(key, end, &first, &last);
 }
 
-static u64 get_level_count(struct manifest *mani,
-			   struct scoutfs_super_block *super, u8 level)
-{
-	unsigned int sc;
-	u64 count;
-
-	do {
-		sc = read_seqcount_begin(&mani->seqcount);
-		count = le64_to_cpu(super->manifest.level_counts[level]);
-	} while (read_seqcount_retry(&mani->seqcount, sc));
-
-	return count;
-}
-
-static bool past_limit(struct manifest *mani, u8 level, u64 count)
-{
-	return count > mani->level_limits[level];
-}
-
-static bool level_full(struct manifest *mani,
-		       struct scoutfs_super_block *super, u8 level)
-{
-	return past_limit(mani, level, get_level_count(mani, super, level));
-}
-
-static void add_level_count(struct super_block *sb, struct manifest *mani,
-			    struct scoutfs_super_block *super, u8 level,
-			    s64 val)
-{
-	bool was_full;
-	bool now_full;
-	u64 count;
-
-	write_seqcount_begin(&mani->seqcount);
-
-	count = le64_to_cpu(super->manifest.level_counts[level]);
-	was_full = past_limit(mani, level, count);
-
-	count += val;
-	now_full = past_limit(mani, level, count);
-	super->manifest.level_counts[level] = cpu_to_le64(count);
-
-	write_seqcount_end(&mani->seqcount);
-
-	if (was_full && !now_full)
-		scoutfs_trans_wake_holders(sb);
-
-	if (now_full)
-		scoutfs_compact_kick(sb);
-}
-
 /*
  * Insert a new manifest entry in the ring.  The ring allocates a new
  * node for us and we fill it.
@@ -206,7 +154,7 @@ int scoutfs_manifest_add(struct super_block *sb,
 	scoutfs_key_copy(&ment_last, last);
 
 	mani->nr_levels = max_t(u8, mani->nr_levels, level + 1);
-	add_level_count(sb, mani, super, level, 1);
+	le64_add_cpu(&super->manifest.level_counts[level], 1);
 	return 0;
 }
 
@@ -244,7 +192,7 @@ int scoutfs_manifest_add_ment(struct super_block *sb,
 	memcpy(ment, add, bytes);
 
 	mani->nr_levels = max_t(u8, mani->nr_levels, add->level + 1);
-	add_level_count(sb, mani, super, add->level, 1);
+	le64_add_cpu(&super->manifest.level_counts[add->level], 1);
 
 	return 0;
 }
@@ -292,7 +240,7 @@ int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
 		return -ENOENT;
 
 	scoutfs_ring_delete(&mani->ring, ment);
-	add_level_count(sb, mani, super, level, -1ULL);
+	le64_add_cpu(&super->manifest.level_counts[level], -1ULL);
 	return 0;
 }
 
@@ -455,7 +403,7 @@ scoutfs_manifest_find_range_entries(struct super_block *sb,
 	*found_bytes = 0;
 
 	/* at most we get all level 0,  one from other levels, and null term */
-	nr = get_level_count(mani, super, 0) + mani->nr_levels + 1;
+	nr = le64_to_cpu(super->manifest.level_counts[0]) + mani->nr_levels + 1;
 
 	found = kcalloc(nr, sizeof(struct scoutfs_manifest_entry *), GFP_NOFS);
 	if (!found) {
@@ -736,15 +684,6 @@ void scoutfs_manifest_write_complete(struct super_block *sb)
 	up_write(&mani->rwsem);
 }
 
-u64 scoutfs_manifest_level_count(struct super_block *sb, u8 level)
-{
-	DECLARE_MANIFEST(sb, mani);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-
-	return get_level_count(mani, super, level);
-}
-
 /*
  * Give the caller the segments that will be involved in the next
  * compaction.
@@ -759,7 +698,7 @@ u64 scoutfs_manifest_level_count(struct super_block *sb, u8 level)
  * We add all the segments to the compaction caller's data and let it do
  * its thing.  It'll allocate and free segments and update the manifest.
  *
- * Returns 0 or -errno.  The caller will see if any segments were added.
+ * Returns the number of input segments or -errno.
  *
  * XXX this will get a lot more clever:
  *  - ensuring concurrent compactions don't overlap
@@ -781,12 +720,14 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	struct scoutfs_key_buf over_last;
 	int level;
 	int ret;
+	int nr = 0;
 	int i;
 
 	down_write(&mani->rwsem);
 
 	for (level = mani->nr_levels - 1; level >= 0; level--) {
-		if (level_full(mani, super, level))
+		if (le64_to_cpu(super->manifest.level_counts[level]) >
+	            mani->level_limits[level])
 			break;
 	}
 
@@ -828,6 +769,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 				  le64_to_cpu(ment->seq), level);
 	if (ret)
 		goto out;
+	nr++;
 
 	/* start with the first overlapping at the next level */
 	skey.key = &ment_first;
@@ -851,6 +793,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 					  le64_to_cpu(over->seq), level + 1);
 		if (ret)
 			goto out;
+		nr++;
 
 		over = scoutfs_ring_next(&mani->ring, over);
 	}
@@ -862,7 +805,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	ret = 0;
 out:
 	up_write(&mani->rwsem);
-	return ret;
+	return ret ?: nr;
 }
 
 /*
@@ -949,7 +892,6 @@ int scoutfs_manifest_setup(struct super_block *sb)
 		return -ENOMEM;
 
 	init_rwsem(&mani->rwsem);
-	seqcount_init(&mani->seqcount);
 	scoutfs_ring_init(&mani->ring, &super->manifest.ring,
 			  manifest_ring_compare_key,
 			  manifest_ring_compare_data);

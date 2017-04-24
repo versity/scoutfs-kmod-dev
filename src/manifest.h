@@ -43,7 +43,6 @@ int scoutfs_manifest_add_ment_ref(struct super_block *sb,
 				  struct list_head *list,
 				  struct scoutfs_manifest_entry *ment);
 
-u64 scoutfs_manifest_level_count(struct super_block *sb, u8 level);
 int scoutfs_manifest_next_compact(struct super_block *sb, void *data);
 
 int scoutfs_manifest_setup(struct super_block *sb);

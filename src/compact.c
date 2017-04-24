@@ -24,6 +24,7 @@
 #include "manifest.h"
 #include "counters.h"
 #include "alloc.h"
+#include "net.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -71,6 +72,7 @@ struct compact_seg {
 	struct scoutfs_segment *seg;
 	int pos;
 	int saved_pos;
+	bool part_of_move;
 };
 
 /*
@@ -79,6 +81,10 @@ struct compact_seg {
  */
 struct compact_cursor {
 	struct list_head csegs;
+
+	/* buffer holds allocations and our returning them */
+	u64 segnos[2 * (1 + SCOUTFS_MANIFEST_FANOUT)];
+	unsigned nr_segnos;
 
 	u8 lower_level;
 	u8 last_level;
@@ -345,9 +351,9 @@ static int compact_segments(struct super_block *sb,
 	struct compact_seg *cseg;
 	struct compact_seg *upper;
 	struct compact_seg *lower;
+	unsigned next_segno = 0;
 	u32 key_bytes;
 	u32 nr_items;
-	u64 segno;
 	int ret;
 
 	scoutfs_inc_counter(sb, compact_operations);
@@ -389,6 +395,10 @@ static int compact_segments(struct super_block *sb,
 			if (cseg->seg)
 				scoutfs_seg_get(cseg->seg);
 			list_add_tail(&cseg->entry, results);
+
+			/* don't mess with its segno */
+			upper->part_of_move = true;
+			cseg->part_of_move = true;
 
 			curs->upper = NULL;
 			upper = NULL;
@@ -445,15 +455,14 @@ static int compact_segments(struct super_block *sb,
 			break;
 		}
 
-		ret = scoutfs_alloc_segno(sb, &segno);
-		if (ret) {
-			kfree(cseg);
-			break;
-		}
+		cseg->segno = curs->segnos[next_segno];
+		curs->segnos[next_segno] = 0;
+		next_segno++;
 
-		ret = scoutfs_seg_alloc(sb, segno, &seg);
+		ret = scoutfs_seg_alloc(sb, cseg->segno, &seg);
 		if (ret) {
-			scoutfs_alloc_free(sb, segno);
+			next_segno--;
+			curs->segnos[next_segno] = cseg->segno;
 			kfree(cseg);
 			break;
 		}
@@ -529,33 +538,55 @@ out:
 }
 
 /*
- * Atomically update the manifest.  We lock down the manifest so no one
- * can use it while we're mucking with it.  While the current ring can
- * always delete without failure we will probably have a manifest
- * storage layer eventually that could return errors on deletion.  We
- * also also have corrupted something and try to delete an entry that
- * doesn't exist.  So we use an initial dirtying step to ensure that our
- * later deletions succeed.
- *
- * XXX does locking the manifest prevent commits?  I would think so?
+ * Give the compaction cursor a segno to allocate from.
  */
-static int update_manifest(struct super_block *sb, struct compact_cursor *curs,
-			   struct list_head *results)
+void scoutfs_compact_add_segno(struct super_block *sb, void *data, u64 segno)
 {
+	struct compact_cursor *curs = data;
+
+	curs->segnos[curs->nr_segnos++] = segno;
+}
+
+/*
+ * Commit the result of a compaction based on the state of the cursor.
+ * The net caller stops the rings from being written while we're making
+ * changes.  We lock the manifest to atomically make our changes.
+ *
+ * The erorr handling is sketchy here because calling the manifest from
+ * here is temporary.  We should be sending a message to the server
+ * instead of calling the allocator and manifest.
+ */
+int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
+{
+	struct compact_cursor *curs = c;
+	struct list_head *results = r;
 	struct compact_seg *cseg;
-	struct compact_seg *until;
-	int ret = 0;
-	int err;
+	int ret;
+	int i;
+
+	/* free unused segnos that were allocated for the compaction */
+	for (i = 0; i < curs->nr_segnos; i++) {
+		if (curs->segnos[i]) {
+			ret = scoutfs_alloc_free(sb, curs->segnos[i]);
+			BUG_ON(ret);
+		}
+	}
 
 	scoutfs_manifest_lock(sb);
 
+	/* delete input segments, probably freeing their segnos */
 	list_for_each_entry(cseg, &curs->csegs, entry) {
-		ret = scoutfs_manifest_dirty(sb, cseg->first,
-					     cseg->seq, cseg->level);
-		if (ret)
-			goto out;
+		if (!cseg->part_of_move) {
+			ret = scoutfs_alloc_free(sb, cseg->segno);
+			BUG_ON(ret);
+		}
+
+		ret = scoutfs_manifest_del(sb, cseg->first,
+					   cseg->seq, cseg->level);
+		BUG_ON(ret);
 	}
 
+	/* add output entries */
 	list_for_each_entry(cseg, results, entry) {
 		/* XXX moved upper segments won't have read the segment :P */
 		if (cseg->seg)
@@ -565,56 +596,22 @@ static int update_manifest(struct super_block *sb, struct compact_cursor *curs,
 			ret = scoutfs_manifest_add(sb, cseg->first,
 						   cseg->last, cseg->segno,
 						   cseg->seq, cseg->level);
-		if (ret) {
-			until = cseg;
-			list_for_each_entry(cseg, results, entry) {
-				if (cseg == until)
-					break;
-				err = scoutfs_seg_manifest_del(sb, cseg->seg,
-							       cseg->level);
-				BUG_ON(err);
-			}
-			goto out;
-		}
-	}
-
-	list_for_each_entry(cseg, &curs->csegs, entry) {
-		ret = scoutfs_manifest_del(sb, cseg->first,
-					   cseg->seq, cseg->level);
 		BUG_ON(ret);
 	}
 
-out:
 	scoutfs_manifest_unlock(sb);
 
-	return ret;
-}
-
-static int free_result_segnos(struct super_block *sb,
-			      struct list_head *results)
-{
-	struct compact_seg *cseg;
-	int ret = 0;
-	int err;
-
-	list_for_each_entry(cseg, results, entry) {
-		/* XXX failure here would be an inconsistency */
-		err = scoutfs_seg_free_segno(sb, cseg->seg);
-		if (err && !ret)
-			ret = err;
-	}
-
-	return ret;
+	return 0;
 }
 
 /*
  * The compaction worker tries to make forward progress with compaction
- * every time its kicked.  It asks the manifest for segments to compact.
+ * every time its kicked.  It pretends to send a message requesting
+ * compaction parameters but in reality the net request function there
+ * is calling directly into the manifest and back into our compaction
+ * add routines.
  *
- * If it succeeds in doing work then it kicks itself again to see if there's
- * more work to do.
- *
- * XXX worry about forward progress in the case of errors.
+ * We always try to clean up everything on errors.
  */
 static void scoutfs_compact_func(struct work_struct *work)
 {
@@ -622,6 +619,7 @@ static void scoutfs_compact_func(struct work_struct *work)
 	struct super_block *sb = ci->sb;
 	struct compact_cursor curs = {{NULL,}};
 	struct scoutfs_bio_completion comp;
+	struct compact_seg *cseg;
 	LIST_HEAD(results);
 	int ret;
 	int err;
@@ -629,33 +627,35 @@ static void scoutfs_compact_func(struct work_struct *work)
 	INIT_LIST_HEAD(&curs.csegs);
 	scoutfs_bio_init_comp(&comp);
 
-	ret = scoutfs_manifest_next_compact(sb, (void *)&curs);
-	if (list_empty(&curs.csegs))
-		goto out;
+	ret = scoutfs_net_get_compaction(sb, (void *)&curs);
 
-	ret = compact_segments(sb, &curs, &comp, &results);
+	/* short circuit no compaction work to do */
+	if (ret == 0 && list_empty(&curs.csegs))
+		return;
 
-	/* always wait for io completion */
-	err = scoutfs_bio_wait_comp(sb, &comp);
+	if (ret == 0 && !list_empty(&curs.csegs)) {
+		ret = compact_segments(sb, &curs, &comp, &results);
+
+		/* always wait for io completion */
+		err = scoutfs_bio_wait_comp(sb, &comp);
+		if (!ret && err)
+			ret = err;
+	}
+
+	/* don't update manifest on error, just free segnos */
+	if (ret) {
+		list_for_each_entry(cseg, &results, entry) {
+			if (!cseg->part_of_move)
+				curs.segnos[curs.nr_segnos++] = cseg->segno;
+		}
+		free_cseg_list(sb, &curs.csegs);
+		free_cseg_list(sb, &results);
+	}
+
+	err = scoutfs_net_finish_compaction(sb, &curs, &results);
 	if (!ret && err)
 		ret = err;
-	if (ret)
-		goto out;
 
-	ret = update_manifest(sb, &curs, &results);
-	if (ret == 0) {
-#if 0 /* XXX this is busted, fixing soon */
-		scoutfs_sync_fs(sb, 0);
-#endif
-
-#if 0 /* XXX where do we do this in shared? */
-		scoutfs_trans_wake_holders(sb);
-#endif
-		scoutfs_compact_kick(sb);
-	}
-out:
-	if (ret)
-		free_result_segnos(sb, &results);
 	free_cseg_list(sb, &curs.csegs);
 	free_cseg_list(sb, &results);
 

@@ -156,8 +156,7 @@ int scoutfs_key_str(char *buf, struct scoutfs_key_buf *key)
 	case SCOUTFS_DIRENT_KEY: {
 		struct scoutfs_dirent_key *dkey = key->data;
 
-		len = (int)key->key_len - offsetof(struct scoutfs_dirent_key,
-						   name[1]);
+		len = (int)key->key_len - sizeof(struct scoutfs_dirent_key);
 		if (len <= 0)
 			break;
 

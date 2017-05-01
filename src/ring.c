@@ -178,7 +178,7 @@ static struct ring_node *ring_rb_walk(struct scoutfs_ring_info *ring,
 	struct rb_node **node = &ring->rb_root.rb_node;
 	struct rb_node *parent = NULL;
 	struct ring_node *found = NULL;
-	struct ring_node *rnode;
+	struct ring_node *rnode = NULL;
 
 	/* only provide one or the other */
 	BUG_ON(!!key == !!data);
@@ -213,9 +213,10 @@ static struct ring_node *ring_rb_walk(struct scoutfs_ring_info *ring,
 			rb_insert_color(&ins->rb_node, &ring->rb_root);
 		}
 		found = ins;
+		*cmp = 0;
 	}
 
-	return found;
+	return rnode;
 }
 
 static struct ring_node *ring_rb_entry(struct rb_node *node)

@@ -118,7 +118,7 @@ static void set_xattr_key_part(struct scoutfs_key_buf *key, u8 part)
  */
 #define for_each_xattr_item(key, val, vh, buffer, size, part, off, bytes)    \
 	for (part = 0, off = 0;						     \
-	     off < size &&						     \
+	     ((off < size) || (part == 0 && size == 0)) &&		     \
 		(bytes = min_t(size_t, SCOUTFS_XATTR_PART_SIZE, size - off), \
 		 set_xattr_key_part(key, part),				     \
 		 (vh)->part_len = cpu_to_le16(bytes),			     \

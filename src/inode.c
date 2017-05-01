@@ -47,6 +47,16 @@ struct free_ino_pool {
 	bool in_flight;
 };
 
+struct inode_sb_info {
+	struct free_ino_pool pool;
+
+	spinlock_t writeback_lock;
+	struct rb_root writeback_inodes;
+};
+
+#define DECLARE_INODE_SB_INFO(sb, name) \
+	struct inode_sb_info *name = SCOUTFS_SB(sb)->inode_sb_info
+
 static struct kmem_cache *scoutfs_inode_cachep;
 
 /*
@@ -61,6 +71,7 @@ static void scoutfs_inode_ctor(void *obj)
 	seqcount_init(&ci->seqcount);
 	ci->staging = false;
 	init_rwsem(&ci->xattr_rwsem);
+	RB_CLEAR_NODE(&ci->writeback_node);
 
 	inode_init_once(&ci->inode);
 }
@@ -84,8 +95,48 @@ static void scoutfs_i_callback(struct rcu_head *head)
 	kmem_cache_free(scoutfs_inode_cachep, SCOUTFS_I(inode));
 }
 
+static void insert_writeback_inode(struct inode_sb_info *inf,
+				   struct scoutfs_inode_info *ins)
+{
+	struct rb_root *root = &inf->writeback_inodes;
+	struct rb_node **node = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct scoutfs_inode_info *si;
+
+	while (*node) {
+		parent = *node;
+		si = container_of(*node, struct scoutfs_inode_info,
+				  writeback_node);
+
+		if (ins->ino < si->ino)
+			node = &(*node)->rb_left;
+		else if (ins->ino > si->ino)
+			node = &(*node)->rb_right;
+		else
+			BUG();
+	}
+
+	rb_link_node(&ins->writeback_node, parent, node);
+	rb_insert_color(&ins->writeback_node, root);
+}
+
+static void remove_writeback_inode(struct inode_sb_info *inf,
+			       struct scoutfs_inode_info *si)
+{
+	if (!RB_EMPTY_NODE(&si->writeback_node)) {
+		rb_erase(&si->writeback_node, &inf->writeback_inodes);
+		RB_CLEAR_NODE(&si->writeback_node);
+	}
+}
+
 void scoutfs_destroy_inode(struct inode *inode)
 {
+	DECLARE_INODE_SB_INFO(inode->i_sb, inf);
+
+	spin_lock(&inf->writeback_lock);
+	remove_writeback_inode(inf, SCOUTFS_I(inode));
+	spin_unlock(&inf->writeback_lock);
+
 	call_rcu(&inode->i_rcu, scoutfs_i_callback);
 }
 
@@ -393,7 +444,7 @@ u64 scoutfs_last_ino(struct super_block *sb)
  */
 void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr)
 {
-	struct free_ino_pool *pool = SCOUTFS_SB(sb)->free_ino_pool;
+	struct free_ino_pool *pool = &SCOUTFS_SB(sb)->inode_sb_info->pool;
 
 	trace_printk("filling ino %llu nr %llu\n", ino, nr);
 
@@ -427,7 +478,7 @@ static bool pool_in_flight(struct free_ino_pool *pool)
  */
 static int alloc_ino(struct super_block *sb, u64 *ino)
 {
-	struct free_ino_pool *pool = SCOUTFS_SB(sb)->free_ino_pool;
+	struct free_ino_pool *pool = &SCOUTFS_SB(sb)->inode_sb_info->pool;
 	bool request;
 	int ret;
 
@@ -733,28 +784,121 @@ int scoutfs_orphan_inode(struct inode *inode)
 	return ret;
 }
 
+/*
+ * Track an inode that could have dirty pages.  Used to kick off writeback
+ * on all dirty pages during transaction commit without tying ourselves in
+ * knots trying to call through the high level vfs sync methods.
+ */
+void scoutfs_inode_queue_writeback(struct inode *inode)
+{
+	DECLARE_INODE_SB_INFO(inode->i_sb, inf);
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	spin_lock(&inf->writeback_lock);
+	if (RB_EMPTY_NODE(&si->writeback_node))
+		insert_writeback_inode(inf, si);
+	spin_unlock(&inf->writeback_lock);
+}
+
+/*
+ * Walk our dirty inodes in ino order and either start dirty page
+ * writeback or wait for writeback to complete.
+ *
+ * This is called by transaction commiting so other writers are
+ * excluded.  We're still very careful to iterate over the tree while it
+ * and the inodes could be changing.
+ *
+ * Because writes are excluded we know that there's no remaining dirty
+ * pages once waiting returns successfully.
+ *
+ * XXX not sure what to do about retrying io errors.
+ */
+int scoutfs_inode_walk_writeback(struct super_block *sb, bool write)
+{
+	DECLARE_INODE_SB_INFO(sb, inf);
+	struct scoutfs_inode_info *si;
+	struct rb_node *node;
+	struct inode *inode;
+	struct inode *defer_iput = NULL;
+	int ret;
+
+	spin_lock(&inf->writeback_lock);
+
+	node = rb_first(&inf->writeback_inodes);
+	while (node) {
+		si = container_of(node, struct scoutfs_inode_info,
+				  writeback_node);
+		node = rb_next(node);
+		inode = igrab(&si->inode);
+		if (!inode)
+			continue;
+
+		spin_unlock(&inf->writeback_lock);
+
+		if (defer_iput) {
+			iput(defer_iput);
+			defer_iput = NULL;
+		}
+
+		if (write)
+			ret = filemap_fdatawrite(inode->i_mapping);
+		else
+			ret = filemap_fdatawait(inode->i_mapping);
+		trace_printk("ino %llu write %d ret %d\n",
+			     scoutfs_ino(inode), write, ret);
+		if (ret) {
+			iput(inode);
+			goto out;
+		}
+
+		spin_lock(&inf->writeback_lock);
+
+		if (WARN_ON_ONCE(RB_EMPTY_NODE(&si->writeback_node)))
+			node = rb_first(&inf->writeback_inodes);
+		else
+			node = rb_next(&si->writeback_node);
+
+		if (!write)
+			remove_writeback_inode(inf, si);
+
+		/* avoid iput->destroy lock deadlock */
+		defer_iput = inode;
+	}
+
+	spin_unlock(&inf->writeback_lock);
+out:
+	if (defer_iput)
+		iput(defer_iput);
+	return ret;
+}
+
 int scoutfs_inode_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct free_ino_pool *pool;
+	struct inode_sb_info *inf;
 
-	pool = kzalloc(sizeof(struct free_ino_pool), GFP_KERNEL);
-	if (!pool)
+	inf = kzalloc(sizeof(struct inode_sb_info), GFP_KERNEL);
+	if (!inf)
 		return -ENOMEM;
 
+	pool = &inf->pool;
 	init_waitqueue_head(&pool->waitq);
 	spin_lock_init(&pool->lock);
 
-	sbi->free_ino_pool = pool;
+	spin_lock_init(&inf->writeback_lock);
+	inf->writeback_inodes = RB_ROOT;
+
+	sbi->inode_sb_info = inf;
 
 	return 0;
 }
 
 void scoutfs_inode_destroy(struct super_block *sb)
 {
-	struct free_ino_pool *pool = SCOUTFS_SB(sb)->free_ino_pool;
+	struct inode_sb_info *inf = SCOUTFS_SB(sb)->inode_sb_info;
 
-	kfree(pool);
+	kfree(inf);
 }
 
 void scoutfs_inode_exit(void)

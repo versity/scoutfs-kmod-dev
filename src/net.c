@@ -18,6 +18,7 @@
 #include <linux/in.h>
 #include <net/sock.h>
 #include <net/tcp.h>
+#include <linux/sort.h>
 
 #include "format.h"
 #include "net.h"
@@ -363,6 +364,61 @@ static struct send_buf *alloc_sbuf(unsigned data_len)
 	return sbuf;
 }
 
+/* XXX I dunno, totally made up */
+#define BULK_COUNT 32
+
+static struct send_buf *process_bulk_alloc(struct super_block *sb,void *req,
+					   int req_len)
+{
+	DECLARE_NET_INFO(sb, nti);
+	struct scoutfs_net_segnos *ns;
+	struct commit_waiter cw;
+	struct send_buf *sbuf;
+	u64 segno;
+	int ret;
+	int i;
+
+	if (req_len != 0)
+		return ERR_PTR(-EINVAL);
+
+	sbuf = alloc_sbuf(offsetof(struct scoutfs_net_segnos,
+				   segnos[BULK_COUNT]));
+	if (!sbuf)
+		return ERR_PTR(-ENOMEM);
+
+	ns = (void *)sbuf->nh->data;
+	ns->nr = cpu_to_le16(BULK_COUNT);
+
+	down_read(&nti->ring_commit_rwsem);
+
+	for (i = 0; i < BULK_COUNT; i++) {
+		ret = scoutfs_alloc_segno(sb, &segno);
+		if (ret) {
+			while (i-- > 0)
+				scoutfs_alloc_free(sb,
+					le64_to_cpu(ns->segnos[i]));
+			break;
+		}
+
+		ns->segnos[i] = cpu_to_le64(segno);
+	}
+
+
+	if (ret == 0)
+		queue_commit_work(nti, &cw);
+	up_read(&nti->ring_commit_rwsem);
+
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
+	if (ret)
+		sbuf->nh->status = SCOUTFS_NET_STATUS_ERROR;
+	else
+		sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+
+	return sbuf;
+}
+
 static struct send_buf *process_record_segment(struct super_block *sb,
 					       void *req, int req_len)
 {
@@ -616,6 +672,7 @@ static proc_func_t type_proc_func(u8 type)
 			process_manifest_range_entries,
 		[SCOUTFS_NET_ALLOC_SEGNO] = process_alloc_segno,
 		[SCOUTFS_NET_RECORD_SEGMENT] = process_record_segment,
+		[SCOUTFS_NET_BULK_ALLOC] = process_bulk_alloc,
 	};
 
 	return type < SCOUTFS_NET_UNKNOWN ? funcs[type] : NULL;
@@ -1098,6 +1155,113 @@ static int add_send_buf(struct super_block *sb, int type, void *data,
 	mutex_unlock(&nti->mutex);
 
 	return 0;
+}
+
+struct bulk_alloc_args {
+	struct completion comp;
+	u64 *segnos;
+	int ret;
+};
+
+static int sort_cmp_u64s(const void *A, const void *B)
+{
+	const u64 *a = A;
+	const u64 *b = B;
+
+	return *a < *b ? -1  : *a > *b ? 1 : 0;
+}
+
+static void sort_swap_u64s(void *A, void *B, int size)
+{
+	u64 *a = A;
+	u64 *b = B;
+
+	swap(*a, *b);
+}
+
+static int bulk_alloc_reply(struct super_block *sb, void *reply, int ret,
+			    void *arg)
+{
+	struct bulk_alloc_args *args = arg;
+	struct scoutfs_net_segnos *ns = reply;
+	u16 nr;
+	int i;
+
+	if (ret < sizeof(struct scoutfs_net_segnos) ||
+	    ret != offsetof(struct scoutfs_net_segnos,
+			    segnos[le16_to_cpu(ns->nr)])) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	nr = le16_to_cpu(ns->nr);
+
+	args->segnos = kmalloc((nr + 1) * sizeof(args->segnos[0]), GFP_NOFS);
+	if (args->segnos == NULL) {
+		ret = -ENOMEM; /* XXX hmm. */
+		goto out;
+	}
+
+	for (i = 0; i < nr; i++) {
+		args->segnos[i] = le64_to_cpu(ns->segnos[i]);
+
+		/* make sure they're all non-zero */
+		if (args->segnos[i] == 0) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	sort(args->segnos, nr, sizeof(args->segnos[0]),
+	     sort_cmp_u64s, sort_swap_u64s);
+
+	/* make sure they're all unique */
+	for (i = 1; i < nr; i++) {
+		if (args->segnos[i] == args->segnos[i - 1]) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	args->segnos[nr] = 0;
+	ret = 0;
+out:
+	if (ret && args->segnos) {
+		kfree(args->segnos);
+		args->segnos = NULL;
+	}
+	args->ret = ret;
+	complete(&args->comp);
+	return args->ret;
+}
+
+/*
+ * Returns a 0-terminated allocated array of segnos, the caller is
+ * responsible for freeing it.
+ */
+u64 *scoutfs_net_bulk_alloc(struct super_block *sb)
+{
+	struct bulk_alloc_args args;
+	int ret;
+
+	args.segnos = NULL;
+	init_completion(&args.comp);
+
+	ret = add_send_buf(sb, SCOUTFS_NET_BULK_ALLOC, NULL, 0,
+			   bulk_alloc_reply, &args);
+	if (ret == 0) {
+		wait_for_completion(&args.comp);
+		ret = args.ret;
+		if (ret == 0 && (args.segnos == NULL || args.segnos[0] == 0))
+			ret = -ENOSPC;
+	}
+
+	if (ret) {
+		kfree(args.segnos);
+		args.segnos = ERR_PTR(ret);
+	}
+
+	return args.segnos;
 }
 
 /*

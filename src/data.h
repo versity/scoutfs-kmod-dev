@@ -6,7 +6,6 @@ extern const struct file_operations scoutfs_file_fops;
 
 int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 				u64 len, bool offline);
-void scoutfs_data_end_writeback(struct super_block *sb, int err);
 
 int scoutfs_data_setup(struct super_block *sb);
 void scoutfs_data_destroy(struct super_block *sb);

@@ -156,9 +156,10 @@ struct scoutfs_segment_block {
 #define SCOUTFS_READDIR_KEY		6
 #define SCOUTFS_LINK_BACKREF_KEY	7
 #define SCOUTFS_SYMLINK_KEY		8
-#define SCOUTFS_EXTENT_KEY		9
+#define SCOUTFS_FILE_EXTENT_KEY		9
 #define SCOUTFS_ORPHAN_KEY		10
-#define SCOUTFS_DATA_KEY		11
+#define SCOUTFS_FREE_EXTENT_BLKNO_KEY	11
+#define SCOUTFS_FREE_EXTENT_BLOCKS_KEY	12
 /* not found in the fs */
 #define SCOUTFS_MAX_UNUSED_KEY		253
 #define SCOUTFS_NET_ADDR_KEY		254
@@ -198,11 +199,28 @@ struct scoutfs_orphan_key {
 	__be64 ino;
 } __packed;
 
-/* value is data payload bytes */
-struct scoutfs_data_key {
+/* no value */
+struct scoutfs_file_extent_key {
 	__u8 type;
 	__be64 ino;
-	__be64 block;
+	__be64 last_blk_off;
+	__be64 last_blkno;
+	__be64 blocks;
+} __packed;
+
+/* no value */
+struct scoutfs_free_extent_blkno_key {
+	__u8 type;
+	__be64 node_id;
+	__be64 last_blkno;
+	__be64 blocks;
+} __packed;
+
+struct scoutfs_free_extent_blocks_key {
+	__u8 type;
+	__be64 node_id;
+	__be64 blocks;
+	__be64 last_blkno;
 } __packed;
 
 /* value is each item's part of the full xattr value for the off/len */
@@ -384,6 +402,11 @@ struct scoutfs_net_manifest_entries {
 	struct scoutfs_manifest_entry ments[0];
 } __packed;
 
+struct scoutfs_net_segnos {
+	__le16 nr;
+	__le64 segnos[0];
+} __packed;
+
 enum {
 	/* sends and receives a struct scoutfs_timeval */
 	SCOUTFS_NET_TRADE_TIME = 0,
@@ -391,6 +414,7 @@ enum {
 	SCOUTFS_NET_MANIFEST_RANGE_ENTRIES,
 	SCOUTFS_NET_ALLOC_SEGNO,
 	SCOUTFS_NET_RECORD_SEGMENT,
+	SCOUTFS_NET_BULK_ALLOC,
 	SCOUTFS_NET_UNKNOWN,
 };
 

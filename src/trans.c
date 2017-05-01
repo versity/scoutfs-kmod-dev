@@ -26,6 +26,7 @@
 #include "seg.h"
 #include "counters.h"
 #include "net.h"
+#include "inode.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -97,10 +98,12 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		 * about leaking segnos nor duplicate manifest entries
 		 * on crashes between us and the server.
 		 */
-		ret = scoutfs_net_alloc_segno(sb, &segno) ?:
+		ret = scoutfs_inode_walk_writeback(sb, true) ?:
+		      scoutfs_net_alloc_segno(sb, &segno) ?:
 		      scoutfs_seg_alloc(sb, segno, &seg) ?:
 		      scoutfs_item_dirty_seg(sb, seg) ?:
 		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
+		      scoutfs_inode_walk_writeback(sb, false) ?:
 		      scoutfs_bio_wait_comp(sb, &comp) ?:
 		      scoutfs_net_record_segment(sb, seg, 0);
 		if (ret)
@@ -111,9 +114,6 @@ void scoutfs_trans_write_func(struct work_struct *work)
 out:
 	/* XXX this all needs serious work for dealing with errors */
 	WARN_ON_ONCE(ret);
-
-	/* must be done before waking waiting trans holders who might dirty */
-	scoutfs_data_end_writeback(sb, ret);
 
 	spin_lock(&sbi->trans_write_lock);
 	sbi->trans_write_count++;

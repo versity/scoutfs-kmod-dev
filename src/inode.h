@@ -13,6 +13,7 @@ struct scoutfs_inode_info {
 	seqcount_t seqcount;
 	bool staging;			/* holder of i_mutex is staging */
 	struct rw_semaphore xattr_rwsem;
+	struct rb_node writeback_node;
 
 	struct inode inode;
 };
@@ -47,6 +48,9 @@ void scoutfs_inode_inc_data_version(struct inode *inode);
 u64 scoutfs_inode_get_data_version(struct inode *inode);
 
 int scoutfs_scan_orphans(struct super_block *sb);
+
+void scoutfs_inode_queue_writeback(struct inode *inode);
+int scoutfs_inode_walk_writeback(struct super_block *sb, bool write);
 
 u64 scoutfs_last_ino(struct super_block *sb);
 

@@ -14,10 +14,12 @@ struct compact_info;
 struct data_info;
 struct lock_info;
 struct net_info;
-struct free_ino_pool;
+struct inode_sb_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
+
+	u64 node_id;
 
 	struct scoutfs_super_block super;
 
@@ -29,7 +31,7 @@ struct scoutfs_sb_info {
 	struct seg_alloc *seg_alloc;
 	struct compact_info *compact_info;
 	struct data_info *data_info;
-	struct free_ino_pool *free_ino_pool;
+	struct inode_sb_info *inode_sb_info;
 
 	atomic_t trans_holds;
 	wait_queue_head_t trans_hold_wq;

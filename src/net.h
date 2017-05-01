@@ -13,6 +13,7 @@ int scoutfs_net_manifest_range_entries(struct super_block *sb,
 int scoutfs_net_alloc_segno(struct super_block *sb, u64 *segno);
 int scoutfs_net_record_segment(struct super_block *sb,
 			       struct scoutfs_segment *seg, u8 level);
+u64 *scoutfs_net_bulk_alloc(struct super_block *sb);
 
 int scoutfs_net_get_compaction(struct super_block *sb, void *curs);
 int scoutfs_net_finish_compaction(struct super_block *sb, void *curs,

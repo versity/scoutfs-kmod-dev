@@ -204,6 +204,12 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sbi)
 		return -ENOMEM;
 
+	/*
+	 * XXX this is random today for initial testing, but we'll want
+	 * it to be assigned by the server.
+	 */
+	get_random_bytes_arch(&sbi->node_id, sizeof(sbi->node_id));
+
 	spin_lock_init(&sbi->next_ino_lock);
 	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);

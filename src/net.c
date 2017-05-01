@@ -1951,6 +1951,7 @@ int scoutfs_net_setup(struct super_block *sb)
  */
 void scoutfs_net_destroy(struct super_block *sb)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_NET_INFO(sb, nti);
 	struct sock_info *sinf;
 	struct sock_info *pos;
@@ -1987,5 +1988,6 @@ void scoutfs_net_destroy(struct super_block *sb)
 		/* and free all resources */
 		free_sbuf_list(sb, &nti->to_send, -ESHUTDOWN);
 		free_nti(nti);
+		sbi->net_info = NULL;
 	}
 }

@@ -19,7 +19,6 @@
 #include <linux/sched.h>
 #include <linux/buffer_head.h>
 #include <linux/hash.h>
-#include <linux/random.h>
 
 #include "format.h"
 #include "super.h"
@@ -33,16 +32,19 @@
 #include "ioctl.h"
 #include "net.h"
 
+#define EXTF "[off %llu bno %llu bks %llu fl %x]"
+#define EXTA(ne) (ne)->blk_off, (ne)->blkno, (ne)->blocks, (ne)->flags
+
 /*
- * scoutfs uses extent records to reference file data.
+ * scoutfs uses extent items to reference file data.
  *
- * The extent items map logical file regions to device blocks at at 4K
+ * The extent items map logical file regions to device blocks at 4K
  * block granularity.  File data isn't overwritten so that overwriting
  * doesn't generate extent item locking and modification.
  *
  * Nodes have their own free extent items stored at their node id to
  * avoid lock contention during allocation and freeing.  These pools are
- * filled and drained with RPCs to the server who allocates blocks in
+ * filled and drained with messages to the server who allocates
  * segment-sized regions.
  *
  * Block allocation maintains a fixed number of allocation cursors that
@@ -55,7 +57,7 @@
  * allocating extents for the first time, we track their inodes.  Before
  * we commit dirty metadata we write out all tracked inodes.  This
  * ensures that data is persistent before the metadata that references
- * it is usable.
+ * it is visible.
  *
  * Weirdly, the extents are indexed by the *final* logical block and
  * blkno of the extent.  This lets us search for neighbouring previous
@@ -64,11 +66,10 @@
  *
  * There are two items that track free extents, one indexed by the block
  * location of the free extent and one indexed by the size of the free
- * region.  This means that one allocation can update a great number of
- * items throughout the tree as file and both kinds of free extents
- * split and merge.  The code goes to great lengths to stage these
- * updates so that it can always unwind and return errors without
- * leaving the items inconsistent.
+ * extent.  This means that one allocation can update a great number of
+ * items throughout the tree as items are created and deleted as extents
+ * are split and merged.  This can introduce inconsistent failure
+ * states.  We'll some day address that with preallocation and pinning.
  *
  * XXX
  *  - truncate
@@ -122,20 +123,10 @@ struct native_extent {
 	u64 blk_off;
 	u64 blkno;
 	u64 blocks;
+	u8 flags;
 };
 
-/* These are stored in a (type==0) terminated array on caller's stacks */
-struct extent_change {
-	struct native_extent ext;
-	u64 arg;
-	unsigned ins:1,
-		 type;
-};
-
-/* insert file extent + remove both blkno and blocks extents + 0 term */
-#define MAX_CHANGES (3 + 3 + 3 + 1)
-
-/* XXX avoiding dynamic on-stack array initializers :/ */
+/* avoiding dynamic on-stack array initializers :/ */
 union extent_key_union {
 	struct scoutfs_file_extent_key file;
 	struct scoutfs_free_extent_blkno_key blkno;
@@ -153,6 +144,7 @@ static void init_file_extent_key(struct scoutfs_key_buf *key, void *key_bytes,
 	fkey->last_blk_off = cpu_to_be64(ext->blk_off + ext->blocks - 1);
 	fkey->last_blkno = cpu_to_be64(ext->blkno + ext->blocks - 1);
 	fkey->blocks = cpu_to_be64(ext->blocks);
+	fkey->flags = ext->flags;
 
 	scoutfs_key_init(key, fkey, sizeof(struct scoutfs_file_extent_key));
 }
@@ -191,6 +183,7 @@ static void load_file_extent(struct native_extent *ext,
 	ext->blocks = be64_to_cpu(fkey->blocks);
 	ext->blk_off = be64_to_cpu(fkey->last_blk_off) - ext->blocks + 1;
 	ext->blkno = be64_to_cpu(fkey->last_blkno) - ext->blocks + 1;
+	ext->flags = fkey->flags;
 }
 
 #define LOAD_FREE_EXTENT(which_type, ext, key)		\
@@ -201,6 +194,7 @@ do {							\
 		     be64_to_cpu(fkey->blocks) + 1;	\
 	ext->blk_off = ext->blkno;			\
 	ext->blocks = be64_to_cpu(fkey->blocks);	\
+	ext->flags = 0;					\
 } while (0)
 
 static void load_extent(struct native_extent *ext, struct scoutfs_key_buf *key)
@@ -240,7 +234,8 @@ static int merge_extents(struct native_extent *mod,
 	}
 
 	if (left->blk_off + left->blocks == right->blk_off &&
-	    left->blkno + left->blocks == right->blkno) {
+	    left->blkno + left->blocks == right->blkno &&
+	    left->flags == right->flags) {
 		mod->blk_off = left->blk_off;
 		mod->blkno = left->blkno;
 		mod->blocks = left->blocks + right->blocks;
@@ -263,10 +258,12 @@ static void trim_extents(struct native_extent *left,
 	left->blk_off = outer->blk_off;
 	left->blkno = outer->blkno;
 	left->blocks = inner->blk_off - outer->blk_off;
+	left->flags = outer->flags;
 
 	right->blk_off = inner->blk_off + inner->blocks;
 	right->blkno = inner->blkno + inner->blocks;
 	right->blocks = (outer->blk_off + outer->blocks) - right->blk_off;
+	right->flags = outer->flags;
 }
 
 /* return true if inner is fully contained by outer */
@@ -280,38 +277,10 @@ static bool extents_within(struct native_extent *outer,
 }
 
 /*
- * Add a new entry to the array of changes.  The _BLOCKS extent items
- * exactly match the _BLKNO items but with different field order for
- * searching by size.  We keep them in sync by always adding a _BLOCKS
- * change for every _BLKNO change.
- */
-static struct extent_change *append_change(struct extent_change *chg,
-					   bool ins, struct native_extent *ext,
-					   u64 arg, u8 type)
-{
-	trace_printk("appending ins %d blk_off %llu blkno %llu blocks %llu arg %llu type %u\n",
-			ins, ext->blk_off, ext->blkno, ext->blocks,
-			arg, type);
-
-	chg->ext = *ext;
-	chg->arg = arg;
-	chg->ins = ins;
-	chg->type = type;
-
-	if (type == SCOUTFS_FREE_EXTENT_BLKNO_KEY) {
-		chg++;
-		*chg = *(chg - 1);
-		chg->type = SCOUTFS_FREE_EXTENT_BLOCKS_KEY;
-	}
-
-	return chg + 1;
-}
-
-/*
  * Find an adjacent extent in the direction of the delta.  If we can
  * merge with it then we modify the incoming cur extent.  nei is set to
- * the neighbour we found.  > 0 is returned if we merged, 0 if not, and
- * < 0 on error.
+ * the neighbour we found.  If we didn't merge then nei's blocks is set
+ * to 0.
  */
 static int try_merge(struct super_block *sb, struct native_extent *cur,
 		     s64 delta, struct native_extent *nei, u64 arg, u8 type)
@@ -323,12 +292,11 @@ static int try_merge(struct super_block *sb, struct native_extent *cur,
 	struct native_extent ext;
 	int ret;
 
+	memset(nei, 0, sizeof(struct native_extent));
+
 	/* short circuit prev search for common first block alloc */
 	if (cur->blk_off == 0 && delta < 0)
 		return 0;
-
-	trace_printk("nei %lld from blk_off %llu blkno %llu blocks %llu\n",
-		     delta, cur->blk_off, cur->blkno, cur->blocks);
 
 	memset(&ext, ~0, sizeof(ext));
 	init_extent_key(&last, last_bytes, &ext, arg, type);
@@ -336,6 +304,7 @@ static int try_merge(struct super_block *sb, struct native_extent *cur,
 	ext.blk_off = cur->blk_off + delta;
 	ext.blkno = cur->blkno + delta;
 	ext.blocks = 1;
+	ext.flags = 0;
 	init_extent_key(&key, key_bytes, &ext, arg, type);
 
 	ret = scoutfs_item_next_same(sb, &key, &last, NULL);
@@ -345,80 +314,139 @@ static int try_merge(struct super_block *sb, struct native_extent *cur,
 		goto out;
 	}
 
-	load_extent(nei, &key);
-	trace_printk("found nei blk_off %llu blkno %llu blocks %llu\n",
-		     nei->blk_off, nei->blkno, nei->blocks);
+	load_extent(&ext, &key);
+	trace_printk("merge nei "EXTF"\n", EXTA(&ext));
 
-	ret = merge_extents(cur, nei);
-out:
-	return ret;
-}
-
-/*
- * Build the changes needed to insert the given extent.  The semantics
- * of the extents and callers means that we should not find existing extents
- * that overlap the insertion.
- */
-static int record_insert_changes(struct super_block *sb,
-				 struct extent_change *chg,
-				 struct native_extent *caller_ins,
-				 u64 arg, u8 type)
-{
-	struct native_extent ins = *caller_ins;
-	struct native_extent ext;
-	int ret;
-
-	trace_printk("inserting arg %llu type %u blk_off %llu blkno %llu blocks %llu\n",
-		     arg, type, ins.blk_off, ins.blkno, ins.blocks);
-
-	/* find the end */
-	while (chg->type)
-		chg++;
-
-	/* find previous that might be adjacent */
-	ret = try_merge(sb, &ins, -1, &ext, arg, type);
-	if (ret < 0)
-		goto out;
-	else if (ret > 0)
-		chg = append_change(chg, false, &ext, arg, type);
-
-	/* find next that might be adjacent */
-	ret = try_merge(sb, &ins, 1, &ext, arg, type);
-	if (ret < 0)
-		goto out;
-	else if (ret > 0)
-		chg = append_change(chg, false, &ext, arg, type);
-
-	/* and insert the new extent, possibly including merged neighbours */
-	chg = append_change(chg, true, &ins, arg, type);
+	if (merge_extents(cur, &ext))
+		*nei = ext;
 	ret = 0;
 out:
 	return ret;
 }
 
 /*
- * Record the changes needed to remove a portion of an existing extent.
+ * We have two item types for indexing free extents by either the
+ * location of the extent or the size of the extent.  When we create
+ * logical extents we might be finding neighbouring extents that could
+ * be merged.  We can only search for neighbours in the location items.
+ * Once we find them we mirror the item modifications for both the
+ * location and size items.
+ *
+ * If this returns an error then nothing will have changed.
  */
-static int record_remove_changes(struct super_block *sb,
-				 struct extent_change *chg,
-				 struct native_extent *rem, u64 arg,
-				 u8 type)
+static int modify_items(struct super_block *sb, struct native_extent *ext,
+			u64 arg, u8 type, bool create)
+{
+	u8 key_bytes[MAX_KEY_BYTES];
+	struct scoutfs_key_buf key;
+	int ret;
+	int err;
+
+	trace_printk("mod cre %u "EXTF"\n", create, EXTA(ext));
+
+	BUG_ON(type != SCOUTFS_FILE_EXTENT_KEY &&
+	       type != SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+
+	init_extent_key(&key, key_bytes, ext, arg, type);
+	ret = create ? scoutfs_item_create(sb, &key, NULL) :
+		       scoutfs_item_delete(sb, &key);
+
+	if (ret == 0 && type == SCOUTFS_FREE_EXTENT_BLKNO_KEY) {
+		init_extent_key(&key, key_bytes, ext, arg,
+				SCOUTFS_FREE_EXTENT_BLOCKS_KEY);
+		ret = create ? scoutfs_item_create(sb, &key, NULL) :
+			       scoutfs_item_delete(sb, &key);
+		if (ret) {
+			init_extent_key(&key, key_bytes, ext, arg, type);
+			err = create ? scoutfs_item_delete(sb, &key) :
+				       scoutfs_item_create(sb, &key, NULL);
+			BUG_ON(err);
+		}
+	}
+
+	return ret;
+}
+
+/*
+ * Insert a new extent.  We see if it can be merged with adjacent
+ * existing extents.  If this returns an error then the existing extents
+ * will not have changed.
+ */
+static int insert_extent(struct super_block *sb,
+				 struct native_extent *caller_ins,
+				 u64 arg, u8 type)
+{
+	struct native_extent left;
+	struct native_extent right;
+	struct native_extent ins = *caller_ins;
+	bool del_ins = false;
+	bool ins_left = false;
+	int err;
+	int ret;
+
+	trace_printk("inserting "EXTF"\n", EXTA(caller_ins));
+
+	/* find previous that might be adjacent */
+	ret = try_merge(sb, &ins, -1, &left, arg, type);
+	      try_merge(sb, &ins, 1, &right, arg, type);
+	if (ret < 0)
+		goto out;
+
+	trace_printk("merge left "EXTF"\n", EXTA(&left));
+	trace_printk("merge right "EXTF"\n", EXTA(&right));
+
+	ret = modify_items(sb, &ins, arg, type, true);
+	if (ret)
+		goto out;
+	del_ins = true;
+
+	if (left.blocks) {
+		ret = modify_items(sb, &left, arg, type, false);
+		if (ret)
+			goto undo;
+		ins_left = true;
+	}
+
+	if (right.blocks)
+		ret = modify_items(sb, &right, arg, type, false);
+
+undo:
+	if (ret) {
+		if (ins_left) {
+			err = modify_items(sb, &left, arg, type, true);
+			BUG_ON(err);
+		}
+		if (del_ins) {
+			err = modify_items(sb, &ins, arg, type, false);
+			BUG_ON(err);
+		}
+	}
+
+out:
+	return ret;
+}
+
+/*
+ * Remove a portion of an existing extent.  The removal might leave
+ * behind non-overlapping edges of the existing extent.  If this returns
+ * an error then the existing extent will not have changed.
+ */
+static int remove_extent(struct super_block *sb,
+			 struct native_extent *rem, u64 arg, u8 type)
 {
 	u8 last_bytes[MAX_KEY_BYTES];
 	u8 key_bytes[MAX_KEY_BYTES];
 	struct scoutfs_key_buf last;
 	struct scoutfs_key_buf key;
-	struct native_extent left;
-	struct native_extent right;
+	struct native_extent left = {0,};
+	struct native_extent right = {0,};
 	struct native_extent outer;
+	bool rem_left = false;
+	bool rem_right = false;
+	int err = 0;
 	int ret;
 
-	trace_printk("removing arg %llu type %u blk_off %llu blkno %llu blocks %llu\n",
-		     arg, type, rem->blk_off, rem->blkno, rem->blocks);
-
-	/* find the end */
-	while (chg->type)
-		chg++;
+	trace_printk("removing "EXTF"\n", EXTA(rem));
 
 	memset(&outer, ~0, sizeof(outer));
 	init_extent_key(&last, last_bytes, &outer, arg, type);
@@ -431,101 +459,181 @@ static int record_remove_changes(struct super_block *sb,
 
 	load_extent(&outer, &key);
 
-	trace_printk("found outer blk_off %llu blkno %llu blocks %llu\n",
-		     outer.blk_off, outer.blkno, outer.blocks);
+	trace_printk("outer "EXTF"\n", EXTA(&outer));
 
-	if (!extents_within(&outer, rem)) {
+	if (!extents_within(&outer, rem) || outer.flags != rem->flags) {
 		ret = -EIO;
 		goto out;
 	}
 
 	trim_extents(&left, &right, &outer, rem);
 
-	chg = append_change(chg, false, &outer, arg, type);
+	trace_printk("trim left "EXTF"\n", EXTA(&left));
+	trace_printk("trim right "EXTF"\n", EXTA(&right));
 
 	if (left.blocks) {
-		trace_printk("left trim blk_off %llu blkno %llu blocks %llu\n",
-			     left.blk_off, left.blkno, left.blocks);
-		chg = append_change(chg, true, &left, arg, type);
+		ret = modify_items(sb, &left, arg, type, true);
+		if (ret)
+			goto out;
+		rem_left = true;
 	}
 
 	if (right.blocks) {
-		trace_printk("right trim blk_off %llu blkno %llu blocks %llu\n",
-			     right.blk_off, right.blkno, right.blocks);
-		chg = append_change(chg, true, &right, arg, type);
+		ret = modify_items(sb, &right, arg, type, true);
+		if (ret)
+			goto out;
+		rem_right = true;
 	}
 
-	ret = 0;
+	ret = modify_items(sb, &outer, arg, type, false);
+
 out:
-	if (ret)
-		trace_printk("ret %d\n", ret);
+	if (ret) {
+		if (rem_right) {
+			err = modify_items(sb, &right, arg, type, false);
+			BUG_ON(err);
+		}
+		if (rem_left) {
+			err = modify_items(sb, &left, arg, type, false);
+			BUG_ON(err);
+		}
+	}
+
+	trace_printk("ret %d\n", ret);
 	return ret;
 }
 
 /*
- * Any given allocation or free of a file data extent can involve both
- * insertion and deletion of both file extent and free extent items.  To
- * make these atomic we record all the insertions and deletions that are
- * performed.  We first dirty the deletions, then insert, then delete.
- * This lets us always safely unwind on failure.
+ * Free extents whose blocks fall inside the specified logical block
+ * range.
+ *
+ * If 'offline' is given then blocks are freed but the extent items are
+ * left behind and their _OFFLINE flag is set.
+ *
+ * This is the low level extent item manipulation code.  Callers manage
+ * higher order locking and transactional consistency.
  */
-static int apply_changes(struct super_block *sb, struct extent_change *changes)
-{
-	u8 key_bytes[MAX_KEY_BYTES];
-	struct scoutfs_key_buf key;
-	struct extent_change *chg;
-	int ret;
-	int err;
-
-	for (chg = changes; chg->type; chg++) {
-		if (chg->ins)
-			continue;
-
-		init_extent_key(&key, key_bytes, &chg->ext, chg->arg,
-				chg->type);
-		ret = scoutfs_item_dirty(sb, &key);
-		if (ret)
-			goto out;
-	}
-
-	for (chg = changes; chg->type; chg++) {
-		if (!chg->ins)
-			continue;
-
-		init_extent_key(&key, key_bytes, &chg->ext, chg->arg,
-				chg->type);
-		ret = scoutfs_item_create(sb, &key, NULL);
-		if (ret) {
-			while ((--chg) >= changes) {
-				if (!chg->ins)
-					continue;
-				init_extent_key(&key, key_bytes, &chg->ext,
-						chg->arg, chg->type);
-				err = scoutfs_item_delete(sb, &key);
-				BUG_ON(err);
-			}
-			goto out;
-		}
-	}
-
-	for (chg = changes; chg->type; chg++) {
-		if (chg->ins)
-			continue;
-
-		init_extent_key(&key, key_bytes, &chg->ext, chg->arg,
-				chg->type);
-		ret = scoutfs_item_delete(sb, &key);
-		BUG_ON(ret);
-	}
-
-out:
-	return ret;
-}
-
 int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 				u64 len, bool offline)
 {
-	BUG();  /* NYI */
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	u8 last_bytes[MAX_KEY_BYTES];
+	u8 key_bytes[MAX_KEY_BYTES];
+	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf key;
+	struct native_extent found;
+	struct native_extent rng;
+	struct native_extent ext;
+	struct native_extent ofl;
+	struct native_extent fr;
+	bool rem_fr = false;
+	bool ins_ext = false;
+	int ret = 0;
+	int err;
+
+	trace_printk("iblock %llu len %llu offline %u\n",
+		     iblock, len, offline);
+
+	memset(&ext, ~0, sizeof(ext));
+	init_extent_key(&last, last_bytes, &ext, ino, SCOUTFS_FILE_EXTENT_KEY);
+
+	rng.blk_off = iblock;
+	rng.blocks = len;
+	rng.blkno = 0;
+	rng.flags = 0;
+
+	while (rng.blocks) {
+		/* find the next extent that could include our first block */
+		init_extent_key(&key, key_bytes, &rng, ino,
+				SCOUTFS_FILE_EXTENT_KEY);
+
+		ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		load_extent(&found, &key);
+		trace_printk("found "EXTF"\n", EXTA(&found));
+
+		/* XXX corruption: offline and allocation are exclusive */
+		if (!!found.blkno ==
+		    !!(found.flags & SCOUTFS_FILE_EXTENT_OFFLINE)) {
+			ret = -EIO;
+			break;
+		}
+
+		/* we're done if the found extent is past us */
+		if (found.blk_off >= rng.blk_off + rng.blocks) {
+			ret = 0;
+			break;
+		}
+
+		/* find the intersection */
+		ext.blk_off = max(rng.blk_off, found.blk_off);
+		ext.blocks = min(rng.blk_off + rng.blocks,
+				 found.blk_off + found.blocks) - ext.blk_off;
+		ext.blkno = found.blkno + (ext.blk_off - found.blk_off);
+		ext.flags = found.flags;
+
+		/* next search will be past the extent we truncate */
+		rng.blk_off = ext.blk_off + ext.blocks;
+		if (rng.blk_off < iblock + len)
+			rng.blocks = (iblock + len) - rng.blk_off;
+		else
+			rng.blocks = 0;
+
+		/* done if already offline */
+		if (offline && (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE))
+			continue;
+
+		/* free the old extent if it was allocated */
+		if (ext.blkno) {
+			fr = ext;
+			fr.blk_off = fr.blkno;
+			ret = insert_extent(sb, &fr, sbi->node_id,
+					    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+			if (ret)
+				break;
+			rem_fr = true;
+		}
+
+		/* always remove the overlapping file extent */
+		ret = remove_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_KEY);
+		if (ret)
+			break;
+		ins_ext = true;
+
+		/* maybe add new file extents with the offline flag set */
+		if (offline) {
+			ofl = ext;
+			ofl.blkno = 0;
+			ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
+			ret = insert_extent(sb, &ofl, sbi->node_id,
+					    SCOUTFS_FILE_EXTENT_KEY);
+			if (ret)
+				break;
+		}
+
+		rem_fr = false;
+		ins_ext = false;
+	}
+
+	if (ret) {
+		if (ins_ext) {
+			err = insert_extent(sb, &ext, ino,
+					    SCOUTFS_FILE_EXTENT_KEY);
+			BUG_ON(err);
+		}
+		if (rem_fr) {
+			err = remove_extent(sb, &fr, sbi->node_id,
+					    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+			BUG_ON(err);
+		}
+	}
+
+	return ret;
 }
 
 /*
@@ -564,7 +672,6 @@ static struct task_cursor *get_cursor(struct data_info *datinf)
 static int bulk_alloc(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct extent_change changes[MAX_CHANGES];
 	struct native_extent ext;
 	u64 *segnos = NULL;
 	int ret;
@@ -577,7 +684,6 @@ static int bulk_alloc(struct super_block *sb)
 	}
 
 	for (i = 0; segnos[i]; i++) {
-		memset(changes, 0, sizeof(changes));
 
 		/* merge or set this one */
 		if (i > 0 && (segnos[i] == segnos[i - 1] + 1)) {
@@ -595,14 +701,12 @@ static int bulk_alloc(struct super_block *sb)
 		if ((segnos[i] + 1) == segnos[i + 1])
 			continue;
 
-		trace_printk("inserting extent [%u] blkno %llu blocks %llu\n",
-			     i, ext.blkno, ext.blocks);
+		trace_printk("inserting [%u] "EXTF"\n", i, EXTA(&ext));
 
 		ext.blk_off = ext.blkno;
-		ret = record_insert_changes(sb, changes, &ext, sbi->node_id,
-					    SCOUTFS_FREE_EXTENT_BLKNO_KEY) ?:
-		      apply_changes(sb, changes);
-		/* XXX error here leaks segnos */
+		ext.flags = 0;
+		ret = insert_extent(sb, &ext, sbi->node_id,
+				    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
 		if (ret)
 			break;
 	}
@@ -610,6 +714,8 @@ static int bulk_alloc(struct super_block *sb)
 out:
 	if (!IS_ERR_OR_NULL(segnos))
 		kfree(segnos);
+
+	/* XXX don't orphan segnos on error, crash recovery with server */
 
 	return ret;
 }
@@ -623,12 +729,12 @@ out:
  * free space outside of our cursor, then we look for the next large
  * free extent.
  */
-static int allocate_block(struct inode *inode, sector_t iblock, u64 *blkno)
+static int allocate_block(struct inode *inode, sector_t iblock, u64 *blkno,
+			  bool was_offline)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_DATA_INFO(sb, datinf);
-	struct extent_change changes[MAX_CHANGES] = {{{0,}}};
 	u8 last_bytes[MAX_KEY_BYTES];
 	u8 key_bytes[MAX_KEY_BYTES];
 	struct scoutfs_key_buf last;
@@ -636,9 +742,15 @@ static int allocate_block(struct inode *inode, sector_t iblock, u64 *blkno)
 	struct native_extent last_ext;
 	struct native_extent found;
 	struct native_extent ext;
+	struct native_extent ofl;
+	struct native_extent fr;
 	struct task_cursor *curs;
 	bool alloced = false;
+	const u64 ino = scoutfs_ino(inode);
+	bool rem_ext = false;
+	bool ins_ofl = false;
 	u8 type;
+	int err;
 	int ret;
 
 	memset(&last_ext, ~0, sizeof(last_ext));
@@ -658,6 +770,7 @@ reset_cursor:
 		ext.blocks = LARGE_EXTENT_BLOCKS;
 		type = SCOUTFS_FREE_EXTENT_BLOCKS_KEY;
 	}
+	ext.flags = 0;
 
 retry:
 	trace_printk("searching %llu,%llu curs %p task %p pid %u %llu,%llu\n",
@@ -709,7 +822,7 @@ retry:
 	}
 
 	load_extent(&found, &key);
-	trace_printk("found %llu,%llu\n", found.blkno, found.blocks);
+	trace_printk("found nei "EXTF"\n", EXTA(&found));
 
 	/* look for a new large extent if found is outside cursor */
 	if (curs->blocks &&
@@ -743,36 +856,69 @@ retry:
 	trace_printk("using %llu,%llu curs %llu,%llu\n",
 		     found.blkno, found.blocks, curs->blkno, curs->blocks);
 
+	/* remove old offline block if we're staging */
+	if (was_offline) {
+		ofl.blk_off = iblock;
+		ofl.blkno = 0;
+		ofl.blocks = 1;
+		ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
+		ret = remove_extent(sb, &ofl, ino, SCOUTFS_FILE_EXTENT_KEY);
+		if (ret < 0)
+			goto out;
+		ins_ofl = true;
+	}
+
+	/* insert new file extent */
 	*blkno = found.blkno;
 	ext.blk_off = iblock;
 	ext.blkno = found.blkno;
 	ext.blocks = 1;
-	ret = record_insert_changes(sb, changes, &ext, scoutfs_ino(inode),
-				    SCOUTFS_FILE_EXTENT_KEY);
+	ext.flags = 0;
+	ret = insert_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_KEY);
 	if (ret < 0)
 		goto out;
+	rem_ext = true;
 
-	ext.blk_off = ext.blkno;
-	ret = record_remove_changes(sb, changes, &ext, sbi->node_id,
-			    SCOUTFS_FREE_EXTENT_BLKNO_KEY) ?:
-	      apply_changes(sb, changes);
+	/* and remove free extents */
+	fr = ext;
+	fr.blk_off = ext.blkno;
+	ret = remove_extent(sb, &fr, sbi->node_id,
+			    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+	if (ret)
+		goto out;
 
 	/* advance cursor if we're using it */
-	if (ret == 0 && curs->blocks) {
+	if (curs->blocks) {
 		if (--curs->blocks == 0)
 			curs->blkno = 0;
 		else
 			curs->blkno++;
 	}
 
+	ret = 0;
 out:
+	if (ret) {
+		if (rem_ext) {
+			err = remove_extent(sb, &ext, ino,
+					    SCOUTFS_FILE_EXTENT_KEY);
+			BUG_ON(err);
+		}
+		if (ins_ofl) {
+			err = insert_extent(sb, &ofl, ino,
+					    SCOUTFS_FILE_EXTENT_KEY);
+			BUG_ON(err);
+		}
+	}
+
 	up_write(&datinf->alloc_rwsem);
+	trace_printk("ret %d\n", ret);
 	return ret;
 }
 
 static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 			     struct buffer_head *bh, int create)
 {
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	DECLARE_DATA_INFO(sb, datinf);
 	u8 last_bytes[MAX_KEY_BYTES];
@@ -780,24 +926,22 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	struct scoutfs_key_buf last;
 	struct scoutfs_key_buf key;
 	struct native_extent ext;
-	u64 blocks;
+	bool was_offline = false;
 	u64 blkno;
 	u64 off;
 	int ret;
 
 	bh->b_blocknr = 0;
 	bh->b_size = 0;
-	blocks = 0;
 
 	ext.blk_off = iblock;
 	ext.blocks = 1;
 	ext.blkno = 0;
+	ext.flags = 0;
 	init_extent_key(&key, key_bytes, &ext, scoutfs_ino(inode),
 			SCOUTFS_FILE_EXTENT_KEY);
 
-	ext.blk_off = ~0ULL;
-	ext.blkno = ~0ULL;
-	ext.blocks = ~0ULL;
+	memset(&ext, ~0, sizeof(ext));
 	init_extent_key(&last, last_bytes, &ext, scoutfs_ino(inode),
 			SCOUTFS_FILE_EXTENT_KEY);
 
@@ -810,35 +954,49 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	up_read(&datinf->alloc_rwsem);
 	if (ret < 0) {
 		if (ret == -ENOENT)
-			ret = 0;
+			memset(&ext, 0, sizeof(ext));
 		else
 			goto out;
 	} else {
 		load_extent(&ext, &key);
-		trace_printk("found blk_off %llu blkno %llu blocks %llu\n",
-			     ext.blk_off, ext.blkno, ext.blocks);
-		if (iblock >= ext.blk_off &&
-		    iblock < (ext.blk_off + ext.blocks)) {
+		trace_printk("found nei "EXTF"\n", EXTA(&ext));
+	}
+
+	if ((ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE) && !si->staging) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* use the extent if it intersects */
+	if (iblock >= ext.blk_off && iblock < (ext.blk_off + ext.blocks)) {
+
+		if (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE) {
+			/* non-stage can't write to offline */
+			if (!si->staging) {
+				ret = -EINVAL;
+				goto out;
+			}
+			was_offline = true;
+		} else {
+			/* found online extent */
 			off = iblock - ext.blk_off;
-			blkno = ext.blkno + off;
-			blocks = ext.blocks - off;
+			map_bh(bh, inode->i_sb, ext.blkno + off);
+			bh->b_size = min_t(u64, SIZE_MAX,
+				    (ext.blocks - off) << SCOUTFS_BLOCK_SHIFT);
 		}
 	}
 
-	if (blocks == 0 && create) {
-		ret = allocate_block(inode, iblock, &blkno);
+	if (!buffer_mapped(bh) && create) {
+		ret = allocate_block(inode, iblock, &blkno, was_offline);
 		if (ret)
 			goto out;
 
-		blocks = 1;
-	}
-
-	if (blocks) {
 		map_bh(bh, inode->i_sb, blkno);
-		bh->b_size = min_t(u64, SIZE_MAX,
-				   blocks << SCOUTFS_BLOCK_SHIFT);
+		bh->b_size = SCOUTFS_BLOCK_SHIFT;
+		set_buffer_new(bh);
 	}
 
+	ret = 0;
 out:
 	trace_printk("ino %llu iblock %llu create %d ret %d bnr %llu size %zu\n",
 		     scoutfs_ino(inode), (u64)iblock, create, ret,
@@ -918,6 +1076,91 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 		scoutfs_inode_queue_writeback(inode);
 	}
 	scoutfs_release_trans(sb);
+	return ret;
+}
+
+/*
+ * Return the extents that intersect with the given byte range.  It doesn't
+ * trim the returned extents to the byte range.
+ */
+int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
+			u64 start, u64 len)
+{
+	struct super_block *sb = inode->i_sb;
+	const u8 type = SCOUTFS_FILE_EXTENT_KEY;
+	const u64 ino = scoutfs_ino(inode);
+	u8 last_bytes[MAX_KEY_BYTES];
+	u8 key_bytes[MAX_KEY_BYTES];
+	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf key;
+	struct native_extent ext;
+	u64 logical;
+	u64 blk_off;
+	u64 final;
+	u64 phys;
+	u64 size;
+	u32 flags;
+	int ret = 0;
+
+	ret = fiemap_check_flags(fieinfo, FIEMAP_FLAG_SYNC);
+	if (ret)
+		goto out;
+
+	memset(&ext, ~0, sizeof(ext));
+	init_extent_key(&last, last_bytes, &ext, ino, type);
+
+	blk_off = start >> SCOUTFS_BLOCK_SHIFT;
+	final = (start + len - 1) >> SCOUTFS_BLOCK_SHIFT;
+	size = 0;
+	flags = 0;
+
+	/* XXX overkill? */
+	mutex_lock(&inode->i_mutex);
+
+	for (;;) {
+		ext.blk_off = blk_off;
+		ext.blkno = 0;
+		ext.blocks = 1;
+		ext.flags = 0;
+		init_extent_key(&key, key_bytes, &ext, ino, type);
+
+		ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+		if (ret < 0) {
+			if (ret != -ENOENT)
+				break;
+			flags |= FIEMAP_EXTENT_LAST;
+			ret = 0;
+		}
+
+		load_extent(&ext, &key);
+
+		if (ext.blk_off > final)
+			flags |= FIEMAP_EXTENT_LAST;
+
+		if (size) {
+			ret = fiemap_fill_next_extent(fieinfo, logical, phys,
+						      size, flags);
+			if (ret != 0) {
+				if (ret == 1)
+					ret = 0;
+				break;
+			}
+		}
+
+		if (flags & FIEMAP_EXTENT_LAST)
+			break;
+
+		logical = ext.blk_off << SCOUTFS_BLOCK_SHIFT;
+		phys = ext.blkno << SCOUTFS_BLOCK_SHIFT;
+		size = ext.blocks << SCOUTFS_BLOCK_SHIFT;
+		flags = ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE ?
+			FIEMAP_EXTENT_UNKNOWN : 0;
+
+		blk_off = ext.blk_off + ext.blocks;
+	}
+
+	mutex_unlock(&inode->i_mutex);
+out:
 	return ret;
 }
 

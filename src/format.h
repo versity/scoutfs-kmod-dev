@@ -206,7 +206,10 @@ struct scoutfs_file_extent_key {
 	__be64 last_blk_off;
 	__be64 last_blkno;
 	__be64 blocks;
+	__u8 flags;
 } __packed;
+
+#define SCOUTFS_FILE_EXTENT_OFFLINE (1 << 0)
 
 /* no value */
 struct scoutfs_free_extent_blkno_key {

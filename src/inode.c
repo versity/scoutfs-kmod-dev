@@ -145,6 +145,7 @@ static const struct inode_operations scoutfs_file_iops = {
 	.getxattr	= scoutfs_getxattr,
 	.listxattr	= scoutfs_listxattr,
 	.removexattr	= scoutfs_removexattr,
+	.fiemap		= scoutfs_data_fiemap,
 };
 
 static const struct inode_operations scoutfs_special_iops = {

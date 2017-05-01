@@ -403,6 +403,8 @@ restart:
 		}
 	}
 
+	trace_scoutfs_item_insertion(sb, ins->key, ins->val);
+
 	rb_link_node(&ins->node, parent, node);
 	rb_insert_augmented(&ins->node, root, &scoutfs_item_rb_cb);
 

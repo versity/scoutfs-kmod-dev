@@ -217,6 +217,19 @@ TRACE_EVENT(scoutfs_item_lookup,
         TP_printk("key %s", __get_str(key))
 );
 
+TRACE_EVENT(scoutfs_item_insertion,
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key,
+		 struct kvec *val),
+        TP_ARGS(sb, key, val),
+        TP_STRUCT__entry(
+                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
+        ),
+        TP_fast_assign(
+		scoutfs_key_str(__get_dynamic_array(key), key);
+        ),
+        TP_printk("key %s", __get_str(key))
+);
+
 TRACE_EVENT(scoutfs_item_insert_batch,
         TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),

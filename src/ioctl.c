@@ -268,7 +268,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 
 	start = round_up(args.offset, SCOUTFS_BLOCK_SIZE);
 	end_inc = round_down(args.offset + args.count, SCOUTFS_BLOCK_SIZE) - 1;
-	if (end_inc > start)
+	if (end_inc < start)
 		return 0;
 
 	iblock = start >> SCOUTFS_BLOCK_SHIFT;

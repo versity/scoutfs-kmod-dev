@@ -261,6 +261,9 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
 		return -EFAULT;
 
+	trace_printk("offset %llu count %llu vers %llu\n",
+			args.offset, args.count, args.data_version);
+
 	if (args.count == 0)
 		return 0;
 	if ((args.offset + args.count) < args.offset)
@@ -312,6 +315,7 @@ out:
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 
+	trace_printk("ret %d\n", ret);
 	return ret;
 }
 

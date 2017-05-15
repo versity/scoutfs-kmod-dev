@@ -28,84 +28,81 @@
 #include "super.h"
 #include "inode.h"
 #include "trans.h"
+#include "item.h"
 #include "data.h"
 
 /*
- * Find all the inodes that have had keys of a given type modified since
- * a given sequence number.  The user's arg struct specifies the inode
- * range to search within and the sequence value to return results from.
- * Different ioctls call this for different key types.
- *
- * When this is used for file data items the user is trying to find
- * inodes whose data has changed since a given time in the past.
- *
- * XXX We'll need to improve the walk and search to notice when file
- * data items have been truncated away.
- *
- * Inodes and their sequence numbers are copied out to userspace in
- * inode order, not sequence order.
+ * Walk one of the inode index items.  This is a thin ioctl wrapper
+ * around the core item interface.
  */
-static long scoutfs_ioc_inodes_since(struct file *file, unsigned long arg,
-				     u8 type)
+static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_ioctl_inodes_since __user *uargs = (void __user *)arg;
-	struct scoutfs_ioctl_inodes_since args;
-	struct scoutfs_ioctl_ino_seq __user *uiseq;
-	struct scoutfs_ioctl_ino_seq iseq;
-	struct scoutfs_inode_key last_ikey;
-	struct scoutfs_inode_key ikey;
-	struct scoutfs_key_buf last;
+	struct scoutfs_ioctl_walk_inodes __user *uwalk = (void __user *)arg;
+	struct scoutfs_ioctl_walk_inodes walk;
+	struct scoutfs_ioctl_walk_inodes_entry ent;
+	struct scoutfs_inode_index_key last_ikey;
+	struct scoutfs_inode_index_key ikey;
+	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
-	long bytes;
-	u64 seq;
-	int ret;
+	int ret = 0;
+	u32 nr;
 
-	if (copy_from_user(&args, uargs, sizeof(args)))
+	if (copy_from_user(&walk, uwalk, sizeof(walk)))
 		return -EFAULT;
 
-	uiseq = (void __user *)(unsigned long)args.buf_ptr;
-	if (args.buf_len < sizeof(iseq) || args.buf_len > INT_MAX)
+	trace_printk("index %u first %llu.%u.%llu last %llu.%u.%llu\n",
+		     walk.index, walk.first.major, walk.first.minor,
+		     walk.first.ino, walk.last.major, walk.last.minor,
+		     walk.last.ino);
+
+	if (walk.index == SCOUTFS_IOC_WALK_INODES_CTIME)
+		ikey.type = SCOUTFS_INODE_INDEX_CTIME_KEY;
+	else if (walk.index == SCOUTFS_IOC_WALK_INODES_MTIME)
+		ikey.type = SCOUTFS_INODE_INDEX_MTIME_KEY;
+	else if (walk.index == SCOUTFS_IOC_WALK_INODES_SIZE)
+		ikey.type = SCOUTFS_INODE_INDEX_SIZE_KEY;
+	else
 		return -EINVAL;
 
-	scoutfs_inode_init_key(&key, &ikey, args.first_ino);
-	scoutfs_inode_init_key(&last, &last_ikey, args.last_ino);
+	ikey.major = cpu_to_be64(walk.first.major);
+	ikey.minor = cpu_to_be32(walk.first.minor);
+	ikey.ino = cpu_to_be64(walk.first.ino);
+	scoutfs_key_init(&key, &ikey, sizeof(ikey));
 
-	bytes = 0;
-	for (;;) {
+	last_ikey.type = ikey.type;
+	last_ikey.major = cpu_to_be64(walk.last.major);
+	last_ikey.minor = cpu_to_be32(walk.last.minor);
+	last_ikey.ino = cpu_to_be64(walk.last.ino);
+	scoutfs_key_init(&last_key, &last_ikey, sizeof(last_ikey));
 
-		/* XXX item cache needs to search by seq */
-		seq = !!sb;
-		ret = WARN_ON_ONCE(-EINVAL);
-//		ret = scoutfs_item_since(sb, &key, &last, args.seq, &seq, NULL);
+	/* cap nr to the max the ioctl can return to a compat task */
+	walk.nr_entries = min_t(u64, walk.nr_entries, INT_MAX);
+
+	for (nr = 0; nr < walk.nr_entries;
+	     nr++, walk.entries_ptr += sizeof(ent)) {
+
+		ret = scoutfs_item_next_same(sb, &key, &last_key, NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		iseq.ino = be64_to_cpu(ikey.ino);
-		iseq.seq = seq;
+		ent.major = be64_to_cpu(ikey.major);
+		ent.minor = be32_to_cpu(ikey.minor);
+		ent.ino = be64_to_cpu(ikey.ino);
 
-		if (copy_to_user(uiseq, &iseq, sizeof(iseq))) {
+		if (copy_to_user((void __user *)walk.entries_ptr, &ent,
+				 sizeof(ent))) {
 			ret = -EFAULT;
 			break;
 		}
 
-		uiseq++;
-		bytes += sizeof(iseq);
-		if (bytes + sizeof(iseq) > args.buf_len) {
-			ret = 0;
-			break;
-		}
-
-		last_ikey.ino = cpu_to_be64(iseq.ino + 1);
+		scoutfs_key_inc_cur_len(&key);
 	}
 
-	if (bytes)
-		ret = bytes;
-
-	return ret;
+	return nr ?: ret;
 }
 
 struct ino_path_cursor {
@@ -419,12 +416,10 @@ out:
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
-	case SCOUTFS_IOC_INODES_SINCE:
-		return scoutfs_ioc_inodes_since(file, arg, SCOUTFS_INODE_KEY);
+	case SCOUTFS_IOC_WALK_INODES:
+		return scoutfs_ioc_walk_inodes(file, arg);
 	case SCOUTFS_IOC_INO_PATH:
 		return scoutfs_ioc_ino_path(file, arg);
-	case SCOUTFS_IOC_INODE_DATA_SINCE:
-		return WARN_ON_ONCE(-EINVAL);
 	case SCOUTFS_IOC_DATA_VERSION:
 		return scoutfs_ioc_data_version(file, arg);
 	case SCOUTFS_IOC_RELEASE:

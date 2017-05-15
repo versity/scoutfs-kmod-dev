@@ -160,6 +160,9 @@ struct scoutfs_segment_block {
 #define SCOUTFS_ORPHAN_KEY		10
 #define SCOUTFS_FREE_EXTENT_BLKNO_KEY	11
 #define SCOUTFS_FREE_EXTENT_BLOCKS_KEY	12
+#define SCOUTFS_INODE_INDEX_CTIME_KEY	13
+#define SCOUTFS_INODE_INDEX_MTIME_KEY	14
+#define SCOUTFS_INODE_INDEX_SIZE_KEY	15
 /* not found in the fs */
 #define SCOUTFS_MAX_UNUSED_KEY		253
 #define SCOUTFS_NET_ADDR_KEY		254
@@ -246,6 +249,18 @@ struct scoutfs_xattr_val_header {
 /* value is the null terminated target path */
 struct scoutfs_symlink_key {
 	__u8 type;
+	__be64 ino;
+} __packed;
+
+struct scoutfs_betimespec {
+	__be64 sec;
+	__be32 nsec;
+} __packed;
+
+struct scoutfs_inode_index_key {
+	__u8 type;
+	__be64 major;
+	__be32 minor;
 	__be64 ino;
 } __packed;
 

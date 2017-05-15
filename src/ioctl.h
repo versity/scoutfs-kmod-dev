@@ -6,25 +6,54 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 /* XXX I have no idea how these are chosen. */
 #define SCOUTFS_IOCTL_MAGIC 's'
 
-struct scoutfs_ioctl_ino_seq {
+struct scoutfs_ioctl_walk_inodes_entry {
+	__u64 major;
+	__u32 minor;
 	__u64 ino;
-	__u64 seq;
-} __packed;
-
-struct scoutfs_ioctl_inodes_since {
-	__u64 first_ino;
-	__u64 last_ino;
-	__u64 seq;
-	__u64 buf_ptr;
-	__u32 buf_len;
 } __packed;
 
 /*
- * Adds entries to the user's buffer for each inode whose sequence
- * number is greater than or equal to the given seq.
+ * Walk inodes in an index that is sorted by one of their fields.
+ *
+ * Each index is built from generic index items that have major and
+ * minor values that are set to the field being indexed.  In time
+ * indices, for example, major is seconds and minor is nanoseconds.
+ *
+ * @first       The first index entry that can be returned.
+ * @last        The last index entry that can be returned.
+ * @entries_ptr Pointer to emory containing buffer for entry results.
+ * @nr_entries  The number of entries that can fit in the buffer.
+ * @index       Which index to walk, enumerated in _WALK_INODES_ constants.
+ *
+ * To start iterating first can be memset to 0 and last to 0xff.  Then
+ * after each set of results first can be set to the last entry returned
+ * and then the fields can be incremented in reverse sort order (ino <
+ * minor < major) as each increasingly significant value wraps around to
+ * 0.
+ *
+ * If first is greater than last then the walk will return 0 entries.
  */
-#define SCOUTFS_IOC_INODES_SINCE _IOW(SCOUTFS_IOCTL_MAGIC, 1, \
-				      struct scoutfs_ioctl_inodes_since)
+struct scoutfs_ioctl_walk_inodes {
+	struct scoutfs_ioctl_walk_inodes_entry first;
+	struct scoutfs_ioctl_walk_inodes_entry last;
+	__u64 entries_ptr;
+	__u32 nr_entries;
+	__u8 index;
+} __packed;
+
+enum {
+	SCOUTFS_IOC_WALK_INODES_CTIME = 0,
+	SCOUTFS_IOC_WALK_INODES_MTIME,
+	SCOUTFS_IOC_WALK_INODES_SIZE,
+	SCOUTFS_IOC_WALK_INODES_UNKNOWN,
+};
+
+/*
+ * Adds entries to the user's buffer for each inode that is found in the
+ * given index between the first and last positions.
+ */
+#define SCOUTFS_IOC_WALK_INODES _IOW(SCOUTFS_IOCTL_MAGIC, 1, \
+				     struct scoutfs_ioctl_walk_inodes)
 
 /*
  * Fill the path buffer with the next path to the target inode.  An
@@ -79,9 +108,6 @@ struct scoutfs_ioctl_ino_path {
 /* Get a single path from the root to the given inode number */
 #define SCOUTFS_IOC_INO_PATH _IOW(SCOUTFS_IOCTL_MAGIC, 2, \
 				      struct scoutfs_ioctl_ino_path)
-
-#define SCOUTFS_IOC_INODE_DATA_SINCE _IOW(SCOUTFS_IOCTL_MAGIC, 3, \
-					  struct scoutfs_ioctl_inodes_since)
 
 #define SCOUTFS_IOC_DATA_VERSION _IOW(SCOUTFS_IOCTL_MAGIC, 4, __u64)
 

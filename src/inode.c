@@ -184,6 +184,16 @@ static void set_inode_ops(struct inode *inode)
 	mapping_set_gfp_mask(inode->i_mapping, GFP_USER);
 }
 
+static void set_item_info(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	si->have_item = true;
+	si->item_size = i_size_read(inode);
+	si->item_ctime = inode->i_ctime;
+	si->item_mtime = inode->i_mtime;
+}
+
 static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 {
 	struct scoutfs_inode_info *ci = SCOUTFS_I(inode);
@@ -203,6 +213,8 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 
 	ci->data_version = le64_to_cpu(cinode->data_version);
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
+
+	set_item_info(inode);
 }
 
 void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
@@ -363,6 +375,77 @@ int scoutfs_dirty_inode_item(struct inode *inode)
 }
 
 /*
+ * Make sure inode index items are kept in sync with the fields that are
+ * set in the inode items.  This must be called any time the contents of
+ * the inode items are updated.
+ *
+ * This is effectively a RMW on the inode fields so the caller needs to
+ * lock the inode so that it's the only one working with the index items
+ * for a given set of fields in the inode.
+ *
+ * But it doesn't need to lock the index item keys.  By locking the
+ * inode we've ensured that we can safely log deletion and insertion
+ * items in our log.  The indexes are eventually consistent so we don't
+ * need to wrap them locks.
+ *
+ * XXX this needs more supporting work from the rest of the
+ * infrastructure:
+ *
+ * - Deleting and creating the items needs to forcefully set those dirty
+ * items in the cache without first trying to read them from segments.
+ * - the reading ioctl needs to forcefully invalidate the index items
+ * as it walks.
+ * - maybe the reading ioctl needs to verify fields with inodes?
+ * - final inode deletion needs to invalidate the index items for
+ * each inode as it deletes items based on the locked inode fields.
+ * - make sure deletion items safely vanish w/o finding existing item
+ * - ... error handling :(
+ */
+static int update_index(struct inode *inode, u8 type, u64 now_major,
+			u32 now_minor, u64 then_major, u32 then_minor)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_inode_index_key ins_ikey;
+	struct scoutfs_inode_index_key del_ikey;
+	struct scoutfs_key_buf ins;
+	struct scoutfs_key_buf del;
+	int ret;
+	int err;
+
+	trace_printk("ino %llu have %u now %llu.%u then %llu.%u \n",
+		     scoutfs_ino(inode), si->have_item,
+		     now_major, now_minor, then_major, then_minor);
+
+	if (si->have_item && now_major == then_major && now_minor == then_minor)
+		return 0;
+
+	ins_ikey.type = type;
+	ins_ikey.major = cpu_to_be64(now_major);
+	ins_ikey.minor = cpu_to_be32(now_minor);
+	ins_ikey.ino = cpu_to_be64(scoutfs_ino(inode));
+	scoutfs_key_init(&ins, &ins_ikey, sizeof(ins_ikey));
+
+	ret = scoutfs_item_create(sb, &ins, NULL);
+	if (ret || !si->have_item)
+		return ret;
+
+	del_ikey.type = type;
+	del_ikey.major = cpu_to_be64(then_major);
+	del_ikey.minor = cpu_to_be32(then_minor);
+	del_ikey.ino = cpu_to_be64(scoutfs_ino(inode));
+	scoutfs_key_init(&del, &del_ikey, sizeof(del_ikey));
+
+	ret = scoutfs_item_delete(sb, &del);
+	if (ret) {
+		err = scoutfs_item_delete(sb, &ins);
+		BUG_ON(err);
+	}
+
+	return ret;
+}
+
+/*
  * Every time we modify the inode in memory we copy it to its inode
  * item.  This lets us write out items without having to track down
  * dirty vfs inodes.
@@ -373,12 +456,24 @@ int scoutfs_dirty_inode_item(struct inode *inode)
  */
 void scoutfs_update_inode_item(struct inode *inode)
 {
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_key_buf key;
 	struct scoutfs_inode sinode;
 	SCOUTFS_DECLARE_KVEC(val);
+	int ret;
 	int err;
+
+	ret = update_index(inode, SCOUTFS_INODE_INDEX_CTIME_KEY,
+			   inode->i_ctime.tv_sec, inode->i_ctime.tv_nsec,
+			   si->item_ctime.tv_sec, si->item_ctime.tv_nsec) ?:
+	      update_index(inode, SCOUTFS_INODE_INDEX_MTIME_KEY,
+			   inode->i_mtime.tv_sec, inode->i_mtime.tv_nsec,
+			   si->item_mtime.tv_sec, si->item_mtime.tv_nsec) ?:
+	      update_index(inode, SCOUTFS_INODE_INDEX_SIZE_KEY,
+			   i_size_read(inode), 0, si->item_size, 0);
+	BUG_ON(ret);
 
 	store_inode(&sinode, inode);
 
@@ -392,6 +487,7 @@ void scoutfs_update_inode_item(struct inode *inode)
 		BUG_ON(err);
 	}
 
+	set_item_info(inode);
 	trace_scoutfs_update_inode(inode);
 }
 
@@ -562,6 +658,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->ino = ino;
 	ci->data_version = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
+	ci->have_item = false;
 
 	inode->i_ino = ino; /* XXX overflow */
 	inode_init_owner(inode, dir, mode);

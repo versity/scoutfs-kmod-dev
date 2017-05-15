@@ -8,6 +8,10 @@ struct scoutfs_inode_info {
 	u64 ino;
 	u64 data_version;
 	u64 next_readdir_pos;
+	bool have_item;
+	u64 item_size;
+	struct timespec item_ctime;
+	struct timespec item_mtime;
 
 	/* initialized once for slab object */
 	seqcount_t seqcount;

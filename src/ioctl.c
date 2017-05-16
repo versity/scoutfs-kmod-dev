@@ -413,6 +413,24 @@ out:
 	return ret;
 }
 
+static long scoutfs_ioc_stat_more(struct file *file, unsigned long arg)
+{
+	struct inode *inode = file_inode(file);
+	struct scoutfs_ioctl_stat_more stm;
+
+	if (get_user(stm.valid_bytes, (__u64 __user *)arg))
+		return -EFAULT;
+
+	stm.valid_bytes = min_t(u64, stm.valid_bytes,
+				sizeof(struct scoutfs_ioctl_stat_more));
+	stm.data_version = scoutfs_inode_get_data_version(inode);
+
+	if (copy_to_user((void __user *)arg, &stm, stm.valid_bytes))
+		return -EFAULT;
+
+	return 0;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -426,6 +444,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_release(file, arg);
 	case SCOUTFS_IOC_STAGE:
 		return scoutfs_ioc_stage(file, arg);
+	case SCOUTFS_IOC_STAT_MORE:
+		return scoutfs_ioc_stat_more(file, arg);
 	}
 
 	return -ENOTTY;

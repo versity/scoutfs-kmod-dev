@@ -130,4 +130,25 @@ struct scoutfs_ioctl_stage {
 #define SCOUTFS_IOC_STAGE _IOW(SCOUTFS_IOCTL_MAGIC, 6, \
 			       struct scoutfs_ioctl_stage)
 
+/*
+ * Give the user inode fields that are not otherwise visible.  statx()
+ * isn't always available and xattrs are relatively expensive.
+ *
+ * @valid_bytes stores the number of bytes that are valid in the
+ * structure.  The caller sets this to the size of the struct that they
+ * understand.  The kernel then fills and copies back the min of the
+ * size they and the user caller understand.  The user can tell if a
+ * field is set if all of its bytes are within the valid_bytes that the
+ * kernel set on return.
+ *
+ * New fields are only added to the end of the struct.
+ */
+struct scoutfs_ioctl_stat_more {
+	__u64 valid_bytes;
+	__u64 data_version;
+} __packed;
+
+#define SCOUTFS_IOC_STAT_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \
+				   struct scoutfs_ioctl_stat_more)
+
 #endif

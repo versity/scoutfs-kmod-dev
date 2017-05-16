@@ -182,6 +182,7 @@ static struct scoutfs_segment *replace_seg(struct segment_cache *cac,
 			node = &(*node)->rb_right;
 		} else {
 			rb_replace_node(&seg->node, &ins->node, root);
+			RB_CLEAR_NODE(&seg->node);
 			lru_check(cac, seg);
 			lru_check(cac, ins);
 			found = seg;

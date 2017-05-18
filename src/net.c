@@ -628,45 +628,12 @@ static struct send_buf *process_alloc_inodes(struct super_block *sb,
 	return sbuf;
 }
 
-/*
- * Log the time in the request and reply with our current time.
- */
-static struct send_buf *process_trade_time(struct super_block *sb,
-					   void *r, int req_len)
-{
-	struct scoutfs_timespec *req = r;
-	struct scoutfs_timespec *reply;
-	struct send_buf *sbuf;
-	struct timespec64 ts;
-
-	if (req_len != sizeof(*req))
-		return ERR_PTR(-EINVAL);
-
-	sbuf = alloc_sbuf(sizeof(struct scoutfs_timespec));
-	if (!sbuf)
-		return ERR_PTR(-ENOMEM);
-
-	getnstimeofday64(&ts);
-	trace_printk("req %llu.%u replying %llu.%lu\n",
-			le64_to_cpu(req->sec), le32_to_cpu(req->nsec),
-			(u64)ts.tv_sec, ts.tv_nsec);
-
-	reply = (void *)sbuf->nh->data;
-	reply->sec = cpu_to_le64(ts.tv_sec);
-	reply->nsec = cpu_to_le32(ts.tv_nsec);
-
-	sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
-
-	return sbuf;
-}
-
 typedef struct send_buf *(*proc_func_t)(struct super_block *sb, void *req,
 				        int req_len);
 
 static proc_func_t type_proc_func(u8 type)
 {
 	static proc_func_t funcs[] = {
-		[SCOUTFS_NET_TRADE_TIME] = process_trade_time,
 		[SCOUTFS_NET_ALLOC_INODES] = process_alloc_inodes,
 		[SCOUTFS_NET_MANIFEST_RANGE_ENTRIES] =
 			process_manifest_range_entries,
@@ -1581,39 +1548,6 @@ int scoutfs_net_alloc_inodes(struct super_block *sb)
 {
 	return add_send_buf(sb, SCOUTFS_NET_ALLOC_INODES, NULL, 0,
 			    alloc_inodes_reply, NULL);
-}
-
-static int trade_time_reply(struct super_block *sb, void *reply, int ret,
-			    void *arg)
-{
-	struct scoutfs_timespec *ts = reply;
-
-	if (ret != sizeof(*ts))
-		return -EINVAL;
-
-	trace_printk("reply %llu.%u\n",
-		     le64_to_cpu(ts->sec), le32_to_cpu(ts->nsec));
-
-	return 0;
-}
-
-int scoutfs_net_trade_time(struct super_block *sb)
-{
-	struct scoutfs_timespec send;
-	struct timespec64 ts;
-	int ret;
-
-	getnstimeofday64(&ts);
-	send.sec = cpu_to_le64(ts.tv_sec);
-	send.nsec = cpu_to_le32(ts.tv_nsec);
-
-	ret = add_send_buf(sb, SCOUTFS_NET_TRADE_TIME, &send,
-			     sizeof(send), trade_time_reply, NULL);
-
-	trace_printk("sent %llu.%lu ret %d\n",
-		     (u64)ts.tv_sec, ts.tv_nsec, ret);
-
-	return ret;
 }
 
 static struct sock_info *alloc_sinf(struct super_block *sb)

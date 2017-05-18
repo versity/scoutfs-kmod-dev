@@ -4,7 +4,6 @@
 struct scoutfs_key_buf;
 struct scoutfs_segment;
 
-int scoutfs_net_trade_time(struct super_block *sb);
 int scoutfs_net_alloc_inodes(struct super_block *sb);
 int scoutfs_net_manifest_range_entries(struct super_block *sb,
 				       struct scoutfs_key_buf *start,

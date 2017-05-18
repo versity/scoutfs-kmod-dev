@@ -426,9 +426,7 @@ struct scoutfs_net_segnos {
 } __packed;
 
 enum {
-	/* sends and receives a struct scoutfs_timeval */
-	SCOUTFS_NET_TRADE_TIME = 0,
-	SCOUTFS_NET_ALLOC_INODES,
+	SCOUTFS_NET_ALLOC_INODES = 0,
 	SCOUTFS_NET_MANIFEST_RANGE_ENTRIES,
 	SCOUTFS_NET_ALLOC_SEGNO,
 	SCOUTFS_NET_RECORD_SEGMENT,

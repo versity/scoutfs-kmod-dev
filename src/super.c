@@ -234,8 +234,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (ret)
 		return ret;
 
-	scoutfs_net_trade_time(sb);
-
 	inode = scoutfs_iget(sb, SCOUTFS_ROOT_INO);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);

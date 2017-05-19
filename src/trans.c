@@ -50,6 +50,9 @@
  * very long time.
  */
 
+/* sync dirty data at least this often */
+#define TRANS_SYNC_DELAY (HZ * 10)
+
 /*
  * This work func is responsible for writing out all the dirty blocks
  * that make up the current dirty transaction.  It prevents writers from
@@ -77,7 +80,7 @@
 void scoutfs_trans_write_func(struct work_struct *work)
 {
 	struct scoutfs_sb_info *sbi = container_of(work, struct scoutfs_sb_info,
-						   trans_write_work);
+						   trans_write_work.work);
 	struct super_block *sb = sbi->sb;
 	struct scoutfs_bio_completion comp;
 	struct scoutfs_segment *seg;
@@ -125,6 +128,8 @@ out:
 	wake_up(&sbi->trans_hold_wq);
 
 	sbi->trans_task = NULL;
+
+	scoutfs_trans_restart_sync_deadline(sb);
 }
 
 struct write_attempt {
@@ -148,9 +153,14 @@ static int write_attempted(struct scoutfs_sb_info *sbi,
 	return done;
 }
 
+
+/*
+ * We always have delayed sync work pending but the caller wants it
+ * to execute immediately.
+ */
 static void queue_trans_work(struct scoutfs_sb_info *sbi)
 {
-	queue_work(sbi->trans_write_workq, &sbi->trans_write_work);
+	mod_delayed_work(sbi->trans_write_workq, &sbi->trans_write_work, 0);
 }
 
 /*
@@ -192,6 +202,14 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 		       int datasync)
 {
 	return scoutfs_sync_fs(file->f_inode->i_sb, 1);
+}
+
+void scoutfs_trans_restart_sync_deadline(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	mod_delayed_work(sbi->trans_write_workq, &sbi->trans_write_work,
+			 TRANS_SYNC_DELAY);
 }
 
 /*
@@ -322,7 +340,7 @@ void scoutfs_shutdown_trans(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 
 	if (sbi->trans_write_workq) {
-		flush_work(&sbi->trans_write_work);
+		cancel_delayed_work_sync(&sbi->trans_write_work);
 		destroy_workqueue(sbi->trans_write_workq);
 	}
 }

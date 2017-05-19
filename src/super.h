@@ -40,7 +40,7 @@ struct scoutfs_sb_info {
 	spinlock_t trans_write_lock;
 	u64 trans_write_count;
 	int trans_write_ret;
-	struct work_struct trans_write_work;
+	struct delayed_work trans_write_work;
 	wait_queue_head_t trans_write_wq;
 	struct workqueue_struct *trans_write_workq;
 

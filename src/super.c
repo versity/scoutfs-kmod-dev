@@ -214,7 +214,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);
 	spin_lock_init(&sbi->trans_write_lock);
-	INIT_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
+	INIT_DELAYED_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
 
 	/* XXX can have multiple mounts of a  device, need mount id */
@@ -242,6 +242,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sb->s_root)
 		return -ENOMEM;
 
+	scoutfs_trans_restart_sync_deadline(sb);
 //	scoutfs_scan_orphans(sb);
 
 	return 0;

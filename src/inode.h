@@ -6,12 +6,16 @@
 struct scoutfs_inode_info {
 	/* read or initialized for each inode instance */
 	u64 ino;
-	u64 data_version;
 	u64 next_readdir_pos;
+	u64 meta_seq;
+	u64 data_seq;
+	u64 data_version;
 	bool have_item;
 	u64 item_size;
 	struct timespec item_ctime;
 	struct timespec item_mtime;
+	u64 item_meta_seq;
+	u64 item_data_seq;
 
 	/* initialized once for slab object */
 	seqcount_t seqcount;
@@ -48,8 +52,12 @@ void scoutfs_update_inode_item(struct inode *inode);
 void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev);
+void scoutfs_inode_set_meta_seq(struct inode *inode);
+void scoutfs_inode_set_data_seq(struct inode *inode);
 void scoutfs_inode_inc_data_version(struct inode *inode);
-u64 scoutfs_inode_get_data_version(struct inode *inode);
+u64 scoutfs_inode_meta_seq(struct inode *inode);
+u64 scoutfs_inode_data_seq(struct inode *inode);
+u64 scoutfs_inode_data_version(struct inode *inode);
 
 int scoutfs_scan_orphans(struct super_block *sb);
 

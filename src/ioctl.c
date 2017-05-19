@@ -30,6 +30,7 @@
 #include "trans.h"
 #include "item.h"
 #include "data.h"
+#include "net.h"
 
 /*
  * Walk one of the inode index items.  This is a thin ioctl wrapper
@@ -45,6 +46,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	struct scoutfs_inode_index_key ikey;
 	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
+	u64 last_seq;
 	int ret = 0;
 	u32 nr;
 
@@ -62,8 +64,27 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		ikey.type = SCOUTFS_INODE_INDEX_MTIME_KEY;
 	else if (walk.index == SCOUTFS_IOC_WALK_INODES_SIZE)
 		ikey.type = SCOUTFS_INODE_INDEX_SIZE_KEY;
+	else if (walk.index == SCOUTFS_IOC_WALK_INODES_META_SEQ)
+		ikey.type = SCOUTFS_INODE_INDEX_META_SEQ_KEY;
+	else if (walk.index == SCOUTFS_IOC_WALK_INODES_DATA_SEQ)
+		ikey.type = SCOUTFS_INODE_INDEX_DATA_SEQ_KEY;
 	else
 		return -EINVAL;
+
+	/* clamp results to the inodes in the farthest stable seq */
+	if (ikey.type == SCOUTFS_INODE_INDEX_META_SEQ_KEY ||
+	    ikey.type == SCOUTFS_INODE_INDEX_DATA_SEQ_KEY) {
+
+		ret = scoutfs_net_get_last_seq(sb, &last_seq);
+		if (ret)
+			return ret;
+
+		if (last_seq < walk.last.major) {
+			walk.last.major = last_seq;
+			walk.last.minor = ~0;
+			walk.last.ino = ~0ULL;
+		}
+	}
 
 	ikey.major = cpu_to_be64(walk.first.major);
 	ikey.minor = cpu_to_be32(walk.first.minor);
@@ -219,21 +240,6 @@ out:
 }
 
 /*
- * Sample the inode's data_version.  It is not strictly serialized with
- * writes that are in flight.
- */
-static long scoutfs_ioc_data_version(struct file *file, unsigned long arg)
-{
-	u64 __user *uvers = (void __user *)arg;
-	u64 vers = scoutfs_inode_get_data_version(file_inode(file));
-
-	if (put_user(vers, uvers))
-		return -EFAULT;
-
-	return 0;
-}
-
-/*
  * The caller has a version of the data available in the given byte
  * range in an external archive.  As long as the data version still
  * matches we free the blocks fully contained in the range and mark them
@@ -291,7 +297,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 		goto out;
 	}
 
-	if (scoutfs_inode_get_data_version(inode) != args.data_version) {
+	if (scoutfs_inode_data_version(inode) != args.data_version) {
 		ret = -ESTALE;
 		goto out;
 	}
@@ -386,7 +392,7 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 		goto out;
 	}
 
-	if (scoutfs_inode_get_data_version(inode) != args.data_version) {
+	if (scoutfs_inode_data_version(inode) != args.data_version) {
 		ret = -ESTALE;
 		goto out;
 	}
@@ -423,7 +429,9 @@ static long scoutfs_ioc_stat_more(struct file *file, unsigned long arg)
 
 	stm.valid_bytes = min_t(u64, stm.valid_bytes,
 				sizeof(struct scoutfs_ioctl_stat_more));
-	stm.data_version = scoutfs_inode_get_data_version(inode);
+	stm.meta_seq = scoutfs_inode_meta_seq(inode);
+	stm.data_seq = scoutfs_inode_data_seq(inode);
+	stm.data_version = scoutfs_inode_data_version(inode);
 
 	if (copy_to_user((void __user *)arg, &stm, stm.valid_bytes))
 		return -EFAULT;
@@ -438,8 +446,6 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_walk_inodes(file, arg);
 	case SCOUTFS_IOC_INO_PATH:
 		return scoutfs_ioc_ino_path(file, arg);
-	case SCOUTFS_IOC_DATA_VERSION:
-		return scoutfs_ioc_data_version(file, arg);
 	case SCOUTFS_IOC_RELEASE:
 		return scoutfs_ioc_release(file, arg);
 	case SCOUTFS_IOC_STAGE:

@@ -113,7 +113,18 @@ void scoutfs_trans_write_func(struct work_struct *work)
 			goto out;
 
 		scoutfs_inc_counter(sb, trans_level0_seg_write);
+
+	} else if (sbi->trans_deadline_expired) {
+		/*
+		 * If we're not writing data then we only advance the
+		 * seq at the sync deadline interval.  This keeps idle
+		 * mounts from pinning a seq and stopping readers of the
+		 * seq indices but doesn't send a message for every sync
+		 * syscall.
+		 */
+		ret = scoutfs_net_advance_seq(sb, &sbi->trans_seq);
 	}
+
 out:
 	/* XXX this all needs serious work for dealing with errors */
 	WARN_ON_ONCE(ret);
@@ -160,6 +171,7 @@ static int write_attempted(struct scoutfs_sb_info *sbi,
  */
 static void queue_trans_work(struct scoutfs_sb_info *sbi)
 {
+	sbi->trans_deadline_expired = false;
 	mod_delayed_work(sbi->trans_write_workq, &sbi->trans_write_work, 0);
 }
 
@@ -208,6 +220,7 @@ void scoutfs_trans_restart_sync_deadline(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 
+	sbi->trans_deadline_expired = true;
 	mod_delayed_work(sbi->trans_write_workq, &sbi->trans_write_work,
 			 TRANS_SYNC_DELAY);
 }

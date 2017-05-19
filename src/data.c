@@ -1062,6 +1062,7 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 			     struct page *page, void *fsdata)
 {
 	struct inode *inode = mapping->host;
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	int ret;
 
@@ -1070,7 +1071,10 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 
 	ret = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
 	if (ret > 0) {
-		scoutfs_inode_inc_data_version(inode);
+		if (!si->staging) {
+			scoutfs_inode_set_data_seq(inode);
+			scoutfs_inode_inc_data_version(inode);
+		}
 		/* XXX kind of a big hammer, inode life cycle needs work */
 		scoutfs_update_inode_item(inode);
 		scoutfs_inode_queue_writeback(inode);

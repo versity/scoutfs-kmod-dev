@@ -192,6 +192,8 @@ static void set_item_info(struct inode *inode)
 	si->item_size = i_size_read(inode);
 	si->item_ctime = inode->i_ctime;
 	si->item_mtime = inode->i_mtime;
+	si->item_meta_seq = scoutfs_inode_meta_seq(inode);
+	si->item_data_seq = scoutfs_inode_data_seq(inode);
 }
 
 static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
@@ -211,6 +213,8 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	inode->i_ctime.tv_sec = le64_to_cpu(cinode->ctime.sec);
 	inode->i_ctime.tv_nsec = le32_to_cpu(cinode->ctime.nsec);
 
+	ci->meta_seq = le64_to_cpu(cinode->meta_seq);
+	ci->data_seq = le64_to_cpu(cinode->data_seq);
 	ci->data_version = le64_to_cpu(cinode->data_version);
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
 
@@ -245,31 +249,84 @@ static int scoutfs_read_locked_inode(struct inode *inode)
 	return ret;
 }
 
-void scoutfs_inode_inc_data_version(struct inode *inode)
+/*
+ * Set a given seq to the current trans seq if it differs.  The caller
+ * holds locks and a transaction which prevents the transaction from
+ * committing and refreshing the seq.
+ */
+static void set_trans_seq(struct inode *inode, u64 *seq)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 
-	if (!si->staging) {
+	if (*seq != sbi->trans_seq) {
 		preempt_disable();
 		write_seqcount_begin(&si->seqcount);
-		si->data_version++;
+		*seq = sbi->trans_seq;
 		write_seqcount_end(&si->seqcount);
 		preempt_enable();
 	}
 }
 
-u64 scoutfs_inode_get_data_version(struct inode *inode)
+void scoutfs_inode_set_meta_seq(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	set_trans_seq(inode, &si->meta_seq);
+}
+
+void scoutfs_inode_set_data_seq(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	set_trans_seq(inode, &si->data_seq);
+}
+
+void scoutfs_inode_inc_data_version(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	preempt_disable();
+	write_seqcount_begin(&si->seqcount);
+	si->data_version++;
+	write_seqcount_end(&si->seqcount);
+	preempt_enable();
+}
+
+static u64 read_seqcount_u64(struct inode *inode, u64 *val)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	unsigned int seq;
-	u64 vers;
+	u64 v;
 
 	do {
 		seq = read_seqcount_begin(&si->seqcount);
-		vers = si->data_version;
+		v = *val;
 	} while (read_seqcount_retry(&si->seqcount, seq));
 
-	return vers;
+	return v;
+}
+
+u64 scoutfs_inode_meta_seq(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	return read_seqcount_u64(inode, &si->meta_seq);
+}
+
+u64 scoutfs_inode_data_seq(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	return read_seqcount_u64(inode, &si->data_seq);
+}
+
+u64 scoutfs_inode_data_version(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	return read_seqcount_u64(inode, &si->data_version);
 }
 
 static int scoutfs_iget_test(struct inode *inode, void *arg)
@@ -332,7 +389,9 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->mtime.sec = cpu_to_le64(inode->i_mtime.tv_sec);
 	cinode->mtime.nsec = cpu_to_le32(inode->i_mtime.tv_nsec);
 
-	cinode->data_version = cpu_to_le64(ci->data_version);
+	cinode->meta_seq = cpu_to_le64(scoutfs_inode_meta_seq(inode));
+	cinode->data_seq = cpu_to_le64(scoutfs_inode_data_seq(inode));
+	cinode->data_version = cpu_to_le64(scoutfs_inode_data_version(inode));
 	cinode->next_readdir_pos = cpu_to_le64(ci->next_readdir_pos);
 }
 
@@ -465,6 +524,9 @@ void scoutfs_update_inode_item(struct inode *inode)
 	int ret;
 	int err;
 
+	/* set the meta version once per trans for any inode updates */
+	scoutfs_inode_set_meta_seq(inode);
+
 	ret = update_index(inode, SCOUTFS_INODE_INDEX_CTIME_KEY,
 			   inode->i_ctime.tv_sec, inode->i_ctime.tv_nsec,
 			   si->item_ctime.tv_sec, si->item_ctime.tv_nsec) ?:
@@ -472,7 +534,13 @@ void scoutfs_update_inode_item(struct inode *inode)
 			   inode->i_mtime.tv_sec, inode->i_mtime.tv_nsec,
 			   si->item_mtime.tv_sec, si->item_mtime.tv_nsec) ?:
 	      update_index(inode, SCOUTFS_INODE_INDEX_SIZE_KEY,
-			   i_size_read(inode), 0, si->item_size, 0);
+			   i_size_read(inode), 0, si->item_size, 0) ?:
+	      update_index(inode, SCOUTFS_INODE_INDEX_META_SEQ_KEY,
+			   scoutfs_inode_meta_seq(inode), 0,
+			   si->item_meta_seq, 0) ?:
+	      update_index(inode, SCOUTFS_INODE_INDEX_DATA_SEQ_KEY,
+			   scoutfs_inode_data_seq(inode), 0,
+			   si->item_data_seq, 0);
 	BUG_ON(ret);
 
 	store_inode(&sinode, inode);
@@ -656,6 +724,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	ci = SCOUTFS_I(inode);
 	ci->ino = ino;
+	ci->meta_seq = 0;
+	ci->data_seq = 0;
 	ci->data_version = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->have_item = false;

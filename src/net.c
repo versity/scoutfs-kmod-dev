@@ -82,6 +82,10 @@ struct net_info {
 	struct llist_head ring_commit_waiters;
 	struct work_struct ring_commit_work;
 
+	/* server tracks seq use */
+	spinlock_t seq_lock;
+	struct list_head pending_seqs;
+
 	/* both track active sockets for destruction */
 	struct list_head active_socks;
 
@@ -628,6 +632,132 @@ static struct send_buf *process_alloc_inodes(struct super_block *sb,
 	return sbuf;
 }
 
+struct pending_seq {
+	struct list_head head;
+	u64 seq;
+};
+
+/*
+ * Give the client the next seq for it to use in items in its
+ * transaction.  They tell us the seq they just used so we can remove it
+ * from pending tracking and possibly include it in get_last_seq
+ * replies.
+ *
+ * The list walk is O(clients) and the message processing rate goes from
+ * every committed segment to every sync deadline interval.
+ *
+ * XXX The pending seq tracking should be persistent so that it survives
+ * server failover.
+ */
+static struct send_buf *process_advance_seq(struct super_block *sb,
+					    void *req, int req_len)
+{
+	DECLARE_NET_INFO(sb, nti);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct pending_seq *next_ps;
+	struct pending_seq *ps;
+	struct commit_waiter cw;
+	__le64 * __packed prev;
+	__le64 * __packed next;
+	struct send_buf *sbuf;
+	int ret;
+
+	if (req_len != sizeof(__le64))
+		return ERR_PTR(-EINVAL);
+
+	prev = req;
+
+	sbuf = alloc_sbuf(sizeof(__le64));
+	if (!sbuf)
+		return ERR_PTR(-ENOMEM);
+
+	next = (void *)sbuf->nh->data;
+
+	next_ps = kmalloc(sizeof(struct pending_seq), GFP_NOFS);
+	if (!next_ps) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	down_read(&nti->ring_commit_rwsem);
+
+	spin_lock(&nti->seq_lock);
+
+	list_for_each_entry(ps, &nti->pending_seqs, head) {
+		if (ps->seq == le64_to_cpu(*prev)) {
+			list_del_init(&ps->head);
+			kfree(ps);
+			break;
+		}
+	}
+
+	*next = super->next_seq;
+	le64_add_cpu(&super->next_seq, 1);
+
+	trace_printk("prev %llu next %llu, super next_seq %llu\n",
+		     le64_to_cpup(prev), le64_to_cpup(next),
+		     le64_to_cpu(super->next_seq));
+
+	next_ps->seq = le64_to_cpup(next);
+	list_add_tail(&next_ps->head, &nti->pending_seqs);
+
+	spin_unlock(&nti->seq_lock);
+
+	queue_commit_work(nti, &cw);
+	up_read(&nti->ring_commit_rwsem);
+
+	ret = wait_for_commit(&cw);
+out:
+	if (ret < 0)
+		sbuf->nh->status = SCOUTFS_NET_STATUS_ERROR;
+	else
+		sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+
+	return sbuf;
+}
+
+/*
+ * Give the client the last seq that is stable before the lowest seq
+ * that is still dirty out at a client.
+ */
+static struct send_buf *process_get_last_seq(struct super_block *sb,
+					     void *req, int req_len)
+{
+	DECLARE_NET_INFO(sb, nti);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct pending_seq *ps;
+	__le64 * __packed last;
+	struct send_buf *sbuf;
+
+	if (req_len != 0)
+		return ERR_PTR(-EINVAL);
+
+	sbuf = alloc_sbuf(sizeof(__le64));
+	if (!sbuf)
+		return ERR_PTR(-ENOMEM);
+
+	last = (void *)sbuf->nh->data;
+
+	spin_lock(&nti->seq_lock);
+	ps = list_first_entry_or_null(&nti->pending_seqs,
+				      struct pending_seq, head);
+	if (ps) {
+		*last = cpu_to_le64(ps->seq - 1);
+	} else {
+		*last = super->next_seq;
+		le64_add_cpu(last, -1ULL);
+	}
+	spin_unlock(&nti->seq_lock);
+
+	trace_printk("last %llu\n", le64_to_cpup(last));
+
+	sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+
+	return sbuf;
+}
+
 typedef struct send_buf *(*proc_func_t)(struct super_block *sb, void *req,
 				        int req_len);
 
@@ -640,6 +770,8 @@ static proc_func_t type_proc_func(u8 type)
 		[SCOUTFS_NET_ALLOC_SEGNO] = process_alloc_segno,
 		[SCOUTFS_NET_RECORD_SEGMENT] = process_record_segment,
 		[SCOUTFS_NET_BULK_ALLOC] = process_bulk_alloc,
+		[SCOUTFS_NET_ADVANCE_SEQ] = process_advance_seq,
+		[SCOUTFS_NET_GET_LAST_SEQ] = process_get_last_seq,
 	};
 
 	return type < SCOUTFS_NET_UNKNOWN ? funcs[type] : NULL;
@@ -726,9 +858,19 @@ static int process_reply(struct net_info *nti, struct recv_buf *rbuf)
 
 static void destroy_server_state(struct super_block *sb)
 {
+	DECLARE_NET_INFO(sb, nti);
+	struct pending_seq *ps;
+	struct pending_seq *tmp;
+
 	scoutfs_compact_destroy(sb);
 	scoutfs_alloc_destroy(sb);
 	scoutfs_manifest_destroy(sb);
+
+	/* XXX these should be persistent and reclaimed during recovery */
+	list_for_each_entry_safe(ps, tmp, &nti->pending_seqs, head) {
+		list_del_init(&ps->head);
+		kfree(ps);
+	}
 }
 
 /*
@@ -1550,6 +1692,87 @@ int scoutfs_net_alloc_inodes(struct super_block *sb)
 			    alloc_inodes_reply, NULL);
 }
 
+struct advance_seq_args {
+	u64 seq;
+	struct completion comp;
+	int ret;
+};
+
+static int advance_seq_reply(struct super_block *sb, void *reply, int ret,
+				  void *arg)
+{
+	struct advance_seq_args *args = arg;
+	__le64 * __packed seq = reply;
+
+	if (ret == sizeof(__le64)) {
+		args->seq = le64_to_cpup(seq);
+		args->ret = 0;
+	} else {
+		args->ret = -EINVAL;
+	}
+
+	complete(&args->comp); /* args can be freed from this point */
+	return args->ret;
+}
+
+int scoutfs_net_advance_seq(struct super_block *sb, u64 *seq)
+{
+	struct advance_seq_args args;
+	__le64 leseq = cpu_to_le64p(seq);
+	int ret;
+
+	init_completion(&args.comp);
+
+	ret = add_send_buf(sb, SCOUTFS_NET_ADVANCE_SEQ, &leseq,
+			   sizeof(leseq), advance_seq_reply, &args);
+	if (ret == 0) {
+		wait_for_completion(&args.comp);
+		*seq = args.seq;
+		ret = args.ret;
+	}
+	return ret;
+}
+
+struct get_last_seq_args {
+	u64 seq;
+	struct completion comp;
+	int ret;
+};
+
+static int get_last_seq_reply(struct super_block *sb, void *reply, int ret,
+			     void *arg)
+{
+	struct get_last_seq_args *args = arg;
+	__le64 * __packed seq = reply;
+
+	if (ret == sizeof(__le64)) {
+		args->seq = le64_to_cpup(seq);
+		args->ret = 0;
+	} else {
+		args->ret = -EINVAL;
+	}
+
+	complete(&args->comp); /* args can be freed from this point */
+	return args->ret;
+}
+
+int scoutfs_net_get_last_seq(struct super_block *sb, u64 *seq)
+{
+	struct get_last_seq_args args;
+	int ret;
+
+	init_completion(&args.comp);
+
+	ret = add_send_buf(sb, SCOUTFS_NET_GET_LAST_SEQ, NULL, 0,
+			   get_last_seq_reply, &args);
+	if (ret == 0) {
+		wait_for_completion(&args.comp);
+		*seq = args.seq;
+		ret = args.ret;
+	}
+	return ret;
+}
+
 static struct sock_info *alloc_sinf(struct super_block *sb)
 {
 	struct sock_info *sinf;
@@ -1862,6 +2085,8 @@ int scoutfs_net_setup(struct super_block *sb)
 	init_rwsem(&nti->ring_commit_rwsem);
 	init_llist_head(&nti->ring_commit_waiters);
 	INIT_WORK(&nti->ring_commit_work, scoutfs_net_ring_commit_func);
+	spin_lock_init(&nti->seq_lock);
+	INIT_LIST_HEAD(&nti->pending_seqs);
 	INIT_LIST_HEAD(&nti->active_socks);
 
 	sbi->net_info = nti;

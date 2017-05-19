@@ -163,6 +163,8 @@ struct scoutfs_segment_block {
 #define SCOUTFS_INODE_INDEX_CTIME_KEY	13
 #define SCOUTFS_INODE_INDEX_MTIME_KEY	14
 #define SCOUTFS_INODE_INDEX_SIZE_KEY	15
+#define SCOUTFS_INODE_INDEX_META_SEQ_KEY	16
+#define SCOUTFS_INODE_INDEX_DATA_SEQ_KEY	17
 /* not found in the fs */
 #define SCOUTFS_MAX_UNUSED_KEY		253
 #define SCOUTFS_NET_ADDR_KEY		254
@@ -280,6 +282,7 @@ struct scoutfs_super_block {
 	__le64 id;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
 	__le64 next_ino;
+	__le64 next_seq;
 	__le64 alloc_uninit;
 	__le64 total_segs;
 	__le64 free_segs;
@@ -300,6 +303,14 @@ struct scoutfs_timespec {
 } __packed;
 
 /*
+ * @meta_seq: advanced the first time an inode is updated in a given
+ * transaction.  It can only advance again after the inode is written
+ * and a new transaction opens.
+ *
+ * @data_seq: advanced the first time a file's data (or size) is
+ * modified in a given transaction.  It can only advance again after the
+ * file is written and a new transaction opens.
+ *
  * @data_version: incremented every time the contents of a file could
  * have changed.  It is exposed via an ioctl and is then provided as an
  * argument to data functions to protect racing modification.
@@ -314,6 +325,8 @@ struct scoutfs_timespec {
 struct scoutfs_inode {
 	__le64 size;
 	__le64 blocks;
+	__le64 meta_seq;
+	__le64 data_seq;
 	__le64 data_version;
 	__le64 next_readdir_pos;
 	__le32 nlink;
@@ -431,6 +444,8 @@ enum {
 	SCOUTFS_NET_ALLOC_SEGNO,
 	SCOUTFS_NET_RECORD_SEGMENT,
 	SCOUTFS_NET_BULK_ALLOC,
+	SCOUTFS_NET_ADVANCE_SEQ,
+	SCOUTFS_NET_GET_LAST_SEQ,
 	SCOUTFS_NET_UNKNOWN,
 };
 

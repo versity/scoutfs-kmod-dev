@@ -242,6 +242,10 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sb->s_root)
 		return -ENOMEM;
 
+	ret = scoutfs_net_advance_seq(sb, &sbi->trans_seq);
+	if (ret)
+		return ret;
+
 	scoutfs_trans_restart_sync_deadline(sb);
 //	scoutfs_scan_orphans(sb);
 

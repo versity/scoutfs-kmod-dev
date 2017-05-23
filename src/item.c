@@ -293,7 +293,7 @@ static void update_dirty_parents(struct cached_item *item)
 	scoutfs_item_rb_propagate(rb_parent(&item->node), NULL);
 }
 
-static void mark_item_dirty(struct item_cache *cac,
+static void mark_item_dirty(struct super_block *sb, struct item_cache *cac,
 			    struct cached_item *item)
 {
 	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
@@ -307,10 +307,13 @@ static void mark_item_dirty(struct item_cache *cac,
 	cac->dirty_key_bytes += item->key->key_len;
 	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
 
+	scoutfs_trans_track_item(sb, 1, item->key->key_len,
+				 scoutfs_kvec_length(item->val));
+
 	update_dirty_parents(item);
 }
 
-static void clear_item_dirty(struct item_cache *cac,
+static void clear_item_dirty(struct super_block *sb, struct item_cache *cac,
 			     struct cached_item *item)
 {
 	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
@@ -323,6 +326,9 @@ static void clear_item_dirty(struct item_cache *cac,
 	cac->nr_dirty_items--;
 	cac->dirty_key_bytes -= item->key->key_len;
 	cac->dirty_val_bytes -= scoutfs_kvec_length(item->val);
+
+	scoutfs_trans_track_item(sb, -1, -item->key->key_len,
+				 -scoutfs_kvec_length(item->val));
 
 	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||
 		     cac->dirty_val_bytes < 0);
@@ -339,7 +345,7 @@ static void erase_item(struct super_block *sb, struct item_cache *cac,
 {
 	trace_printk("erasing item %p\n", item);
 
-	clear_item_dirty(cac, item);
+	clear_item_dirty(sb, cac, item);
 	rb_erase_augmented(&item->node, &cac->items, &scoutfs_item_rb_cb);
 	free_item(sb, item);
 }
@@ -354,11 +360,11 @@ static void become_deletion_item(struct super_block *sb,
 				 struct cached_item *item,
 				 struct kvec *del_val)
 {
-	clear_item_dirty(cac, item);
+	clear_item_dirty(sb, cac, item);
 	scoutfs_kvec_clone(del_val, item->val);
 	scoutfs_kvec_init_null(item->val);
 	item->deletion = 1;
-	mark_item_dirty(cac, item);
+	mark_item_dirty(sb, cac, item);
 	scoutfs_inc_counter(sb, item_delete);
 }
 
@@ -905,7 +911,7 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 	ret = insert_item(sb, cac, item, false);
 	if (!ret) {
 		scoutfs_inc_counter(sb, item_create);
-		mark_item_dirty(cac, item);
+		mark_item_dirty(sb, cac, item);
 	}
 	spin_unlock_irqrestore(&cac->lock, flags);
 
@@ -950,7 +956,7 @@ int scoutfs_item_create_ephemeral(struct super_block *sb,
 	BUG_ON(ret);
 
 	scoutfs_inc_counter(sb, item_create_ephemeral);
-	mark_item_dirty(cac, item);
+	mark_item_dirty(sb, cac, item);
 
 	spin_unlock_irqrestore(&cac->lock, flags);
 
@@ -975,9 +981,9 @@ void scoutfs_item_update_ephemeral(struct super_block *sb,
 	if (item && item->ephemeral) {
 		trace_printk("updating ephemeral item %p\n", item);
 		scoutfs_inc_counter(sb, item_update_ephemeral);
-		clear_item_dirty(cac, item);
+		clear_item_dirty(sb, cac, item);
 		scoutfs_kvec_clone(item->val, val);
-		mark_item_dirty(cac, item);
+		mark_item_dirty(sb, cac, item);
 	}
 
 	spin_unlock_irqrestore(&cac->lock, flags);
@@ -1173,7 +1179,7 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del_init(&item->entry);
 		insert_item(sb, cac, item, true);
-		mark_item_dirty(cac, item);
+		mark_item_dirty(sb, cac, item);
 	}
 
 	ret = 0;
@@ -1220,7 +1226,7 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key)
 
 		item = find_item(sb, &cac->items, key);
 		if (item) {
-			mark_item_dirty(cac, item);
+			mark_item_dirty(sb, cac, item);
 			ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, end)) {
 			ret = -ENOENT;
@@ -1275,9 +1281,9 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 
 		item = find_item(sb, &cac->items, key);
 		if (item) {
-			clear_item_dirty(cac, item);
+			clear_item_dirty(sb, cac, item);
 			scoutfs_kvec_swap(up_val, item->val);
-			mark_item_dirty(cac, item);
+			mark_item_dirty(sb, cac, item);
 			ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, end)) {
 			ret = -ENOENT;
@@ -1612,7 +1618,7 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 
 		key_bytes -= item->key->key_len;
 
-		clear_item_dirty(cac, item);
+		clear_item_dirty(sb, cac, item);
 
 		del = item;
 		item = next_dirty(item);

@@ -455,6 +455,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		       dev_t rdev)
 {
 	struct super_block *sb = dir->i_sb;
+	DECLARE_ITEM_COUNT(cnt);
 	struct inode *inode;
 	int ret;
 
@@ -462,7 +463,8 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (ret)
 		return ret;
 
-	ret = scoutfs_hold_trans(sb);
+	scoutfs_count_mknod(&cnt, dentry->d_name.len);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		return ret;
 
@@ -515,6 +517,7 @@ static int scoutfs_link(struct dentry *old_dentry,
 {
 	struct inode *inode = old_dentry->d_inode;
 	struct super_block *sb = dir->i_sb;
+	DECLARE_ITEM_COUNT(cnt);
 	int ret;
 
 	if (inode->i_nlink >= SCOUTFS_LINK_MAX)
@@ -524,7 +527,8 @@ static int scoutfs_link(struct dentry *old_dentry,
 	if (ret)
 		return ret;
 
-	ret = scoutfs_hold_trans(sb);
+	scoutfs_count_link(&cnt, dentry->d_name.len);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		return ret;
 
@@ -559,12 +563,14 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct scoutfs_key_buf *keys[3] = {NULL,};
 	struct scoutfs_key_buf rdir_key;
 	struct scoutfs_readdir_key rkey;
+	DECLARE_ITEM_COUNT(cnt);
 	int ret = 0;
 
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
 		return -ENOTEMPTY;
 
-	ret = scoutfs_hold_trans(sb);
+	scoutfs_count_unlink(&cnt, dentry->d_name.len);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		return ret;
 
@@ -718,6 +724,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	struct scoutfs_key_buf key;
 	struct inode *inode = NULL;
 	SCOUTFS_DECLARE_KVEC(val);
+	DECLARE_ITEM_COUNT(cnt);
 	int ret;
 
 	/* path_max includes null as does our value for nd_set_link */
@@ -728,7 +735,8 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		return ret;
 
-	ret = scoutfs_hold_trans(sb);
+	scoutfs_count_symlink(&cnt, dentry->d_name.len, name_len);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		return ret;
 

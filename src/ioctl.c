@@ -27,7 +27,6 @@
 #include "ioctl.h"
 #include "super.h"
 #include "inode.h"
-#include "trans.h"
 #include "item.h"
 #include "data.h"
 #include "net.h"
@@ -307,13 +306,8 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	/* drop all clean and dirty cached blocks in the range */
 	truncate_inode_pages_range(&inode->i_data, start, end_inc);
 
-	ret = scoutfs_hold_trans(sb);
-	if (ret)
-		goto out;
-
 	ret = scoutfs_data_truncate_items(sb, scoutfs_ino(inode), iblock, len,
 					  true);
-	scoutfs_release_trans(sb);
 out:
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);

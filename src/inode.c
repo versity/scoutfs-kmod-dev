@@ -574,9 +574,11 @@ void scoutfs_update_inode_item(struct inode *inode)
 void scoutfs_dirty_inode(struct inode *inode, int flags)
 {
 	struct super_block *sb = inode->i_sb;
+	DECLARE_ITEM_COUNT(cnt);
 	int ret;
 
-	ret = scoutfs_hold_trans(sb);
+	scoutfs_count_dirty_inode(&cnt);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret == 0) {
 		ret = scoutfs_dirty_inode_item(inode);
 		if (ret == 0)
@@ -777,12 +779,15 @@ static int remove_orphan_item(struct super_block *sb, u64 ino)
 static int __delete_inode(struct super_block *sb, struct scoutfs_key_buf *key,
 			  u64 ino, umode_t mode)
 {
+	DECLARE_ITEM_COUNT(cnt);
 	bool release = false;
 	int ret;
 
 	trace_delete_inode(sb, ino, mode);
 
-	ret = scoutfs_hold_trans(sb);
+	/* XXX this is obviously not done yet :) */
+	scoutfs_count_dirty_inode(&cnt);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		goto out;
 	release = true;

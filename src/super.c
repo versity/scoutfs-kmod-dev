@@ -211,7 +211,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	get_random_bytes_arch(&sbi->node_id, sizeof(sbi->node_id));
 
 	spin_lock_init(&sbi->next_ino_lock);
-	atomic_set(&sbi->trans_holds, 0);
 	init_waitqueue_head(&sbi->trans_hold_wq);
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_DELAYED_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);

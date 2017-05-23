@@ -12,6 +12,7 @@ struct manifest;
 struct segment_cache;
 struct compact_info;
 struct data_info;
+struct trans_info;
 struct lock_info;
 struct net_info;
 struct inode_sb_info;
@@ -33,7 +34,6 @@ struct scoutfs_sb_info {
 	struct data_info *data_info;
 	struct inode_sb_info *inode_sb_info;
 
-	atomic_t trans_holds;
 	wait_queue_head_t trans_hold_wq;
 	struct task_struct *trans_task;
 
@@ -46,6 +46,7 @@ struct scoutfs_sb_info {
 	struct workqueue_struct *trans_write_workq;
 	bool trans_deadline_expired;
 
+	struct trans_info *trans_info;
 	struct lock_info *lock_info;
 	struct net_info *net_info;
 

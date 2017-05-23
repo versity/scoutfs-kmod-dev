@@ -368,9 +368,6 @@ static struct send_buf *alloc_sbuf(unsigned data_len)
 	return sbuf;
 }
 
-/* XXX I dunno, totally made up */
-#define BULK_COUNT 32
-
 static struct send_buf *process_bulk_alloc(struct super_block *sb,void *req,
 					   int req_len)
 {
@@ -386,16 +383,16 @@ static struct send_buf *process_bulk_alloc(struct super_block *sb,void *req,
 		return ERR_PTR(-EINVAL);
 
 	sbuf = alloc_sbuf(offsetof(struct scoutfs_net_segnos,
-				   segnos[BULK_COUNT]));
+				   segnos[SCOUTFS_BULK_ALLOC_COUNT]));
 	if (!sbuf)
 		return ERR_PTR(-ENOMEM);
 
 	ns = (void *)sbuf->nh->data;
-	ns->nr = cpu_to_le16(BULK_COUNT);
+	ns->nr = cpu_to_le16(SCOUTFS_BULK_ALLOC_COUNT);
 
 	down_read(&nti->ring_commit_rwsem);
 
-	for (i = 0; i < BULK_COUNT; i++) {
+	for (i = 0; i < SCOUTFS_BULK_ALLOC_COUNT; i++) {
 		ret = scoutfs_alloc_segno(sb, &segno);
 		if (ret) {
 			while (i-- > 0)

@@ -16,6 +16,7 @@
 #include <linux/wait.h>
 #include <linux/atomic.h>
 #include <linux/writeback.h>
+#include <linux/slab.h>
 
 #include "super.h"
 #include "trans.h"
@@ -54,6 +55,33 @@
 #define TRANS_SYNC_DELAY (HZ * 10)
 
 /*
+ * XXX move the rest of the super trans_ fields here.
+ */
+struct trans_info {
+	spinlock_t lock;
+	unsigned reserved_items;
+	unsigned reserved_keys;
+	unsigned reserved_vals;
+	unsigned holders;
+	bool writing;
+};
+
+#define DECLARE_TRANS_INFO(sb, name) \
+	struct trans_info *name = SCOUTFS_SB(sb)->trans_info
+
+static bool drained_holders(struct trans_info *tri)
+{
+	bool drained;
+
+	spin_lock(&tri->lock);
+	tri->writing = true;
+	drained = tri->holders == 0;
+	spin_unlock(&tri->lock);
+
+	return drained;
+}
+
+/*
  * This work func is responsible for writing out all the dirty blocks
  * that make up the current dirty transaction.  It prevents writers from
  * holding a transaction so it doesn't have to worry about blocks being
@@ -82,6 +110,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	struct scoutfs_sb_info *sbi = container_of(work, struct scoutfs_sb_info,
 						   trans_write_work.work);
 	struct super_block *sb = sbi->sb;
+	DECLARE_TRANS_INFO(sb, tri);
 	struct scoutfs_bio_completion comp;
 	struct scoutfs_segment *seg;
 	u64 segno;
@@ -90,8 +119,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	scoutfs_bio_init_comp(&comp);
 	sbi->trans_task = current;
 
-	wait_event(sbi->trans_hold_wq,
-		   atomic_cmpxchg(&sbi->trans_holds, 0, -1) == 0);
+	wait_event(sbi->trans_hold_wq, drained_holders(tri));
 
 	trace_printk("items dirty %d\n", scoutfs_item_has_dirty(sb));
 
@@ -108,7 +136,8 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
 		      scoutfs_inode_walk_writeback(sb, false) ?:
 		      scoutfs_bio_wait_comp(sb, &comp) ?:
-		      scoutfs_net_record_segment(sb, seg, 0);
+		      scoutfs_net_record_segment(sb, seg, 0) ?:
+		      scoutfs_net_advance_seq(sb, &sbi->trans_seq);
 		if (ret)
 			goto out;
 
@@ -135,7 +164,10 @@ out:
 	spin_unlock(&sbi->trans_write_lock);
 	wake_up(&sbi->trans_write_wq);
 
-	atomic_set(&sbi->trans_holds, 0);
+	spin_lock(&tri->lock);
+	tri->writing = false;
+	spin_unlock(&tri->lock);
+
 	wake_up(&sbi->trans_hold_wq);
 
 	sbi->trans_task = NULL;
@@ -226,99 +258,184 @@ void scoutfs_trans_restart_sync_deadline(struct super_block *sb)
 }
 
 /*
- * The holder that creates the most dirty item data is adding a full
- * size xattr.  The largest xattr can have a 255 byte name and 64KB
- * value.
- *
- * XXX Assuming the worst case here too aggressively limits the number
- * of concurrent holders that can work without being blocked when they
- * know they'll dirty much less.  We may want to have callers pass in
- * their item, key, and val budgets if that's not too fragile.
+ * Each thread reserves space in the segment for their dirty items while
+ * they hold the transaction.  This is calculated before the first
+ * transaction hold is acquired.  It includes all the potential nested
+ * item manipulation that could happen with the transaction held.
+ * Including nested holds avoids having to deal with writing out partial
+ * transactions while a caller still holds the transaction.
  */
-#define HOLD_WORST_ITEMS \
-	SCOUTFS_XATTR_MAX_PARTS
-
-#define HOLD_WORST_KEYS \
-	(SCOUTFS_XATTR_MAX_PARTS *				\
-		(sizeof(struct scoutfs_xattr_key) +		\
-		 SCOUTFS_XATTR_MAX_NAME_LEN +			\
-		 sizeof(struct scoutfs_xattr_key_footer)))
-
-#define HOLD_WORST_VALS \
-	 (sizeof(struct scoutfs_xattr_val_header) +		\
-	  SCOUTFS_XATTR_MAX_SIZE)
+#define SCOUTFS_RESERVATION_MAGIC 0xd57cd13b
+struct scoutfs_reservation {
+	unsigned magic;
+	unsigned holders;
+	struct scoutfs_item_count reserved;
+	struct scoutfs_item_count actual;
+};
 
 /*
- * We're able to hold the transaction if the current dirty item bytes
- * and the presumed worst case item dirtying of all the holders,
- * including us, all fit in a segment.
+ * Try to hold the transaction.  If a caller already holds the trans then
+ * we piggy back on their hold.  We wait if the writer is trying to
+ * write out the transation.  And if our items won't fit then we kick off
+ * a write.
  */
-static bool hold_acquired(struct super_block *sb)
+static bool acquired_hold(struct super_block *sb,
+			  struct scoutfs_reservation *rsv,
+			  struct scoutfs_item_count *cnt)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	int with_us;
-	int holds;
-	int before;
-	u32 items;
-	u32 keys;
-	u32 vals;
+	DECLARE_TRANS_INFO(sb, tri);
+	bool acquired = false;
+	unsigned items;
+	unsigned keys;
+	unsigned vals;
+	bool fits;
 
-	holds = atomic_read(&sbi->trans_holds);
-	for (;;) {
-		/* transaction is being committed */
-		if (holds < 0)
-			return false;
+	spin_lock(&tri->lock);
 
-#if 0 /* XXX where will we do this in the shared universe? */
-		/* only hold when there's no level 0 segments, XXX for now */
-		if (scoutfs_manifest_level_count(sb, 0) > 0) {
-			scoutfs_compact_kick(sb);
-			return false;
-		}
-#endif
+	trace_printk("cnt %u.%u.%u, rsv %p holders %u reserved %u.%u.%u actual %d.%d.%d, trans holders %u writing %u reserved %u.%u.%u\n",
+			cnt->items, cnt->keys, cnt->vals, rsv, rsv->holders,
+			rsv->reserved.items, rsv->reserved.keys,
+			rsv->reserved.vals, rsv->actual.items, rsv->actual.keys,
+			rsv->actual.vals, tri->holders, tri->writing,
+			tri->reserved_items, tri->reserved_keys,
+			tri->reserved_vals);
 
-		/* see if we all would fill the segment */
-		with_us = holds + 1;
-		items = with_us * HOLD_WORST_ITEMS;
-		keys = with_us * HOLD_WORST_KEYS;
-		vals = with_us * HOLD_WORST_VALS;
-		if (!scoutfs_item_dirty_fits_single(sb, items, keys, vals)) {
-			scoutfs_sync_fs(sb, 0);
-			return false;
-		}
+	/* use a caller's existing reservation */
+	if (rsv->holders)
+		goto hold;
 
-		before = atomic_cmpxchg(&sbi->trans_holds, holds, with_us);
-		if (before == holds)
-			return true;
-		holds = before;
+	/* wait until the writing thread is finished */
+	if (tri->writing)
+		goto out;
+
+	/* see if we can reserve space for our item count */
+	items = tri->reserved_items + cnt->items;
+	keys = tri->reserved_keys + cnt->keys;
+	vals = tri->reserved_vals + cnt->vals;
+	fits = scoutfs_item_dirty_fits_single(sb, items, keys, vals);
+	if (!fits) {
+		queue_trans_work(sbi);
+		goto out;
 	}
+
+	tri->reserved_items = items;
+	tri->reserved_keys = keys;
+	tri->reserved_vals = vals;
+
+	rsv->reserved.items = cnt->items;
+	rsv->reserved.keys = cnt->keys;
+	rsv->reserved.vals = cnt->vals;
+
+hold:
+	rsv->holders++;
+	tri->holders++;
+	acquired = true;
+
+out:
+
+	spin_unlock(&tri->lock);
+
+	return acquired;
 }
 
-int scoutfs_hold_trans(struct super_block *sb)
+int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_reservation *rsv;
+	int ret;
 
 	if (current == sbi->trans_task)
 		return 0;
 
-	return wait_event_interruptible(sbi->trans_hold_wq, hold_acquired(sb));
+	rsv = current->journal_info;
+	if (rsv == NULL) {
+		rsv = kzalloc(sizeof(struct scoutfs_reservation), GFP_NOFS);
+		if (!rsv)
+			return -ENOMEM;
+
+		rsv->magic = SCOUTFS_RESERVATION_MAGIC;
+		current->journal_info = rsv;
+	}
+
+	BUG_ON(rsv->magic != SCOUTFS_RESERVATION_MAGIC);
+
+	ret = wait_event_interruptible(sbi->trans_hold_wq,
+				       acquired_hold(sb, rsv, cnt));
+	if (ret && rsv->holders == 0) {
+		current->journal_info = NULL;
+		kfree(rsv);
+	}
+	return ret;
 }
 
-/*
- * As we release we'll almost certainly have dirtied less than the
- * worst case dirty assumption that holders might be throttled waiting
- * for.  We always try and wake blocked holders in case they now have
- * room to dirty.
- */
-void scoutfs_release_trans(struct super_block *sb)
+void scoutfs_trans_track_item(struct super_block *sb, signed items,
+			      signed keys, signed vals)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_reservation *rsv = current->journal_info;
 
 	if (current == sbi->trans_task)
 		return;
 
-	atomic_dec(&sbi->trans_holds);
-	wake_up(&sbi->trans_hold_wq);
+	BUG_ON(!rsv || rsv->magic != SCOUTFS_RESERVATION_MAGIC);
+
+	rsv->actual.items += items;
+	rsv->actual.keys += keys;
+	rsv->actual.vals += vals;
+
+	WARN_ON_ONCE(rsv->actual.items > rsv->reserved.items);
+	WARN_ON_ONCE(rsv->actual.keys > rsv->reserved.keys);
+	WARN_ON_ONCE(rsv->actual.vals > rsv->reserved.vals);
+}
+
+/*
+ * As we drop the last hold in the reservation we try and wake other
+ * hold attempts that were waiting for space.  As we drop the last trans
+ * holder we try to wake a writing thread that was waiting for us to
+ * finish.
+ */
+void scoutfs_release_trans(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_reservation *rsv;
+	DECLARE_TRANS_INFO(sb, tri);
+	bool wake = false;
+
+	if (current == sbi->trans_task)
+		return;
+
+	rsv = current->journal_info;
+	BUG_ON(!rsv || rsv->magic != SCOUTFS_RESERVATION_MAGIC);
+
+	spin_lock(&tri->lock);
+
+	trace_printk("rsv %p holders %u reserved %u.%u.%u actual %d.%d.%d, trans holders %u writing %u reserved %u.%u.%u\n",
+			rsv, rsv->holders, rsv->reserved.items,
+			rsv->reserved.keys, rsv->reserved.vals,
+			rsv->actual.items, rsv->actual.keys, rsv->actual.vals,
+			tri->holders, tri->writing, tri->reserved_items,
+			tri->reserved_keys, tri->reserved_vals);
+
+	BUG_ON(rsv->holders <= 0);
+	BUG_ON(tri->holders <= 0);
+
+	if (--rsv->holders == 0) {
+		tri->reserved_items -= rsv->reserved.items;
+		tri->reserved_keys -= rsv->reserved.keys;
+		tri->reserved_vals -= rsv->reserved.vals;
+		current->journal_info = NULL;
+		kfree(rsv);
+		wake = true;
+	}
+
+	if (--tri->holders == 0)
+		wake = true;
+
+	spin_unlock(&tri->lock);
+
+	if (wake)
+		wake_up(&sbi->trans_hold_wq);
 }
 
 /*
@@ -336,10 +453,21 @@ void scoutfs_trans_wake_holders(struct super_block *sb)
 int scoutfs_setup_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct trans_info *tri;
+
+	tri = kzalloc(sizeof(struct trans_info), GFP_KERNEL);
+	if (!tri)
+		return -ENOMEM;
+
+	spin_lock_init(&tri->lock);
 
 	sbi->trans_write_workq = alloc_workqueue("scoutfs_trans", 0, 1);
-	if (!sbi->trans_write_workq)
+	if (!sbi->trans_write_workq) {
+		kfree(tri);
 		return -ENOMEM;
+	}
+
+	sbi->trans_info = tri;
 
 	return 0;
 }
@@ -351,9 +479,12 @@ int scoutfs_setup_trans(struct super_block *sb)
 void scoutfs_shutdown_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	DECLARE_TRANS_INFO(sb, tri);
 
 	if (sbi->trans_write_workq) {
 		cancel_delayed_work_sync(&sbi->trans_write_work);
 		destroy_workqueue(sbi->trans_write_workq);
 	}
+
+	kfree(tri);
 }

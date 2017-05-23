@@ -160,7 +160,7 @@ struct scoutfs_segment_block {
 #define SCOUTFS_ORPHAN_KEY		10
 #define SCOUTFS_FREE_EXTENT_BLKNO_KEY	11
 #define SCOUTFS_FREE_EXTENT_BLOCKS_KEY	12
-#define SCOUTFS_INODE_INDEX_CTIME_KEY	13
+#define SCOUTFS_INODE_INDEX_CTIME_KEY	13  /* don't forget first and last */
 #define SCOUTFS_INODE_INDEX_MTIME_KEY	14
 #define SCOUTFS_INODE_INDEX_SIZE_KEY	15
 #define SCOUTFS_INODE_INDEX_META_SEQ_KEY	16
@@ -169,6 +169,11 @@ struct scoutfs_segment_block {
 #define SCOUTFS_MAX_UNUSED_KEY		253
 #define SCOUTFS_NET_ADDR_KEY		254
 #define SCOUTFS_NET_LISTEN_KEY		255
+
+#define SCOUTFS_INODE_INDEX_FIRST SCOUTFS_INODE_INDEX_CTIME_KEY
+#define SCOUTFS_INODE_INDEX_LAST SCOUTFS_INODE_INDEX_DATA_SEQ_KEY
+#define SCOUTFS_INODE_INDEX_NR \
+	(SCOUTFS_INODE_INDEX_LAST - SCOUTFS_INODE_INDEX_FIRST + 1)
 
 /* value is struct scoutfs_inode */
 struct scoutfs_inode_key {
@@ -432,6 +437,9 @@ struct scoutfs_net_manifest_entries {
 	__le16 nr;
 	struct scoutfs_manifest_entry ments[0];
 } __packed;
+
+/* XXX I dunno, totally made up */
+#define SCOUTFS_BULK_ALLOC_COUNT 32
 
 struct scoutfs_net_segnos {
 	__le16 nr;

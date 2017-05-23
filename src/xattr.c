@@ -262,6 +262,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct scoutfs_xattr_val_header vh;
 	size_t name_len = strlen(name);
 	SCOUTFS_DECLARE_KVEC(val);
+	DECLARE_ITEM_COUNT(cnt);
 	struct scoutfs_lock lck;
 	unsigned int bytes;
 	unsigned int off;
@@ -314,7 +315,8 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	else
 		sif = 0;
 
-	ret = scoutfs_hold_trans(sb);
+	scoutfs_count_xattr_set(&cnt, name_len, size);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		goto unlock;
 

@@ -510,8 +510,9 @@ out:
  * If 'offline' is given then blocks are freed but the extent items are
  * left behind and their _OFFLINE flag is set.
  *
- * This is the low level extent item manipulation code.  Callers manage
- * higher order locking and transactional consistency.
+ * This is the low level extent item manipulation code.  We hold and
+ * release the transaction so the caller doesn't have to deal with
+ * partial progress.
  */
 int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 				u64 len, bool offline)
@@ -526,8 +527,10 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	struct native_extent ext;
 	struct native_extent ofl;
 	struct native_extent fr;
+	DECLARE_ITEM_COUNT(cnt);
 	bool rem_fr = false;
 	bool ins_ext = false;
+	bool holding = false;
 	int ret = 0;
 	int err;
 
@@ -588,6 +591,12 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		if (offline && (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE))
 			continue;
 
+		scoutfs_count_trunc_block(&cnt);
+		ret = scoutfs_hold_trans(sb, &cnt);
+		if (ret)
+			break;
+		holding = true;
+
 		/* free the old extent if it was allocated */
 		if (ext.blkno) {
 			fr = ext;
@@ -618,7 +627,12 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 
 		rem_fr = false;
 		ins_ext = false;
+		scoutfs_release_trans(sb);
+		holding = false;
 	}
+
+	if (holding)
+		scoutfs_release_trans(sb);
 
 	if (ret) {
 		if (ins_ext) {
@@ -1034,12 +1048,14 @@ static int scoutfs_write_begin(struct file *file,
 {
 	struct inode *inode = mapping->host;
 	struct super_block *sb = inode->i_sb;
+	DECLARE_ITEM_COUNT(cnt);
 	int ret;
 
 	trace_printk("ino %llu pos %llu len %u\n",
 		     scoutfs_ino(inode), (u64)pos, len);
 
-	ret = scoutfs_hold_trans(sb);
+	scoutfs_count_write_begin(&cnt);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		goto out;
 

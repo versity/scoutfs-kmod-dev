@@ -354,6 +354,7 @@ static void become_deletion_item(struct super_block *sb,
 				 struct cached_item *item,
 				 struct kvec *del_val)
 {
+	clear_item_dirty(cac, item);
 	scoutfs_kvec_clone(del_val, item->val);
 	scoutfs_kvec_init_null(item->val);
 	item->deletion = 1;

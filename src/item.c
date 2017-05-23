@@ -70,8 +70,7 @@ struct cached_item {
 	};
 
 	long dirty;
-	unsigned deletion:1,
-	         ephemeral:1;
+	unsigned deletion:1;
 
 	struct scoutfs_key_buf *key;
 
@@ -94,8 +93,7 @@ static void free_item(struct super_block *sb, struct cached_item *item)
 {
 	if (!IS_ERR_OR_NULL(item)) {
 		scoutfs_key_free(sb, item->key);
-		if (!item->ephemeral)
-			scoutfs_kvec_kfree(item->val);
+		scoutfs_kvec_kfree(item->val);
 		kfree(item);
 	}
 }
@@ -922,74 +920,6 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 }
 
 /*
- * Ephemeral items are slightly magical and used to track file contents
- * without copying the data into an allocated value.
- *
- * Their value kvec clones the callers which means they reference
- * external data.  They're freed after items are copied into segments so
- * that callers can know that no items reference their structures after
- * a commit finishes.
- *
- * They forcefully clobber any existing item at their key without
- * reading the existing item.
- */
-int scoutfs_item_create_ephemeral(struct super_block *sb,
-			          struct scoutfs_key_buf *key,
-				  struct kvec *val)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct item_cache *cac = sbi->item_cache;
-	struct cached_item *item;
-	unsigned long flags;
-	int ret;
-
-	item = alloc_item(sb, key, NULL);
-	if (!item)
-		return -ENOMEM;
-
-	scoutfs_kvec_clone(item->val, val);
-	item->ephemeral = 1;
-
-	spin_lock_irqsave(&cac->lock, flags);
-
-	ret = insert_item(sb, cac, item, true);
-	BUG_ON(ret);
-
-	scoutfs_inc_counter(sb, item_create_ephemeral);
-	mark_item_dirty(sb, cac, item);
-
-	spin_unlock_irqrestore(&cac->lock, flags);
-
-	return ret;
-}
-
-/*
- * Update the value for an ephemeral item if it exists.
- */
-void scoutfs_item_update_ephemeral(struct super_block *sb,
-				   struct scoutfs_key_buf *key,
-				   struct kvec *val)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct item_cache *cac = sbi->item_cache;
-	struct cached_item *item;
-	unsigned long flags;
-
-	spin_lock_irqsave(&cac->lock, flags);
-
-	item = find_item(sb, &cac->items, key);
-	if (item && item->ephemeral) {
-		trace_printk("updating ephemeral item %p\n", item);
-		scoutfs_inc_counter(sb, item_update_ephemeral);
-		clear_item_dirty(sb, cac, item);
-		scoutfs_kvec_clone(item->val, val);
-		mark_item_dirty(sb, cac, item);
-	}
-
-	spin_unlock_irqrestore(&cac->lock, flags);
-}
-
-/*
  * Allocate an item with the key and value and add it to the list of
  * items to be inserted as a batch later.  The caller adds in sort order
  * and we add with _tail to maintain that order.
@@ -1623,7 +1553,7 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 		del = item;
 		item = next_dirty(item);
 
-		if (del->deletion || del->ephemeral)
+		if (del->deletion)
 			erase_item(sb, cac, del);
 
 		nr_items--;

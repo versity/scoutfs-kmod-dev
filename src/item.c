@@ -1037,7 +1037,7 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	if (WARN_ON_ONCE(invalid_flags(sif)))
 		return -EINVAL;
 
-//	trace_scoutfs_item_set_batch(sb, start, end);
+	trace_scoutfs_item_set_batch(sb, start, end);
 
 	if (WARN_ON_ONCE(scoutfs_key_compare(start, end) > 0))
 		return -EINVAL;

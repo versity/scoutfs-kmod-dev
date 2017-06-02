@@ -230,7 +230,7 @@ TRACE_EVENT(scoutfs_item_insertion,
         TP_printk("key %s", __get_str(key))
 );
 
-TRACE_EVENT(scoutfs_item_insert_batch,
+DECLARE_EVENT_CLASS(scoutfs_range_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),
         TP_ARGS(sb, start, end),
@@ -243,6 +243,18 @@ TRACE_EVENT(scoutfs_item_insert_batch,
 		scoutfs_key_str(__get_dynamic_array(end), end);
         ),
         TP_printk("start %s end %s", __get_str(start), __get_str(end))
+);
+
+DEFINE_EVENT(scoutfs_range_class, scoutfs_item_set_batch,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
+		 struct scoutfs_key_buf *end),
+        TP_ARGS(sb, start, end)
+);
+
+DEFINE_EVENT(scoutfs_range_class, scoutfs_item_insert_batch,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
+		 struct scoutfs_key_buf *end),
+        TP_ARGS(sb, start, end)
 );
 
 #define lock_mode(mode)							\

@@ -19,7 +19,36 @@ void scoutfs_key_inc_cur_len(struct scoutfs_key_buf *key);
 void scoutfs_key_dec(struct scoutfs_key_buf *key);
 void scoutfs_key_dec_cur_len(struct scoutfs_key_buf *key);
 
+int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size);
 int scoutfs_key_str(char *buf, struct scoutfs_key_buf *key);
+void scoutfs_key_start_percpu(void);
+char *scoutfs_key_percpu_string(void);
+void scoutfs_key_finish_percpu(void);
+
+#define SK_PCPU(statements) do {	\
+	scoutfs_key_start_percpu();	\
+	{ statements; }			\
+	scoutfs_key_finish_percpu();	\
+} while (0)
+
+/*
+ * The biggest keys are typically a little struct then a large name.  The
+ * string representation will tend to be mostly the name, but some of the
+ * strict fields can blow up from say 8 bytes to 20 bytes.  So we give
+ * a lot of padding for that.
+ */
+#define SK_STR_BYTES (100 + SCOUTFS_MAX_KEY_SIZE)
+
+#define SK_FMT "%s"
+#define SK_ARG(k)					\
+({							\
+	char *__str = scoutfs_key_percpu_string();	\
+	scoutfs_key_str_size(__str, k, SK_STR_BYTES);	\
+	__str;						\
+})
+
+#define SK_TRACE_PRINTK(args...) SK_PCPU(trace_printk(args))
+#define SK_PRINTK(args...) SK_PCPU(printk(args))
 
 /*
  * Initialize a small key in a larger allocated buffer.  This lets

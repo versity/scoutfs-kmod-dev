@@ -116,9 +116,8 @@ void scoutfs_key_dec(struct scoutfs_key_buf *key)
  *
  * XXX nonprintable characters in the trace?
  */
-int scoutfs_key_str(char *buf, struct scoutfs_key_buf *key)
+int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 {
-	size_t size = buf ? INT_MAX : 0;
 	int len;
 	u8 type;
 
@@ -169,4 +168,56 @@ int scoutfs_key_str(char *buf, struct scoutfs_key_buf *key)
 
 	return snprintf_null(buf, size, "[truncated type %u len %u]",
 			     type, key->key_len);
+}
+
+/*
+ * A null buf can be set to find the length of the formatted string.
+ */
+int scoutfs_key_str(char *buf, struct scoutfs_key_buf *key)
+{
+	return scoutfs_key_str_size(buf, key, buf ? INT_MAX : 0);
+}
+
+#define MAX_STR_COUNT 10
+
+struct key_strings {
+	bool started;
+	int next_str;
+	char strings[MAX_STR_COUNT][SK_STR_BYTES];
+};
+
+static DEFINE_PER_CPU(struct key_strings, percpu_key_strings);
+
+void scoutfs_key_start_percpu(void)
+{
+	struct key_strings *ks = this_cpu_ptr(&percpu_key_strings);
+
+	BUG_ON(ks->started);
+	ks->started = true;
+	get_cpu();
+}
+
+char *scoutfs_key_percpu_string(void)
+{
+	struct key_strings *ks = this_cpu_ptr(&percpu_key_strings);
+	char *str;
+
+	BUG_ON(!ks->started);
+
+	str = ks->strings[ks->next_str++];
+	BUG_ON(ks->next_str >= MAX_STR_COUNT);
+
+	return str;
+}
+
+void scoutfs_key_finish_percpu(void)
+{
+	struct key_strings *ks = this_cpu_ptr(&percpu_key_strings);
+
+	BUG_ON(!ks->started);
+
+	ks->next_str = 0;
+	ks->started = false;
+
+	put_cpu();
 }

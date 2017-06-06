@@ -121,6 +121,9 @@ int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 	int len;
 	u8 type;
 
+	if (key == NULL || key->data == NULL)
+		return snprintf_null(buf, size, "[NULL]");
+
 	if (key->key_len == 0)
 		return snprintf_null(buf, size, "[0 len]");
 
@@ -159,6 +162,82 @@ int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 
 		return snprintf_null(buf, size, "dnt.%llu.%.*s",
 				     be64_to_cpu(dkey->ino), len, dkey->name);
+	}
+
+	case SCOUTFS_READDIR_KEY: {
+		struct scoutfs_readdir_key *rkey = key->data;
+
+		return snprintf_null(buf, size, "rdr.%llu.%llu",
+				     be64_to_cpu(rkey->ino),
+				     be64_to_cpu(rkey->pos));
+	}
+
+	case SCOUTFS_LINK_BACKREF_KEY: {
+		struct scoutfs_link_backref_key *lkey = key->data;
+
+		len = (int)key->key_len - sizeof(*lkey);
+		if (len <= 0)
+			break;
+
+		return snprintf_null(buf, size, "lbr.%llu.%llu.%.*s",
+				     be64_to_cpu(lkey->ino),
+				     be64_to_cpu(lkey->dir_ino), len,
+				     lkey->name);
+	}
+
+	case SCOUTFS_SYMLINK_KEY: {
+		struct scoutfs_symlink_key *skey = key->data;
+
+		return snprintf_null(buf, size, "sym.%llu",
+				     be64_to_cpu(skey->ino));
+	}
+
+	case SCOUTFS_FILE_EXTENT_KEY: {
+		struct scoutfs_file_extent_key *ekey = key->data;
+
+		return snprintf_null(buf, size, "ext.%llu.%llu.%llu.%llu.%x",
+				     be64_to_cpu(ekey->ino),
+				     be64_to_cpu(ekey->last_blk_off),
+				     be64_to_cpu(ekey->last_blkno),
+				     be64_to_cpu(ekey->blocks),
+				     ekey->flags);
+	}
+
+	case SCOUTFS_ORPHAN_KEY: {
+		struct scoutfs_orphan_key *okey = key->data;
+
+		return snprintf_null(buf, size, "orp.%llu",
+				     be64_to_cpu(okey->ino));
+	}
+
+	case SCOUTFS_FREE_EXTENT_BLKNO_KEY:
+	case SCOUTFS_FREE_EXTENT_BLOCKS_KEY: {
+		struct scoutfs_free_extent_blkno_key *fkey = key->data;
+
+		return snprintf_null(buf, size, "%s.%llu.%llu.%llu",
+			fkey->type == SCOUTFS_FREE_EXTENT_BLKNO_KEY ? "fel" :
+								      "fes",
+				be64_to_cpu(fkey->node_id),
+				be64_to_cpu(fkey->last_blkno),
+				be64_to_cpu(fkey->blocks));
+	}
+
+	case SCOUTFS_INODE_INDEX_CTIME_KEY:
+	case SCOUTFS_INODE_INDEX_MTIME_KEY:
+	case SCOUTFS_INODE_INDEX_SIZE_KEY:
+	case SCOUTFS_INODE_INDEX_META_SEQ_KEY:
+	case SCOUTFS_INODE_INDEX_DATA_SEQ_KEY: {
+		struct scoutfs_inode_index_key *ikey = key->data;
+
+		return snprintf_null(buf, size, "%s.%llu.%u.%llu",
+			ikey->type == SCOUTFS_INODE_INDEX_CTIME_KEY ? "ctm" :
+			ikey->type == SCOUTFS_INODE_INDEX_MTIME_KEY ? "mtm" :
+			ikey->type == SCOUTFS_INODE_INDEX_SIZE_KEY ? "siz" :
+			ikey->type == SCOUTFS_INODE_INDEX_META_SEQ_KEY ? "msq" :
+			ikey->type == SCOUTFS_INODE_INDEX_DATA_SEQ_KEY ? "dsq" :
+				"uii", be64_to_cpu(ikey->major),
+				be32_to_cpu(ikey->minor),
+				be64_to_cpu(ikey->ino));
 	}
 
 	default:

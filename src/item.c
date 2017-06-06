@@ -1478,17 +1478,6 @@ static void count_seg_items(struct item_cache *cac, u32 *nr_items,
  * The caller is responsible for the consistency of the dirty items once
  * they're in its seg.  We can consider them clean once we store them.
  *
- * Today entering a transaction doesn't ensure that there's never more
- * than a segment's worth of dirty items.  As we release a trans we kick
- * off an async sync.  By the time we get here we can have a lot more
- * than a segments worth of dirty items.
- *
- * XXX This is unacceptable because multiple segment writes are not
- * atomic.  We can have the items that make up an atomic change span
- * segments and can be partially visible if we only write the first
- * segment.  We probably want to throttle trans enters once we have as
- * many dirty items as our atomic segment updates can write.
- *
  * XXX this first/append pattern will go away once we can write a stream
  * of items to a segment without needing to know the item count to
  * find the starting key and value offsets.

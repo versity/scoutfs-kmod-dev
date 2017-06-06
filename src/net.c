@@ -1838,6 +1838,38 @@ static void scoutfs_net_accept_func(struct work_struct *work)
 }
 
 /*
+ * Create a new TCP socket and set all the options that are used for
+ * both connecting and listening sockets.
+ */
+static int create_sock_setopts(struct socket **sock_ret)
+{
+	struct socket *sock;
+	int optval;
+	int ret;
+
+	*sock_ret = NULL;
+
+	ret = sock_create_kern(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
+	if (ret) {
+		trace_printk("sock create ret %d\n", ret);
+		return ret;
+	}
+
+	optval = 1;
+	ret = kernel_setsockopt(sock, SOL_TCP, TCP_NODELAY, (char *)&optval,
+				sizeof(optval));
+	if (ret) {
+		trace_printk("nodelay ret %d\n", ret);
+		sock_release(sock);
+		return ret;
+	}
+
+	*sock_ret = sock;
+
+	return 0;
+}
+
+/*
  * The server work has acquired the listen lock.  We create a socket and
  * publish its bound address in the addr lock's lvb.
  *
@@ -1855,6 +1887,7 @@ static void scoutfs_net_listen_func(struct work_struct *work)
 	struct sockaddr_in sin;
 	struct socket *sock;
 	int addrlen;
+	int optval;
 	int ret;
 
 	/* XXX option to set listening address */
@@ -1865,12 +1898,21 @@ static void scoutfs_net_listen_func(struct work_struct *work)
 	trace_printk("binding to %pIS:%u\n",
 		     &sin, be16_to_cpu(sin.sin_port));
 
-	ret = sock_create_kern(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
+	ret = create_sock_setopts(&sock);
 	if (ret)
 		goto out;
 
 	trace_printk("listening sinf %p sock %p sk %p\n",
 		     sinf, sock, sock->sk);
+
+	optval = 1;
+	ret = kernel_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char *)&optval,
+				sizeof(optval));
+	if (ret) {
+		trace_printk("reuseaddr ret %d\n", ret);
+		sock_release(sock);
+		goto out;
+	}
 
 	sinf->sock = sock;
 	INIT_WORK(&sinf->accept_work, scoutfs_net_accept_func);
@@ -1914,7 +1956,7 @@ static void scoutfs_net_connect_func(struct work_struct *work)
 	int addrlen;
 	int ret;
 
-	ret = sock_create_kern(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
+	ret = create_sock_setopts(&sock);
 	if (ret)
 		goto out;
 

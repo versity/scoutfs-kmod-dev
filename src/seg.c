@@ -565,6 +565,16 @@ void scoutfs_seg_append_item(struct super_block *sb,
 	pos = le32_to_cpu(sblk->nr_items);
 	sblk->nr_items = cpu_to_le32(pos + 1);
 
+	/*
+	 * It's very bad data corruption if we write out of order items
+	 * to a segment.  It'll mislead the key search during read and
+	 * stop it from finding its items.
+	 */
+	if (pos) {
+		scoutfs_seg_item_ptrs(seg, pos - 1, &item_key, NULL, NULL);
+		BUG_ON(scoutfs_key_compare(key, &item_key) <= 0);
+	}
+
 	prev = pos_ptr(seg, pos - 1);
 	item = pos_ptr(seg, pos);
 

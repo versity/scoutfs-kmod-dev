@@ -414,6 +414,7 @@ scoutfs_manifest_find_range_entries(struct super_block *sb,
 	nr = 0;
 
 	/* get level 0 segments that overlap with the missing range */
+	skey.key = NULL;
 	skey.level = 0;
 	skey.seq = ~0ULL;
 	ment = scoutfs_ring_lookup_prev(&mani->ring, &skey);
@@ -836,6 +837,8 @@ static int manifest_ring_compare_key(void *key, void *data)
 	struct scoutfs_key_buf last;
 	int cmp;
 
+	scoutfs_key_init(&first, NULL, 0);
+
 	if (skey->level < ment->level) {
 		cmp = -1;
 		goto out;
@@ -861,6 +864,13 @@ static int manifest_ring_compare_key(void *key, void *data)
 	}
 
 out:
+#if 0
+	/* pretty expensive to be on by default */
+	SK_TRACE_PRINTK("%u,%llu,"SK_FMT" %c %u,%llu,"SK_FMT"\n",
+			skey->level, skey->seq, SK_ARG(skey->key),
+			cmp < 0 ? '<' : cmp == 0 ? '=' : '>',
+			ment->level, le64_to_cpu(ment->seq), SK_ARG(&first));
+#endif
 	return cmp;
 }
 

@@ -633,6 +633,13 @@ static void scoutfs_compact_func(struct work_struct *work)
 	if (ret == 0 && list_empty(&curs.csegs))
 		return;
 
+	/* trace compaction ranges */
+	list_for_each_entry(cseg, &curs.csegs, entry) {
+		SK_TRACE_PRINTK("level %u segno %llu first "SK_FMT" last "SK_FMT"\n",
+				cseg->level, cseg->segno, SK_ARG(cseg->first),
+				SK_ARG(cseg->last));
+	}
+
 	if (ret == 0 && !list_empty(&curs.csegs)) {
 		ret = compact_segments(sb, &curs, &comp, &results);
 

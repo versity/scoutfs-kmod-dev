@@ -1488,8 +1488,11 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item = NULL;
 	struct cached_item *del;
+	unsigned long flags;
 	u32 key_bytes;
 	u32 nr_items;
+
+	spin_lock_irqsave(&cac->lock, flags);
 
 	count_seg_items(cac, &nr_items, &key_bytes);
 
@@ -1521,6 +1524,8 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 
 		nr_items--;
 	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
 
 	return 0;
 }

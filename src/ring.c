@@ -320,7 +320,7 @@ void *scoutfs_ring_lookup_next(struct scoutfs_ring_info *ring, void *key)
 	int cmp;
 
 	rnode = ring_rb_walk(ring, key, NULL, NULL, &cmp);
-	if (rnode && (cmp > 1 || rnode->deleted))
+	if (rnode && (cmp > 0 || rnode->deleted))
 		rnode = ring_rb_next(rnode);
 
 	return rnode_data(rnode);
@@ -332,7 +332,7 @@ void *scoutfs_ring_lookup_prev(struct scoutfs_ring_info *ring, void *key)
 	int cmp;
 
 	rnode = ring_rb_walk(ring, key, NULL, NULL, &cmp);
-	if (rnode && (cmp < 1 || rnode->deleted))
+	if (rnode && (cmp < 0 || rnode->deleted))
 		rnode = ring_rb_prev(rnode);
 
 	return rnode_data(rnode);

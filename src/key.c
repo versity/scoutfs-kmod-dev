@@ -93,8 +93,6 @@ void scoutfs_key_dec_cur_len(struct scoutfs_key_buf *key)
 	u8 *bytes = key->data;
 	int i;
 
-	extend_zeros(key);
-
 	for (i = key->key_len - 1; i >= 0; i--) {
 		if (--bytes[i] != 255)
 			break;

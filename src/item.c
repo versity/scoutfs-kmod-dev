@@ -47,6 +47,8 @@ static bool invalid_flags(int sif)
 }
 
 struct item_cache {
+	struct super_block *sb;
+
 	spinlock_t lock;
 	struct rb_root items;
 	struct rb_root ranges;
@@ -54,20 +56,23 @@ struct item_cache {
 	long nr_dirty_items;
 	long dirty_key_bytes;
 	long dirty_val_bytes;
+
+	struct shrinker shrinker;
+	struct list_head lru_list;
+	unsigned long lru_nr;
 };
 
 /*
  * The dirty bits track if the given item is dirty and if its child
  * subtrees contain any dirty items.
  *
- * The entry is only used when the items are in a private batch list
- * before insertion.
+ * The entry list_head typically stores clean items on an lru for shrinking.
+ * It's also briefly used to track items in a batch after they're
+ * allocated but before they're inserted for the first time.
  */
 struct cached_item {
-	union {
-		struct rb_node node;
-		struct list_head entry;
-	};
+	struct rb_node node;
+	struct list_head entry;
 
 	long dirty;
 	unsigned deletion:1;
@@ -92,6 +97,8 @@ static u8 item_flags(struct cached_item *item)
 static void free_item(struct super_block *sb, struct cached_item *item)
 {
 	if (!IS_ERR_OR_NULL(item)) {
+		WARN_ON_ONCE(!list_empty(&item->entry));
+		WARN_ON_ONCE(!RB_EMPTY_NODE(&item->node));
 		scoutfs_key_free(sb, item->key);
 		scoutfs_kvec_kfree(item->val);
 		kfree(item);
@@ -106,6 +113,9 @@ static struct cached_item *alloc_item(struct super_block *sb,
 
 	item = kzalloc(sizeof(struct cached_item), GFP_NOFS);
 	if (item) {
+		RB_CLEAR_NODE(&item->node);
+		INIT_LIST_HEAD(&item->entry);
+
 		if (!val)
 			scoutfs_kvec_init_null(item->val);
 
@@ -301,6 +311,9 @@ static void mark_item_dirty(struct super_block *sb, struct item_cache *cac,
 		return;
 
 	item->dirty |= ITEM_DIRTY;
+	list_del_init(&item->entry);
+	cac->lru_nr--;
+
 	cac->nr_dirty_items++;
 	cac->dirty_key_bytes += item->key->key_len;
 	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
@@ -321,6 +334,9 @@ static void clear_item_dirty(struct super_block *sb, struct item_cache *cac,
 		return;
 
 	item->dirty &= ~ITEM_DIRTY;
+	list_add_tail(&item->entry, &cac->lru_list);
+	cac->lru_nr++;
+
 	cac->nr_dirty_items--;
 	cac->dirty_key_bytes -= item->key->key_len;
 	cac->dirty_val_bytes -= scoutfs_kvec_length(item->val);
@@ -334,6 +350,12 @@ static void clear_item_dirty(struct super_block *sb, struct item_cache *cac,
 	update_dirty_parents(item);
 }
 
+static void item_referenced(struct item_cache *cac, struct cached_item *item)
+{
+	if (!item->dirty)
+		list_move_tail(&item->entry, &cac->lru_list);
+}
+
 /*
  * Safely erase an item from the tree.  Make sure to remove its dirty
  * accounting, use the augmented erase, and free it.
@@ -345,6 +367,11 @@ static void erase_item(struct super_block *sb, struct item_cache *cac,
 
 	clear_item_dirty(sb, cac, item);
 	rb_erase_augmented(&item->node, &cac->items, &scoutfs_item_rb_cb);
+	RB_CLEAR_NODE(&item->node);
+	if (!list_empty(&item->entry)) {
+		list_del_init(&item->entry);
+		cac->lru_nr--;
+	}
 	free_item(sb, item);
 }
 
@@ -413,7 +440,56 @@ restart:
 	rb_link_node(&ins->node, parent, node);
 	rb_insert_augmented(&ins->node, root, &scoutfs_item_rb_cb);
 
+	BUG_ON(ins->dirty & ITEM_DIRTY);
+	list_add_tail(&ins->entry, &cac->lru_list);
+	cac->lru_nr++;
+
 	return 0;
+}
+
+static struct cached_range *rb_first_rng(struct rb_root *root)
+{
+	struct rb_node *node;
+
+	if ((node = rb_first(root)))
+		return container_of(node, struct cached_range, node);
+
+	return NULL;
+}
+
+static struct cached_range *walk_ranges(struct rb_root *root,
+					struct scoutfs_key_buf *key,
+					struct cached_range **prev,
+					struct cached_range **next)
+{
+	struct rb_node *node = root->rb_node;
+	struct cached_range *rng;
+	int cmp;
+
+	if (prev)
+		*prev = NULL;
+	if (next)
+		*next = NULL;
+
+	while (node) {
+		rng = container_of(node, struct cached_range, node);
+
+		cmp = scoutfs_key_compare_ranges(key, key,
+						 rng->start, rng->end);
+		if (cmp < 0) {
+			if (next)
+				*next = rng;
+			node = node->rb_left;
+		} else if (cmp > 0) {
+			if (prev)
+				*prev = rng;
+			node = node->rb_right;
+		} else {
+			return rng;
+		}
+	}
+
+	return NULL;
 }
 
 /*
@@ -428,26 +504,16 @@ static bool check_range(struct super_block *sb, struct rb_root *root,
 			struct scoutfs_key_buf *key,
 			struct scoutfs_key_buf *end)
 {
-	struct rb_node *node = root->rb_node;
-	struct cached_range *next = NULL;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_range *next;
 	struct cached_range *rng;
-	int cmp;
 
-	while (node) {
-		rng = container_of(node, struct cached_range, node);
-
-		cmp = scoutfs_key_compare_ranges(key, key,
-						 rng->start, rng->end);
-		if (cmp < 0) {
-			next = rng;
-			node = node->rb_left;
-		} else if (cmp > 0) {
-			node = node->rb_right;
-		} else {
-			scoutfs_key_copy(end, rng->end);
-			scoutfs_inc_counter(sb, item_range_hit);
-			return true;
-		}
+	rng = walk_ranges(&cac->ranges, key, NULL, &next);
+	if (rng) {
+		scoutfs_key_copy(end, rng->end);
+		scoutfs_inc_counter(sb, item_range_hit);
+		return true;
 	}
 
 	if (next)
@@ -644,12 +710,14 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_lock_irqsave(&cac->lock, flags);
 
 		item = find_item(sb, &cac->items, key);
-		if (item)
+		if (item) {
+			item_referenced(cac, item);
 			ret = scoutfs_kvec_memcpy(val, item->val);
-		else if (check_range(sb, &cac->ranges, key, end))
+		} else if (check_range(sb, &cac->ranges, key, end)) {
 			ret = -ENOENT;
-		else
+		} else {
 			ret = -ENODATA;
+		}
 
 		spin_unlock_irqrestore(&cac->lock, flags);
 
@@ -795,10 +863,12 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		if (cached && (item = item_for_next(&cac->items, key,
 						    range_end, last))) {
 			scoutfs_key_copy(key, item->key);
-			if (val)
+			if (val) {
+				item_referenced(cac, item);
 				ret = scoutfs_kvec_memcpy(val, item->val);
-			else
+			} else {
 				ret = 0;
+			}
 			break;
 		}
 
@@ -990,7 +1060,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 	insert_range(sb, &cac->ranges, rng);
 
 	list_for_each_entry_safe(item, tmp, list, entry) {
-		list_del(&item->entry);
+		list_del_init(&item->entry);
 		if (insert_item(sb, cac, item, false))
 			list_add(&item->entry, list);
 	}
@@ -1625,6 +1695,160 @@ out:
 	return ret;
 }
 
+static struct cached_item *rb_next_item(struct cached_item *item)
+{
+	struct rb_node *node;
+
+	if (item && (node = rb_next(&item->node)))
+		return container_of(node, struct cached_item, node);
+
+	return NULL;
+}
+
+/*
+ * Shrink the item cache.
+ *
+ * Unfortunately this is complicated by the rbtree of ranges that track
+ * the validity of the cache.  If we free items we have to make sure
+ * they're not covered by ranges or else they'd be considered a valid
+ * negative cache hit.  We don't want to allocate more memory for new
+ * range entries that would be required to poke holes int he cached
+ * range.
+ *
+ * So instead of just freeing the oldest item we shrink the range that
+ * contains the oldest item.  We bias towards freeing the lesser side of
+ * the range.
+ *
+ * Instead of allocating a new range start key we use the key of the
+ * item we're removing.  We have to increment it past the removed key
+ * value.  That increment can move it past the next key in the range if
+ * the next key is of higher precision.  This will be rare and can't go
+ * on indefinitely so we keep searching until we can inc a key and not
+ * extend past the next item.  Eventually we have a range of items to
+ * free.
+ *
+ * During all of this, we chose to abort if we see dirty items.  They
+ * won't be dirty forever and the mm can call back in.
+ *
+ * We can also hit items in the lru which aren't covered by ranges.  We
+ * just free them straight away.  And finally if we're completely out of
+ * items we walk and free the ranges.
+ */
+static int item_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
+{
+	struct item_cache *cac = container_of(shrink, struct item_cache,
+					      shrinker);
+	struct super_block *sb = cac->sb;
+	struct cached_range *rng;
+	struct cached_item *item;
+	struct cached_item *next;
+	struct cached_item *begin;
+	struct cached_item *end;
+	unsigned long flags;
+	unsigned long nr;
+
+	nr = sc->nr_to_scan;
+	if (nr == 0)
+		goto out;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	while (nr > 0) {
+		item = list_first_entry_or_null(&cac->lru_list,
+						struct cached_item, entry);
+
+		/* no lru items, if no items at all then free ranges */
+		if (!item) {
+			if (!RB_EMPTY_ROOT(&cac->items)) {
+				scoutfs_inc_counter(sb, item_shrink_dirty_abort);
+				goto abort;
+			}
+			rng = rb_first_rng(&cac->ranges);
+			if (!rng)
+				break;
+			scoutfs_inc_counter(sb, item_shrink_no_items);
+			begin = NULL;
+			end = NULL;
+			goto free;
+		}
+
+		/* can't have dirty items on the lru */
+		BUG_ON(item->dirty & ITEM_DIRTY);
+
+		/* if we're not in a range just shrink the item */
+		rng = walk_ranges(&cac->ranges, item->key, NULL, NULL);
+		if (!rng) {
+			begin = item;
+			end = item;
+			scoutfs_inc_counter(sb, item_shrink_outside);
+			goto free;
+		}
+
+		/* find the string of items to free, ending with range start */
+		item = next_item(&cac->items, rng->start);
+		begin = item;
+		end = item;
+
+		while (item) {
+			/* can't if it's dirty :( */
+			if (item->dirty & ITEM_DIRTY) {
+				scoutfs_inc_counter(sb, item_shrink_dirty_abort);
+				goto abort;
+			}
+
+			/* we're going to free this item now */
+			end = item;
+
+			/* free items and range if we exhausted the range */
+			next = rb_next_item(item);
+			if (!next || scoutfs_key_compare(next->key, rng->end) > 0)
+				break;
+
+			/* truncate range using after our key as start, if safe */
+			scoutfs_key_inc_cur_len(item->key);
+			if (scoutfs_key_compare(item->key, next->key) <= 0) {
+				trace_scoutfs_item_shrink(sb, item->key);
+				scoutfs_key_free(sb, rng->start);
+				rng->start = item->key;
+				item->key = NULL;
+				rng = NULL;
+				break;
+			}
+			scoutfs_key_dec_cur_len(item->key);
+
+			/* keep searching for valid range start key */
+			scoutfs_inc_counter(sb, item_shrink_skip_inced);
+			item = next;
+		}
+
+free:
+		if (rng) {
+			trace_scoutfs_item_shrink_range(sb, rng->start, rng->end);
+			scoutfs_inc_counter(sb, item_shrink_range);
+			rb_erase(&rng->node, &cac->ranges);
+			free_range(sb, rng);
+		}
+
+		/* free items from begin to end */
+		for (item = begin;
+		     item && (next = item == end ? NULL : rb_next_item(item), 1);
+		     item = next) {
+			if (item->key)
+				trace_scoutfs_item_shrink(sb, item->key);
+			scoutfs_inc_counter(sb, item_shrink);
+			erase_item(sb, cac, item);
+		}
+
+		nr--;
+	}
+
+abort:
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+out:
+	return min_t(unsigned long, cac->lru_nr, INT_MAX);
+}
+
 int scoutfs_item_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -1635,9 +1859,14 @@ int scoutfs_item_setup(struct super_block *sb)
 		return -ENOMEM;
 	sbi->item_cache = cac;
 
+	cac->sb = sb;
 	spin_lock_init(&cac->lock);
 	cac->items = RB_ROOT;
 	cac->ranges = RB_ROOT;
+	cac->shrinker.shrink = item_lru_shrink;
+	cac->shrinker.seeks = DEFAULT_SEEKS;
+	register_shrinker(&cac->shrinker);
+	INIT_LIST_HEAD(&cac->lru_list);
 
 	return 0;
 }
@@ -1656,8 +1885,13 @@ void scoutfs_item_destroy(struct super_block *sb)
 	struct cached_range *pos_rng;
 
 	if (cac) {
+		if (cac->shrinker.shrink == item_lru_shrink)
+			unregister_shrinker(&cac->shrinker);
+
 		rbtree_postorder_for_each_entry_safe(item, pos_item,
 						     &cac->items, node) {
+			RB_CLEAR_NODE(&item->node);
+			INIT_LIST_HEAD(&item->entry);
 			free_item(sb, item);
 		}
 

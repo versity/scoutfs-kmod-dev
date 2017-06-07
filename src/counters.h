@@ -34,10 +34,16 @@
 	EXPAND_COUNTER(item_delete)		\
 	EXPAND_COUNTER(item_range_hit)		\
 	EXPAND_COUNTER(item_range_miss)		\
-	EXPAND_COUNTER(item_range_insert)
+	EXPAND_COUNTER(item_range_insert)	\
+	EXPAND_COUNTER(item_shrink_no_items)	\
+	EXPAND_COUNTER(item_shrink_outside)	\
+	EXPAND_COUNTER(item_shrink_dirty_abort)	\
+	EXPAND_COUNTER(item_shrink_skip_inced)	\
+	EXPAND_COUNTER(item_shrink_range)	\
+	EXPAND_COUNTER(item_shrink)
 
 #define FIRST_COUNTER alloc_alloc
-#define LAST_COUNTER item_range_insert
+#define LAST_COUNTER item_shrink
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

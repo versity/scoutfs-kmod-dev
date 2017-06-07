@@ -226,6 +226,11 @@ DEFINE_EVENT(scoutfs_key_class, scoutfs_item_insertion,
         TP_ARGS(sb, key)
 );
 
+DEFINE_EVENT(scoutfs_key_class, scoutfs_item_shrink,
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_ARGS(sb, key)
+);
+
 DECLARE_EVENT_CLASS(scoutfs_range_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),
@@ -248,6 +253,12 @@ DEFINE_EVENT(scoutfs_range_class, scoutfs_item_set_batch,
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_insert_batch,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
+		 struct scoutfs_key_buf *end),
+        TP_ARGS(sb, start, end)
+);
+
+DEFINE_EVENT(scoutfs_range_class, scoutfs_item_shrink_range,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),
         TP_ARGS(sb, start, end)

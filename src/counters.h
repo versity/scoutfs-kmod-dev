@@ -58,6 +58,9 @@ struct scoutfs_counters {
 #define scoutfs_inc_counter(sb, which) \
 	percpu_counter_inc(&SCOUTFS_SB(sb)->counters->which)
 
+#define scoutfs_add_counter(sb, which, cnt) \
+	percpu_counter_add(&SCOUTFS_SB(sb)->counters->which, cnt)
+
 void __init scoutfs_init_counters(void);
 int scoutfs_setup_counters(struct super_block *sb);
 void scoutfs_destroy_counters(struct super_block *sb);

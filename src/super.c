@@ -18,6 +18,7 @@
 #include <linux/magic.h>
 #include <linux/random.h>
 #include <linux/statfs.h>
+#include <linux/sched.h>
 
 #include "super.h"
 #include "format.h"
@@ -36,6 +37,7 @@
 #include "data.h"
 #include "lock.h"
 #include "net.h"
+#include "options.h"
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
@@ -139,7 +141,8 @@ int scoutfs_write_dirty_super(struct super_block *sb)
  * to re-read the super every time it comes up so that it can work from
  * the most recent persistent state.
  */
-int scoutfs_read_supers(struct super_block *sb)
+int scoutfs_read_supers(struct super_block *sb,
+			struct scoutfs_super_block *local)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
@@ -147,6 +150,7 @@ int scoutfs_read_supers(struct super_block *sb)
 	int found = -1;
 	int ret;
 	int i;
+	u64 seq = 0;
 
 	page = alloc_page(GFP_KERNEL);
 	if (!page)
@@ -168,9 +172,9 @@ int scoutfs_read_supers(struct super_block *sb)
 			continue;
 		}
 
-		if (found < 0 || (le64_to_cpu(super->hdr.seq) >
-				le64_to_cpu(sbi->super.hdr.seq))) {
-			sbi->super = *super;
+		if (found < 0 || (le64_to_cpu(super->hdr.seq) > seq)) {
+			*local = *super;
+			seq = le64_to_cpu((*local).hdr.seq);
 			found = i;
 		}
 	}
@@ -191,6 +195,7 @@ int scoutfs_read_supers(struct super_block *sb)
 static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct scoutfs_sb_info *sbi;
+	struct mount_options opts;
 	struct inode *inode;
 	int ret;
 
@@ -221,8 +226,14 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sbi->kset)
 		return -ENOMEM;
 
+	ret = scoutfs_parse_options(sb, data, &opts);
+	if (ret)
+		return ret;
+
+	sbi->opts = opts;
+
 	ret = scoutfs_setup_counters(sb) ?:
-	      scoutfs_read_supers(sb) ?:
+	      scoutfs_read_supers(sb, &SCOUTFS_SB(sb)->super) ?:
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
 	      scoutfs_inode_setup(sb) ?:

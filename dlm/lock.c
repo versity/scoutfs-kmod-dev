@@ -2552,6 +2552,11 @@ static int _can_be_granted(struct dlm_rsb *r, struct dlm_lkb *lkb, int now,
 	 * order.
 	 */
 
+	/*
+	 * XXX: Right now scoutfs uses NOORDER but if that changes
+	 * we'll have to replace the list_empty() checks below with
+	 * tree searches.
+	 */
 	if (lkb->lkb_exflags & DLM_LKF_NOORDER)
 		return 1;
 

@@ -267,16 +267,21 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
         TP_ARGS(sb, lck),
         TP_STRUCT__entry(
 		__field(int, mode)
+		__field(int, rqmode)
+		__field(unsigned int, seq)
                 __dynamic_array(char, start, scoutfs_key_str(NULL, lck->start))
                 __dynamic_array(char, end, scoutfs_key_str(NULL, lck->end))
         ),
         TP_fast_assign(
 		__entry->mode = lck->mode;
+		__entry->rqmode = lck->rqmode;
+		__entry->seq = lck->sequence;
 		scoutfs_key_str(__get_dynamic_array(start), lck->start);
 		scoutfs_key_str(__get_dynamic_array(end), lck->end);
         ),
-        TP_printk("mode %s start %s end %s",
-		  lock_mode(__entry->mode), __get_str(start), __get_str(end))
+        TP_printk("seq %u mode %s rqmode %s start %s end %s",
+		  __entry->seq, lock_mode(__entry->mode),
+		  lock_mode(__entry->rqmode), __get_str(start), __get_str(end))
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_range,
@@ -285,6 +290,11 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_range,
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_unlock_range,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_ast,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );

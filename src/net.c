@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <asm/ioctls.h>
 #include <linux/net.h>
+#include <linux/inet.h>
 #include <linux/in.h>
 #include <net/sock.h>
 #include <net/tcp.h>
@@ -30,6 +31,7 @@
 #include "seg.h"
 #include "compact.h"
 #include "scoutfs_trace.h"
+#include "msg.h"
 
 /*
  * scoutfs mounts use a simple client-server model to send and process
@@ -889,7 +891,7 @@ static void scoutfs_net_proc_func(struct work_struct *work)
 	while (!nti->server_loaded) {
 		mutex_lock(&nti->mutex);
 		if (!nti->server_loaded) {
-			ret = scoutfs_read_supers(sb) ?:
+			ret = scoutfs_read_supers(sb, &SCOUTFS_SB(sb)->super) ?:
 			      scoutfs_manifest_setup(sb) ?:
 			      scoutfs_alloc_setup(sb) ?:
 			      scoutfs_compact_setup(sb);
@@ -1108,18 +1110,29 @@ static void set_sock_callbacks(struct sock_info *sinf)
 
 }
 
-/* get or set the address of the listening server depending on mode */
-static int lock_addr_lvb(struct super_block *sb, int mode,
-			   struct scoutfs_inet_addr *addr)
+static int write_server_addr(struct super_block *sb,
+			     struct scoutfs_inet_addr *addr)
 {
-	struct scoutfs_lock lck;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+
+	super->server_addr.addr = addr->addr;
+	super->server_addr.port = addr->port;
+
+	return scoutfs_write_dirty_super(sb);
+}
+
+static int read_server_addr(struct super_block *sb,
+			    struct scoutfs_inet_addr *addr)
+{
 	int ret;
+	struct scoutfs_super_block stack;
 
-	ret = scoutfs_lock_range_lvb(sb, mode, &addr_key, &addr_key,
-				     addr, sizeof(*addr), &lck);
-	if (ret == 0)
-		scoutfs_unlock_range(sb, &lck);
-
+	ret = scoutfs_read_supers(sb, &stack);
+	if (ret == 0) {
+		addr->addr = stack.server_addr.addr;
+		addr->port = stack.server_addr.port;
+	}
 	return ret;
 }
 
@@ -1177,6 +1190,7 @@ static void scoutfs_net_shutdown_func(struct work_struct *work)
 	struct super_block *sb = sinf->sb;
 	DECLARE_NET_INFO(sb, nti);
 	struct socket *sock = sinf->sock;
+	int ret;
 
 	trace_printk("sinf %p sock %p shutting_down %d\n",
 		     sinf, sock, sinf->shutting_down);
@@ -1198,9 +1212,13 @@ static void scoutfs_net_shutdown_func(struct work_struct *work)
 		destroy_server_state(sb);
 		nti->server_loaded = false;
 
-		/* clear addr lvb and try to reacquire lock and listen */
+		/* clear addr, try to reacquire lock and listen */
 		memset(&sinf->addr, 0, sizeof(sinf->addr));
-		lock_addr_lvb(sb, SCOUTFS_LOCK_MODE_WRITE, &sinf->addr);
+		ret = write_server_addr(sb, &sinf->addr);
+		if (ret)
+			scoutfs_err(sb,
+				    "Non-fatal error %d while writing server "
+				    "address\n", ret);
 		scoutfs_unlock_range(sb, &sinf->listen_lck);
 		queue_delayed_work(nti->proc_wq, &nti->server_work, 0);
 
@@ -1883,6 +1901,7 @@ static void scoutfs_net_listen_func(struct work_struct *work)
 	struct sock_info *sinf = container_of(work, struct sock_info,
 					      listen_work);
 	struct super_block *sb = sinf->sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_inet_addr addr;
 	struct sockaddr_in sin;
 	struct socket *sock;
@@ -1890,10 +1909,9 @@ static void scoutfs_net_listen_func(struct work_struct *work)
 	int optval;
 	int ret;
 
-	/* XXX option to set listening address */
 	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = cpu_to_be32(INADDR_LOOPBACK);
-	sin.sin_port = 0;
+	sin.sin_addr.s_addr = cpu_to_be32(le32_to_cpu(sbi->opts.listen_addr.addr));
+	sin.sin_port = cpu_to_be16(le16_to_cpu(sbi->opts.listen_addr.port));
 
 	trace_printk("binding to %pIS:%u\n",
 		     &sin, be16_to_cpu(sin.sin_port));
@@ -1931,10 +1949,17 @@ static void scoutfs_net_listen_func(struct work_struct *work)
 
 	set_sock_callbacks(sinf);
 
-	ret = kernel_listen(sock, 255) ?:
-	      lock_addr_lvb(sb, SCOUTFS_LOCK_MODE_WRITE, &addr);
-	if (ret == 0)
-		queue_sock_work(sinf, &sinf->accept_work);
+	ret = kernel_listen(sock, 255);
+	if (ret)
+		goto out;
+
+	scoutfs_advance_dirty_super(sb);
+	ret = write_server_addr(sb, &addr);
+	if (ret)
+		goto out;
+	scoutfs_advance_dirty_super(sb);
+
+	queue_sock_work(sinf, &sinf->accept_work);
 
 out:
 	if (ret) {
@@ -2012,7 +2037,7 @@ static void scoutfs_net_client_func(struct work_struct *work)
 	INIT_WORK(&sinf->send_work, scoutfs_net_send_func);
 	INIT_WORK(&sinf->recv_work, scoutfs_net_recv_func);
 
-	ret = lock_addr_lvb(sb, SCOUTFS_LOCK_MODE_READ, &sinf->addr);
+	ret = read_server_addr(sb, &sinf->addr);
 	if (ret == 0 && sinf->addr.addr == cpu_to_le32(INADDR_ANY))
 		ret = -ENOENT;
 	if (ret < 0) {

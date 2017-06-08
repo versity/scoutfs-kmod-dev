@@ -12,14 +12,15 @@ else
 SP = @:
 endif
 
-SCOUTFS_ARGS := CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src
+SCOUTFS_ARGS := CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) -I $(CURDIR)/dlm/include M=$(CURDIR)/src
 DLM_ARGS := CONFIG_DLM=m CONFIG_DLM_DEBUG=y -C $(SK_KSRC) M=$(CURDIR)/dlm
 
 all: module
 
 module:
-	make $(SCOUTFS_ARGS)
 	make $(DLM_ARGS)
+	cp $(CURDIR)/dlm/Module.symvers $(CURDIR)/src/
+	make $(SCOUTFS_ARGS)
 	$(SP) make C=2 CF="-D__CHECK_ENDIAN__" $(SCOUTFS_ARGS)
 # Do not enable until we can clean up some warnings
 #	$(SP) make C=2 CF="-D__CHECK_ENDIAN__" $(DLM_ARGS)

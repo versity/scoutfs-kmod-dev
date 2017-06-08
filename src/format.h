@@ -276,6 +276,13 @@ struct scoutfs_inode_index_key {
 
 #define SCOUTFS_UUID_BYTES 16
 
+/* XXX ipv6 */
+struct scoutfs_inet_addr {
+	__le32 addr;
+	__le16 port;
+} __packed;
+
+#define SCOUTFS_DEFAULT_PORT 12345
 
 /*
  * The ring fields describe the statically allocated ring log.  The
@@ -298,6 +305,7 @@ struct scoutfs_super_block {
 	__le64 next_seg_seq;
 	struct scoutfs_ring_descriptor alloc_ring;
 	struct scoutfs_manifest manifest;
+	struct scoutfs_inet_addr server_addr;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1
@@ -396,12 +404,6 @@ enum {
 /*
  * messages over the wire.
  */
-
-/* XXX ipv6 */
-struct scoutfs_inet_addr {
-	__le32 addr;
-	__le16 port;
-} __packed;
 
 /*
  * This header precedes and describes all network messages sent over

@@ -19,9 +19,10 @@
 	EXPAND_COUNTER(manifest_compact_migrate) \
 	EXPAND_COUNTER(compact_operations) \
 	EXPAND_COUNTER(compact_segment_moved) \
-	EXPAND_COUNTER(compact_segment_skipped) \
 	EXPAND_COUNTER(compact_segment_read)	\
 	EXPAND_COUNTER(compact_segment_written)	\
+	EXPAND_COUNTER(compact_sticky_upper)	\
+	EXPAND_COUNTER(compact_sticky_written)	\
 	EXPAND_COUNTER(data_readpage)		\
 	EXPAND_COUNTER(data_write_begin)	\
 	EXPAND_COUNTER(data_write_end)		\

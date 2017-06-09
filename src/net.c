@@ -1420,7 +1420,8 @@ int scoutfs_net_get_compaction(struct super_block *sb, void *curs)
 		return nr;
 	}
 
-	for (i = 0; i < nr; i++) {
+	/* allow for expansion slop from sticky and alignment */
+	for (i = 0; i < nr + SCOUTFS_COMPACTION_SLOP; i++) {
 		ret = scoutfs_alloc_segno(sb, &segno);
 		if (ret < 0)
 			break;

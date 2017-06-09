@@ -719,6 +719,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	struct scoutfs_key_buf ment_last;
 	struct scoutfs_key_buf over_first;
 	struct scoutfs_key_buf over_last;
+	bool sticky;
 	int level;
 	int ret;
 	int nr = 0;
@@ -739,7 +740,6 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		goto out;
 	}
 
-	scoutfs_compact_describe(sb, data, level, mani->nr_levels - 1);
 
 	/* find the oldest level 0 or the next higher order level by key */
 	if (level == 0) {
@@ -779,7 +779,8 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	over = scoutfs_ring_lookup_next(&mani->ring, &skey);
 
 	/* and add a fanout's worth of lower overlapping segments */
-	for (i = 0; i < SCOUTFS_MANIFEST_FANOUT; i++) {
+	sticky = false;
+	for (i = 0; i < SCOUTFS_MANIFEST_FANOUT + 1; i++) {
 		if (!over || over->level != (ment->level + 1))
 			break;
 
@@ -788,6 +789,12 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		if (scoutfs_key_compare_ranges(&ment_first, &ment_last,
 					       &over_first, &over_last) != 0)
 			break;
+
+		/* upper level has to stay around when more than fanout */
+		if (i == SCOUTFS_MANIFEST_FANOUT) {
+			sticky = true;
+			break;
+		}
 
 		ret = scoutfs_compact_add(sb, data, &over_first, &over_last,
 					  le64_to_cpu(over->segno),
@@ -798,6 +805,8 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 
 		over = scoutfs_ring_next(&mani->ring, over);
 	}
+
+	scoutfs_compact_describe(sb, data, level, mani->nr_levels - 1, sticky);
 
 	/* record the next key to start from */
 	scoutfs_key_copy(mani->compact_keys[level], &ment_last);

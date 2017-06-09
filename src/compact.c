@@ -83,7 +83,7 @@ struct compact_cursor {
 	struct list_head csegs;
 
 	/* buffer holds allocations and our returning them */
-	u64 segnos[2 * (1 + SCOUTFS_MANIFEST_FANOUT)];
+	u64 segnos[SCOUTFS_COMPACTION_MAX_UPDATE];
 	unsigned nr_segnos;
 
 	u8 lower_level;
@@ -93,6 +93,9 @@ struct compact_cursor {
 	struct compact_seg *saved_upper;
 	struct compact_seg *lower;
 	struct compact_seg *saved_lower;
+
+	bool sticky;
+	struct compact_seg *last_lower;
 };
 
 static void free_cseg(struct super_block *sb, struct compact_seg *cseg)
@@ -256,6 +259,19 @@ retry:
 		*item_flags = lower_flags;
 	}
 
+	/*
+	 * If we have a sticky compaction then we can't mix items from
+	 * the upper level past the last lower key into the lower level.
+	 * The caller will notice when they're emptying the final upper
+	 * level in a sticky merge and leave it at the upper level.
+	 */
+	if (curs->sticky && curs->lower &&
+	    (!lower || lower == curs->last_lower) &&
+	    scoutfs_key_compare(item_key, curs->last_lower->last) > 0) {
+		ret = 0;
+		goto out;
+	}
+
 	if (cmp <= 0)
 		upper->pos++;
 	if (cmp >= 0)
@@ -346,7 +362,6 @@ static int compact_segments(struct super_block *sb,
 			    struct scoutfs_bio_completion *comp,
 			    struct list_head *results)
 {
-	struct scoutfs_key_buf upper_next;
 	struct scoutfs_segment *seg;
 	struct compact_seg *cseg;
 	struct compact_seg *upper;
@@ -357,24 +372,25 @@ static int compact_segments(struct super_block *sb,
 	int ret;
 
 	scoutfs_inc_counter(sb, compact_operations);
+	if (curs->sticky)
+		scoutfs_inc_counter(sb, compact_sticky_upper);
 
 	for (;;) {
 		upper = curs->upper;
 		lower = curs->lower;
 
 		/*
-		 * We can just move the upper segment down a level if it
-		 * doesn't intersect any lower segments.
+		 * If we're at the start of the upper segment and
+		 * there's no lower segment then we might as well just
+		 * move the segment in the manifest.  We can't do this
+		 * if we're moving to the last level because we might
+		 * need to drop any deletion items.
 		 *
-		 * XXX we can't do this if the segment we're moving has
-		 * deletion items.  We need to copy the non-deletion items
-		 * and drop the deletion items in that case.  To do that
-		 * we'll need the manifest to count the number of deletion
-		 * and non-deletion items.
+		 * XXX We should have metadata in the manifest to tell
+		 * us that there's no deletion items in the segment.
 		 */
-		if (upper && upper->pos == 0 &&
-		    (!lower ||
-		     scoutfs_key_compare(upper->last, lower->first) < 0)) {
+		if (upper && upper->pos == 0 && !lower && !curs->sticky &&
+		    ((upper->level + 1) < curs->last_level)) {
 
 			/*
 			 * XXX blah!  these csegs are getting
@@ -412,26 +428,17 @@ static int compact_segments(struct super_block *sb,
 			break;
 
 		/*
-		 * We can skip a lower segment if there's no upper segment
-		 * or the next upper item is past the last in the lower.
+		 * XXX we could intelligently skip reading and merging
+		 * lower segments here.  The lower segment won't change
+		 * if: 
+		 *  - the lower segment is entirely before the upper
+		 *  - the lower segment is full
 		 *
-		 * XXX this will need to test for intersection with range
-		 * deletion items.
+		 * We don't have the metadata to determine that it's
+		 * full today so we want to read lower segments that don't
+		 * overlap so that we can merge partial lowers with
+		 * its neighbours.
 		 */
-		if (lower && lower->pos == 0 &&
-		    (!upper ||
-		     (!scoutfs_seg_item_ptrs(upper->seg, upper->pos,
-					     &upper_next, NULL, NULL) &&
-		      scoutfs_key_compare(&upper_next, lower->last) > 0))) {
-
-			curs->lower = next_spos(curs, lower);
-
-			list_del_init(&lower->entry);
-			free_cseg(sb, lower);
-
-			scoutfs_inc_counter(sb, compact_segment_skipped);
-			continue;
-		}
 
 		ret = read_segment(sb, lower);
 		if (ret)
@@ -467,14 +474,35 @@ static int compact_segments(struct super_block *sb,
 			break;
 		}
 
+		/*
+		 * The remaining upper items in a sticky merge have to
+		 * be written into the upper level.
+		 */
+		if (curs->sticky && !lower) {
+			cseg->level = curs->lower_level - 1;
+			scoutfs_inc_counter(sb, compact_sticky_written);
+		} else {
+			cseg->level = curs->lower_level;
+		}
+
 		/* csegs will be claned up once they're on the list */
-		cseg->level = curs->lower_level;
 		cseg->seg = seg;
 		list_add_tail(&cseg->entry, results);
 
 		ret = compact_items(sb, curs, seg, nr_items, key_bytes);
 		if (ret < 0)
 			break;
+
+		/*
+		 * Clear lower after we've consumed it so that sticky
+		 * compaction can decide to write the rest of the items
+		 * into the upper level.  We decide that it's done by
+		 * testing the pos that next_item() is going to try.
+		 */
+		if (curs->sticky && curs->lower == curs->last_lower &&
+		    scoutfs_seg_item_ptrs(curs->lower->seg, curs->lower->pos,
+					  NULL, NULL, NULL) < 0)
+			curs->lower = NULL;
 
 		/* start a complete segment write now, we'll wait later */
 		ret = scoutfs_seg_submit_write(sb, seg, comp);
@@ -489,15 +517,16 @@ static int compact_segments(struct super_block *sb,
 
 /*
  * Manifest walking is providing the details of the overall compaction
- * operation.  It'll then add all the segments involved.
+ * operation.
  */
 void scoutfs_compact_describe(struct super_block *sb, void *data,
-			      u8 upper_level, u8 last_level)
+			      u8 upper_level, u8 last_level, bool sticky)
 {
 	struct compact_cursor *curs = data;
 
 	curs->lower_level = upper_level + 1;
 	curs->last_level = last_level;
+	curs->sticky = sticky;
 }
 
 /*
@@ -531,6 +560,8 @@ int scoutfs_compact_add(struct super_block *sb, void *data,
 		curs->upper = cseg;
 	else if (!curs->lower)
 		curs->lower = cseg;
+	if (curs->lower)
+		curs->last_lower = cseg;
 
 	ret = 0;
 out:

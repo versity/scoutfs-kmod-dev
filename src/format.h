@@ -448,6 +448,16 @@ struct scoutfs_net_segnos {
 	__le64 segnos[0];
 } __packed;
 
+/* XXX eventually we'll have net compaction and will need agents to agree */
+
+/* one upper segment and fanout lower segments */
+#define SCOUTFS_COMPACTION_MAX_INPUT	(1 + SCOUTFS_MANIFEST_FANOUT)
+/* sticky can add one, and so can item page alignment */
+#define SCOUTFS_COMPACTION_SLOP		2
+/* delete all inputs and insert all outputs (same goes for alloc|free segnos) */
+#define SCOUTFS_COMPACTION_MAX_UPDATE \
+	(2 * (SCOUTFS_COMPACTION_MAX_INPUT + SCOUTFS_COMPACTION_SLOP))
+
 enum {
 	SCOUTFS_NET_ALLOC_INODES = 0,
 	SCOUTFS_NET_MANIFEST_RANGE_ENTRIES,

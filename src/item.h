@@ -57,6 +57,12 @@ int scoutfs_item_invalidate(struct super_block *sb,
 			    struct scoutfs_key_buf *start,
 			    struct scoutfs_key_buf *end);
 
+int scoutfs_item_copy_range_keys(struct super_block *sb,
+				 struct scoutfs_key_buf *key, void *data,
+				 unsigned len);
+int scoutfs_item_copy_keys(struct super_block *sb, struct scoutfs_key_buf *key,
+			   void *data, unsigned len);
+
 int scoutfs_item_setup(struct super_block *sb);
 void scoutfs_item_destroy(struct super_block *sb);
 

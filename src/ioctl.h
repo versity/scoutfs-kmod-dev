@@ -166,4 +166,20 @@ struct scoutfs_ioctl_stat_more {
 #define SCOUTFS_IOC_STAT_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \
 				   struct scoutfs_ioctl_stat_more)
 
+struct scoutfs_ioctl_item_cache_keys {
+	__u64 key_ptr;
+	__u64 key_len;
+	__u64 buf_ptr;
+	__u64 buf_len;
+	__u8 which;
+} __packed;
+
+enum {
+	SCOUTFS_IOC_ITEM_CACHE_KEYS_ITEMS = 0,
+	SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES,
+};
+
+#define SCOUTFS_IOC_ITEM_CACHE_KEYS _IOW(SCOUTFS_IOCTL_MAGIC, 8, \
+					 struct scoutfs_ioctl_item_cache_keys)
+
 #endif

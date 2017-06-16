@@ -433,6 +433,73 @@ static long scoutfs_ioc_stat_more(struct file *file, unsigned long arg)
 	return 0;
 }
 
+static long scoutfs_ioc_item_cache_keys(struct file *file, unsigned long arg)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+	struct scoutfs_ioctl_item_cache_keys ick;
+	struct scoutfs_key_buf *key;
+	struct page *page;
+	unsigned bytes;
+	void *buf;
+	int total;
+	int ret;
+
+	if (copy_from_user(&ick, (void __user *)arg, sizeof(ick)))
+		return -EFAULT;
+
+	if ((!!ick.key_ptr != !!ick.key_len) ||
+	    ick.key_len > SCOUTFS_MAX_KEY_SIZE ||
+	    ick.which > SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES)
+		return -EINVAL;
+
+	/* don't overflow signed 32bit syscall return longs */
+	ick.buf_len = min_t(u64, ick.buf_len, S32_MAX);
+
+	key = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	page = alloc_page(GFP_KERNEL);
+	if (!key || !page) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	if (copy_from_user(key->data, (void __user *)ick.key_ptr, ick.key_len)) {
+		ret = -EFAULT;
+		goto out;
+	}
+	scoutfs_key_init_buf_len(key, key->data, ick.key_len,
+				 SCOUTFS_MAX_KEY_SIZE);
+	scoutfs_key_inc(key);
+
+	buf = page_address(page);
+	total = 0;
+	ret = 0;
+	while (ick.buf_len) {
+		bytes = min_t(u64, ick.buf_len, PAGE_SIZE);
+
+		if (ick.which == SCOUTFS_IOC_ITEM_CACHE_KEYS_ITEMS)
+			ret = scoutfs_item_copy_keys(sb, key, buf, bytes);
+		else
+			ret = scoutfs_item_copy_range_keys(sb, key, buf, bytes);
+
+		if (ret > 0 && copy_to_user((void __user *)ick.buf_ptr, buf, ret))
+			ret = -EFAULT;
+		if (ret <= 0)
+			break;
+
+		ick.buf_len -= ret;
+		ick.buf_ptr += ret;
+		total += ret;
+		ret = 0;
+	}
+
+out:
+	scoutfs_key_free(sb, key);
+	if (page)
+		__free_page(page);
+
+	return ret ?: total;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -446,6 +513,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_stage(file, arg);
 	case SCOUTFS_IOC_STAT_MORE:
 		return scoutfs_ioc_stat_more(file, arg);
+	case SCOUTFS_IOC_ITEM_CACHE_KEYS:
+		return scoutfs_ioc_item_cache_keys(file, arg);
 	}
 
 	return -ENOTTY;

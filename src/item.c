@@ -457,6 +457,16 @@ static struct cached_range *rb_first_rng(struct rb_root *root)
 	return NULL;
 }
 
+static struct cached_range *rb_next_rng(struct cached_range *rng)
+{
+	struct rb_node *node;
+
+	if (rng && (node = rb_next(&rng->node)))
+		return container_of(node, struct cached_range, node);
+
+	return NULL;
+}
+
 static struct cached_range *walk_ranges(struct rb_root *root,
 					struct scoutfs_key_buf *key,
 					struct cached_range **prev,
@@ -1847,6 +1857,120 @@ abort:
 
 out:
 	return min_t(unsigned long, cac->lru_nr, INT_MAX);
+}
+
+static void *copy_key_with_len(void *data, struct scoutfs_key_buf *key)
+{
+	u16 len = key->key_len;
+
+	memcpy(data, &len, sizeof(len));
+	data += sizeof(len);
+	memcpy(data, key->data, len);
+
+	return data + len;
+}
+
+/*
+ * Copy the next cached ranges starting with the key into the caller's
+ * buffer.  Each range copied by storing each keys size in a u16
+ * followed by the binary key data.  The number of bytes of full copied
+ * ranges is returned.  The caller's key is incremented past the last
+ * key returned so that they can iterate without worrying about
+ * examining the returned keys.
+ */
+int scoutfs_item_copy_range_keys(struct super_block *sb,
+				 struct scoutfs_key_buf *key, void *data,
+				 unsigned len)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct rb_node *node = cac->ranges.rb_node;
+	struct cached_range *next = NULL;
+	struct scoutfs_key_buf *last = NULL;
+	struct cached_range *rng;
+	unsigned long flags;
+	unsigned bytes;
+	int ret = 0;
+	int cmp;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	while (node) {
+		rng = container_of(node, struct cached_range, node);
+
+		cmp = scoutfs_key_compare_ranges(key, key,
+						 rng->start, rng->end);
+		if (cmp < 0) {
+			next = rng;
+			node = node->rb_left;
+		} else if (cmp > 0) {
+			node = node->rb_right;
+		} else {
+			next = rng;
+			break;
+		}
+	}
+
+	for (rng = next; rng; rng = rb_next_rng(rng)) {
+		bytes = 2 + rng->start->key_len + 2 + rng->end->key_len;
+		if (len < bytes)
+			break;
+
+		data = copy_key_with_len(data, rng->start);
+		data = copy_key_with_len(data, rng->end);
+		len -= bytes;
+		ret += bytes;
+
+		last = rng->end;
+	}
+
+	if (last) {
+		scoutfs_key_copy(key, last);
+		scoutfs_key_inc(key);
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	return ret;
+}
+
+/* like copy_range_keys, but for present items */
+int scoutfs_item_copy_keys(struct super_block *sb, struct scoutfs_key_buf *key,
+			   void *data, unsigned len)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct scoutfs_key_buf *last = NULL;
+	struct cached_item *item = NULL;
+	unsigned long flags;
+	unsigned bytes;
+	int ret = 0;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	for (item = next_item(&cac->items, key); item; item = rb_next_item(item)) {
+		if (item->deletion)
+			continue;
+
+		bytes = 2 + item->key->key_len;
+		if (len < bytes)
+			break;
+
+		data = copy_key_with_len(data, item->key);
+		len -= bytes;
+		ret += bytes;
+
+		last = item->key;
+	}
+
+	if (last) {
+		scoutfs_key_copy(key, last);
+		scoutfs_key_inc(key);
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	return ret;
 }
 
 int scoutfs_item_setup(struct super_block *sb)

@@ -547,11 +547,12 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 		ref->pos = scoutfs_seg_find_pos(ref->seg, key);
 
 	/*
-	 * Find the greatest range we can cover if we walk all the
-	 * segments.  We only have level 0 segments for the missing
-	 * range so that's the greatest.  Then we shrink the range by
-	 * the limit of each higher level segment that intersected with
-	 * our starting key.
+	 * Find the limit of the range we can safely walk.  We have all
+	 * the level 0 segments that intersect with the caller's range.
+	 * But we only have the level > 0 segments that intersected with
+	 * the starting key.  We have to stop at the nearest end of
+	 * those segments because other segments might overlap after
+	 * that.
 	 */
 	scoutfs_key_clone(&seg_end, end);
 	list_for_each_entry(ref, &ref_list, entry) {
@@ -576,13 +577,14 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 			/*
 			 * Check the next item in the segment.  We're
 			 * done with the segment if there are no more
-			 * items or if the next item is past the
-			 * caller's end.
+			 * items or if the next item is past the keys
+			 * that our segments can see.
 			 */
 			ret = scoutfs_seg_item_ptrs(ref->seg, ref->pos,
 						    &item_key, item_val,
 						    &item_flags);
-			if (ret < 0 || scoutfs_key_compare(&item_key, end) > 0){
+			if (ret < 0 ||
+			    scoutfs_key_compare(&item_key, &seg_end) > 0){
 				ref->pos = -1;
 				continue;
 			}
@@ -636,7 +638,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 		scoutfs_key_clone(&batch_end, &found_key);
 
 		/* if we just saw the end key then we're done */
-		if (scoutfs_key_compare(&found_key, end) == 0) {
+		if (scoutfs_key_compare(&found_key, &seg_end) == 0) {
 			ret = 0;
 			break;
 		}

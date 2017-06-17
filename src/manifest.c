@@ -130,7 +130,7 @@ int scoutfs_manifest_add(struct super_block *sb,
 	unsigned key_bytes;
 	unsigned bytes;
 
-	trace_scoutfs_manifest_add(sb, first, last, segno, seq, level);
+	trace_scoutfs_manifest_add(sb, level, segno, seq, first, last);
 
 	key_bytes = first->key_len + last->key_len;
 	bytes = offsetof(struct scoutfs_manifest_entry, keys[key_bytes]);
@@ -173,11 +173,14 @@ int scoutfs_manifest_add_ment(struct super_block *sb,
 	struct scoutfs_manifest_entry *ment;
 	struct manifest_search_key skey;
 	struct scoutfs_key_buf first;
+	struct scoutfs_key_buf last;
 	unsigned bytes;
 
 	lockdep_assert_held(&mani->rwsem);
 
-	init_ment_keys(add, &first, NULL);
+	init_ment_keys(add, &first, &last);
+	trace_scoutfs_manifest_add(sb, add->level, le64_to_cpu(add->segno),
+				   le64_to_cpu(add->seq), &first, &last);
 
 	skey.key = &first;
 	skey.level = add->level;
@@ -230,6 +233,7 @@ int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_manifest_entry *ment;
 	struct manifest_search_key skey;
+	struct scoutfs_key_buf last;
 
 	skey.key = first;
 	skey.level = level;
@@ -238,6 +242,10 @@ int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
 	ment = scoutfs_ring_lookup(&mani->ring, &skey);
 	if (!ment)
 		return -ENOENT;
+
+	init_ment_keys(ment, NULL, &last);
+	trace_scoutfs_manifest_delete(sb, ment->level, le64_to_cpu(ment->segno),
+				      le64_to_cpu(ment->seq), first, &last);
 
 	scoutfs_ring_delete(&mani->ring, ment);
 	le64_add_cpu(&super->manifest.level_counts[level], -1ULL);
@@ -500,7 +508,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	int cmp;
 	int n;
 
-	trace_printk("reading items\n");
+	trace_scoutfs_read_items(sb, key, end);
 
 	/* get refs on all the segments */
 	ret = scoutfs_net_manifest_range_entries(sb, key, end, &ref_list);
@@ -509,6 +517,10 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 
 	/* submit reads for all the segments */
 	list_for_each_entry(ref, &ref_list, entry) {
+
+		trace_scoutfs_read_item_segment(sb, ref->level,  ref->segno,
+						ref->seq, ref->first, ref->last);
+
 		seg = scoutfs_seg_submit_read(sb, ref->segno);
 		if (IS_ERR(seg)) {
 			ret = PTR_ERR(seg);

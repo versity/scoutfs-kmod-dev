@@ -181,27 +181,51 @@ TRACE_EVENT(scoutfs_scan_orphans,
 	TP_printk("dev %d,%d", MAJOR(__entry->dev), MINOR(__entry->dev))
 );
 
-TRACE_EVENT(scoutfs_manifest_add,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *first,
-		 struct scoutfs_key_buf *last, u64 segno, u64 seq, u8 level),
-        TP_ARGS(sb, first, last, segno, seq, level),
+DECLARE_EVENT_CLASS(scoutfs_manifest_class,
+        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
+		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+        TP_ARGS(sb, level, segno, seq, first, last),
         TP_STRUCT__entry(
-                __dynamic_array(char, first, scoutfs_key_str(NULL, first))
-                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
+		__field(u8, level)
 		__field(u64, segno)
 		__field(u64, seq)
-		__field(u8, level)
+                __dynamic_array(char, first, scoutfs_key_str(NULL, first))
+                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
         ),
         TP_fast_assign(
-		scoutfs_key_str(__get_dynamic_array(first), first);
-		scoutfs_key_str(__get_dynamic_array(last), last);
+		__entry->level = level;
 		__entry->segno = segno;
 		__entry->seq = seq;
-		__entry->level = level;
+		scoutfs_key_str(__get_dynamic_array(first), first);
+		scoutfs_key_str(__get_dynamic_array(last), last);
         ),
-        TP_printk("first %s last %s segno %llu seq %llu level %u",
-		  __get_str(first), __get_str(last), __entry->segno,
-		  __entry->seq, __entry->level)
+        TP_printk("level %u segno %llu seq %llu first %s last %s",
+		  __entry->level, __entry->segno, __entry->seq,
+		  __get_str(first), __get_str(last))
+);
+
+DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_add,
+        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
+		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+        TP_ARGS(sb, level, segno, seq, first, last)
+);
+
+DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_delete,
+        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
+		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+        TP_ARGS(sb, level, segno, seq, first, last)
+);
+
+DEFINE_EVENT(scoutfs_manifest_class, scoutfs_compact_input,
+        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
+		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+        TP_ARGS(sb, level, segno, seq, first, last)
+);
+
+DEFINE_EVENT(scoutfs_manifest_class, scoutfs_read_item_segment,
+        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
+		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+        TP_ARGS(sb, level, segno, seq, first, last)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_key_class,
@@ -259,6 +283,12 @@ DEFINE_EVENT(scoutfs_range_class, scoutfs_item_insert_batch,
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_shrink_range,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
+		 struct scoutfs_key_buf *end),
+        TP_ARGS(sb, start, end)
+);
+
+DEFINE_EVENT(scoutfs_range_class, scoutfs_read_items,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),
         TP_ARGS(sb, start, end)

@@ -731,7 +731,7 @@ int scoutfs_ring_submit_write(struct super_block *sb,
 		nr = last + le64_to_cpu(rdesc->total_blocks) - first;
 
 	rdesc->first_block = cpu_to_le64(first);
-	rdesc->first_seq = cpu_to_le64(ring->first_dirty_seq);
+	rdesc->first_seq = cpu_to_le64(ring->first_dirty_seq + nr_blocks - nr);
 	rdesc->nr_blocks = cpu_to_le64(nr);
 
 	/* the contig dirty blocks in pages might wrap around ring */

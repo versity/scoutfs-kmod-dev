@@ -394,14 +394,24 @@ static void become_deletion_item(struct super_block *sb,
 }
 
 /*
- * Try to insert the given item.  If there's already a non-deletion item
- * with the insertion key then return -EEXIST.  An existing deletion
- * item is replaced and freed.
+ * Try to add an item to the cache.  The caller is responsible for
+ * marking the newly inserted item dirty.
  *
- * The caller is responsible for marking the newly inserted item dirty.
+ * We distinguish between callers seeing trying to insert a new logical
+ * item and others trying to populate the cache.
+ *
+ * New logical item creaters have made sure the items are participating
+ * in consistent locking.  It's safe for them to clobber dirty deletion
+ * items with a new version of the item.
+ *
+ * Cache readers can only populate items that weren't present already.
+ * In particular, they absolutely cannot replace dirty old inode index items
+ * with the old version that was just deleted (outside of range caching and
+ * locking consistency).
  */
 static int insert_item(struct super_block *sb, struct item_cache *cac,
-		       struct cached_item *ins, bool overwrite)
+		       struct cached_item *ins, bool logical_overwrite,
+		       bool cache_populate)
 {
 	struct rb_root *root = &cac->items;
 	struct cached_item *item;
@@ -426,7 +436,8 @@ restart:
 				item->dirty |= RIGHT_DIRTY;
 			node = &(*node)->rb_right;
 		} else {
-			if (!item->deletion && !overwrite)
+			if (cache_populate ||
+			    (!item->deletion && !logical_overwrite))
 				return -EEXIST;
 
 			/* sadly there's no augmented replace */
@@ -986,7 +997,7 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 		return -ENOMEM;
 
 	spin_lock_irqsave(&cac->lock, flags);
-	ret = insert_item(sb, cac, item, false);
+	ret = insert_item(sb, cac, item, false, false);
 	if (!ret) {
 		scoutfs_inc_counter(sb, item_create);
 		mark_item_dirty(sb, cac, item);
@@ -1071,7 +1082,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del_init(&item->entry);
-		if (insert_item(sb, cac, item, false))
+		if (insert_item(sb, cac, item, false, true))
 			list_add(&item->entry, list);
 	}
 
@@ -1188,7 +1199,7 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	/* insert the caller's items, overwriting any existing */
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del_init(&item->entry);
-		insert_item(sb, cac, item, true);
+		insert_item(sb, cac, item, true, false);
 		mark_item_dirty(sb, cac, item);
 	}
 

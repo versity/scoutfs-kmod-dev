@@ -131,31 +131,35 @@ int scoutfs_alloc_segno(struct super_block *sb, u64 *segno)
 	ind = sal->next_segno >> SCOUTFS_ALLOC_REGION_SHIFT;
 	nr = sal->next_segno & SCOUTFS_ALLOC_REGION_MASK;
 
-	do {
+	for (;;) {
 		reg = scoutfs_ring_lookup_next(&sal->ring, &ind);
-	} while (reg == NULL && ind && (ind = 0, nr = 0, 1));
+		if (reg == NULL && ind != 0) {
+			ind = 0;
+			nr = 0;
+			continue;
+		}
+		if (IS_ERR_OR_NULL(reg)) {
+			if (IS_ERR(reg))
+				ret = PTR_ERR(reg);
+			else
+				ret = -ENOSPC;
+			goto out;
+		}
 
-	if (IS_ERR_OR_NULL(reg)) {
-		if (IS_ERR(reg))
-			ret = PTR_ERR(reg);
-		else
-			ret = -ENOSPC;
-		goto out;
+		nr = find_next_bit_le(reg->bits, SCOUTFS_ALLOC_REGION_BITS, nr);
+		if (nr < SCOUTFS_ALLOC_REGION_BITS)
+			break;
+
+		/* possible for nr to be after all free bits, keep going */
+		ind++;
+		nr = 0;
 	}
 
 	scoutfs_ring_dirty(&sal->ring, reg);
 
-	nr = find_next_bit_le(reg->bits, SCOUTFS_ALLOC_REGION_BITS, nr);
-	if (nr >= SCOUTFS_ALLOC_REGION_BITS) {
-		/* XXX corruption?  shouldn't find empty regions */
-		ret = -EIO;
-		goto out;
-	}
-
 	ind = le64_to_cpu(reg->index);
 
 	clear_bit_le(nr, reg->bits);
-
 	if (empty_region(reg))
 		scoutfs_ring_delete(&sal->ring, reg);
 

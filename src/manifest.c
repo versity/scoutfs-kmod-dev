@@ -482,8 +482,6 @@ out:
  * The segments are immutable at this point so we can use their contents
  * as long as we hold refs.
  */
-#define MAX_ITEMS_READ 32
-
 int scoutfs_manifest_read_items(struct super_block *sb,
 				struct scoutfs_key_buf *key,
 				struct scoutfs_key_buf *end)
@@ -503,10 +501,10 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	u8 item_flags;
 	int found_ctr;
 	bool found;
+	bool added;
 	int ret = 0;
 	int err;
 	int cmp;
-	int n;
 
 	trace_scoutfs_read_items(sb, key, end);
 
@@ -564,8 +562,8 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 
 	found_ctr = 0;
 
-	for (n = 0; n < MAX_ITEMS_READ; n++) {
-
+	added = false;
+	for (;;) {
 		found = false;
 		found_ctr++;
 
@@ -628,10 +626,11 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 			ret = scoutfs_item_add_batch(sb, &batch, &found_key,
 						     found_val);
 			if (ret) {
-				if (n > 0)
+				if (added)
 					ret = 0;
 				break;
 			}
+			added = true;
 		}
 
 		/* the last successful key determines range end until run out */

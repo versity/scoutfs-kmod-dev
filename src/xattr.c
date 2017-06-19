@@ -151,7 +151,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	struct scoutfs_key_buf *key = NULL;
 	struct scoutfs_key_buf *last = NULL;
 	SCOUTFS_DECLARE_KVEC(val);
-	struct scoutfs_lock lck;
+	struct scoutfs_lock *lck;
 	unsigned int total;
 	unsigned int bytes;
 	unsigned int off;
@@ -228,7 +228,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 		ret = -ERANGE;
 
 	up_read(&si->xattr_rwsem);
-	scoutfs_unlock_range(sb, &lck);
+	scoutfs_unlock_range(sb, lck);
 
 out:
 	scoutfs_key_free(sb, key);
@@ -263,7 +263,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	size_t name_len = strlen(name);
 	SCOUTFS_DECLARE_KVEC(val);
 	DECLARE_ITEM_COUNT(cnt);
-	struct scoutfs_lock lck;
+	struct scoutfs_lock *lck;
 	unsigned int bytes;
 	unsigned int off;
 	LIST_HEAD(list);
@@ -335,7 +335,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	scoutfs_release_trans(sb);
 
 unlock:
-	scoutfs_unlock_range(sb, &lck);
+	scoutfs_unlock_range(sb, lck);
 
 out:
 	scoutfs_item_free_batch(sb, &list);
@@ -368,7 +368,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct scoutfs_xattr_key *xkey;
 	struct scoutfs_key_buf *key;
 	struct scoutfs_key_buf *last;
-	struct scoutfs_lock lck;
+	struct scoutfs_lock *lck;
 	ssize_t total;
 	int name_len;
 	int ret;
@@ -435,7 +435,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	}
 
 	up_read(&si->xattr_rwsem);
-	scoutfs_unlock_range(sb, &lck);
+	scoutfs_unlock_range(sb, lck);
 out:
 	scoutfs_key_free(sb, key);
 	scoutfs_key_free(sb, last);
@@ -456,7 +456,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 {
 	struct scoutfs_key_buf *key;
 	struct scoutfs_key_buf *last;
-	struct scoutfs_lock lck;
+	struct scoutfs_lock *lck;
 	int ret;
 
 	key = alloc_xattr_key(sb, ino, NULL, SCOUTFS_XATTR_MAX_NAME_LEN, 0);
@@ -489,7 +489,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 		/* don't need to increment past deleted key */
 	}
 
-	scoutfs_unlock_range(sb, &lck);
+	scoutfs_unlock_range(sb, lck);
 
 out:
 	scoutfs_key_free(sb, key);

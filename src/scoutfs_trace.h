@@ -309,17 +309,26 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__field(unsigned int, seq)
                 __dynamic_array(char, start, scoutfs_key_str(NULL, lck->start))
                 __dynamic_array(char, end, scoutfs_key_str(NULL, lck->end))
-        ),
+		__field(unsigned int, flags)
+		__field(unsigned int, refcnt)
+		__field(unsigned int, holders)
+	),
         TP_fast_assign(
 		__entry->mode = lck->mode;
 		__entry->rqmode = lck->rqmode;
 		__entry->seq = lck->sequence;
+		__entry->flags = lck->flags;
+		__entry->refcnt = lck->refcnt;
+		__entry->holders = lck->holders;
 		scoutfs_key_str(__get_dynamic_array(start), lck->start);
 		scoutfs_key_str(__get_dynamic_array(end), lck->end);
         ),
-        TP_printk("seq %u mode %s rqmode %s start %s end %s",
-		  __entry->seq, lock_mode(__entry->mode),
-		  lock_mode(__entry->rqmode), __get_str(start), __get_str(end))
+        TP_printk("seq %u refs %d holders %d mode %s rqmode %s flags 0x%x "
+		  "start %s end %s",
+		  __entry->seq, __entry->refcnt, __entry->holders,
+		  lock_mode(__entry->mode), lock_mode(__entry->rqmode),
+		  __entry->flags, __get_str(start),
+		  __get_str(end))
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_range,
@@ -333,6 +342,21 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_unlock_range,
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_ast,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_rbast,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_downconvert_func,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+DEFINE_EVENT(scoutfs_lock_class, shrink_lock_tree,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );

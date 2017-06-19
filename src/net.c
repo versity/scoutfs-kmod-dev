@@ -144,7 +144,7 @@ struct sock_info {
 	struct list_head have_sent;
 	struct list_head active_rbufs;
 
-	struct scoutfs_lock listen_lck;
+	struct scoutfs_lock *listen_lck;
 	struct scoutfs_inet_addr addr;
 
 	struct work_struct listen_work;
@@ -1245,7 +1245,7 @@ static void scoutfs_net_shutdown_func(struct work_struct *work)
 			scoutfs_err(sb,
 				    "Non-fatal error %d while writing server "
 				    "address\n", ret);
-		scoutfs_unlock_range(sb, &sinf->listen_lck);
+		scoutfs_unlock_range(sb, sinf->listen_lck);
 		queue_delayed_work(nti->proc_wq, &nti->server_work, 0);
 
 	} if (sinf == nti->connected_sinf) {

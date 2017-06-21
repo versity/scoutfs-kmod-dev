@@ -112,7 +112,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	struct super_block *sb = sbi->sb;
 	DECLARE_TRANS_INFO(sb, tri);
 	struct scoutfs_bio_completion comp;
-	struct scoutfs_segment *seg;
+	struct scoutfs_segment *seg = NULL;
 	u64 segno;
 	int ret = 0;
 
@@ -138,6 +138,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		      scoutfs_bio_wait_comp(sb, &comp) ?:
 		      scoutfs_net_record_segment(sb, seg, 0) ?:
 		      scoutfs_net_advance_seq(sb, &sbi->trans_seq);
+		scoutfs_seg_put(seg);
 		if (ret)
 			goto out;
 

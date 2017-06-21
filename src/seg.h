@@ -10,9 +10,10 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 						u64 segno);
 int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg);
 
-int scoutfs_seg_find_pos(struct scoutfs_segment *seg,
+int scoutfs_seg_find_off(struct scoutfs_segment *seg,
 			 struct scoutfs_key_buf *key);
-int scoutfs_seg_item_ptrs(struct scoutfs_segment *seg, int pos,
+int scoutfs_seg_next_off(struct scoutfs_segment *seg, int off);
+int scoutfs_seg_item_ptrs(struct scoutfs_segment *seg, int off,
 			  struct scoutfs_key_buf *key, struct kvec *val,
 			  u8 *flags);
 
@@ -24,15 +25,9 @@ int scoutfs_seg_alloc(struct super_block *sb, u64 segno,
 int scoutfs_seg_free_segno(struct super_block *sb,
 			   struct scoutfs_segment *seg);
 bool scoutfs_seg_fits_single(u32 nr_items, u32 key_bytes, u32 val_bytes);
-void scoutfs_seg_first_item(struct super_block *sb,
-			    struct scoutfs_segment *seg,
-			    struct scoutfs_key_buf *key, struct kvec *val,
-			    u8 flags, unsigned int nr_items,
-			    unsigned int key_bytes);
-void scoutfs_seg_append_item(struct super_block *sb,
-			     struct scoutfs_segment *seg,
+bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg,
 			     struct scoutfs_key_buf *key, struct kvec *val,
-			     u8 flags);
+			     u8 flags, __le32 **links);
 int scoutfs_seg_manifest_add(struct super_block *sb,
 			     struct scoutfs_segment *seg, u8 level);
 int scoutfs_seg_manifest_del(struct super_block *sb,

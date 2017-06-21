@@ -112,19 +112,29 @@ struct scoutfs_alloc_region {
 } __packed;
 
 /*
- * We really want these to be a power of two size so that they're naturally
- * aligned.  This ensures that they won't cross page boundaries and we
- * can use pointers to them in the page vecs that make up segments without
- * funny business.
+ * The max number of links defines the max number of entries that we can
+ * index in o(log n) and the static list head storage size in the
+ * segment block.  We always pay the static storage cost, which is tiny,
+ * and we can look at the number of items to know the greatest number of
+ * links and skip most of the initial 0 links.
+ */
+#define SCOUTFS_MAX_SKIP_LINKS 32
+
+/*
+ * Items are packed into segments and linked together in a skip list.
+ * Each item's header, links, key, and value are stored contiguously.
+ * They're not allowed to cross a block boundary.
  */
 struct scoutfs_segment_item {
-	__le64 seq;
-	__le32 key_off;
-	__le32 val_off;
 	__le16 key_len;
 	__le16 val_len;
-	__u8 padding[11];
 	__u8 flags;
+	__u8 nr_links;
+	__le32 skip_links[0];
+	/*
+	 * u8 key_bytes[key_len]
+	 * u8 val_bytes[val_len]
+	 */
 } __packed;
 
 #define SCOUTFS_ITEM_FLAG_DELETION (1 << 0)
@@ -138,11 +148,11 @@ struct scoutfs_segment_block {
 	__le32 _padding;
 	__le64 segno;
 	__le64 seq;
+	__le32 last_item_off;
+	__le32 total_bytes;
 	__le32 nr_items;
-	__le32 _moar_pads;
-	struct scoutfs_segment_item items[0];
-	/* packed keys */
-	/* packed vals */
+	__le32 skip_links[SCOUTFS_MAX_SKIP_LINKS];
+	/* packed items */
 } __packed;
 
 /*

@@ -70,8 +70,7 @@ struct compact_seg {
 	struct scoutfs_key_buf *first;
 	struct scoutfs_key_buf *last;
 	struct scoutfs_segment *seg;
-	int pos;
-	int saved_pos;
+	int off;
 	bool part_of_move;
 };
 
@@ -90,12 +89,12 @@ struct compact_cursor {
 	u8 last_level;
 
 	struct compact_seg *upper;
-	struct compact_seg *saved_upper;
 	struct compact_seg *lower;
-	struct compact_seg *saved_lower;
 
 	bool sticky;
 	struct compact_seg *last_lower;
+
+	__le32 *links[SCOUTFS_MAX_SKIP_LINKS];
 };
 
 static void free_cseg(struct super_block *sb, struct compact_seg *cseg)
@@ -138,28 +137,6 @@ static void free_cseg_list(struct super_block *sb, struct list_head *list)
 		list_del_init(&cseg->entry);
 		free_cseg(sb, cseg);
 	}
-}
-
-static void save_pos(struct compact_cursor *curs)
-{
-	struct compact_seg *cseg;
-
-	list_for_each_entry(cseg, &curs->csegs, entry)
-		cseg->saved_pos = cseg->pos;
-
-	curs->saved_upper = curs->upper;
-	curs->saved_lower = curs->lower;
-}
-
-static void restore_pos(struct compact_cursor *curs)
-{
-	struct compact_seg *cseg;
-
-	list_for_each_entry(cseg, &curs->csegs, entry)
-		cseg->pos = cseg->saved_pos;
-
-	curs->upper = curs->saved_upper;
-	curs->lower = curs->saved_lower;
 }
 
 static int read_segment(struct super_block *sb, struct compact_seg *cseg)
@@ -216,7 +193,7 @@ static int next_item(struct super_block *sb, struct compact_cursor *curs,
 
 retry:
 	if (upper) {
-		ret = scoutfs_seg_item_ptrs(upper->seg, upper->pos,
+		ret = scoutfs_seg_item_ptrs(upper->seg, upper->off,
 					    item_key, item_val, item_flags);
 		if (ret < 0)
 			upper = NULL;
@@ -227,7 +204,7 @@ retry:
 		if (ret)
 			goto out;
 
-		ret = scoutfs_seg_item_ptrs(lower->seg, lower->pos,
+		ret = scoutfs_seg_item_ptrs(lower->seg, lower->off,
 					    &lower_key, lower_val,
 					    &lower_flags);
 		if (ret == 0)
@@ -273,9 +250,9 @@ retry:
 	}
 
 	if (cmp <= 0)
-		upper->pos++;
+		upper->off = scoutfs_seg_next_off(upper->seg, upper->off);
 	if (cmp >= 0)
-		lower->pos++;
+		lower->off = scoutfs_seg_next_off(lower->seg, lower->off);
 
 	/*
 	 * Deletion items make their way down all the levels, replacing
@@ -296,64 +273,38 @@ out:
 }
 
 /*
- * Figure out how many items and bytes of keys we're going to try and
- * compact into the next segment.
+ * Walk the input segments for items and append them to the output segment.
+ * Items can exist in the input segments but not be written to the output
+ * segment, for example if they're deletions.  The output segment can be
+ * full.
+ *
+ * Return -errno if something went wrong, then 1 or 0 indicating items written.
  */
-static int count_items(struct super_block *sb, struct compact_cursor *curs,
-		       u32 *nr_items, u32 *key_bytes)
-{
-	struct scoutfs_key_buf item_key;
-	SCOUTFS_DECLARE_KVEC(item_val);
-	u32 items = 0;
-	u32 keys = 0;
-	u32 vals = 0;
-	u8 flags;
-	int ret;
-
-	*nr_items = 0;
-	*key_bytes = 0;
-
-	while ((ret = next_item(sb, curs, &item_key, item_val, &flags)) > 0) {
-
-		items++;
-		keys += item_key.key_len;
-		vals += scoutfs_kvec_length(item_val);
-
-		if (!scoutfs_seg_fits_single(items, keys, vals))
-			break;
-
-		*nr_items = items;
-		*key_bytes = keys;
-	}
-
-	return ret;
-}
-
 static int compact_items(struct super_block *sb, struct compact_cursor *curs,
-			 struct scoutfs_segment *seg, u32 nr_items,
-			 u32 key_bytes)
+			 struct scoutfs_segment *seg)
 {
 	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
+	int has_next;
+	int ret = 0;
 	u8 flags;
-	int ret;
 
-	ret = next_item(sb, curs, &item_key, item_val, &flags);
-	if (ret <= 0)
-		goto out;
-
-	scoutfs_seg_first_item(sb, seg, &item_key, item_val, flags,
-			       nr_items, key_bytes);
-
-	while (--nr_items) {
-		ret = next_item(sb, curs, &item_key, item_val, &flags);
-		if (ret <= 0)
+	for (;;) {
+		has_next = next_item(sb, curs, &item_key, item_val, &flags);
+		if (has_next <= 0) {
+			if (has_next < 0)
+				ret = has_next;
 			break;
 
-		scoutfs_seg_append_item(sb, seg, &item_key, item_val, flags);
+		}
+
+		if (scoutfs_seg_append_item(sb, seg, &item_key, item_val, flags,
+					     curs->links))
+			ret = 1;
+		else
+			break;
 	}
 
-out:
 	return ret;
 }
 
@@ -367,15 +318,14 @@ static int compact_segments(struct super_block *sb,
 	struct compact_seg *upper;
 	struct compact_seg *lower;
 	unsigned next_segno = 0;
-	u32 key_bytes;
-	u32 nr_items;
-	int ret;
+	int ret = 0;
 
 	scoutfs_inc_counter(sb, compact_operations);
 	if (curs->sticky)
 		scoutfs_inc_counter(sb, compact_sticky_upper);
 
-	for (;;) {
+	while (curs->upper || curs->lower) {
+
 		upper = curs->upper;
 		lower = curs->lower;
 
@@ -389,7 +339,7 @@ static int compact_segments(struct super_block *sb,
 		 * XXX We should have metadata in the manifest to tell
 		 * us that there's no deletion items in the segment.
 		 */
-		if (upper && upper->pos == 0 && !lower && !curs->sticky &&
+		if (upper && upper->off == 0 && !lower && !curs->sticky &&
 		    ((upper->level + 1) < curs->last_level)) {
 
 			/*
@@ -417,9 +367,9 @@ static int compact_segments(struct super_block *sb,
 			cseg->part_of_move = true;
 
 			curs->upper = NULL;
-			upper = NULL;
 
 			scoutfs_inc_counter(sb, compact_segment_moved);
+			break;
 		}
 
 		/* we're going to need its next key */
@@ -444,17 +394,6 @@ static int compact_segments(struct super_block *sb,
 		if (ret)
 			break;
 
-		save_pos(curs);
-		ret = count_items(sb, curs, &nr_items, &key_bytes);
-		restore_pos(curs);
-		if (ret < 0)
-			break;
-
-		if (nr_items == 0) {
-			ret = 0;
-			break;
-		}
-
 		/* no cseg keys, manifest update uses seg item keys */
 		cseg = kzalloc(sizeof(struct compact_seg), GFP_NOFS);
 		if (!cseg) {
@@ -466,11 +405,19 @@ static int compact_segments(struct super_block *sb,
 		curs->segnos[next_segno] = 0;
 		next_segno++;
 
+		/*
+		 * Compaction can free all the remaining items resulting
+		 * in an empty output segment.  We just free it in that
+		 * case.
+		 */
 		ret = scoutfs_seg_alloc(sb, cseg->segno, &seg);
-		if (ret) {
+		if (ret == 0)
+			ret = compact_items(sb, curs, seg);
+		if (ret < 1) {
 			next_segno--;
 			curs->segnos[next_segno] = cseg->segno;
 			kfree(cseg);
+			scoutfs_seg_put(seg);
 			break;
 		}
 
@@ -488,21 +435,6 @@ static int compact_segments(struct super_block *sb,
 		/* csegs will be claned up once they're on the list */
 		cseg->seg = seg;
 		list_add_tail(&cseg->entry, results);
-
-		ret = compact_items(sb, curs, seg, nr_items, key_bytes);
-		if (ret < 0)
-			break;
-
-		/*
-		 * Clear lower after we've consumed it so that sticky
-		 * compaction can decide to write the rest of the items
-		 * into the upper level.  We decide that it's done by
-		 * testing the pos that next_item() is going to try.
-		 */
-		if (curs->sticky && curs->lower == curs->last_lower &&
-		    scoutfs_seg_item_ptrs(curs->lower->seg, curs->lower->pos,
-					  NULL, NULL, NULL) < 0)
-			curs->lower = NULL;
 
 		/* start a complete segment write now, we'll wait later */
 		ret = scoutfs_seg_submit_write(sb, seg, comp);

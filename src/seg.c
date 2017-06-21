@@ -265,6 +265,10 @@ int scoutfs_seg_alloc(struct super_block *sb, u64 segno,
 	/* reads shouldn't wait for this */
 	set_bit(SF_END_IO, &seg->flags);
 
+	/* zero the block header so the caller knows to initialize */
+	memset(page_address(seg->pages[0]), 0,
+	       sizeof(struct scoutfs_segment_block));
+
 	/* XXX always remove existing segs, is that necessary? */
 	spin_lock_irqsave(&cac->lock, flags);
 
@@ -371,22 +375,6 @@ static void *off_ptr(struct scoutfs_segment *seg, u32 off)
 	return page_address(seg->pages[pg]) + pg_off;
 }
 
-static u32 pos_off(u32 pos)
-{
-	/* items need of be a power of two */
-	BUILD_BUG_ON(!is_power_of_2(sizeof(struct scoutfs_segment_item)));
-	/* and the first item has to be naturally aligned */
-	BUILD_BUG_ON(offsetof(struct scoutfs_segment_block, items) %
-		     sizeof(struct scoutfs_segment_item));
-
-	return offsetof(struct scoutfs_segment_block, items[pos]);
-}
-
-static void *pos_ptr(struct scoutfs_segment *seg, u32 pos)
-{
-	return off_ptr(seg, pos_off(pos));
-}
-
 static void kvec_from_pages(struct scoutfs_segment *seg,
 			    struct kvec *kvec, u32 off, u16 len)
 {
@@ -401,118 +389,225 @@ static void kvec_from_pages(struct scoutfs_segment *seg,
 			          off_ptr(seg, off + first), len - first);
 }
 
-int scoutfs_seg_item_ptrs(struct scoutfs_segment *seg, int pos,
+static u32 item_bytes(u8 nr_links, u16 key_len, u16 val_len)
+{
+	return offsetof(struct scoutfs_segment_item, skip_links[nr_links]) +
+		key_len + val_len;
+}
+
+static inline int item_key_off(struct scoutfs_segment_item *item, int item_off)
+{
+	return item_off + item_bytes(item->nr_links, 0, 0);
+}
+
+static inline void *item_key_ptr(struct scoutfs_segment_item *item)
+{
+	return (void *)item + item_bytes(item->nr_links, 0, 0);
+}
+
+static inline int item_val_off(struct scoutfs_segment_item *item, int item_off)
+{
+	return item_key_off(item, item_off) + le16_to_cpu(item->key_len);
+}
+
+static void item_ptrs(struct scoutfs_segment *seg, int off,
+		      struct scoutfs_key_buf *key, struct kvec *val)
+{
+	struct scoutfs_segment_item *item = off_ptr(seg, off);
+
+	if (key)
+		scoutfs_key_init(key, item_key_ptr(item),
+				 le16_to_cpu(item->key_len));
+	if (val)
+		kvec_from_pages(seg, val, item_val_off(item, off),
+				le16_to_cpu(item->val_len));
+}
+
+static void first_last_keys(struct scoutfs_segment *seg,
+			    struct scoutfs_key_buf *first,
+			    struct scoutfs_key_buf *last)
+{
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+
+	item_ptrs(seg, sizeof(struct scoutfs_segment_block), first, NULL);
+	item_ptrs(seg, le32_to_cpu(sblk->last_item_off), last, NULL);
+}
+
+static int check_caller_off(struct scoutfs_segment_block *sblk, int off)
+{
+	if (off >= 0 && off < sizeof(struct scoutfs_segment_block))
+		off = sizeof(struct scoutfs_segment_block);
+
+	if (off > le32_to_cpu(sblk->last_item_off))
+		off = -ENOENT;
+
+	return off;
+}
+
+/*
+ * Give the caller the key and value of the item at the given offset.
+ *
+ * Negative offsets are sticky errors and offsets outside the used bytes
+ * in the segment return -ENOENT;
+ *
+ * All other offsets must be initial values less than the segment header
+ * size, notably including 0, or returned from _next_off().
+ */
+int scoutfs_seg_item_ptrs(struct scoutfs_segment *seg, int off,
 			  struct scoutfs_key_buf *key, struct kvec *val,
 			  u8 *flags)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct scoutfs_segment_item *item;
 
-	if (pos < 0 || pos >= le32_to_cpu(sblk->nr_items))
-		return -ENOENT;
+	off = check_caller_off(sblk, off);
+	if (off < 0)
+		return off;
 
-	item = pos_ptr(seg, pos);
+	item_ptrs(seg, off, key, val);
 
-	if (key)
-		scoutfs_key_init(key, off_ptr(seg, le32_to_cpu(item->key_off)),
-				 le16_to_cpu(item->key_len));
-	if (val)
-		kvec_from_pages(seg, val, le32_to_cpu(item->val_off),
-				le16_to_cpu(item->val_len));
-	if (flags)
+	if (flags) {
+		item = off_ptr(seg, off);
 		*flags = item->flags;
+	}
 
 	return 0;
 }
 
 /*
- * Find the first item array position whose key is >= the search key.
- * This can return the number of positions if the key is greater than
- * all the keys.
+ * Return the number of links that the *next* added node should have.
+ * We're appending in order so we can use the low bits of the node count
+ * to get an ideal distribution of the number of links to enable (log n)
+ * searching: of links in each node.  Half of the nodes will have 1
+ * links, a quarter will have 2, an eighth will have 3, and so on.
  */
-static int find_key_pos(struct scoutfs_segment *seg,
-			struct scoutfs_key_buf *search)
+static u8 skip_next_nr(u32 nr_items)
 {
-	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_key_buf key;
-	unsigned int start = 0;
-	unsigned int end = le32_to_cpu(sblk->nr_items);
-	unsigned int pos = 0;
-	int cmp;
-
-	while (start < end) {
-		pos = start + (end - start) / 2;
-		scoutfs_seg_item_ptrs(seg, pos, &key, NULL, NULL);
-
-		cmp = scoutfs_key_compare(search, &key);
-		if (cmp < 0)
-			end = pos;
-		else if (cmp > 0)
-			start = ++pos;
-		else
-			break;
-	}
-
-	return pos;
+	return ffs(nr_items + 1);
 }
 
-int scoutfs_seg_find_pos(struct scoutfs_segment *seg,
+/* The highest 1-based set bit is the max number of links any node can have */
+static u8 skip_most_nr(u32 nr_items)
+{
+	return fls(nr_items);
+}
+
+/*
+ * Find offset of the first item in the segment whose key is greater
+ * than or equal to the search key.  -ENOENT is returned if there's no
+ * item that matches.
+ *
+ * This is a standard skip list search from the segment block through
+ * the items.  Follow high less frequent links while the key is greater
+ * than the items and descend down to lower more frequent links when the
+ * search key is less.
+ */
+int scoutfs_seg_find_off(struct scoutfs_segment *seg,
 			 struct scoutfs_key_buf *key)
 {
-	return find_key_pos(seg, key);
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	struct scoutfs_segment_item *item;
+	struct scoutfs_key_buf item_key;
+	__le32 *links;
+	int cmp;
+	int ret;
+	int i;
+	int off;
+
+	links = sblk->skip_links;
+	ret = -ENOENT;
+	for (i = skip_most_nr(le32_to_cpu(sblk->nr_items)) - 1; i >= 0; i--) {
+		if (links[i] == 0)
+			continue;
+
+		off = le32_to_cpu(links[i]);
+		item = off_ptr(seg, off);
+		scoutfs_key_init(&item_key, item_key_ptr(item),
+				 le16_to_cpu(item->key_len));
+
+		cmp = scoutfs_key_compare(key, &item_key);
+		if (cmp == 0) {
+			ret = off;
+			break;
+		}
+
+		if (cmp > 0) {
+			links = item->skip_links;
+			i++;
+		} else {
+			ret = off;
+		}
+	}
+
+	return ret;
 }
 
 /*
- * Keys are aligned to the next block boundary if they'd cross a block
- * boundary.  To find the first value offset we have to assume that
- * there will be a worst case key alignment at every block boundary.
+ * Return the offset of the next item after the current item.  The input offset
+ * must be a valid offset from _find_off().
  */
-static u32 first_val_off(u32 nr_items, u32 key_bytes)
+int scoutfs_seg_next_off(struct scoutfs_segment *seg, int off)
 {
-	u32 key_padding = SCOUTFS_MAX_KEY_SIZE - 1;
-	u32 partial_block = SCOUTFS_BLOCK_SIZE - key_padding;
-	u32 first_key_off = pos_off(nr_items);
-	u32 block_off = first_key_off & SCOUTFS_BLOCK_MASK;
-	u32 total_padding = ((block_off + key_bytes) / partial_block) *
-				key_padding;
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	struct scoutfs_segment_item *item;
 
-	return first_key_off + key_bytes + total_padding;
+	off = check_caller_off(sblk, off);
+	if (off > 0) {
+		item = off_ptr(seg, off);
+		off = le32_to_cpu(item->skip_links[0]);
+		if (off == 0)
+			off = -ENOENT;
+	}
+	return off;
 }
 
 /*
- * Returns true if the given number of items with the given total byte
- * counts of keys and values fits inside a single segment.
+ * Returns true if the given item population will fit in a single
+ * segment.
+ *
+ * We don't have items cross block boundaries.  It would be too
+ * expensive to maintain packing of sorted dirty items in bins.  Instead
+ * we assume that we'll lose the worst case largest possible item on every
+ * block transition.  This will almost never be the case.  This causes us
+ * to lose around 15% of space for level 0 segment writes.
+ *
+ * Our pattern of item link counts ensures that there will always be fewer
+ * than two links per item.  We assume the worst case items have the
+ * max number of links.
  */
 bool scoutfs_seg_fits_single(u32 nr_items, u32 key_bytes, u32 val_bytes)
 {
-	return (first_val_off(nr_items, key_bytes) + val_bytes)
+	u32 header = sizeof(struct scoutfs_segment_block);
+	u32 items = nr_items * item_bytes(2, 0, 0);
+	u32 item_pad = item_bytes(skip_most_nr(nr_items), SCOUTFS_MAX_KEY_SIZE,
+				  SCOUTFS_MAX_VAL_SIZE) - 1;
+	u32 padding = (SCOUTFS_SEGMENT_SIZE / SCOUTFS_BLOCK_SIZE) * item_pad;
+
+	return (header + items + key_bytes + val_bytes + padding)
 			<= SCOUTFS_SEGMENT_SIZE;
 }
 
-static u32 align_key_off(struct scoutfs_segment *seg, u32 key_off, u32 len)
+static u32 align_item_off(struct scoutfs_segment *seg, u32 item_off, u32 bytes)
 {
-	u32 space = SCOUTFS_BLOCK_SIZE - (key_off & SCOUTFS_BLOCK_MASK);
+	u32 space = SCOUTFS_BLOCK_SIZE - (item_off & SCOUTFS_BLOCK_MASK);
 
-	if (len > space) {
-		memset(off_ptr(seg, key_off), 0, space);
-		return key_off + space;
+	if (bytes > space) {
+		memset(off_ptr(seg, item_off), 0, space);
+		return item_off + space;
 	}
 
-	return key_off;
+	return item_off;
 }
 
+
 /*
- * Store the first item in the segment.  The caller knows the number
- * of items and bytes of keys that determine where the keys and values
- * start.  Future items are appended by looking at the last item.
- *
- * This should never fail because any item must always fit in a segment.
+ * Append an item to the segment.  The caller always appends items that
+ * have been sorted by their keys.  They may not know how many will fit.
+ * We return true if we appended and false if the segment was full.
  */
-void scoutfs_seg_first_item(struct super_block *sb,
-			    struct scoutfs_segment *seg,
-			    struct scoutfs_key_buf *key, struct kvec *val,
-			    u8 flags, unsigned int nr_items,
-			    unsigned int key_bytes)
+bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg,
+			     struct scoutfs_key_buf *key, struct kvec *val,
+			     u8 flags, __le32 **links)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
@@ -520,82 +615,66 @@ void scoutfs_seg_first_item(struct super_block *sb,
 	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf item_key;
 	SCOUTFS_DECLARE_KVEC(item_val);
-	u32 key_off;
-	u32 val_off;
+	u8 nr_links;
+	u32 val_len;
+	u32 bytes;
+	u32 off;
+	int i;
 
-	/* XXX the segment block header is a mess, be better */
-	sblk->segno = cpu_to_le64(seg->segno);
-	sblk->seq = super->next_seg_seq;
-	le64_add_cpu(&super->next_seg_seq, 1);
+	val_len = scoutfs_kvec_length(val);
 
-	key_off = align_key_off(seg, pos_off(nr_items), key->key_len);
-	val_off = first_val_off(nr_items, key_bytes);
+	/* initialize the segment and skip links as the first item is appended */
+	if (sblk->nr_items == 0) {
+		/* XXX the segment block header is a mess, be better */
+		sblk->segno = cpu_to_le64(seg->segno);
+		sblk->seq = super->next_seg_seq;
+		le64_add_cpu(&super->next_seg_seq, 1);
+		sblk->total_bytes = cpu_to_le32(sizeof(*sblk));
 
-	sblk->nr_items = cpu_to_le32(1);
-
-	trace_printk("first item offs key %u val %u\n", key_off, val_off);
-
-	item = pos_ptr(seg, 0);
-	item->seq = cpu_to_le64(1);
-	item->key_off = cpu_to_le32(key_off);
-	item->val_off = cpu_to_le32(val_off);
-	item->key_len = cpu_to_le16(key->key_len);
-	item->val_len = cpu_to_le16(scoutfs_kvec_length(val));
-	item->flags = flags;
-
-	scoutfs_seg_item_ptrs(seg, 0, &item_key, item_val, NULL);
-	scoutfs_key_copy(&item_key, key);
-	scoutfs_kvec_memcpy(item_val, val);
-}
-
-void scoutfs_seg_append_item(struct super_block *sb,
-			     struct scoutfs_segment *seg,
-			     struct scoutfs_key_buf *key, struct kvec *val,
-			     u8 flags)
-{
-	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_segment_item *item;
-	struct scoutfs_segment_item *prev;
-	struct scoutfs_key_buf item_key;
-	SCOUTFS_DECLARE_KVEC(item_val);
-	u32 key_off;
-	u32 val_off;
-	u32 pos;
-
-	pos = le32_to_cpu(sblk->nr_items);
-	sblk->nr_items = cpu_to_le32(pos + 1);
+		for (i = 0; i < SCOUTFS_MAX_SKIP_LINKS; i++)
+			links[i] = &sblk->skip_links[i];
+	}
 
 	/*
 	 * It's very bad data corruption if we write out of order items
 	 * to a segment.  It'll mislead the key search during read and
 	 * stop it from finding its items.
 	 */
-	if (pos) {
-		scoutfs_seg_item_ptrs(seg, pos - 1, &item_key, NULL, NULL);
+	off = le32_to_cpu(sblk->last_item_off);
+	if (off) {
+		item_ptrs(seg, off, &item_key, NULL);
 		BUG_ON(scoutfs_key_compare(key, &item_key) <= 0);
 	}
 
-	prev = pos_ptr(seg, pos - 1);
-	item = pos_ptr(seg, pos);
+	nr_links = skip_next_nr(le32_to_cpu(sblk->nr_items));
+	bytes = item_bytes(nr_links, key->key_len, val_len);
+	off = align_item_off(seg, le32_to_cpu(sblk->total_bytes), bytes);
 
-	key_off = le32_to_cpu(prev->key_off) + le16_to_cpu(prev->key_len);
-	val_off = le32_to_cpu(prev->val_off) + le16_to_cpu(prev->val_len);
+	if ((off + bytes) > SCOUTFS_SEGMENT_SIZE)
+		return false;
 
-	key_off = align_key_off(seg, key_off, key->key_len);
+	sblk->last_item_off = cpu_to_le32(off);
+	sblk->total_bytes = cpu_to_le32(off + bytes);
+	le32_add_cpu(&sblk->nr_items, 1);
 
-	item->seq = cpu_to_le64(1);
-	item->key_off = cpu_to_le32(key_off);
-	item->val_off = cpu_to_le32(val_off);
+	item = off_ptr(seg, off);
 	item->key_len = cpu_to_le16(key->key_len);
-	item->val_len = cpu_to_le16(scoutfs_kvec_length(val));
+	item->val_len = cpu_to_le16(val_len);
 	item->flags = flags;
 
-	trace_printk("item %u offs key %u val %u\n",
-		     pos, key_off, val_off);
+	/* point the previous skip links at our appended item */
+	item->nr_links = nr_links;
+	for (i = 0; i < nr_links; i++) {
+		item->skip_links[i] = 0;
+		*links[i] = cpu_to_le32(off);
+		links[i] = &item->skip_links[i];
+	}
 
-	scoutfs_seg_item_ptrs(seg, pos, &item_key, item_val, NULL);
+	item_ptrs(seg, off, &item_key, item_val);
 	scoutfs_key_copy(&item_key, key);
 	scoutfs_kvec_memcpy(item_val, val);
+
+	return true;
 }
 
 /*
@@ -605,17 +684,10 @@ int scoutfs_seg_manifest_add(struct super_block *sb,
 			     struct scoutfs_segment *seg, u8 level)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf first;
 	struct scoutfs_key_buf last;
 
-	item = pos_ptr(seg, 0);
-	scoutfs_key_init(&first, off_ptr(seg, le32_to_cpu(item->key_off)),
-				 le16_to_cpu(item->key_len));
-
-	item = pos_ptr(seg, le32_to_cpu(sblk->nr_items) - 1);
-	scoutfs_key_init(&last, off_ptr(seg, le32_to_cpu(item->key_off)),
-				 le16_to_cpu(item->key_len));
+	first_last_keys(seg, &first, &last);
 
 	return scoutfs_manifest_add(sb, &first, &last, le64_to_cpu(sblk->segno),
 				    le64_to_cpu(sblk->seq), level);
@@ -625,12 +697,9 @@ int scoutfs_seg_manifest_del(struct super_block *sb,
 			     struct scoutfs_segment *seg, u8 level)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf first;
 
-	item = pos_ptr(seg, 0);
-	scoutfs_key_init(&first, off_ptr(seg, le32_to_cpu(item->key_off)),
-				 le16_to_cpu(item->key_len));
+	first_last_keys(seg, &first, NULL);
 
 	return scoutfs_manifest_del(sb, &first, le64_to_cpu(sblk->seq), level);
 }
@@ -644,17 +713,10 @@ scoutfs_seg_manifest_entry(struct super_block *sb,
 			   struct scoutfs_segment *seg, u8 level)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf first;
 	struct scoutfs_key_buf last;
 
-	item = pos_ptr(seg, 0);
-	scoutfs_key_init(&first, off_ptr(seg, le32_to_cpu(item->key_off)),
-				 le16_to_cpu(item->key_len));
-
-	item = pos_ptr(seg, le32_to_cpu(sblk->nr_items) - 1);
-	scoutfs_key_init(&last, off_ptr(seg, le32_to_cpu(item->key_off)),
-				 le16_to_cpu(item->key_len));
+	first_last_keys(seg, &first, &last);
 
 	return scoutfs_manifest_alloc_entry(sb, &first, &last,
 					    le64_to_cpu(sblk->segno),

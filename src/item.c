@@ -1551,39 +1551,6 @@ bool scoutfs_item_dirty_fits_single(struct super_block *sb, u32 nr_items,
 }
 
 /*
- * Find the initial sorted dirty items that will fit in a segment.  Give
- * the caller the number of items and the total bytes of their keys.
- */
-static void count_seg_items(struct item_cache *cac, u32 *nr_items,
-			    u32 *key_bytes)
-{
-	struct cached_item *item;
-	u32 items = 0;
-	u32 keys = 0;
-	u32 vals = 0;
-
-	*nr_items = 0;
-	*key_bytes = 0;
-
-	for (item = first_dirty(cac->items.rb_node); item;
-	     item = next_dirty(item)) {
-
-		items++;
-		keys += item->key->key_len;
-		vals += scoutfs_kvec_length(item->val);
-
-		if (!scoutfs_seg_fits_single(items, keys, vals))
-			break;
-
-		*nr_items = items;
-		*key_bytes = keys;
-
-		trace_printk("counted item %p nr %u keys %u\n",
-			     item, items, keys);
-	}
-}
-
-/*
  * Fill the given segment with sorted dirty items.
  *
  * The caller is responsible for the consistency of the dirty items once
@@ -1597,33 +1564,20 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
+	__le32 *links[SCOUTFS_MAX_SKIP_LINKS];
 	struct cached_item *item = NULL;
 	struct cached_item *del;
 	unsigned long flags;
-	u32 key_bytes;
-	u32 nr_items;
+	bool appended;
 
 	spin_lock_irqsave(&cac->lock, flags);
 
-	count_seg_items(cac, &nr_items, &key_bytes);
-
-	/* remember nr_items is passed to _first_item */
-	while (nr_items) {
-
-		trace_printk("copying item %p nr %u keys %u\n",
-			     item, nr_items, key_bytes);
-
-		if (!item) {
-			item = first_dirty(cac->items.rb_node);
-			scoutfs_seg_first_item(sb, seg, item->key, item->val,
-					       item_flags(item), nr_items,
-					       key_bytes);
-		} else {
-			scoutfs_seg_append_item(sb, seg, item->key, item->val,
-						item_flags(item));
-		}
-
-		key_bytes -= item->key->key_len;
+	item = first_dirty(cac->items.rb_node);
+	while (item) {
+		appended = scoutfs_seg_append_item(sb, seg, item->key, item->val,
+						   item_flags(item), links);
+		/* trans reservation should have limited dirty */
+		BUG_ON(!appended);
 
 		clear_item_dirty(sb, cac, item);
 
@@ -1632,8 +1586,6 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 
 		if (del->deletion)
 			erase_item(sb, cac, del);
-
-		nr_items--;
 	}
 
 	spin_unlock_irqrestore(&cac->lock, flags);

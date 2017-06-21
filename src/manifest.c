@@ -67,7 +67,7 @@ struct manifest_ref {
 	u64 seq;
 	struct scoutfs_segment *seg;
 	int found_ctr;
-	int pos;
+	int off;
 	u8 level;
 
 	struct scoutfs_key_buf *first;
@@ -542,7 +542,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 
 	/* start from the next item from the key in each segment */
 	list_for_each_entry(ref, &ref_list, entry)
-		ref->pos = scoutfs_seg_find_pos(ref->seg, key);
+		ref->off = scoutfs_seg_find_off(ref->seg, key);
 
 	/*
 	 * Find the limit of the range we can safely walk.  We have all
@@ -567,9 +567,9 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 		found = false;
 		found_ctr++;
 
-		/* find the next least key from the pos in each segment */
+		/* find the next least key from the off in each segment */
 		list_for_each_entry_safe(ref, tmp, &ref_list, entry) {
-			if (ref->pos == -1)
+			if (ref->off < 0)
 				continue;
 
 			/*
@@ -578,12 +578,12 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 			 * items or if the next item is past the keys
 			 * that our segments can see.
 			 */
-			ret = scoutfs_seg_item_ptrs(ref->seg, ref->pos,
+			ret = scoutfs_seg_item_ptrs(ref->seg, ref->off,
 						    &item_key, item_val,
 						    &item_flags);
 			if (ret < 0 ||
-			    scoutfs_key_compare(&item_key, &seg_end) > 0){
-				ref->pos = -1;
+			    scoutfs_key_compare(&item_key, &seg_end) > 0) {
+				ref->off = -1;
 				continue;
 			}
 
@@ -645,7 +645,8 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 		/* advance all the positions that had the found key */
 		list_for_each_entry(ref, &ref_list, entry) {
 			if (ref->found_ctr == found_ctr)
-				ref->pos++;
+				ref->off = scoutfs_seg_next_off(ref->seg,
+								ref->off);
 		}
 
 		ret = 0;

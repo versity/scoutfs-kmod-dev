@@ -2,9 +2,20 @@
 #define _SCOUTFS_SEG_H_
 
 struct scoutfs_bio_completion;
-struct scoutfs_segment;
 struct scoutfs_key_buf;
 struct kvec;
+
+/* this is only visible for trace events */
+struct scoutfs_segment {
+	struct super_block *sb;
+	struct rb_node node;
+	struct list_head lru_entry;
+	atomic_t refcount;
+	u64 segno;
+	unsigned long flags;
+	int err;
+	struct page *pages[SCOUTFS_SEGMENT_PAGES];
+};
 
 struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 						u64 segno);

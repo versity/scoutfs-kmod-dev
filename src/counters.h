@@ -14,7 +14,9 @@
 #define EXPAND_EACH_COUNTER 		\
 	EXPAND_COUNTER(alloc_alloc)	\
 	EXPAND_COUNTER(alloc_free)	\
-	EXPAND_COUNTER(seg_lru_shrink) \
+	EXPAND_COUNTER(seg_alloc)	\
+	EXPAND_COUNTER(seg_shrink)	\
+	EXPAND_COUNTER(seg_free)	\
 	EXPAND_COUNTER(trans_level0_seg_write) \
 	EXPAND_COUNTER(manifest_compact_migrate) \
 	EXPAND_COUNTER(compact_operations) \

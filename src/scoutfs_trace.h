@@ -29,6 +29,7 @@
 #include "format.h"
 #include "kvec.h"
 #include "lock.h"
+#include "seg.h"
 
 struct scoutfs_sb_info;
 
@@ -355,6 +356,47 @@ TRACE_EVENT(scoutfs_lock_invalidate_sb,
         TP_printk("sb %p mode %s start %s end %s",
 		  __entry->sb, lock_mode(__entry->mode),
 		  __get_str(start), __get_str(end))
+);
+
+DECLARE_EVENT_CLASS(scoutfs_seg_class,
+        TP_PROTO(struct scoutfs_segment *seg),
+        TP_ARGS(seg),
+        TP_STRUCT__entry(
+		__field(unsigned int, major)
+		__field(unsigned int, minor)
+		__field(struct scoutfs_segment *, seg)
+		__field(int, refcount)
+		__field(u64, segno)
+		__field(unsigned long, flags)
+		__field(int, err)
+        ),
+        TP_fast_assign(
+		__entry->major = MAJOR(seg->sb->s_bdev->bd_dev);
+		__entry->minor = MINOR(seg->sb->s_bdev->bd_dev);
+		__entry->seg = seg;
+		__entry->refcount = atomic_read(&seg->refcount);
+		__entry->segno = seg->segno;
+		__entry->flags = seg->flags;
+		__entry->err = seg->err;
+        ),
+        TP_printk("dev %u:%u seg %p refcount %d segno %llu flags %lx err %d",
+		  __entry->major, __entry->minor, __entry->seg, __entry->refcount,
+		  __entry->segno, __entry->flags, __entry->err)
+);
+
+DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_alloc,
+	TP_PROTO(struct scoutfs_segment *seg),
+        TP_ARGS(seg)
+);
+
+DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_shrink,
+	TP_PROTO(struct scoutfs_segment *seg),
+        TP_ARGS(seg)
+);
+
+DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_free,
+	TP_PROTO(struct scoutfs_segment *seg),
+        TP_ARGS(seg)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

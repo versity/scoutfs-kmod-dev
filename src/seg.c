@@ -26,6 +26,7 @@
 #include "alloc.h"
 #include "key.h"
 #include "counters.h"
+#include "scoutfs_trace.h"
 
 /*
  * seg.c should just be about the cache and io, and maybe
@@ -49,21 +50,12 @@ struct segment_cache {
 	unsigned long lru_nr;
 };
 
-struct scoutfs_segment {
-	struct rb_node node;
-	struct list_head lru_entry;
-	atomic_t refcount;
-	u64 segno;
-	unsigned long flags;
-	int err;
-	struct page *pages[SCOUTFS_SEGMENT_PAGES];
-};
 
 enum {
 	SF_END_IO = 0,
 };
 
-static struct scoutfs_segment *alloc_seg(u64 segno)
+static struct scoutfs_segment *alloc_seg(struct super_block *sb, u64 segno)
 {
 	struct scoutfs_segment *seg;
 	struct page *page;
@@ -76,6 +68,7 @@ static struct scoutfs_segment *alloc_seg(u64 segno)
 	if (!seg)
 		return seg;
 
+	seg->sb = sb;
 	RB_CLEAR_NODE(&seg->node);
 	INIT_LIST_HEAD(&seg->lru_entry);
 	atomic_set(&seg->refcount, 1);
@@ -83,8 +76,6 @@ static struct scoutfs_segment *alloc_seg(u64 segno)
 
 	for (i = 0; i < SCOUTFS_SEGMENT_PAGES; i++) {
 		page = alloc_page(GFP_NOFS);
-		trace_printk("seg %p segno %llu page %u %p\n",
-			     seg, segno, i, page);
 		if (!page) {
 			scoutfs_seg_put(seg);
 			return ERR_PTR(-ENOMEM);
@@ -92,6 +83,9 @@ static struct scoutfs_segment *alloc_seg(u64 segno)
 
 		seg->pages[i] = page;
 	}
+
+	trace_scoutfs_seg_alloc(seg);
+	scoutfs_inc_counter(sb, seg_alloc);
 
 	return seg;
 }
@@ -106,6 +100,8 @@ void scoutfs_seg_put(struct scoutfs_segment *seg)
 	int i;
 
 	if (!IS_ERR_OR_NULL(seg) && atomic_dec_and_test(&seg->refcount)) {
+		trace_scoutfs_seg_free(seg);
+		scoutfs_inc_counter(seg->sb, seg_free);
 		WARN_ON_ONCE(!RB_EMPTY_NODE(&seg->node));
 		WARN_ON_ONCE(!list_empty(&seg->lru_entry));
 		for (i = 0; i < SCOUTFS_SEGMENT_PAGES; i++)
@@ -256,7 +252,7 @@ int scoutfs_seg_alloc(struct super_block *sb, u64 segno,
 	unsigned long flags;
 	int ret;
 
-	seg = alloc_seg(segno);
+	seg = alloc_seg(sb, segno);
 	if (!seg) {
 		ret = -ENOMEM;
 		goto out;
@@ -321,7 +317,7 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 	if (seg)
 		return seg;
 
-	seg = alloc_seg(segno);
+	seg = alloc_seg(sb, segno);
 	if (IS_ERR(seg))
 		return seg;
 
@@ -776,7 +772,8 @@ static int seg_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	spin_unlock_irqrestore(&cac->lock, flags);
 
 	list_for_each_entry_safe(seg, tmp, &list, lru_entry) {
-		scoutfs_inc_counter(sb, seg_lru_shrink);
+		trace_scoutfs_seg_shrink(seg);
+		scoutfs_inc_counter(sb, seg_shrink);
 		list_del_init(&seg->lru_entry);
 		scoutfs_seg_put(seg);
 	}

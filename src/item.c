@@ -41,6 +41,12 @@
  * clobber them in creation and skip them in lookups.
  */
 
+static bool invalid_key_val(struct scoutfs_key_buf *key, struct kvec *val)
+{
+	return WARN_ON_ONCE(key->key_len > SCOUTFS_MAX_KEY_SIZE ||
+	        (val && (scoutfs_kvec_length(val) > SCOUTFS_MAX_VAL_SIZE)));
+}
+
 static bool invalid_flags(int sif)
 {
 	return (sif & SIF_EXCLUSIVE) && (sif & SIF_REPLACE);
@@ -992,6 +998,9 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 	unsigned long flags;
 	int ret;
 
+	if (invalid_key_val(key, val))
+		return -EINVAL;
+
 	item = alloc_item(sb, key, val);
 	if (!item)
 		return -ENOMEM;
@@ -1020,6 +1029,9 @@ int scoutfs_item_add_batch(struct super_block *sb, struct list_head *list,
 {
 	struct cached_item *item;
 	int ret;
+
+	if (invalid_key_val(key, val))
+		return -EINVAL;
 
 	item = alloc_item(sb, key, val);
 	if (item) {
@@ -1127,6 +1139,11 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 
 	if (WARN_ON_ONCE(invalid_flags(sif)))
 		return -EINVAL;
+
+	list_for_each_entry(item, list, entry) {
+		if (invalid_key_val(item->key, item->val))
+			return -EINVAL;
+	}
 
 	trace_scoutfs_item_set_batch(sb, start, end);
 
@@ -1282,6 +1299,9 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
+
+	if (invalid_key_val(key, val))
+		return -EINVAL;
 
 	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
 	if (!end) {

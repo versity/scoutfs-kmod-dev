@@ -260,8 +260,6 @@ struct scoutfs_symlink_key {
 	__u8 nr;
 } __packed;
 
-#define SCOUTFS_SYMLINK_MAX_VAL_SIZE 200
-
 struct scoutfs_betimespec {
 	__be64 sec;
 	__be32 nsec;
@@ -377,13 +375,6 @@ struct scoutfs_dirent {
 /* S32_MAX avoids the (int) sign bit and might avoid sloppy bugs */
 #define SCOUTFS_LINK_MAX S32_MAX
 
-#define SCOUTFS_XATTR_MAX_NAME_LEN 255
-#define SCOUTFS_XATTR_MAX_SIZE 65536
-#define SCOUTFS_XATTR_PART_SIZE \
-	(SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_xattr_val_header))
-#define SCOUTFS_XATTR_MAX_PARTS \
-	DIV_ROUND_UP(SCOUTFS_XATTR_MAX_SIZE, SCOUTFS_XATTR_PART_SIZE)
-
 /* entries begin after . and .. */
 #define SCOUTFS_DIRENT_FIRST_POS 2
 /* getdents returns next pos with an entry, no entry at (f_pos)~0 */
@@ -403,6 +394,18 @@ enum {
 /* ino_path can search for backref items with a null term */
 #define SCOUTFS_MAX_KEY_SIZE \
 	offsetof(struct scoutfs_link_backref_key, name[SCOUTFS_NAME_LEN + 1])
+
+/* largest single val are dirents, larger broken up into units of this */
+#define SCOUTFS_MAX_VAL_SIZE \
+	offsetof(struct scoutfs_dirent, name[SCOUTFS_NAME_LEN])
+
+#define SCOUTFS_XATTR_MAX_NAME_LEN 255
+#define SCOUTFS_XATTR_MAX_SIZE 65536
+#define SCOUTFS_XATTR_PART_SIZE \
+	(SCOUTFS_MAX_VAL_SIZE - sizeof(struct scoutfs_xattr_val_header))
+#define SCOUTFS_XATTR_MAX_PARTS \
+	DIV_ROUND_UP(SCOUTFS_XATTR_MAX_SIZE, SCOUTFS_XATTR_PART_SIZE)
+
 
 /*
  * messages over the wire.

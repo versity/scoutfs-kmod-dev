@@ -661,7 +661,7 @@ enum {
 	SYM_DELETE,
 };
 static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
-			    const char *target, int size)
+			    const char *target, size_t size)
 {
 	struct scoutfs_symlink_key skey;
 	struct scoutfs_key_buf key;
@@ -671,15 +671,15 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 	int ret;
 	int i;
 
-	if (WARN_ON_ONCE(size <= 0 || size > SCOUTFS_SYMLINK_MAX_SIZE ||
+	if (WARN_ON_ONCE(size == 0 || size > SCOUTFS_SYMLINK_MAX_SIZE ||
 		         op > SYM_DELETE))
 		return -EINVAL;
 
-	nr = DIV_ROUND_UP(size, SCOUTFS_SYMLINK_MAX_VAL_SIZE);
+	nr = DIV_ROUND_UP(size, SCOUTFS_MAX_VAL_SIZE);
 	for (i = 0; i < nr; i++) {
 
 		init_symlink_key(&key, &skey, ino, i);
-		bytes = min(size, SCOUTFS_SYMLINK_MAX_VAL_SIZE);
+		bytes = min(size, SCOUTFS_MAX_VAL_SIZE);
 		scoutfs_kvec_init(val, (void *)target, bytes);
 
 		if (op == SYM_CREATE)
@@ -691,7 +691,7 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 		if (ret)
 			break;
 
-		target += SCOUTFS_SYMLINK_MAX_VAL_SIZE;
+		target += SCOUTFS_MAX_VAL_SIZE;
 		size -= bytes;
 	}
 

@@ -408,7 +408,7 @@ restart:
 		}
 	}
 
-	trace_scoutfs_item_insertion(sb, ins->key, ins->val);
+	trace_scoutfs_item_insertion(sb, ins->key);
 
 	rb_link_node(&ins->node, parent, node);
 	rb_insert_augmented(&ins->node, root, &scoutfs_item_rb_cb);
@@ -632,7 +632,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 	unsigned long flags;
 	int ret;
 
-	trace_scoutfs_item_lookup(sb, key, val);
+	trace_scoutfs_item_lookup(sb, key);
 
 	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
 	if (!end) {

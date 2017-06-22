@@ -204,10 +204,9 @@ TRACE_EVENT(scoutfs_manifest_add,
 		  __entry->seq, __entry->level)
 );
 
-TRACE_EVENT(scoutfs_item_lookup,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key,
-		 struct kvec *val),
-        TP_ARGS(sb, key, val),
+DECLARE_EVENT_CLASS(scoutfs_key_class,
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_ARGS(sb, key),
         TP_STRUCT__entry(
                 __dynamic_array(char, key, scoutfs_key_str(NULL, key))
         ),
@@ -217,17 +216,14 @@ TRACE_EVENT(scoutfs_item_lookup,
         TP_printk("key %s", __get_str(key))
 );
 
-TRACE_EVENT(scoutfs_item_insertion,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key,
-		 struct kvec *val),
-        TP_ARGS(sb, key, val),
-        TP_STRUCT__entry(
-                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
-        ),
-        TP_fast_assign(
-		scoutfs_key_str(__get_dynamic_array(key), key);
-        ),
-        TP_printk("key %s", __get_str(key))
+DEFINE_EVENT(scoutfs_key_class, scoutfs_item_lookup,
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_ARGS(sb, key)
+);
+
+DEFINE_EVENT(scoutfs_key_class, scoutfs_item_insertion,
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_ARGS(sb, key)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_range_class,

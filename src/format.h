@@ -253,11 +253,14 @@ struct scoutfs_xattr_val_header {
 	__u8 last_part;
 } __packed;
 
-/* value is the null terminated target path */
+/* size determines nr needed to store full target path in their values */
 struct scoutfs_symlink_key {
 	__u8 type;
 	__be64 ino;
+	__u8 nr;
 } __packed;
+
+#define SCOUTFS_SYMLINK_MAX_VAL_SIZE 200
 
 struct scoutfs_betimespec {
 	__be64 sec;

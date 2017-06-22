@@ -54,9 +54,10 @@ static inline void scoutfs_count_dirents(struct scoutfs_item_count *cnt,
 static inline void scoutfs_count_sym_target(struct scoutfs_item_count *cnt,
 					      unsigned size)
 {
+	unsigned nr = DIV_ROUND_UP(size, SCOUTFS_SYMLINK_MAX_VAL_SIZE);
 
-	cnt->items += 1;
-	cnt->keys += sizeof(struct scoutfs_symlink_key);
+	cnt->items += nr;
+	cnt->keys += nr * sizeof(struct scoutfs_symlink_key);
 	cnt->vals += size;
 }
 

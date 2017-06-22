@@ -84,6 +84,9 @@ struct net_info {
 	struct llist_head ring_commit_waiters;
 	struct work_struct ring_commit_work;
 
+	/* level 0 segment addition waits for it to clear */ 
+	wait_queue_head_t waitq;
+
 	/* server tracks seq use */
 	spinlock_t seq_lock;
 	struct list_head pending_seqs;
@@ -422,6 +425,20 @@ static struct send_buf *process_bulk_alloc(struct super_block *sb,void *req,
 	return sbuf;
 }
 
+/*
+ * This is new segments arriving.  It needs to wait for level 0 to be
+ * free.  It has relatively little visibility into the manifest, though.
+ * We don't want it to block holding commits because that'll stop
+ * manifest updates from emptying level 0.
+ *
+ * Maybe the easiest way is to protect the level counts with a seqlock,
+ * or whatever.
+ */
+
+/*
+ * The sender has written their level 0 segment and has given us its
+ * details.  We wait for there to be room in level 0 before adding it.
+ */
 static struct send_buf *process_record_segment(struct super_block *sb,
 					       void *req, int req_len)
 {
@@ -443,9 +460,18 @@ static struct send_buf *process_record_segment(struct super_block *sb,
 		goto out;
 	}
 
+retry:
 	down_read(&nti->ring_commit_rwsem);
-
 	scoutfs_manifest_lock(sb);
+
+	if (scoutfs_manifest_level0_full(sb)) {
+		scoutfs_manifest_unlock(sb);
+		up_read(&nti->ring_commit_rwsem);
+		/* XXX waits indefinitely?  io errors? */
+		wait_event(nti->waitq, !scoutfs_manifest_level0_full(sb));
+		goto retry;
+	}
+
 	ret = scoutfs_manifest_add_ment(sb, ment);
 	scoutfs_manifest_unlock(sb);
 
@@ -1446,20 +1472,29 @@ int scoutfs_net_get_compaction(struct super_block *sb, void *curs)
  * In the future we'd encode the manifest and segnos in requests sent to
  * the server who'd update the manifest and allocator in request
  * processing.
+ *
+ * As we finish a compaction we wait level0 writers if it opened up
+ * space in level 0.
  */
 int scoutfs_net_finish_compaction(struct super_block *sb, void *curs,
 				  void *list)
 {
 	DECLARE_NET_INFO(sb, nti);
 	struct commit_waiter cw;
+	bool level0_was_full;
 	int ret;
 
 	down_read(&nti->ring_commit_rwsem);
 
-	ret = scoutfs_compact_commit(sb, curs, list);
+	level0_was_full = scoutfs_manifest_level0_full(sb);
 
-	if (ret == 0)
+	ret = scoutfs_compact_commit(sb, curs, list);
+	if (ret == 0) {
 		queue_commit_work(nti, &cw);
+		if (level0_was_full && !scoutfs_manifest_level0_full(sb))
+			wake_up(&nti->waitq);
+	}
+
 	up_read(&nti->ring_commit_rwsem);
 
 	if (ret == 0)
@@ -2150,6 +2185,7 @@ int scoutfs_net_setup(struct super_block *sb)
 	init_rwsem(&nti->ring_commit_rwsem);
 	init_llist_head(&nti->ring_commit_waiters);
 	INIT_WORK(&nti->ring_commit_work, scoutfs_net_ring_commit_func);
+	init_waitqueue_head(&nti->waitq);
 	spin_lock_init(&nti->seq_lock);
 	INIT_LIST_HEAD(&nti->pending_seqs);
 	INIT_LIST_HEAD(&nti->active_socks);

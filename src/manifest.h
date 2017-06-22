@@ -45,6 +45,8 @@ int scoutfs_manifest_add_ment_ref(struct super_block *sb,
 
 int scoutfs_manifest_next_compact(struct super_block *sb, void *data);
 
+bool scoutfs_manifest_level0_full(struct super_block *sb);
+
 int scoutfs_manifest_setup(struct super_block *sb);
 void scoutfs_manifest_destroy(struct super_block *sb);
 

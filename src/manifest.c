@@ -45,8 +45,12 @@ struct manifest {
 	/* calculated on mount, const thereafter */
 	u64 level_limits[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
 
+	unsigned long flags;
+
 	struct scoutfs_key_buf *compact_keys[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
 };
+
+#define MANI_FLAG_LEVEL0_FULL (1 << 0)
 
 #define DECLARE_MANIFEST(sb, name) \
 	struct manifest *name = SCOUTFS_SB(sb)->manifest
@@ -110,6 +114,46 @@ static bool cmp_range_ment(struct scoutfs_key_buf *key,
 }
 
 /*
+ * Change the level count under the manifest lock.  We then maintain a
+ * bit that can be tested outside the lock to determine if the caller
+ * should wait for level 0 segments to drain.
+ */
+static void add_level_count(struct super_block *sb, int level, s64 val)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	__le64 count;
+	int full;
+
+	le64_add_cpu(&super->manifest.level_counts[level], val);
+
+	if (level == 0) {
+		count = super->manifest.level_counts[level];
+		full = test_bit(MANI_FLAG_LEVEL0_FULL, &mani->flags);
+		if (count && !full)
+			set_bit(MANI_FLAG_LEVEL0_FULL, &mani->flags);
+		else if (!count && full)
+			clear_bit(MANI_FLAG_LEVEL0_FULL, &mani->flags);
+	}
+}
+
+/*
+ * Return whether or not level 0 segments are full.  It's safe to use
+ * this as a wait_event condition because it doesn't block.
+ *
+ * Callers rely on on the spin locks in wait queues to synchronize
+ * testing this as a sleeping condition with addition to the wait queue
+ * and waking of the waitqueue.
+ */
+bool scoutfs_manifest_level0_full(struct super_block *sb)
+{
+	DECLARE_MANIFEST(sb, mani);
+
+	return test_bit(MANI_FLAG_LEVEL0_FULL, &mani->flags);
+}
+
+/*
  * Insert a new manifest entry in the ring.  The ring allocates a new
  * node for us and we fill it.
  *
@@ -121,8 +165,6 @@ int scoutfs_manifest_add(struct super_block *sb,
 			 u8 level)
 {
 	DECLARE_MANIFEST(sb, mani);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_manifest_entry *ment;
 	struct scoutfs_key_buf ment_first;
 	struct scoutfs_key_buf ment_last;
@@ -154,7 +196,7 @@ int scoutfs_manifest_add(struct super_block *sb,
 	scoutfs_key_copy(&ment_last, last);
 
 	mani->nr_levels = max_t(u8, mani->nr_levels, level + 1);
-	le64_add_cpu(&super->manifest.level_counts[level], 1);
+	add_level_count(sb, level, 1);
 	return 0;
 }
 
@@ -168,8 +210,6 @@ int scoutfs_manifest_add_ment(struct super_block *sb,
 			      struct scoutfs_manifest_entry *add)
 {
 	DECLARE_MANIFEST(sb, mani);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_manifest_entry *ment;
 	struct manifest_search_key skey;
 	struct scoutfs_key_buf first;
@@ -195,7 +235,7 @@ int scoutfs_manifest_add_ment(struct super_block *sb,
 	memcpy(ment, add, bytes);
 
 	mani->nr_levels = max_t(u8, mani->nr_levels, add->level + 1);
-	le64_add_cpu(&super->manifest.level_counts[add->level], 1);
+	add_level_count(sb, add->level, 1);
 
 	return 0;
 }
@@ -229,8 +269,6 @@ int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
 			 u64 seq, u8 level)
 {
 	DECLARE_MANIFEST(sb, mani);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_manifest_entry *ment;
 	struct manifest_search_key skey;
 	struct scoutfs_key_buf last;
@@ -248,7 +286,7 @@ int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
 				      le64_to_cpu(ment->seq), first, &last);
 
 	scoutfs_ring_delete(&mani->ring, ment);
-	le64_add_cpu(&super->manifest.level_counts[level], -1ULL);
+	add_level_count(sb, level, -1ULL);
 	return 0;
 }
 

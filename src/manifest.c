@@ -423,7 +423,9 @@ int scoutfs_manifest_add_ment_ref(struct super_block *sb,
  *
  * We only need to search for the starting key in all the higher levels.
  * They do not overlap so we can iterate through the key space in each
- * segment starting with the key.
+ * segment starting with the key.  In each level we need the first
+ * existing segment that intersects with the range, even if it doesn't
+ * contain the key.  The key might fall between segments at that level.
  *
  * This is called by the server who is processing manifest search
  * messages from mounts.  The server locks down the manifest while it
@@ -481,7 +483,7 @@ scoutfs_manifest_find_range_entries(struct super_block *sb,
 
 		/* XXX should use level counts to skip searches */
 
-		ment = scoutfs_ring_lookup(&mani->ring, &skey);
+		ment = scoutfs_ring_lookup_next(&mani->ring, &skey);
 		if (ment) {
 			found[nr++] = ment;
 			*found_bytes += scoutfs_manifest_bytes(ment);

@@ -77,6 +77,90 @@ struct scoutfs_ring_descriptor {
 } __packed;
 
 /*
+ * Assert that we'll be able to represent all possible keys with 8 64bit
+ * primary sort values.
+ */
+#define SCOUTFS_BTREE_GREATEST_KEY_LEN 32
+/* level >0 segments can have a full key and some metadata */
+#define SCOUTFS_BTREE_MAX_KEY_LEN 320
+/* level 0 segments can have two full keys in the value :/ */
+#define SCOUTFS_BTREE_MAX_VAL_LEN 768
+
+/*
+ * A 4EB test image measured a worst case height of 17.  This is plenty
+ * generous.
+ */
+#define SCOUTFS_BTREE_MAX_HEIGHT 20
+
+/* btree blocks (beyond the first) need to be at least half full */
+#define SCOUTFS_BTREE_FREE_LIMIT \
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) / 2)
+
+#define SCOUTFS_BTREE_BITS 8
+
+/*
+ * Btree items can have bits associated with them.  Their parent items
+ * reflect all the bits that their child block contain.  Thus searches
+ * can find items with bits set.
+ *
+ * @SCOUTFS_BTREE_BIT_HALF1: Tracks blocks found in the first half of
+ * the ring.  It's used to migrate blocks from the old half of the ring
+ * into the current half as blocks are dirtied.  It's not found in leaf
+ * items but is calculated based on the block number of referenced
+ * blocks.  _HALF2 is identical but for the second half of the ring.
+ */
+enum {
+	SCOUTFS_BTREE_BIT_HALF1		= (1 << 0),
+	SCOUTFS_BTREE_BIT_HALF2		= (1 << 1),
+};
+
+struct scoutfs_btree_ref {
+	__le64 blkno;
+	__le64 seq;
+} __packed;
+
+/*
+ * A height of X means that the first block read will have level X-1 and
+ * the leaves will have level 0.
+ */
+struct scoutfs_btree_root {
+	struct scoutfs_btree_ref ref;
+	__u8 height;
+} __packed;
+
+struct scoutfs_btree_item_header {
+	__le16 off;
+	__u8 bits;
+} __packed;
+
+struct scoutfs_btree_item {
+	__le16 key_len;
+	__le16 val_len;
+	__u8 data[0];
+} __packed;
+
+struct scoutfs_btree_block {
+	__le64 fsid;
+	__le64 blkno;
+	__le64 seq;
+	__le32 crc;
+	__le32 _pad;
+	__le16 free_end;
+	__le16 free_reclaim;
+	__le16 nr_items;
+	__le16 bit_counts[SCOUTFS_BTREE_BITS];
+	__u8 level;
+	struct scoutfs_btree_item_header item_hdrs[0];
+} __packed;
+
+struct scoutfs_btree_ring {
+	__le64 first_blkno;
+	__le64 nr_blocks;
+	__le64 next_block;
+	__le64 next_seq;
+} __packed;
+
+/*
  * This is absurdly huge.  If there was only ever 1 item per segment and
  * 2^64 items the tree could get this deep.
  */
@@ -313,6 +397,7 @@ struct scoutfs_super_block {
 	__le64 ring_blocks;
 	__le64 ring_tail_block;
 	__le64 ring_gen;
+	struct scoutfs_btree_ring bring;
 	__le64 next_seg_seq;
 	struct scoutfs_ring_descriptor alloc_ring;
 	struct scoutfs_manifest manifest;

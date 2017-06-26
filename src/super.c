@@ -203,6 +203,9 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_op = &scoutfs_super_ops;
 
+	/* btree blocks use long lived bh->b_data refs */
+	mapping_set_gfp_mask(sb->s_bdev->bd_inode->i_mapping, GFP_NOFS);
+
 	sbi = kzalloc(sizeof(struct scoutfs_sb_info), GFP_KERNEL);
 	sb->s_fs_info = sbi;
 	sbi->sb = sb;

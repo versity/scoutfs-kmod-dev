@@ -564,16 +564,6 @@ static int init_lock_info(struct super_block *sb)
 	return 0;
 }
 
-static int can_complete_shutdown(struct held_locks *held)
-{
-	int ret;
-
-	spin_lock(&held->lock);
-	ret = !!RB_EMPTY_ROOT(&held->lock_tree);
-	spin_unlock(&held->lock);
-	return ret;
-}
-
 /*
  * Cause all lock attempts from our super to fail, waking anyone who is
  * currently blocked attempting to lock.  Now that locks can't block we

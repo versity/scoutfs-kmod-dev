@@ -26,11 +26,15 @@
 #include "linux/dlm.h"
 
 /*
- * Allocated once and pointed to by the lock info of all the supers with
- * the same fsid.  Freed as the last super unmounts.
+ * allocated per-super, freed on unmount.
  */
-struct held_locks {
+struct lock_info {
 	struct super_block *sb;
+	dlm_lockspace_t *ls;
+	char ls_name[DLM_LOCKSPACE_LEN];
+	bool shutdown;
+	struct list_head id_head;
+
 	spinlock_t lock;
 	unsigned int seq_cnt;
 	wait_queue_head_t waitq;
@@ -39,20 +43,6 @@ struct held_locks {
 	struct shrinker shrinker;
 	struct list_head lru_list;
 	unsigned long long lru_nr;
-};
-
-/*
- * allocated per-super.  Stored in the global list for finding supers
- * with fsids and stored in a list with others with the same fsid for
- * invalidation.  Freed on unmount.
- */
-struct lock_info {
-	struct super_block *sb;
-	dlm_lockspace_t *ls;
-	char ls_name[DLM_LOCKSPACE_LEN];
-	bool shutdown;
-	struct held_locks *held;
-	struct list_head id_head;
 };
 
 #define	RANGE_LOCK_RESOURCE	"fs_range"
@@ -104,23 +94,22 @@ static void free_scoutfs_lock(struct scoutfs_lock *lck)
 static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lck)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 	unsigned int refs;
 
 	if (lck) {
-		spin_lock(&held->lock);
+		spin_lock(&linfo->lock);
 		BUG_ON(!lck->refcnt);
 		refs = --lck->refcnt;
 		if (!refs) {
 			BUG_ON(lck->holders);
 			BUG_ON(delayed_work_pending(&lck->dc_work));
-			scoutfs_lock_remove(lck, &held->lock_tree);
+			scoutfs_lock_remove(lck, &linfo->lock_tree);
 			list_del(&lck->lru_entry);
-			spin_unlock(&held->lock);
+			spin_unlock(&linfo->lock);
 			free_scoutfs_lock(lck);
 			return;
 		}
-		spin_unlock(&held->lock);
+		spin_unlock(&linfo->lock);
 	}
 }
 
@@ -129,7 +118,6 @@ static void init_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lck,
 			      struct scoutfs_key_buf *end)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 
 	RB_CLEAR_NODE(&lck->interval_node);
 	lck->sb = sb;
@@ -148,9 +136,9 @@ static void init_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lck,
 		lck->dlm_end.len = end->key_len;
 	}
 
-	spin_lock(&held->lock);
-	lck->sequence = ++held->seq_cnt;
-	spin_unlock(&held->lock);
+	spin_lock(&linfo->lock);
+	lck->sequence = ++linfo->seq_cnt;
+	spin_unlock(&linfo->lock);
 }
 
 static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
@@ -184,34 +172,33 @@ static struct scoutfs_lock *find_alloc_scoutfs_lock(struct super_block *sb,
 						struct scoutfs_key_buf *end)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 	struct scoutfs_lock *found, *new;
 
 	new = NULL;
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 search:
-	found = scoutfs_lock_iter_first(&held->lock_tree, start, end);
+	found = scoutfs_lock_iter_first(&linfo->lock_tree, start, end);
 	if (!found) {
 		if (!new) {
-			spin_unlock(&held->lock);
+			spin_unlock(&linfo->lock);
 			new = alloc_scoutfs_lock(sb, start, end);
 			if (!new)
 				return NULL;
 
-			spin_lock(&held->lock);
+			spin_lock(&linfo->lock);
 			goto search;
 		}
 		new->refcnt = 1; /* Freed by shrinker or on umount */
-		scoutfs_lock_insert(new, &held->lock_tree);
+		scoutfs_lock_insert(new, &linfo->lock_tree);
 		found = new;
 		new = NULL;
 	}
 	found->refcnt++;
 	if (!list_empty(&found->lru_entry)) {
 		list_del_init(&found->lru_entry);
-		held->lru_nr--;
+		linfo->lru_nr--;
 	}
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 
 	kfree(new);
 	return found;
@@ -219,7 +206,7 @@ search:
 
 static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 {
-	struct held_locks *held = container_of(shrink, struct held_locks,
+	struct lock_info *linfo = container_of(shrink, struct lock_info,
 					       shrinker);
 	struct scoutfs_lock *lck;
 	struct scoutfs_lock *tmp;
@@ -231,8 +218,8 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 	if (!nr)
 		goto out;
 
-	spin_lock_irqsave(&held->lock, flags);
-	list_for_each_entry_safe(lck, tmp, &held->lru_list, lru_entry) {
+	spin_lock_irqsave(&linfo->lock, flags);
+	list_for_each_entry_safe(lck, tmp, &linfo->lru_list, lru_entry) {
 		if (nr-- == 0)
 			break;
 
@@ -240,27 +227,26 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 		WARN_ON(lck->refcnt != 1);
 		WARN_ON(lck->flags & SCOUTFS_LOCK_QUEUED);
 
-		scoutfs_lock_remove(lck, &held->lock_tree);
+		scoutfs_lock_remove(lck, &linfo->lock_tree);
 		list_del(&lck->lru_entry);
 		list_add_tail(&lck->lru_entry, &list);
-		held->lru_nr--;
+		linfo->lru_nr--;
 	}
-	spin_unlock_irqrestore(&held->lock, flags);
+	spin_unlock_irqrestore(&linfo->lock, flags);
 
 	list_for_each_entry_safe(lck, tmp, &list, lru_entry) {
-		trace_shrink_lock_tree(held->sb, lck);
+		trace_shrink_lock_tree(linfo->sb, lck);
 		list_del(&lck->lru_entry);
 		free_scoutfs_lock(lck);
 	}
 out:
-	return min_t(unsigned long, held->lru_nr, INT_MAX);
+	return min_t(unsigned long, linfo->lru_nr, INT_MAX);
 }
 
 static void free_lock_tree(struct super_block *sb)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
-	struct rb_node *node = rb_first(&held->lock_tree);
+	struct rb_node *node = rb_first(&linfo->lock_tree);
 
 	while (node) {
 		struct scoutfs_lock *lck;
@@ -275,40 +261,39 @@ static void scoutfs_ast(void *astarg)
 {
 	struct scoutfs_lock *lck = astarg;
 	DECLARE_LOCK_INFO(lck->sb, linfo);
-	struct held_locks *held = linfo->held;
 
 	trace_scoutfs_ast(lck->sb, lck);
 
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	lck->mode = lck->rqmode;
 	/* Clear blocking flag when we are granted an unlock request */
 	if (lck->rqmode == DLM_LOCK_IV)
 		lck->flags &= ~SCOUTFS_LOCK_BLOCKING;
 	lck->rqmode = DLM_LOCK_IV;
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 
-	wake_up(&held->waitq);
+	wake_up(&linfo->waitq);
 }
 
-static void queue_blocking_work(struct held_locks *held,
+static void queue_blocking_work(struct lock_info *linfo,
 				struct scoutfs_lock *lck, unsigned int seconds)
 {
-	assert_spin_locked(&held->lock);
+	assert_spin_locked(&linfo->lock);
 	if (!(lck->flags & SCOUTFS_LOCK_QUEUED)) {
 		/* Take a ref for the workqueue */
 		lck->flags |= SCOUTFS_LOCK_QUEUED;
 		lck->refcnt++;
 	}
-	mod_delayed_work(held->downconvert_wq, &lck->dc_work, seconds * HZ);
+	mod_delayed_work(linfo->downconvert_wq, &lck->dc_work, seconds * HZ);
 }
 
-static void set_lock_blocking(struct held_locks *held,
-			       struct scoutfs_lock *lck, unsigned int seconds)
+static void set_lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lck,
+			      unsigned int seconds)
 {
-	assert_spin_locked(&held->lock);
+	assert_spin_locked(&linfo->lock);
 	lck->flags |= SCOUTFS_LOCK_BLOCKING;
 	if (lck->holders == 0)
-		queue_blocking_work(held, lck, seconds);
+		queue_blocking_work(linfo, lck, seconds);
 }
 
 static void scoutfs_rbast(void *astarg, int mode,
@@ -316,34 +301,33 @@ static void scoutfs_rbast(void *astarg, int mode,
 {
 	struct scoutfs_lock *lck = astarg;
 	struct lock_info *linfo = SCOUTFS_SB(lck->sb)->lock_info;
-	struct held_locks *held = linfo->held;
 
 	trace_scoutfs_rbast(lck->sb, lck);
 
-	spin_lock(&held->lock);
-	set_lock_blocking(held, lck, 0);
-	spin_unlock(&held->lock);
+	spin_lock(&linfo->lock);
+	set_lock_blocking(linfo, lck, 0);
+	spin_unlock(&linfo->lock);
 }
 
-static int lock_granted(struct held_locks *held, struct scoutfs_lock *lck,
+static int lock_granted(struct lock_info *linfo, struct scoutfs_lock *lck,
 			int mode)
 {
 	int ret;
 
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	ret = !!(mode == lck->mode);
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 
 	return ret;
 }
 
-static int lock_blocking(struct held_locks *held, struct scoutfs_lock *lck)
+static int lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lck)
 {
 	int ret;
 
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	ret = !!(lck->flags & SCOUTFS_LOCK_BLOCKING);
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 
 	return ret;
 }
@@ -363,7 +347,6 @@ int scoutfs_lock_range(struct super_block *sb, int mode,
 		       struct scoutfs_lock **ret_lck)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 	struct scoutfs_lock *lck;
 	int ret;
 
@@ -374,16 +357,16 @@ int scoutfs_lock_range(struct super_block *sb, int mode,
 	trace_scoutfs_lock_range(sb, lck);
 
 check_lock_state:
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	if (linfo->shutdown) {
-		spin_unlock(&held->lock);
+		spin_unlock(&linfo->lock);
 		put_scoutfs_lock(sb, lck);
 		return -ESHUTDOWN;
 	}
 
 	if (lck->flags & SCOUTFS_LOCK_BLOCKING) {
-		spin_unlock(&held->lock);
-		wait_event(held->waitq, !lock_blocking(held, lck));
+		spin_unlock(&linfo->lock);
+		wait_event(linfo->waitq, !lock_blocking(linfo, lck));
 		goto check_lock_state;
 	}
 
@@ -395,18 +378,18 @@ check_lock_state:
 			 * blocking to let the downconvert thread do it's work
 			 * so we can reacquire at the correct mode.
 			 */
-			set_lock_blocking(held, lck, 0);
-			spin_unlock(&held->lock);
+			set_lock_blocking(linfo, lck, 0);
+			spin_unlock(&linfo->lock);
 			goto check_lock_state;
 		}
 		lck->holders++;
-		spin_unlock(&held->lock);
+		spin_unlock(&linfo->lock);
 		goto out;
 	}
 
 	lck->rqmode = mode;
 	lck->holders++;
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 
 	ret = dlm_lock_range(linfo->ls, mode, &lck->dlm_start, &lck->dlm_end,
 			     &lck->lksb, DLM_LKF_NOORDER, RANGE_LOCK_RESOURCE,
@@ -419,7 +402,7 @@ check_lock_state:
 		return ret;
 	}
 
-	wait_event(held->waitq, lock_granted(held, lck, mode));
+	wait_event(linfo->waitq, lock_granted(linfo, lck, mode));
 out:
 	*ret_lck = lck;
 	return 0;
@@ -428,19 +411,18 @@ out:
 void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lck)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 	unsigned int seconds = 60;
 
 	trace_scoutfs_unlock_range(sb, lck);
 
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	lck->holders--;
 	if (lck->holders == 0) {
 		if (lck->flags & SCOUTFS_LOCK_BLOCKING)
 			seconds = 0;
-		queue_blocking_work(held, lck, seconds);
+		queue_blocking_work(linfo, lck, seconds);
 	}
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 
 	put_scoutfs_lock(sb, lck);
 }
@@ -448,16 +430,15 @@ void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lck)
 static void unlock_range(struct super_block *sb, struct scoutfs_lock *lck)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 	int ret;
 
 	trace_scoutfs_unlock_range(sb, lck);
 
 	BUG_ON(!lck->sequence);
 
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	lck->rqmode = DLM_LOCK_IV;
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 	ret = dlm_unlock(linfo->ls, lck->lksb.sb_lkid, 0, &lck->lksb, lck);
 	if (ret) {
 		scoutfs_err(sb, "Error %d unlocking %s\n", ret,
@@ -465,10 +446,10 @@ static void unlock_range(struct super_block *sb, struct scoutfs_lock *lck)
 		goto out;
 	}
 
-	wait_event(held->waitq, lock_granted(held, lck, DLM_LOCK_IV));
+	wait_event(linfo->waitq, lock_granted(linfo, lck, DLM_LOCK_IV));
 out:
 	/* lock was removed from tree, wake up umount process */
-	wake_up(&held->waitq);
+	wake_up(&linfo->waitq);
 }
 
 static void scoutfs_downconvert_func(struct work_struct *work)
@@ -477,16 +458,15 @@ static void scoutfs_downconvert_func(struct work_struct *work)
 						dc_work.work);
 	struct super_block *sb = lck->sb;
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 
 	trace_scoutfs_downconvert_func(sb, lck);
 
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	lck->flags &= ~SCOUTFS_LOCK_QUEUED;
 	if (lck->holders)
 		goto out; /* scoutfs_unlock_range will requeue for us */
 
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 
 	WARN_ON_ONCE(lck->holders);
 	WARN_ON_ONCE(lck->refcnt == 0);
@@ -499,7 +479,7 @@ static void scoutfs_downconvert_func(struct work_struct *work)
 	invalidate_caches(sb, SCOUTFS_LOCK_MODE_WRITE, lck->start, lck->end);
 	unlock_range(sb, lck);
 
-	spin_lock(&held->lock);
+	spin_lock(&linfo->lock);
 	/* Check whether we can add the lock to the LRU list:
 	 *
 	 * First, check mode to be sure that the lock wasn't reacquired
@@ -511,11 +491,11 @@ static void scoutfs_downconvert_func(struct work_struct *work)
 	 */
 	if (lck->mode == SCOUTFS_LOCK_MODE_IV && lck->refcnt == 1 &&
 	    list_empty(&lck->lru_entry)) {
-		list_add_tail(&lck->lru_entry, &held->lru_list);
-		held->lru_nr++;
+		list_add_tail(&lck->lru_entry, &linfo->lru_list);
+		linfo->lru_nr++;
 	}
 out:
-	spin_unlock(&held->lock);
+	spin_unlock(&linfo->lock);
 	put_scoutfs_lock(sb, lck);
 }
 
@@ -526,30 +506,20 @@ out:
 static int init_lock_info(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct held_locks *held;
 	struct lock_info *linfo;
 
 	linfo = kzalloc(sizeof(struct lock_info), GFP_KERNEL);
 	if (!linfo)
 		return -ENOMEM;
 
-	held = kzalloc(sizeof(struct held_locks), GFP_KERNEL);
-	if (!held) {
-		kfree(linfo);
-		return -ENOMEM;
-	}
-
-	spin_lock_init(&held->lock);
-	init_waitqueue_head(&held->waitq);
-	INIT_LIST_HEAD(&held->lru_list);
-	held->shrinker.shrink = shrink_lock_tree;
-	held->shrinker.seeks = DEFAULT_SEEKS;
-	register_shrinker(&held->shrinker);
-	held->sb = sb;
-
+	spin_lock_init(&linfo->lock);
+	init_waitqueue_head(&linfo->waitq);
+	INIT_LIST_HEAD(&linfo->lru_list);
+	linfo->shrinker.shrink = shrink_lock_tree;
+	linfo->shrinker.seeks = DEFAULT_SEEKS;
+	register_shrinker(&linfo->shrinker);
 	linfo->sb = sb;
 	linfo->shutdown = false;
-	linfo->held = held;
 	INIT_LIST_HEAD(&linfo->id_head);
 	linfo->ls = NULL;
 
@@ -559,7 +529,7 @@ static int init_lock_info(struct super_block *sb)
 	sbi->lock_info = linfo;
 
 	trace_printk("sb %p id %016llx allocated linfo %p held %p\n",
-		     sb, le64_to_cpu(sbi->super.id), linfo, held);
+		     sb, le64_to_cpu(sbi->super.id), linfo, linfo);
 
 	return 0;
 }
@@ -573,15 +543,13 @@ static int init_lock_info(struct super_block *sb)
 void scoutfs_lock_shutdown(struct super_block *sb)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held = linfo->held;
 
 	if (linfo) {
-		held = linfo->held;
-		spin_lock(&held->lock);
+		spin_lock(&linfo->lock);
 		linfo->shutdown = true;
-		spin_unlock(&held->lock);
+		spin_unlock(&linfo->lock);
 
-		wake_up(&held->waitq);
+		wake_up(&linfo->waitq);
 	}
 }
 
@@ -589,14 +557,11 @@ void scoutfs_lock_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct held_locks *held;
 	int ret;
 
 	if (linfo) {
-		held = linfo->held;
-
-		destroy_workqueue(held->downconvert_wq);
-		unregister_shrinker(&held->shrinker);
+		destroy_workqueue(linfo->downconvert_wq);
+		unregister_shrinker(&linfo->shrinker);
 		ret = dlm_release_lockspace(linfo->ls, 2);
 		if (ret)
 			scoutfs_info(sb, "Error %d releasing lockspace %s\n",
@@ -606,17 +571,15 @@ void scoutfs_lock_destroy(struct super_block *sb)
 
 		sbi->lock_info = NULL;
 
-		trace_printk("sb %p id %016llx freeing linfo %p held %p\n",
-			     sb, le64_to_cpu(sbi->super.id), linfo, held);
+		trace_printk("sb %p id %016llx freeing linfo %p linfo %p\n",
+			     sb, le64_to_cpu(sbi->super.id), linfo, linfo);
 
-		kfree(held);
 		kfree(linfo);
 	}
 }
 
 int scoutfs_lock_setup(struct super_block *sb)
 {
-	struct held_locks *held;
 	struct lock_info *linfo;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	int ret;
@@ -626,11 +589,9 @@ int scoutfs_lock_setup(struct super_block *sb)
 		return ret;
 
 	linfo = sbi->lock_info;
-	held = linfo->held;
-	held->downconvert_wq = alloc_workqueue("scoutfs_dc",
+	linfo->downconvert_wq = alloc_workqueue("scoutfs_dc",
 					       WQ_UNBOUND|WQ_HIGHPRI, 0);
-	if (!held->downconvert_wq) {
-		kfree(held);
+	if (!linfo->downconvert_wq) {
 		kfree(linfo);
 		return -ENOMEM;
 	}

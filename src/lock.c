@@ -560,12 +560,15 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	int ret;
 
 	if (linfo) {
-		destroy_workqueue(linfo->downconvert_wq);
+		if (linfo->downconvert_wq)
+			destroy_workqueue(linfo->downconvert_wq);
 		unregister_shrinker(&linfo->shrinker);
-		ret = dlm_release_lockspace(linfo->ls, 2);
-		if (ret)
-			scoutfs_info(sb, "Error %d releasing lockspace %s\n",
-				     ret, linfo->ls_name);
+		if (linfo->ls) {
+			ret = dlm_release_lockspace(linfo->ls, 2);
+			if (ret)
+				scoutfs_info(sb, "Error %d releasing lockspace %s\n",
+					     ret, linfo->ls_name);
+		}
 
 		free_lock_tree(sb);
 

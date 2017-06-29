@@ -169,16 +169,38 @@ struct scoutfs_btree_ring {
 #define SCOUTFS_MANIFEST_FANOUT 10
 
 struct scoutfs_manifest {
-	struct scoutfs_ring_descriptor ring;
+	struct scoutfs_btree_root root;
 	__le64 level_counts[SCOUTFS_MANIFEST_MAX_LEVEL];
 } __packed;
 
-struct scoutfs_manifest_entry {
+/*
+ * Manifest entries are packed into btree keys and values in a very
+ * fiddly way so that we can sort them with memcmp first by level then
+ * by their position in the level.  First comes the level.
+ *
+ * Level 0 segments are sorted by their seq so they don't have the first
+ * segment key in the manifest btree key.  Both of their keys are in the
+ * value.
+ *
+ * Level 1 segments are sorted by their first key so their last key is
+ * in the value.
+ *
+ * We go to all this trouble so that we can communicate a version of the
+ * manifest with one btree root, have dense btree keys which are used as
+ * seperators in parent blocks, and don't duplicate the large keys in
+ * the manifest btree key and value.
+ */
+
+struct scoutfs_manifest_btree_key {
+	__u8 level;
+	__u8 bkey[0];
+} __packed;
+
+struct scoutfs_manifest_btree_val {
 	__le64 segno;
 	__le64 seq;
 	__le16 first_key_len;
 	__le16 last_key_len;
-	__u8 level;
 	__u8 keys[0];
 } __packed;
 
@@ -536,9 +558,13 @@ struct scoutfs_net_key_range {
 	__u8 key_bytes[0];
 } __packed;
 
-struct scoutfs_net_manifest_entries {
-	__le16 nr;
-	struct scoutfs_manifest_entry ments[0];
+struct scoutfs_net_manifest_entry {
+	__le64 segno;
+	__le64 seq;
+	__le16 first_key_len;
+	__le16 last_key_len;
+	__u8 level;
+	__u8 keys[0];
 } __packed;
 
 /* XXX I dunno, totally made up */
@@ -561,7 +587,6 @@ struct scoutfs_net_segnos {
 
 enum {
 	SCOUTFS_NET_ALLOC_INODES = 0,
-	SCOUTFS_NET_MANIFEST_RANGE_ENTRIES,
 	SCOUTFS_NET_ALLOC_SEGNO,
 	SCOUTFS_NET_RECORD_SEGMENT,
 	SCOUTFS_NET_BULK_ALLOC,

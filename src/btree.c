@@ -1768,7 +1768,7 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_btree_ring *bring = &super->bring;
 	struct scoutfs_btree_root *roots[] = {
-		/* XXX super roots go here */
+		&super->manifest.root,
 		NULL,
 	};
 	struct scoutfs_btree_root *root;

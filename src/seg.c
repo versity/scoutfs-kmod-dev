@@ -673,11 +673,8 @@ bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg
 	return true;
 }
 
-/*
- * Add a dirty manifest entry for the given segment at the given level.
- */
-int scoutfs_seg_manifest_add(struct super_block *sb,
-			     struct scoutfs_segment *seg, u8 level)
+void scoutfs_seg_init_ment(struct scoutfs_manifest_entry *ment, int level,
+			   struct scoutfs_segment *seg)
 {
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct scoutfs_key_buf first;
@@ -685,38 +682,8 @@ int scoutfs_seg_manifest_add(struct super_block *sb,
 
 	first_last_keys(seg, &first, &last);
 
-	return scoutfs_manifest_add(sb, &first, &last, le64_to_cpu(sblk->segno),
-				    le64_to_cpu(sblk->seq), level);
-}
-
-int scoutfs_seg_manifest_del(struct super_block *sb,
-			     struct scoutfs_segment *seg, u8 level)
-{
-	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_key_buf first;
-
-	first_last_keys(seg, &first, NULL);
-
-	return scoutfs_manifest_del(sb, &first, le64_to_cpu(sblk->seq), level);
-}
-
-/*
- * Return an allocated manifest entry that describes the segment, returns
- * NULL if it couldn't allocate.
- */
-struct scoutfs_manifest_entry *
-scoutfs_seg_manifest_entry(struct super_block *sb,
-			   struct scoutfs_segment *seg, u8 level)
-{
-	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
-	struct scoutfs_key_buf first;
-	struct scoutfs_key_buf last;
-
-	first_last_keys(seg, &first, &last);
-
-	return scoutfs_manifest_alloc_entry(sb, &first, &last,
-					    le64_to_cpu(sblk->segno),
-					    le64_to_cpu(sblk->seq), level);
+	scoutfs_manifest_init_entry(ment, level, le64_to_cpu(sblk->segno),
+				    le64_to_cpu(sblk->seq), &first, &last);
 }
 
 /*

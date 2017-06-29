@@ -457,15 +457,13 @@ void scoutfs_compact_describe(struct super_block *sb, void *data,
  * and is then possibly adding all the lower overlapping segments.
  */
 int scoutfs_compact_add(struct super_block *sb, void *data,
-			struct scoutfs_key_buf *first,
-			struct scoutfs_key_buf *last, u64 segno, u64 seq,
-			u8 level)
+			struct scoutfs_manifest_entry *ment)
 {
 	struct compact_cursor *curs = data;
 	struct compact_seg *cseg;
 	int ret;
 
-	cseg = alloc_cseg(sb, first, last);
+	cseg = alloc_cseg(sb, &ment->first, &ment->last);
 	if (!cseg) {
 		ret = -ENOMEM;
 		goto out;
@@ -473,9 +471,9 @@ int scoutfs_compact_add(struct super_block *sb, void *data,
 
 	list_add_tail(&cseg->entry, &curs->csegs);
 
-	cseg->segno = segno;
-	cseg->seq = seq;
-	cseg->level = level;
+	cseg->segno = ment->segno;
+	cseg->seq = ment->seq;
+	cseg->level = ment->level;
 
 	if (!curs->upper)
 		curs->upper = cseg;
@@ -501,8 +499,8 @@ void scoutfs_compact_add_segno(struct super_block *sb, void *data, u64 segno)
 
 /*
  * Commit the result of a compaction based on the state of the cursor.
- * The net caller stops the rings from being written while we're making
- * changes.  We lock the manifest to atomically make our changes.
+ * The net caller stops the manifest from being written while we're
+ * making changes.  We lock the manifest to atomically make our changes.
  *
  * The erorr handling is sketchy here because calling the manifest from
  * here is temporary.  We should be sending a message to the server
@@ -510,6 +508,7 @@ void scoutfs_compact_add_segno(struct super_block *sb, void *data, u64 segno)
  */
 int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
 {
+	struct scoutfs_manifest_entry ment;
 	struct compact_cursor *curs = c;
 	struct list_head *results = r;
 	struct compact_seg *cseg;
@@ -533,8 +532,9 @@ int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
 			BUG_ON(ret);
 		}
 
-		ret = scoutfs_manifest_del(sb, cseg->first,
-					   cseg->seq, cseg->level);
+		scoutfs_manifest_init_entry(&ment, cseg->level, 0, cseg->seq,
+					    cseg->first, NULL);
+		ret = scoutfs_manifest_del(sb, &ment);
 		BUG_ON(ret);
 	}
 
@@ -542,12 +542,12 @@ int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
 	list_for_each_entry(cseg, results, entry) {
 		/* XXX moved upper segments won't have read the segment :P */
 		if (cseg->seg)
-			ret = scoutfs_seg_manifest_add(sb, cseg->seg,
-						       cseg->level);
+			scoutfs_seg_init_ment(&ment, cseg->level, cseg->seg);
 		else
-			ret = scoutfs_manifest_add(sb, cseg->first,
-						   cseg->last, cseg->segno,
-						   cseg->seq, cseg->level);
+			scoutfs_manifest_init_entry(&ment, cseg->level,
+						    cseg->segno, cseg->seq,
+						    cseg->first, cseg->last);
+		ret = scoutfs_manifest_add(sb, &ment);
 		BUG_ON(ret);
 	}
 

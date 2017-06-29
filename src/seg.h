@@ -3,6 +3,7 @@
 
 struct scoutfs_bio_completion;
 struct scoutfs_key_buf;
+struct scoutfs_manifest_entry;
 struct kvec;
 
 /* this is only visible for trace events */
@@ -39,18 +40,12 @@ bool scoutfs_seg_fits_single(u32 nr_items, u32 key_bytes, u32 val_bytes);
 bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg,
 			     struct scoutfs_key_buf *key, struct kvec *val,
 			     u8 flags, __le32 **links);
-int scoutfs_seg_manifest_add(struct super_block *sb,
-			     struct scoutfs_segment *seg, u8 level);
-int scoutfs_seg_manifest_del(struct super_block *sb,
-			     struct scoutfs_segment *seg, u8 level);
+void scoutfs_seg_init_ment(struct scoutfs_manifest_entry *ment, int level,
+			   struct scoutfs_segment *seg);
 
 int scoutfs_seg_submit_write(struct super_block *sb,
 			     struct scoutfs_segment *seg,
 			     struct scoutfs_bio_completion *comp);
-
-struct scoutfs_manifest_entry *
-scoutfs_seg_manifest_entry(struct super_block *sb,
-			   struct scoutfs_segment *seg, u8 level);
 
 int scoutfs_seg_setup(struct super_block *sb);
 void scoutfs_seg_destroy(struct super_block *sb);

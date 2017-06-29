@@ -1,47 +1,39 @@
 #ifndef _SCOUTFS_MANIFEST_H_
 #define _SCOUTFS_MANIFEST_H_
 
-struct scoutfs_key_buf;
+#include "key.h"
+
 struct scoutfs_bio_completion;
 
+/*
+ * This native manifest entry references the physical storage of a
+ * manifest entry which can exist in a segment header and its edge keys,
+ * a network transmission of a packed entry and its keys, or in btree
+ * blocks spread between an item key and value.
+ */
+struct scoutfs_manifest_entry {
+	u8 level;
+	u64 segno;
+	u64 seq;
+	struct scoutfs_key_buf first;
+	struct scoutfs_key_buf last;
+};
+
+void scoutfs_manifest_init_entry(struct scoutfs_manifest_entry *ment,
+				 u64 level, u64 segno, u64 seq,
+				 struct scoutfs_key_buf *first,
+				 struct scoutfs_key_buf *last);
 int scoutfs_manifest_add(struct super_block *sb,
-			 struct scoutfs_key_buf *first,
-			 struct scoutfs_key_buf *last, u64 segno, u64 seq,
-			 u8 level);
-int scoutfs_manifest_add_ment(struct super_block *sb,
-			      struct scoutfs_manifest_entry *add);
-int scoutfs_manifest_dirty(struct super_block *sb,
-			   struct scoutfs_key_buf *first, u64 seq, u8 level);
-int scoutfs_manifest_del(struct super_block *sb, struct scoutfs_key_buf *first,
-			 u64 seq, u8 level);
-int scoutfs_manifest_has_dirty(struct super_block *sb);
-int scoutfs_manifest_submit_write(struct super_block *sb,
-				  struct scoutfs_bio_completion *comp);
-void scoutfs_manifest_write_complete(struct super_block *sb);
-
-int scoutfs_manifest_bytes(struct scoutfs_manifest_entry *ment);
-
-struct scoutfs_manifest_entry *
-scoutfs_manifest_alloc_entry(struct super_block *sb,
-			     struct scoutfs_key_buf *first,
-			     struct scoutfs_key_buf *last, u64 segno, u64 seq,
-			     u8 level);
+			 struct scoutfs_manifest_entry *ment);
+int scoutfs_manifest_del(struct super_block *sb,
+			 struct scoutfs_manifest_entry *ment);
 
 int scoutfs_manifest_lock(struct super_block *sb);
 int scoutfs_manifest_unlock(struct super_block *sb);
 
-struct scoutfs_manifest_entry **
-scoutfs_manifest_find_range_entries(struct super_block *sb,
-				    struct scoutfs_key_buf *key,
-				    struct scoutfs_key_buf *end,
-				    unsigned *found_bytes);
-
 int scoutfs_manifest_read_items(struct super_block *sb,
 				struct scoutfs_key_buf *key,
 				struct scoutfs_key_buf *end);
-int scoutfs_manifest_add_ment_ref(struct super_block *sb,
-				  struct list_head *list,
-				  struct scoutfs_manifest_entry *ment);
 
 int scoutfs_manifest_next_compact(struct super_block *sb, void *data);
 

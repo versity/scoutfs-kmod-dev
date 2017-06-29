@@ -350,8 +350,7 @@ void *scoutfs_ring_prev(struct scoutfs_ring_info *ring, void *data)
 
 /*
  * Calculate the most blocks we could have to use to store a given number
- * of bytes of entries.  At worst each block has a header and leaves one
- * less than the max manifest entry unused.
+ * of bytes of entries.
  */
 static unsigned most_blocks(unsigned long bytes)
 {
@@ -359,8 +358,7 @@ static unsigned most_blocks(unsigned long bytes)
 
 	space = SCOUTFS_BLOCK_SIZE -
 		sizeof(struct scoutfs_ring_block) -
-		(sizeof(struct scoutfs_manifest_entry) +
-		 (2 * SCOUTFS_MAX_KEY_SIZE) - 1);
+		sizeof(struct scoutfs_alloc_region);
 
 	return DIV_ROUND_UP(bytes, space);
 }

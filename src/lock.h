@@ -34,8 +34,8 @@ enum {
 int scoutfs_lock_range(struct super_block *sb, int mode,
                       struct scoutfs_key_buf *start,
                       struct scoutfs_key_buf *end,
-                       struct scoutfs_lock **ret_lck);
-void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lck);
+                       struct scoutfs_lock **ret_lock);
+void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lock);
 
 int scoutfs_lock_addr(struct super_block *sb, int wanted_mode,
 		      void *caller_lvb, unsigned lvb_len);

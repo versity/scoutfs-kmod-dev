@@ -208,12 +208,12 @@ struct scoutfs_manifest_btree_val {
 #define SCOUTFS_ALLOC_REGION_BITS (1 << SCOUTFS_ALLOC_REGION_SHIFT)
 #define SCOUTFS_ALLOC_REGION_MASK (SCOUTFS_ALLOC_REGION_BITS - 1)
 
-/*
- * The bits need to be aligned so that the host can use native long
- * bitops on the bits in memory.
- */
-struct scoutfs_alloc_region {
-	__le64 index;
+struct scoutfs_alloc_region_btree_key {
+	__be64 index;
+} __packed;
+
+/* The bits need to be aligned so that the hosts can use native long bit ops */
+struct scoutfs_alloc_region_btree_val {
 	__le64 bits[SCOUTFS_ALLOC_REGION_BITS / 64];
 } __packed;
 
@@ -421,7 +421,7 @@ struct scoutfs_super_block {
 	__le64 ring_gen;
 	struct scoutfs_btree_ring bring;
 	__le64 next_seg_seq;
-	struct scoutfs_ring_descriptor alloc_ring;
+	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
 	struct scoutfs_inet_addr server_addr;
 } __packed;

@@ -322,27 +322,22 @@ static void scoutfs_net_ring_commit_func(struct work_struct *work)
 	struct net_info *nti = container_of(work, struct net_info,
 					    ring_commit_work);
 	struct super_block *sb = nti->sb;
-	struct scoutfs_bio_completion comp;
 	struct commit_waiter *cw;
 	struct commit_waiter *pos;
 	struct llist_node *node;
 	int ret;
 
-	scoutfs_bio_init_comp(&comp);
-
 	down_write(&nti->ring_commit_rwsem);
 
 	if (scoutfs_btree_has_dirty(sb)) {
-		ret = scoutfs_btree_write_dirty(sb) ?:
-		      scoutfs_alloc_submit_write(sb, &comp) ?:
-		      scoutfs_bio_wait_comp(sb, &comp) ?:
+		ret = scoutfs_alloc_apply_pending(sb) ?:
+		      scoutfs_btree_write_dirty(sb) ?:
 		      scoutfs_write_dirty_super(sb);
 
 		/* we'd need to loop or something */
 		BUG_ON(ret);
 
 		scoutfs_btree_write_complete(sb);
-		scoutfs_alloc_write_complete(sb);
 
 		scoutfs_advance_dirty_super(sb);
 	} else {

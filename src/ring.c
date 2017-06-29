@@ -357,8 +357,7 @@ static unsigned most_blocks(unsigned long bytes)
 	unsigned long space;
 
 	space = SCOUTFS_BLOCK_SIZE -
-		sizeof(struct scoutfs_ring_block) -
-		sizeof(struct scoutfs_alloc_region);
+		sizeof(struct scoutfs_ring_block);
 
 	return DIV_ROUND_UP(bytes, space);
 }

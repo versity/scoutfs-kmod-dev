@@ -1769,6 +1769,7 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 	struct scoutfs_btree_ring *bring = &super->bring;
 	struct scoutfs_btree_root *roots[] = {
 		&super->manifest.root,
+		&super->alloc_root,
 		NULL,
 	};
 	struct scoutfs_btree_root *root;

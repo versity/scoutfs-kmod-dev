@@ -7,7 +7,7 @@
 #define SCOUTFS_SUPER_ID	0x2e736674756f6373ULL	/* "scoutfs." */
 
 /*
- * The super block and ring blocks are fixed 4k.
+ * The super block and btree blocks are fixed 4k.
  */
 #define SCOUTFS_BLOCK_SHIFT 12
 #define SCOUTFS_BLOCK_SIZE (1 << SCOUTFS_BLOCK_SHIFT)
@@ -48,32 +48,6 @@ struct scoutfs_block_header {
 	__le64 fsid;
 	__le64 seq;
 	__le64 blkno;
-} __packed;
-
-struct scoutfs_ring_entry {
-	__le16 data_len;
-	__u8 flags;
-	__u8 data[0];
-} __packed;
-
-#define SCOUTFS_RING_ENTRY_FLAG_DELETION (1 << 0)
-
-struct scoutfs_ring_block {
-	__le32 crc;
-	__le32 pad;
-	__le64 fsid;
-	__le64 seq;
-	__le64 block;
-	__le32 nr_entries;
-	struct scoutfs_ring_entry entries[0];
-} __packed;
-
-struct scoutfs_ring_descriptor {
-	__le64 blkno;
-	__le64 total_blocks;
-	__le64 first_block;
-	__le64 first_seq;
-	__le64 nr_blocks;
 } __packed;
 
 /*
@@ -401,11 +375,6 @@ struct scoutfs_inet_addr {
 
 #define SCOUTFS_DEFAULT_PORT 12345
 
-/*
- * The ring fields describe the statically allocated ring log.  The
- * head and tail indexes are logical 4k blocks offsets inside the ring.
- * The head block should contain the seq.
- */
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
@@ -415,10 +384,6 @@ struct scoutfs_super_block {
 	__le64 alloc_uninit;
 	__le64 total_segs;
 	__le64 free_segs;
-	__le64 ring_blkno;
-	__le64 ring_blocks;
-	__le64 ring_tail_block;
-	__le64 ring_gen;
 	struct scoutfs_btree_ring bring;
 	__le64 next_seg_seq;
 	struct scoutfs_btree_root alloc_root;

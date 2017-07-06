@@ -16,6 +16,9 @@ int scoutfs_net_finish_compaction(struct super_block *sb, void *curs,
 int scoutfs_net_get_last_seq(struct super_block *sb, u64 *seq);
 int scoutfs_net_advance_seq(struct super_block *sb, u64 *seq);
 
+int scoutfs_net_get_manifest_root(struct super_block *sb,
+				  struct scoutfs_btree_root *root);
+
 int scoutfs_net_setup(struct super_block *sb);
 void scoutfs_net_destroy(struct super_block *sb);
 

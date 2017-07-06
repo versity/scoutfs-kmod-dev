@@ -85,6 +85,9 @@ struct net_info {
 	struct llist_head commit_waiters;
 	struct work_struct commit_work;
 
+	/* server remembers the stable manifest root for clients */
+	struct scoutfs_btree_root stable_manifest_root;
+
 	/* level 0 segment addition waits for it to clear */ 
 	wait_queue_head_t waitq;
 
@@ -338,6 +341,7 @@ static void scoutfs_net_commit_func(struct work_struct *work)
 
 		scoutfs_btree_write_complete(sb);
 
+		nti->stable_manifest_root = SCOUTFS_SB(sb)->super.manifest.root;
 		scoutfs_advance_dirty_super(sb);
 	} else {
 		ret = 0;
@@ -777,6 +781,32 @@ static struct send_buf *process_get_last_seq(struct super_block *sb,
 	return sbuf;
 }
 
+static struct send_buf *process_get_manifest_root(struct super_block *sb,
+						  void *req, int req_len)
+{
+	DECLARE_NET_INFO(sb, nti);
+	struct scoutfs_btree_root *root;
+	struct send_buf *sbuf;
+
+	if (req_len != 0)
+		return ERR_PTR(-EINVAL);
+
+	sbuf = alloc_sbuf(sizeof(struct scoutfs_btree_root));
+	if (!sbuf)
+		return ERR_PTR(-ENOMEM);
+
+	root = (void *)sbuf->nh->data;
+
+	scoutfs_manifest_lock(sb);
+	memcpy(root, &nti->stable_manifest_root,
+	       sizeof(struct scoutfs_btree_root));
+	scoutfs_manifest_unlock(sb);
+
+	sbuf->nh->status = SCOUTFS_NET_STATUS_SUCCESS;
+
+	return sbuf;
+}
+
 typedef struct send_buf *(*proc_func_t)(struct super_block *sb, void *req,
 				        int req_len);
 
@@ -789,6 +819,7 @@ static proc_func_t type_proc_func(u8 type)
 		[SCOUTFS_NET_BULK_ALLOC] = process_bulk_alloc,
 		[SCOUTFS_NET_ADVANCE_SEQ] = process_advance_seq,
 		[SCOUTFS_NET_GET_LAST_SEQ] = process_get_last_seq,
+		[SCOUTFS_NET_GET_MANIFEST_ROOT] = process_get_manifest_root,
 	};
 
 	return type < SCOUTFS_NET_UNKNOWN ? funcs[type] : NULL;
@@ -918,6 +949,8 @@ static void scoutfs_net_proc_func(struct work_struct *work)
 			if (ret == 0) {
 				scoutfs_advance_dirty_super(sb);
 				nti->server_loaded = true;
+				nti->stable_manifest_root =
+					SCOUTFS_SB(sb)->super.manifest.root;
 			} else {
 				destroy_server_state(sb);
 			}
@@ -1706,6 +1739,48 @@ int scoutfs_net_get_last_seq(struct super_block *sb, u64 *seq)
 	}
 	return ret;
 }
+
+struct get_manifest_root_args {
+	struct scoutfs_btree_root *root;
+	struct completion comp;
+	int ret;
+};
+
+static int get_manifest_root_reply(struct super_block *sb, void *reply, int ret,
+			     void *arg)
+{
+	struct get_manifest_root_args *args = arg;
+	struct scoutfs_btree_root *root = reply;
+
+	if (ret == sizeof(struct scoutfs_btree_root)) {
+		memcpy(args->root, root, sizeof(struct scoutfs_btree_root));
+		args->ret = 0;
+	} else {
+		args->ret = -EINVAL;
+	}
+
+	complete(&args->comp); /* args can be freed from this point */
+	return args->ret;
+}
+
+int scoutfs_net_get_manifest_root(struct super_block *sb,
+				  struct scoutfs_btree_root *root)
+{
+	struct get_manifest_root_args args;
+	int ret;
+
+	args.root = root;
+	init_completion(&args.comp);
+
+	ret = add_send_buf(sb, SCOUTFS_NET_GET_MANIFEST_ROOT, NULL, 0,
+			   get_manifest_root_reply, &args);
+	if (ret == 0) {
+		wait_for_completion(&args.comp);
+		ret = args.ret;
+	}
+	return ret;
+}
+
 
 static struct sock_info *alloc_sinf(struct super_block *sb)
 {

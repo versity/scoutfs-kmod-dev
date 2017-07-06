@@ -447,16 +447,14 @@ static int btree_prev_overlap_or_next(struct super_block *sb,
  * existing segment that intersects with the range, even if it doesn't
  * contain the key.  The key might fall between segments at that level.
  *
- * XXX Today this using the roots from the mount-wide super.  This is
- * super wrong.  Doing so lets it use the dirty btree that could be
- * modified by the manifest server running on this node so it has to
- * lock.  It should be using a specific root communicated by lock lvbs
- * (or read from the super on mount).  Then the btrees it traverses will
- * be stable and read-only.  (But can still get -ESTALE if they're
- * re-written under us, would need to re-sample roots from the super in
- * that case, I imagine.)
+ * This is walking stable btree roots.  The blocks won't be changed as
+ * long as we read valid blocks.  They can be overwritten in which case
+ * we'll return -ESTALE and the caller can retry with a newer root or
+ * return hard errors.
  */
-static int get_manifest_refs(struct super_block *sb, struct scoutfs_key_buf *key,
+static int get_manifest_refs(struct super_block *sb,
+			     struct scoutfs_btree_root *root,
+			     struct scoutfs_key_buf *key,
 			     struct scoutfs_key_buf *end,
 			     struct list_head *ref_list)
 {
@@ -474,8 +472,6 @@ static int get_manifest_refs(struct super_block *sb, struct scoutfs_key_buf *key
 	mkey = alloc_btree_key_val(&ment, &mkey_len, NULL, NULL);
 	if (!mkey)
 		return -ENOMEM;
-
-	scoutfs_manifest_lock(sb);
 
 	/* get level 0 segments that overlap with the missing range */
 	mkey_len = init_btree_key(mkey, 0, ~0ULL, NULL);
@@ -534,8 +530,8 @@ static int get_manifest_refs(struct super_block *sb, struct scoutfs_key_buf *key
 out:
 	scoutfs_btree_put_iref(&iref);
 	scoutfs_btree_put_iref(&prev);
-	scoutfs_manifest_unlock(sb);
 	kfree(mkey);
+	BUG_ON(ret == -ESTALE); /* XXX caller needs to retry or return error */
 	return ret;
 }
 
@@ -572,6 +568,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	struct scoutfs_key_buf found_key;
 	struct scoutfs_key_buf batch_end;
 	struct scoutfs_key_buf seg_end;
+	struct scoutfs_btree_root root;
 	SCOUTFS_DECLARE_KVEC(item_val);
 	SCOUTFS_DECLARE_KVEC(found_val);
 	struct scoutfs_segment *seg;
@@ -590,8 +587,19 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 
 	trace_scoutfs_read_items(sb, key, end);
 
+
+	/*
+	 * Ask the manifest server which manifest root to read from.  Lock
+	 * holding callers will be responsible for this in the future.  They'll
+	 * either get a manifest ref in the lvb of their lock or they'll
+	 * ask the server the first time the system sees the lock.
+	 */
+	ret = scoutfs_net_get_manifest_root(sb, &root);
+	if (ret)
+		goto out;
+
 	/* get refs on all the segments */
-	ret = get_manifest_refs(sb, key, end, &ref_list);
+	ret = get_manifest_refs(sb, &root, key, end, &ref_list);
 	if (ret)
 		goto out;
 

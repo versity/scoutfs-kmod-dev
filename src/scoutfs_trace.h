@@ -284,10 +284,15 @@ DEFINE_EVENT(scoutfs_range_class, scoutfs_read_items,
         TP_ARGS(sb, start, end)
 );
 
-#define lock_mode(mode)							\
-	__print_symbolic(mode,						\
-		{ SCOUTFS_LOCK_MODE_READ,	"READ" },		\
-		{ SCOUTFS_LOCK_MODE_WRITE,	"WRITE" })
+#define lock_mode(mode)			\
+	__print_symbolic(mode,		\
+		{ DLM_LOCK_IV,	"IV" },	\
+		{ DLM_LOCK_NL,	"NL" },	\
+		{ DLM_LOCK_CR,	"CR" },	\
+		{ DLM_LOCK_CW,	"CW" },	\
+		{ DLM_LOCK_PR,	"PR" },	\
+		{ DLM_LOCK_PW,	"PW" },	\
+		{ DLM_LOCK_EX,	"EX" })
 
 DECLARE_EVENT_CLASS(scoutfs_lock_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),

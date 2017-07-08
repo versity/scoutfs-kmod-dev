@@ -25,12 +25,6 @@ struct scoutfs_lock {
 	struct delayed_work dc_work;
 };
 
-enum {
-	SCOUTFS_LOCK_MODE_IV = DLM_LOCK_IV,
-	SCOUTFS_LOCK_MODE_READ = DLM_LOCK_PR,
-	SCOUTFS_LOCK_MODE_WRITE = DLM_LOCK_EX,
-};
-
 int scoutfs_lock_range(struct super_block *sb, int mode,
                       struct scoutfs_key_buf *start,
                       struct scoutfs_key_buf *end,

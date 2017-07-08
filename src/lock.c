@@ -78,7 +78,7 @@ static int invalidate_caches(struct super_block *sb, int mode,
 	if (ret)
 		return ret;
 
-	if (mode == SCOUTFS_LOCK_MODE_WRITE)
+	if (mode == DLM_LOCK_EX)
 		ret = scoutfs_item_invalidate(sb, start, end);
 
 	return ret;
@@ -121,7 +121,7 @@ static void init_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock,
 
 	RB_CLEAR_NODE(&lock->interval_node);
 	lock->sb = sb;
-	lock->mode = SCOUTFS_LOCK_MODE_IV;
+	lock->mode = DLM_LOCK_IV;
 	INIT_DELAYED_WORK(&lock->dc_work, scoutfs_downconvert_func);
 	INIT_LIST_HEAD(&lock->lru_entry);
 
@@ -476,7 +476,7 @@ static void scoutfs_downconvert_func(struct work_struct *work)
 	 * invalidate based on what level we're downconverting to (PR,
 	 * NL).
 	 */
-	invalidate_caches(sb, SCOUTFS_LOCK_MODE_WRITE, lock->start, lock->end);
+	invalidate_caches(sb, DLM_LOCK_EX, lock->start, lock->end);
 	unlock_range(sb, lock);
 
 	spin_lock(&linfo->lock);
@@ -489,7 +489,7 @@ static void scoutfs_downconvert_func(struct work_struct *work)
 	 * lock tree so in particular we have nobody in
 	 * scoutfs_lock_range concurrently trying to acquire a lock.
 	 */
-	if (lock->mode == SCOUTFS_LOCK_MODE_IV && lock->refcnt == 1 &&
+	if (lock->mode == DLM_LOCK_IV && lock->refcnt == 1 &&
 	    list_empty(&lock->lru_entry)) {
 		list_add_tail(&lock->lru_entry, &linfo->lru_list);
 		linfo->lru_nr++;

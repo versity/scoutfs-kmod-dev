@@ -178,7 +178,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 		goto out;
 	}
 
-	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_READ, key, last, &lck);
+	ret = scoutfs_lock_range(sb, DLM_LOCK_PR, key, last, &lck);
 	if (ret)
 		goto out;
 
@@ -289,7 +289,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		goto out;
 	}
 
-	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_WRITE, key, last, &lck);
+	ret = scoutfs_lock_range(sb, DLM_LOCK_EX, key, last, &lck);
 	if (ret)
 		goto out;
 
@@ -386,7 +386,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	xkey = key->data;
 	xkey->name[0] = '\0';
 
-	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_READ, key, last, &lck);
+	ret = scoutfs_lock_range(sb, DLM_LOCK_PR, key, last, &lck);
 	if (ret)
 		goto out;
 
@@ -469,7 +469,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 	}
 
 	/* while we read to delete we need to writeback others */
-	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_WRITE, key, last, &lck);
+	ret = scoutfs_lock_range(sb, DLM_LOCK_EX, key, last, &lck);
 	if (ret)
 		goto out;
 

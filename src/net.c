@@ -2083,7 +2083,7 @@ static void scoutfs_net_server_func(struct work_struct *work)
 	INIT_WORK(&sinf->listen_work, scoutfs_net_listen_func);
 	INIT_WORK(&sinf->accept_work, scoutfs_net_accept_func);
 
-	ret = scoutfs_lock_range(sb, SCOUTFS_LOCK_MODE_WRITE, &listen_key,
+	ret = scoutfs_lock_range(sb, DLM_LOCK_EX, &listen_key,
 				 &listen_key, &sinf->listen_lck);
 	if (ret) {
 		kfree(sinf);

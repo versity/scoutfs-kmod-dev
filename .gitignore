@@ -4,9 +4,6 @@
 *.cmd
 *~
 src/.tmp_versions/
-dlm/.tmp_versions/
 src/Module.symvers
-dlm/Module.symvers
 src/modules.order
-dlm/modules.order
 cscope.*

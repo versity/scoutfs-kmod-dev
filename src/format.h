@@ -506,6 +506,19 @@ enum {
 #define SCOUTFS_XATTR_MAX_PARTS \
 	DIV_ROUND_UP(SCOUTFS_XATTR_MAX_SIZE, SCOUTFS_XATTR_PART_SIZE)
 
+/*
+ * structures used by dlm
+ */
+struct scoutfs_lock_name {
+	__u8 zone;
+	__u8 type;
+	__le64 first;
+	__le64 second;
+} __packed;
+
+#define SCOUTFS_LOCK_INODE_GROUP_NR	1024
+#define SCOUTFS_LOCK_INODE_GROUP_MASK	(SCOUTFS_LOCK_INODE_GROUP_NR - 1)
+#define SCOUTFS_LOCK_INODE_GROUP_OFFSET	(~0ULL)
 
 /*
  * messages over the wire.

@@ -178,7 +178,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 		goto out;
 	}
 
-	ret = scoutfs_lock_range(sb, DLM_LOCK_PR, key, last, &lck);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode), &lck);
 	if (ret)
 		goto out;
 
@@ -229,7 +229,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 		ret = -ERANGE;
 
 	up_read(&si->xattr_rwsem);
-	scoutfs_unlock_range(sb, lck);
+	scoutfs_unlock(sb, lck);
 
 out:
 	scoutfs_key_free(sb, key);
@@ -289,7 +289,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		goto out;
 	}
 
-	ret = scoutfs_lock_range(sb, DLM_LOCK_EX, key, last, &lck);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode), &lck);
 	if (ret)
 		goto out;
 
@@ -336,7 +336,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	scoutfs_release_trans(sb);
 
 unlock:
-	scoutfs_unlock_range(sb, lck);
+	scoutfs_unlock(sb, lck);
 
 out:
 	scoutfs_item_free_batch(sb, &list);
@@ -386,7 +386,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	xkey = key->data;
 	xkey->name[0] = '\0';
 
-	ret = scoutfs_lock_range(sb, DLM_LOCK_PR, key, last, &lck);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode), &lck);
 	if (ret)
 		goto out;
 
@@ -436,7 +436,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	}
 
 	up_read(&si->xattr_rwsem);
-	scoutfs_unlock_range(sb, lck);
+	scoutfs_unlock(sb, lck);
 out:
 	scoutfs_key_free(sb, key);
 	scoutfs_key_free(sb, last);
@@ -469,7 +469,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 	}
 
 	/* while we read to delete we need to writeback others */
-	ret = scoutfs_lock_range(sb, DLM_LOCK_EX, key, last, &lck);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, ino, &lck);
 	if (ret)
 		goto out;
 
@@ -490,7 +490,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 		/* don't need to increment past deleted key */
 	}
 
-	scoutfs_unlock_range(sb, lck);
+	scoutfs_unlock(sb, lck);
 
 out:
 	scoutfs_key_free(sb, key);

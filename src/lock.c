@@ -14,16 +14,19 @@
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/dlm.h>
 
 #include "super.h"
 #include "lock.h"
 #include "item.h"
 #include "scoutfs_trace.h"
 #include "msg.h"
+#include "cmp.h"
 
-#include "../dlm/interval_tree_generic.h"
-
-#include "linux/dlm.h"
+#define LN_FMT "%u.%u.%llu.%llu"
+#define LN_ARG(name) \
+	(name)->zone, (name)->type, le64_to_cpu((name)->first), \
+	le64_to_cpu((name)->second)
 
 /*
  * allocated per-super, freed on unmount.
@@ -45,20 +48,10 @@ struct lock_info {
 	unsigned long long lru_nr;
 };
 
-#define	RANGE_LOCK_RESOURCE	"fs_range"
-#define	RANGE_LOCK_RESOURCE_LEN	(strlen(RANGE_LOCK_RESOURCE))
-
 #define DECLARE_LOCK_INFO(sb, name) \
 	struct lock_info *name = SCOUTFS_SB(sb)->lock_info
 
 static void scoutfs_downconvert_func(struct work_struct *work);
-
-#define START(lock) ((lock)->start)
-#define LAST(lock)  ((lock)->end)
-KEYED_INTERVAL_TREE_DEFINE(struct scoutfs_lock, interval_node,
-			   struct scoutfs_key_buf *, subtree_last, START, LAST,
-			   scoutfs_key_compare, static, scoutfs_lock);
-
 
 /*
  * Invalidate caches on this because another node wants a lock
@@ -86,9 +79,11 @@ static int invalidate_caches(struct super_block *sb, int mode,
 
 static void free_scoutfs_lock(struct scoutfs_lock *lock)
 {
-	kfree(lock->start);
-	kfree(lock->end);
-	kfree(lock);
+	if (lock) {
+		scoutfs_key_free(lock->sb, lock->start);
+		scoutfs_key_free(lock->sb, lock->end);
+		kfree(lock);
+	}
 }
 
 static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
@@ -103,7 +98,7 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 		if (!refs) {
 			BUG_ON(lock->holders);
 			BUG_ON(delayed_work_pending(&lock->dc_work));
-			scoutfs_lock_remove(lock, &linfo->lock_tree);
+			rb_erase(&lock->node, &linfo->lock_tree);
 			list_del(&lock->lru_entry);
 			spin_unlock(&linfo->lock);
 			free_scoutfs_lock(lock);
@@ -113,85 +108,93 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 	}
 }
 
-static void init_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock,
-			      struct scoutfs_key_buf *start,
-			      struct scoutfs_key_buf *end)
-{
-	DECLARE_LOCK_INFO(sb, linfo);
-
-	RB_CLEAR_NODE(&lock->interval_node);
-	lock->sb = sb;
-	lock->mode = DLM_LOCK_IV;
-	INIT_DELAYED_WORK(&lock->dc_work, scoutfs_downconvert_func);
-	INIT_LIST_HEAD(&lock->lru_entry);
-
-	if (start) {
-		lock->start = start;
-		lock->dlm_start.val = start->data;
-		lock->dlm_start.len = start->key_len;
-	}
-	if (end) {
-		lock->end = end;
-		lock->dlm_end.val = end->data;
-		lock->dlm_end.len = end->key_len;
-	}
-
-	spin_lock(&linfo->lock);
-	lock->sequence = ++linfo->seq_cnt;
-	spin_unlock(&linfo->lock);
-}
-
 static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
+					       struct scoutfs_lock_name *lock_name,
 					       struct scoutfs_key_buf *start,
 					       struct scoutfs_key_buf *end)
 
 {
-	struct scoutfs_key_buf *s, *e;
 	struct scoutfs_lock *lock;
 
-	s = scoutfs_key_dup(sb, start);
-	if (!s)
-		return NULL;
-	e = scoutfs_key_dup(sb, end);
-	if (!e) {
-		kfree(s);
-		return NULL;
-	}
 	lock = kzalloc(sizeof(struct scoutfs_lock), GFP_NOFS);
-	if (!lock) {
-		kfree(e);
-		kfree(s);
+	if (lock) {
+		lock->start = scoutfs_key_dup(sb, start);
+		lock->end = scoutfs_key_dup(sb, end);
+		if (!lock->start || !lock->end) {
+			free_scoutfs_lock(lock);
+			lock = NULL;
+		} else {
+			RB_CLEAR_NODE(&lock->node);
+			lock->sb = sb;
+			lock->lock_name = *lock_name;
+			lock->mode = DLM_LOCK_IV;
+			INIT_DELAYED_WORK(&lock->dc_work,
+					  scoutfs_downconvert_func);
+			INIT_LIST_HEAD(&lock->lru_entry);
+		}
 	}
 
-	init_scoutfs_lock(sb, lock, s, e);
 	return lock;
 }
 
+static int cmp_lock_names(struct scoutfs_lock_name *a,
+			  struct scoutfs_lock_name *b)
+{
+	return (int)a->zone - (int)b->zone ?:
+	       (int)a->type - (int)b->type ?:
+	       scoutfs_cmp_u64s(le64_to_cpu(a->first), le64_to_cpu(b->first)) ?:
+	       scoutfs_cmp_u64s(le64_to_cpu(b->second), le64_to_cpu(b->second));
+}
+
 static struct scoutfs_lock *find_alloc_scoutfs_lock(struct super_block *sb,
-						struct scoutfs_key_buf *start,
-						struct scoutfs_key_buf *end)
+					struct scoutfs_lock_name *lock_name,
+					struct scoutfs_key_buf *start,
+					struct scoutfs_key_buf *end)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct scoutfs_lock *found, *new;
+	struct scoutfs_lock *new = NULL;
+	struct scoutfs_lock *found;
+	struct scoutfs_lock *lock;
+	struct rb_node *parent;
+	struct rb_node **node;
+	int cmp;
 
-	new = NULL;
-	spin_lock(&linfo->lock);
 search:
-	found = scoutfs_lock_iter_first(&linfo->lock_tree, start, end);
+	spin_lock(&linfo->lock);
+	node = &linfo->lock_tree.rb_node;
+	parent = NULL;
+	found = NULL;
+	while (*node) {
+		parent = *node;
+		lock = container_of(*node, struct scoutfs_lock, node);
+
+		cmp = cmp_lock_names(lock_name, &lock->lock_name);
+		if (cmp < 0) {
+			node = &(*node)->rb_left;
+		} else if (cmp > 0) {
+			node = &(*node)->rb_right;
+		} else {
+			found = lock;
+			break;
+		}
+		lock = NULL;
+	}
+
 	if (!found) {
 		if (!new) {
 			spin_unlock(&linfo->lock);
-			new = alloc_scoutfs_lock(sb, start, end);
+			new = alloc_scoutfs_lock(sb, lock_name, start, end);
 			if (!new)
 				return NULL;
 
-			spin_lock(&linfo->lock);
 			goto search;
 		}
-		new->refcnt = 1; /* Freed by shrinker or on umount */
-		scoutfs_lock_insert(new, &linfo->lock_tree);
 		found = new;
 		new = NULL;
+		found->refcnt = 1; /* Freed by shrinker or on umount */
+		found->sequence = ++linfo->seq_cnt;
+		rb_link_node(&found->node, parent, node);
+		rb_insert_color(&found->node, &linfo->lock_tree);
 	}
 	found->refcnt++;
 	if (!list_empty(&found->lru_entry)) {
@@ -227,7 +230,7 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 		WARN_ON(lock->refcnt != 1);
 		WARN_ON(lock->flags & SCOUTFS_LOCK_QUEUED);
 
-		scoutfs_lock_remove(lock, &linfo->lock_tree);
+		rb_erase(&lock->node, &linfo->lock_tree);
 		list_del(&lock->lru_entry);
 		list_add_tail(&lock->lru_entry, &list);
 		linfo->lru_nr--;
@@ -251,7 +254,7 @@ static void free_lock_tree(struct super_block *sb)
 	while (node) {
 		struct scoutfs_lock *lock;
 
-		lock = rb_entry(node, struct scoutfs_lock, interval_node);
+		lock = rb_entry(node, struct scoutfs_lock, node);
 		node = rb_next(node);
 		put_scoutfs_lock(sb, lock);
 	}
@@ -296,13 +299,12 @@ static void set_lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lock
 		queue_blocking_work(linfo, lock, seconds);
 }
 
-static void scoutfs_rbast(void *astarg, int mode,
-			 struct dlm_key *start, struct dlm_key *end)
+static void scoutfs_bast(void *astarg, int mode)
 {
 	struct scoutfs_lock *lock = astarg;
 	struct lock_info *linfo = SCOUTFS_SB(lock->sb)->lock_info;
 
-	trace_scoutfs_rbast(lock->sb, lock);
+	trace_scoutfs_bast(lock->sb, lock);
 
 	spin_lock(&linfo->lock);
 	set_lock_blocking(linfo, lock, 0);
@@ -341,20 +343,21 @@ static int lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lock)
  * The caller provides the opaque lock structure used for storage and
  * their start and end pointers will be accessed while the lock is held.
  */
-int scoutfs_lock_range(struct super_block *sb, int mode,
-		       struct scoutfs_key_buf *start,
-		       struct scoutfs_key_buf *end,
-		       struct scoutfs_lock **ret_lock)
+static int lock_name_keys(struct super_block *sb, int mode,
+			 struct scoutfs_lock_name *lock_name,
+			 struct scoutfs_key_buf *start,
+			 struct scoutfs_key_buf *end,
+			 struct scoutfs_lock **ret_lock)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
 	int ret;
 
-	lock = find_alloc_scoutfs_lock(sb, start, end);
+	lock = find_alloc_scoutfs_lock(sb, lock_name, start, end);
 	if (!lock)
 		return -ENOMEM;
 
-	trace_scoutfs_lock_range(sb, lock);
+	trace_scoutfs_lock_resource(sb, lock);
 
 check_lock_state:
 	spin_lock(&linfo->lock);
@@ -391,13 +394,12 @@ check_lock_state:
 	lock->holders++;
 	spin_unlock(&linfo->lock);
 
-	ret = dlm_lock_range(linfo->ls, mode, &lock->dlm_start, &lock->dlm_end,
-			     &lock->lksb, DLM_LKF_NOORDER, RANGE_LOCK_RESOURCE,
-			     RANGE_LOCK_RESOURCE_LEN, 0, scoutfs_ast, lock,
-			     scoutfs_rbast);
+	ret = dlm_lock(linfo->ls, mode, &lock->lksb, DLM_LKF_NOORDER,
+		       &lock->lock_name, sizeof(struct scoutfs_lock_name),
+		       0, scoutfs_ast, lock, scoutfs_bast);
 	if (ret) {
-		scoutfs_err(sb, "Error %d locking %s\n", ret,
-			    RANGE_LOCK_RESOURCE);
+		scoutfs_err(sb, "Error %d locking "LN_FMT, ret,
+			    LN_ARG(&lock->lock_name));
 		put_scoutfs_lock(sb, lock);
 		return ret;
 	}
@@ -408,12 +410,41 @@ out:
 	return 0;
 }
 
-void scoutfs_unlock_range(struct super_block *sb, struct scoutfs_lock *lock)
+int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
+			   struct scoutfs_lock **ret_lock)
+{
+	struct scoutfs_lock_name lock_name;
+	struct scoutfs_inode_key start_ikey;
+	struct scoutfs_inode_key end_ikey;
+	struct scoutfs_key_buf start;
+	struct scoutfs_key_buf end;
+
+	ino &= ~(u64)SCOUTFS_LOCK_INODE_GROUP_MASK;
+
+	lock_name.zone = SCOUTFS_FS_ZONE;
+	lock_name.type = SCOUTFS_INODE_TYPE;
+	lock_name.first = cpu_to_le64(ino);
+	lock_name.second = 0;
+
+	start_ikey.zone = SCOUTFS_FS_ZONE;
+	start_ikey.ino = cpu_to_be64(ino);
+	start_ikey.type = 0;
+	scoutfs_key_init(&start, &start_ikey, sizeof(start_ikey));
+
+	end_ikey.zone = SCOUTFS_FS_ZONE;
+	end_ikey.ino = cpu_to_be64(ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1);
+	end_ikey.type = ~0;
+	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
+
+	return lock_name_keys(sb, mode, &lock_name, &start, &end, ret_lock);
+}
+
+void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	unsigned int seconds = 60;
 
-	trace_scoutfs_unlock_range(sb, lock);
+	trace_scoutfs_unlock(sb, lock);
 
 	spin_lock(&linfo->lock);
 	lock->holders--;
@@ -432,7 +463,7 @@ static void unlock_range(struct super_block *sb, struct scoutfs_lock *lock)
 	DECLARE_LOCK_INFO(sb, linfo);
 	int ret;
 
-	trace_scoutfs_unlock_range(sb, lock);
+	trace_scoutfs_unlock(sb, lock);
 
 	BUG_ON(!lock->sequence);
 
@@ -441,8 +472,8 @@ static void unlock_range(struct super_block *sb, struct scoutfs_lock *lock)
 	spin_unlock(&linfo->lock);
 	ret = dlm_unlock(linfo->ls, lock->lksb.sb_lkid, 0, &lock->lksb, lock);
 	if (ret) {
-		scoutfs_err(sb, "Error %d unlocking %s\n", ret,
-			    RANGE_LOCK_RESOURCE);
+		scoutfs_err(sb, "Error %d unlocking "LN_FMT, ret,
+			    LN_ARG(&lock->lock_name));
 		goto out;
 	}
 

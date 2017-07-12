@@ -539,9 +539,8 @@ out:
  * The caller found a hole in the item cache that they'd like populated.
  *
  * We search the manifest for all the segments we'll need to iterate
- * from the key to the end key.  We walk the segments and insert as many
- * items as we can from the segments, trying to amortize the per-item
- * cost of segment searching.
+ * from the key to the end key.  If the end key is null then we'll read
+ * as many items as the intersecting segments contain.
  *
  * As we insert the batch of items we give the item cache the range of
  * keys that contain these items.  This lets the cache return negative
@@ -569,6 +568,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	struct scoutfs_key_buf batch_end;
 	struct scoutfs_key_buf seg_end;
 	struct scoutfs_btree_root root;
+	struct scoutfs_inode_key junk;
 	SCOUTFS_DECLARE_KVEC(item_val);
 	SCOUTFS_DECLARE_KVEC(found_val);
 	struct scoutfs_segment *seg;
@@ -585,7 +585,14 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	int err;
 	int cmp;
 
-	trace_scoutfs_read_items(sb, key, end);
+	if (end) {
+		scoutfs_key_clone(&seg_end, end);
+	} else {
+		scoutfs_key_init(&seg_end, &junk, sizeof(junk));
+		scoutfs_key_set_max(&seg_end);
+	}
+
+	trace_scoutfs_read_items(sb, key, &seg_end);
 
 
 	/*
@@ -599,7 +606,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 		goto out;
 
 	/* get refs on all the segments */
-	ret = get_manifest_refs(sb, &root, key, end, &ref_list);
+	ret = get_manifest_refs(sb, &root, key, &seg_end, &ref_list);
 	if (ret)
 		goto out;
 
@@ -642,7 +649,6 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	 * those segments because other segments might overlap after
 	 * that.
 	 */
-	scoutfs_key_clone(&seg_end, end);
 	list_for_each_entry(ref, &ref_list, entry) {
 		if (ref->level > 0 &&
 		    scoutfs_key_compare(ref->last, &seg_end) < 0) {

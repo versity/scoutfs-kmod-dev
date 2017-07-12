@@ -538,15 +538,18 @@ static bool check_range(struct super_block *sb, struct rb_root *root,
 
 	rng = walk_ranges(&cac->ranges, key, NULL, &next);
 	if (rng) {
-		scoutfs_key_copy(end, rng->end);
 		scoutfs_inc_counter(sb, item_range_hit);
+		if (end)
+			scoutfs_key_copy(end, rng->end);
 		return true;
 	}
 
-	if (next)
-		scoutfs_key_copy(end, next->start);
-	else
-		scoutfs_key_set_max(end);
+	if (end) {
+		if (next)
+			scoutfs_key_copy(end, next->start);
+		else
+			scoutfs_key_set_max(end);
+	}
 
 	scoutfs_inc_counter(sb, item_range_miss);
 	return false;

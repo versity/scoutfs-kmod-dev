@@ -224,8 +224,9 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
 			    struct scoutfs_inode_key *ikey, u64 ino)
 {
-	ikey->type = SCOUTFS_INODE_KEY;
+	ikey->zone = SCOUTFS_FS_ZONE;
 	ikey->ino = cpu_to_be64(ino);
+	ikey->type = SCOUTFS_INODE_TYPE;
 
 	scoutfs_key_init(key, ikey, sizeof(struct scoutfs_inode_key));
 }
@@ -479,6 +480,7 @@ static int update_index(struct inode *inode, u8 type, u64 now_major,
 	if (si->have_item && now_major == then_major && now_minor == then_minor)
 		return 0;
 
+	ins_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
 	ins_ikey.type = type;
 	ins_ikey.major = cpu_to_be64(now_major);
 	ins_ikey.minor = cpu_to_be32(now_minor);
@@ -489,6 +491,7 @@ static int update_index(struct inode *inode, u8 type, u64 now_major,
 	if (ret || !si->have_item)
 		return ret;
 
+	del_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
 	del_ikey.type = type;
 	del_ikey.major = cpu_to_be64(then_major);
 	del_ikey.minor = cpu_to_be32(then_minor);
@@ -527,18 +530,18 @@ void scoutfs_update_inode_item(struct inode *inode)
 	/* set the meta version once per trans for any inode updates */
 	scoutfs_inode_set_meta_seq(inode);
 
-	ret = update_index(inode, SCOUTFS_INODE_INDEX_CTIME_KEY,
+	ret = update_index(inode, SCOUTFS_INODE_INDEX_CTIME_TYPE,
 			   inode->i_ctime.tv_sec, inode->i_ctime.tv_nsec,
 			   si->item_ctime.tv_sec, si->item_ctime.tv_nsec) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_MTIME_KEY,
+	      update_index(inode, SCOUTFS_INODE_INDEX_MTIME_TYPE,
 			   inode->i_mtime.tv_sec, inode->i_mtime.tv_nsec,
 			   si->item_mtime.tv_sec, si->item_mtime.tv_nsec) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_SIZE_KEY,
+	      update_index(inode, SCOUTFS_INODE_INDEX_SIZE_TYPE,
 			   i_size_read(inode), 0, si->item_size, 0) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_META_SEQ_KEY,
+	      update_index(inode, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
 			   scoutfs_inode_meta_seq(inode), 0,
 			   si->item_meta_seq, 0) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_DATA_SEQ_KEY,
+	      update_index(inode, SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
 			   scoutfs_inode_data_seq(inode), 0,
 			   si->item_data_seq, 0);
 	BUG_ON(ret);
@@ -753,9 +756,11 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 }
 
 static void init_orphan_key(struct scoutfs_key_buf *key,
-			    struct scoutfs_orphan_key *okey, u64 ino)
+			    struct scoutfs_orphan_key *okey, u64 node_id, u64 ino)
 {
-	okey->type = SCOUTFS_ORPHAN_KEY;
+	okey->zone = SCOUTFS_NODE_ZONE;
+	okey->node_id = cpu_to_be64(node_id);
+	okey->type = SCOUTFS_ORPHAN_TYPE;
 	okey->ino = cpu_to_be64(ino);
 
 	scoutfs_key_init(key, okey, sizeof(struct scoutfs_orphan_key));
@@ -763,11 +768,12 @@ static void init_orphan_key(struct scoutfs_key_buf *key,
 
 static int remove_orphan_item(struct super_block *sb, u64 ino)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_orphan_key okey;
 	struct scoutfs_key_buf key;
 	int ret;
 
-	init_orphan_key(&key, &okey, ino);
+	init_orphan_key(&key, &okey, sbi->node_id, ino);
 
 	ret = scoutfs_item_delete(sb, &key);
 	if (ret == -ENOENT)
@@ -907,9 +913,13 @@ static int process_orphaned_inode(struct super_block *sb, u64 ino)
  * Runtime of this will be bounded by the number of orphans, which could
  * theoretically be very large. If that becomes a problem we might want to push
  * this work off to a thread.
+ *
+ * This only scans orphans for this node.  This will need to be covered by
+ * the rest of node zone cleanup.
  */
 int scoutfs_scan_orphans(struct super_block *sb)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_orphan_key okey;
 	struct scoutfs_orphan_key last_okey;
 	struct scoutfs_key_buf key;
@@ -919,8 +929,8 @@ int scoutfs_scan_orphans(struct super_block *sb)
 
 	trace_scoutfs_scan_orphans(sb);
 
-	init_orphan_key(&key, &okey, 0);
-	init_orphan_key(&last, &last_okey, ~0ULL);
+	init_orphan_key(&key, &okey, sbi->node_id, 0);
+	init_orphan_key(&last, &last_okey, sbi->node_id, ~0ULL);
 
 	while (1) {
 		ret = scoutfs_item_next_same(sb, &key, &last, NULL);
@@ -944,13 +954,14 @@ out:
 int scoutfs_orphan_inode(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_orphan_key okey;
 	struct scoutfs_key_buf key;
 	int ret;
 
 	trace_scoutfs_orphan_inode(sb, inode);
 
-	init_orphan_key(&key, &okey, scoutfs_ino(inode));
+	init_orphan_key(&key, &okey, sbi->node_id, scoutfs_ino(inode));
 
 	ret = scoutfs_item_create(sb, &key, NULL);
 

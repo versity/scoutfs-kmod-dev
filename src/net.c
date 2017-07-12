@@ -165,9 +165,9 @@ struct sock_info {
  * XXX instead of magic keys in the main fs resource we could have
  * another resource that contains the server locks.
  */
-static u8 listen_type = SCOUTFS_NET_LISTEN_KEY;
+static u8 listen_type = SCOUTFS_NET_LISTEN_TYPE;
 static struct scoutfs_key_buf listen_key;
-static u8 addr_type = SCOUTFS_NET_ADDR_KEY;
+static u8 addr_type = SCOUTFS_NET_ADDR_TYPE;
 static struct scoutfs_key_buf addr_key;
 
 static int send_msg(struct socket *sock, void *buf, unsigned len)

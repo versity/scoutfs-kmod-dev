@@ -33,17 +33,6 @@
 
 struct scoutfs_sb_info;
 
-#define show_key_type(type)						       \
-	__print_symbolic(type,						       \
-		{ SCOUTFS_INODE_KEY,		"INODE" },		       \
-		{ SCOUTFS_XATTR_KEY,		"XATTR" },		       \
-		{ SCOUTFS_DIRENT_KEY,		"DIRENT" },		       \
-		{ SCOUTFS_LINK_BACKREF_KEY,	"LINK_BACKREF"},	       \
-		{ SCOUTFS_SYMLINK_KEY,		"SYMLINK" },		       \
-		{ SCOUTFS_EXTENT_KEY,		"EXTENT" })
-
-#define	TRACE_KEYF	"%llu.%s.%llu"
-
 TRACE_EVENT(scoutfs_write_begin,
 	TP_PROTO(u64 ino, loff_t pos, unsigned len),
 

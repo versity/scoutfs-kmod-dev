@@ -246,7 +246,7 @@ void scoutfs_kvec_set_max_key(struct kvec *kvec)
 {
 	__u8 *type = kvec[0].iov_base;
 
-	*type = SCOUTFS_MAX_UNUSED_KEY;
+	*type = 255;
 	scoutfs_kvec_init(kvec, type, 1);
 }
 

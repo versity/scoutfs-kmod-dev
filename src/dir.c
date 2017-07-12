@@ -178,8 +178,9 @@ static struct scoutfs_key_buf *alloc_dirent_key(struct super_block *sb,
 					     name[dentry->d_name.len]));
 	if (key) {
 		dkey = key->data;
-		dkey->type = SCOUTFS_DIRENT_KEY;
+		dkey->zone = SCOUTFS_FS_ZONE;
 		dkey->ino = cpu_to_be64(scoutfs_ino(dir));
+		dkey->type = SCOUTFS_DIRENT_TYPE;
 		memcpy(dkey->name, (void *)dentry->d_name.name,
 		       dentry->d_name.len);
 	}
@@ -192,8 +193,9 @@ static void init_link_backref_key(struct scoutfs_key_buf *key,
 				  u64 ino, u64 dir_ino,
 				  char *name, unsigned name_len)
 {
-	lbrkey->type = SCOUTFS_LINK_BACKREF_KEY;
+	lbrkey->zone = SCOUTFS_FS_ZONE;
 	lbrkey->ino = cpu_to_be64(ino);
+	lbrkey->type = SCOUTFS_LINK_BACKREF_TYPE;
 	lbrkey->dir_ino = cpu_to_be64(dir_ino);
 	if (name_len)
 		memcpy(lbrkey->name, name, name_len);
@@ -297,8 +299,9 @@ static void init_readdir_key(struct scoutfs_key_buf *key,
 			     struct scoutfs_readdir_key *rkey,
 			     struct inode *inode, loff_t pos)
 {
-	rkey->type = SCOUTFS_READDIR_KEY;
+	rkey->zone = SCOUTFS_FS_ZONE;
 	rkey->ino = cpu_to_be64(scoutfs_ino(inode));
+	rkey->type = SCOUTFS_READDIR_TYPE;
 	rkey->pos = cpu_to_be64(pos);
 
 	scoutfs_key_init(key, rkey, sizeof(struct scoutfs_readdir_key));
@@ -636,8 +639,9 @@ out:
 static void init_symlink_key(struct scoutfs_key_buf *key,
 			     struct scoutfs_symlink_key *skey, u64 ino, u8 nr)
 {
-	skey->type = SCOUTFS_SYMLINK_KEY;
+	skey->zone = SCOUTFS_FS_ZONE;
 	skey->ino = cpu_to_be64(ino);
+	skey->type = SCOUTFS_SYMLINK_TYPE;
 	skey->nr = nr;
 
 	scoutfs_key_init(key, skey, sizeof(struct scoutfs_symlink_key));

@@ -47,6 +47,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	struct scoutfs_key_buf key;
 	u64 last_seq;
 	int ret = 0;
+	u8 type;
 	u32 nr;
 
 	if (copy_from_user(&walk, uwalk, sizeof(walk)))
@@ -58,21 +59,21 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		     walk.last.ino);
 
 	if (walk.index == SCOUTFS_IOC_WALK_INODES_CTIME)
-		ikey.type = SCOUTFS_INODE_INDEX_CTIME_KEY;
+		type = SCOUTFS_INODE_INDEX_CTIME_TYPE;
 	else if (walk.index == SCOUTFS_IOC_WALK_INODES_MTIME)
-		ikey.type = SCOUTFS_INODE_INDEX_MTIME_KEY;
+		type = SCOUTFS_INODE_INDEX_MTIME_TYPE;
 	else if (walk.index == SCOUTFS_IOC_WALK_INODES_SIZE)
-		ikey.type = SCOUTFS_INODE_INDEX_SIZE_KEY;
+		type = SCOUTFS_INODE_INDEX_SIZE_TYPE;
 	else if (walk.index == SCOUTFS_IOC_WALK_INODES_META_SEQ)
-		ikey.type = SCOUTFS_INODE_INDEX_META_SEQ_KEY;
+		type = SCOUTFS_INODE_INDEX_META_SEQ_TYPE;
 	else if (walk.index == SCOUTFS_IOC_WALK_INODES_DATA_SEQ)
-		ikey.type = SCOUTFS_INODE_INDEX_DATA_SEQ_KEY;
+		type = SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE;
 	else
 		return -EINVAL;
 
 	/* clamp results to the inodes in the farthest stable seq */
-	if (ikey.type == SCOUTFS_INODE_INDEX_META_SEQ_KEY ||
-	    ikey.type == SCOUTFS_INODE_INDEX_DATA_SEQ_KEY) {
+	if (type == SCOUTFS_INODE_INDEX_META_SEQ_TYPE ||
+	    type == SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE) {
 
 		ret = scoutfs_net_get_last_seq(sb, &last_seq);
 		if (ret)
@@ -85,11 +86,14 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		}
 	}
 
+	ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
+	ikey.type = type;
 	ikey.major = cpu_to_be64(walk.first.major);
 	ikey.minor = cpu_to_be32(walk.first.minor);
 	ikey.ino = cpu_to_be64(walk.first.ino);
 	scoutfs_key_init(&key, &ikey, sizeof(ikey));
 
+	last_ikey.zone = ikey.zone;
 	last_ikey.type = ikey.type;
 	last_ikey.major = cpu_to_be64(walk.last.major);
 	last_ikey.minor = cpu_to_be32(walk.last.minor);

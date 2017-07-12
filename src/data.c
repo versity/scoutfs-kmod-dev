@@ -139,8 +139,9 @@ static void init_file_extent_key(struct scoutfs_key_buf *key, void *key_bytes,
 {
 	struct scoutfs_file_extent_key *fkey = key_bytes;
 
-	fkey->type = SCOUTFS_FILE_EXTENT_KEY;
+	fkey->zone = SCOUTFS_FS_ZONE;
 	fkey->ino = cpu_to_be64(arg);
+	fkey->type = SCOUTFS_FILE_EXTENT_TYPE;
 	fkey->last_blk_off = cpu_to_be64(ext->blk_off + ext->blocks - 1);
 	fkey->last_blkno = cpu_to_be64(ext->blkno + ext->blocks - 1);
 	fkey->blocks = cpu_to_be64(ext->blocks);
@@ -153,8 +154,9 @@ static void init_file_extent_key(struct scoutfs_key_buf *key, void *key_bytes,
 do {									  \
 	struct which_type *fkey = key_bytes;				  \
 									  \
-	fkey->type = type;						  \
+	fkey->zone = SCOUTFS_NODE_ZONE;					  \
 	fkey->node_id = cpu_to_be64(arg);				  \
+	fkey->type = type;						  \
 	fkey->last_blkno = cpu_to_be64(ext->blkno + ext->blocks - 1);	  \
 	fkey->blocks = cpu_to_be64(ext->blocks);			  \
 									  \
@@ -164,9 +166,9 @@ do {									  \
 static void init_extent_key(struct scoutfs_key_buf *key, void *key_bytes,
 			    struct native_extent *ext, u64 arg, u8 type)
 {
-	if (type == SCOUTFS_FILE_EXTENT_KEY)
+	if (type == SCOUTFS_FILE_EXTENT_TYPE)
 		init_file_extent_key(key, key_bytes, ext, arg);
-	else if(type == SCOUTFS_FREE_EXTENT_BLKNO_KEY)
+	else if(type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE)
 		INIT_FREE_EXTENT_KEY(scoutfs_free_extent_blkno_key,
 				     key, key_bytes, ext, arg, type);
 	else
@@ -206,9 +208,9 @@ static void load_extent(struct native_extent *ext, struct scoutfs_key_buf *key)
 		     offsetof(struct scoutfs_file_extent_key, type) !=
 		     offsetof(struct scoutfs_free_extent_blocks_key, type));
 
-	if (fkey->type == SCOUTFS_FILE_EXTENT_KEY)
+	if (fkey->type == SCOUTFS_FILE_EXTENT_TYPE)
 		load_file_extent(ext, key);
-	else if (fkey->type == SCOUTFS_FREE_EXTENT_BLKNO_KEY)
+	else if (fkey->type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE)
 		LOAD_FREE_EXTENT(scoutfs_free_extent_blkno_key, ext, key);
 	else
 		LOAD_FREE_EXTENT(scoutfs_free_extent_blocks_key, ext, key);
@@ -344,16 +346,16 @@ static int modify_items(struct super_block *sb, struct native_extent *ext,
 
 	trace_printk("mod cre %u "EXTF"\n", create, EXTA(ext));
 
-	BUG_ON(type != SCOUTFS_FILE_EXTENT_KEY &&
-	       type != SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+	BUG_ON(type != SCOUTFS_FILE_EXTENT_TYPE &&
+	       type != SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
 
 	init_extent_key(&key, key_bytes, ext, arg, type);
 	ret = create ? scoutfs_item_create(sb, &key, NULL) :
 		       scoutfs_item_delete(sb, &key);
 
-	if (ret == 0 && type == SCOUTFS_FREE_EXTENT_BLKNO_KEY) {
+	if (ret == 0 && type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE) {
 		init_extent_key(&key, key_bytes, ext, arg,
-				SCOUTFS_FREE_EXTENT_BLOCKS_KEY);
+				SCOUTFS_FREE_EXTENT_BLOCKS_TYPE);
 		ret = create ? scoutfs_item_create(sb, &key, NULL) :
 			       scoutfs_item_delete(sb, &key);
 		if (ret) {
@@ -538,7 +540,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		     iblock, len, offline);
 
 	memset(&ext, ~0, sizeof(ext));
-	init_extent_key(&last, last_bytes, &ext, ino, SCOUTFS_FILE_EXTENT_KEY);
+	init_extent_key(&last, last_bytes, &ext, ino, SCOUTFS_FILE_EXTENT_TYPE);
 
 	rng.blk_off = iblock;
 	rng.blocks = len;
@@ -548,7 +550,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	while (rng.blocks) {
 		/* find the next extent that could include our first block */
 		init_extent_key(&key, key_bytes, &rng, ino,
-				SCOUTFS_FILE_EXTENT_KEY);
+				SCOUTFS_FILE_EXTENT_TYPE);
 
 		ret = scoutfs_item_next_same(sb, &key, &last, NULL);
 		if (ret < 0) {
@@ -602,14 +604,14 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 			fr = ext;
 			fr.blk_off = fr.blkno;
 			ret = insert_extent(sb, &fr, sbi->node_id,
-					    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+					    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
 			if (ret)
 				break;
 			rem_fr = true;
 		}
 
 		/* always remove the overlapping file extent */
-		ret = remove_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_KEY);
+		ret = remove_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_TYPE);
 		if (ret)
 			break;
 		ins_ext = true;
@@ -620,7 +622,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 			ofl.blkno = 0;
 			ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
 			ret = insert_extent(sb, &ofl, sbi->node_id,
-					    SCOUTFS_FILE_EXTENT_KEY);
+					    SCOUTFS_FILE_EXTENT_TYPE);
 			if (ret)
 				break;
 		}
@@ -637,12 +639,12 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	if (ret) {
 		if (ins_ext) {
 			err = insert_extent(sb, &ext, ino,
-					    SCOUTFS_FILE_EXTENT_KEY);
+					    SCOUTFS_FILE_EXTENT_TYPE);
 			BUG_ON(err);
 		}
 		if (rem_fr) {
 			err = remove_extent(sb, &fr, sbi->node_id,
-					    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+					    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
 			BUG_ON(err);
 		}
 	}
@@ -720,7 +722,7 @@ static int bulk_alloc(struct super_block *sb)
 		ext.blk_off = ext.blkno;
 		ext.flags = 0;
 		ret = insert_extent(sb, &ext, sbi->node_id,
-				    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+				    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
 		if (ret)
 			break;
 	}
@@ -778,11 +780,11 @@ reset_cursor:
 	if (curs->blocks) {
 		ext.blkno = curs->blkno;
 		ext.blocks = 0;
-		type = SCOUTFS_FREE_EXTENT_BLKNO_KEY;
+		type = SCOUTFS_FREE_EXTENT_BLKNO_TYPE;
 	} else {
 		ext.blkno = datinf->next_large_blkno;
 		ext.blocks = LARGE_EXTENT_BLOCKS;
-		type = SCOUTFS_FREE_EXTENT_BLOCKS_KEY;
+		type = SCOUTFS_FREE_EXTENT_BLOCKS_TYPE;
 	}
 	ext.flags = 0;
 
@@ -825,7 +827,7 @@ retry:
 			if (ext.blocks) {
 				ext.blkno = 0;
 				ext.blocks = 0;
-				type = SCOUTFS_FREE_EXTENT_BLKNO_KEY;
+				type = SCOUTFS_FREE_EXTENT_BLKNO_TYPE;
 				goto retry;
 			}
 
@@ -876,7 +878,7 @@ retry:
 		ofl.blkno = 0;
 		ofl.blocks = 1;
 		ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
-		ret = remove_extent(sb, &ofl, ino, SCOUTFS_FILE_EXTENT_KEY);
+		ret = remove_extent(sb, &ofl, ino, SCOUTFS_FILE_EXTENT_TYPE);
 		if (ret < 0)
 			goto out;
 		ins_ofl = true;
@@ -888,7 +890,7 @@ retry:
 	ext.blkno = found.blkno;
 	ext.blocks = 1;
 	ext.flags = 0;
-	ret = insert_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_KEY);
+	ret = insert_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_TYPE);
 	if (ret < 0)
 		goto out;
 	rem_ext = true;
@@ -897,7 +899,7 @@ retry:
 	fr = ext;
 	fr.blk_off = ext.blkno;
 	ret = remove_extent(sb, &fr, sbi->node_id,
-			    SCOUTFS_FREE_EXTENT_BLKNO_KEY);
+			    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
 	if (ret)
 		goto out;
 
@@ -914,12 +916,12 @@ out:
 	if (ret) {
 		if (rem_ext) {
 			err = remove_extent(sb, &ext, ino,
-					    SCOUTFS_FILE_EXTENT_KEY);
+					    SCOUTFS_FILE_EXTENT_TYPE);
 			BUG_ON(err);
 		}
 		if (ins_ofl) {
 			err = insert_extent(sb, &ofl, ino,
-					    SCOUTFS_FILE_EXTENT_KEY);
+					    SCOUTFS_FILE_EXTENT_TYPE);
 			BUG_ON(err);
 		}
 	}
@@ -953,11 +955,11 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	ext.blkno = 0;
 	ext.flags = 0;
 	init_extent_key(&key, key_bytes, &ext, scoutfs_ino(inode),
-			SCOUTFS_FILE_EXTENT_KEY);
+			SCOUTFS_FILE_EXTENT_TYPE);
 
 	memset(&ext, ~0, sizeof(ext));
 	init_extent_key(&last, last_bytes, &ext, scoutfs_ino(inode),
-			SCOUTFS_FILE_EXTENT_KEY);
+			SCOUTFS_FILE_EXTENT_TYPE);
 
 	/*
 	 * XXX think about how far this next can go, given locking and
@@ -1107,7 +1109,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 			u64 start, u64 len)
 {
 	struct super_block *sb = inode->i_sb;
-	const u8 type = SCOUTFS_FILE_EXTENT_KEY;
+	const u8 type = SCOUTFS_FILE_EXTENT_TYPE;
 	const u64 ino = scoutfs_ino(inode);
 	u8 last_bytes[MAX_KEY_BYTES];
 	u8 key_bytes[MAX_KEY_BYTES];

@@ -87,8 +87,9 @@ static struct scoutfs_key_buf *alloc_xattr_key(struct super_block *sb,
 		xkey = key->data;
 		foot = xattr_key_footer(key);
 
-		xkey->type = SCOUTFS_XATTR_KEY;
+		xkey->zone = SCOUTFS_FS_ZONE;
 		xkey->ino = cpu_to_be64(ino);
+		xkey->type = SCOUTFS_XATTR_TYPE;
 
 		if (name && name_len)
 			memcpy(xkey->name, name, name_len);

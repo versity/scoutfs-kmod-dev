@@ -118,8 +118,10 @@ void scoutfs_key_dec(struct scoutfs_key_buf *key)
  */
 int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 {
+	struct scoutfs_inode_key *ikey;
+	u8 zone = 0;
+	u8 type = 0;
 	int len;
-	u8 type;
 
 	if (key == NULL || key->data == NULL)
 		return snprintf_null(buf, size, "[NULL]");
@@ -127,21 +129,88 @@ int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 	if (key->key_len == 0)
 		return snprintf_null(buf, size, "[0 len]");
 
-	type = *(u8 *)key->data;
+	zone = *(u8 *)key->data;
 
-	switch(type) {
+	/* handle smaller and unknown zones, fall through to fs types */
+	switch(zone) {
+	case SCOUTFS_INODE_INDEX_ZONE: {
+		struct scoutfs_inode_index_key *ikey = key->data;
+		static char *type_strings[] = {
+			[SCOUTFS_INODE_INDEX_CTIME_TYPE]	= "ctm",
+			[SCOUTFS_INODE_INDEX_MTIME_TYPE]	= "mtm",
+			[SCOUTFS_INODE_INDEX_SIZE_TYPE]		= "siz",
+			[SCOUTFS_INODE_INDEX_META_SEQ_TYPE]	= "msq",
+			[SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE]	= "dsq",
+		};
 
-	case SCOUTFS_INODE_KEY: {
+		if (key->key_len < sizeof(struct scoutfs_inode_index_key))
+			break;
+
+		if (type_strings[ikey->type])
+			return snprintf_null(buf, size, "iin.%s.%llu.%u.%llu",
+					     type_strings[ikey->type],
+					     be64_to_cpu(ikey->major),
+					     be32_to_cpu(ikey->minor),
+					     be64_to_cpu(ikey->ino));
+		else
+			return snprintf_null(buf, size, "[iin type %u?]",
+					     ikey->type);
+	}
+
+	/* node zone keys start with zone, node, type */
+	case SCOUTFS_NODE_ZONE: {
+		struct scoutfs_free_extent_blkno_key *fkey = key->data;
+
+		static char *type_strings[] = {
+			[SCOUTFS_FREE_EXTENT_BLKNO_TYPE]	= "fno",
+			[SCOUTFS_FREE_EXTENT_BLOCKS_TYPE]	= "fks",
+		};
+
+		switch(fkey->type) {
+		case SCOUTFS_ORPHAN_TYPE: {
+			struct scoutfs_orphan_key *okey = key->data;
+
+			if (key->key_len < sizeof(struct scoutfs_orphan_key))
+				break;
+			return snprintf_null(buf, size, "nod.%llu.orp.%llu",
+					     be64_to_cpu(okey->node_id),
+					     be64_to_cpu(okey->ino));
+		}
+
+		case SCOUTFS_FREE_EXTENT_BLKNO_TYPE:
+		case SCOUTFS_FREE_EXTENT_BLOCKS_TYPE:
+			return snprintf_null(buf, size, "nod.%llu.%s.%llu.%llu",
+					     be64_to_cpu(fkey->node_id),
+					     type_strings[fkey->type],
+					     be64_to_cpu(fkey->last_blkno),
+					     be64_to_cpu(fkey->blocks));
+		default:
+			return snprintf_null(buf, size, "[nod type %u?]",
+					     fkey->type);
+		}
+	}
+
+	case SCOUTFS_FS_ZONE:
+		break;
+
+	default:
+		return snprintf_null(buf, size, "[zone %u?]", zone);
+	}
+
+	/* everything in the fs tree starts with zone, ino, type */
+	ikey = key->data;
+	switch(ikey->type) {
+	case SCOUTFS_INODE_TYPE: {
 		struct scoutfs_inode_key *ikey = key->data;
 
 		if (key->key_len < sizeof(struct scoutfs_inode_key))
 			break;
 
-		return snprintf_null(buf, size, "ino.%llu",
+		return snprintf_null(buf, size, "fs.%llu.ino",
 				     be64_to_cpu(ikey->ino));
 	}
 
-	case SCOUTFS_XATTR_KEY: {
+	case SCOUTFS_XATTR_TYPE: {
 		struct scoutfs_xattr_key *xkey = key->data;
 
 		len = (int)key->key_len - offsetof(struct scoutfs_xattr_key,
@@ -149,53 +218,53 @@ int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 		if (len <= 0)
 			break;
 
-		return snprintf_null(buf, size, "xat.%llu.%.*s",
+		return snprintf_null(buf, size, "fs.%llu.xat.%.*s",
 				     be64_to_cpu(xkey->ino), len, xkey->name);
 	}
 
-	case SCOUTFS_DIRENT_KEY: {
+	case SCOUTFS_DIRENT_TYPE: {
 		struct scoutfs_dirent_key *dkey = key->data;
 
 		len = (int)key->key_len - sizeof(struct scoutfs_dirent_key);
 		if (len <= 0)
 			break;
 
-		return snprintf_null(buf, size, "dnt.%llu.%.*s",
+		return snprintf_null(buf, size, "fs.%llu.dnt.%.*s",
 				     be64_to_cpu(dkey->ino), len, dkey->name);
 	}
 
-	case SCOUTFS_READDIR_KEY: {
+	case SCOUTFS_READDIR_TYPE: {
 		struct scoutfs_readdir_key *rkey = key->data;
 
-		return snprintf_null(buf, size, "rdr.%llu.%llu",
+		return snprintf_null(buf, size, "fs.%llu.rdr.%llu",
 				     be64_to_cpu(rkey->ino),
 				     be64_to_cpu(rkey->pos));
 	}
 
-	case SCOUTFS_LINK_BACKREF_KEY: {
+	case SCOUTFS_LINK_BACKREF_TYPE: {
 		struct scoutfs_link_backref_key *lkey = key->data;
 
 		len = (int)key->key_len - sizeof(*lkey);
 		if (len <= 0)
 			break;
 
-		return snprintf_null(buf, size, "lbr.%llu.%llu.%.*s",
+		return snprintf_null(buf, size, "fs.%llu.lbr.%llu.%.*s",
 				     be64_to_cpu(lkey->ino),
 				     be64_to_cpu(lkey->dir_ino), len,
 				     lkey->name);
 	}
 
-	case SCOUTFS_SYMLINK_KEY: {
+	case SCOUTFS_SYMLINK_TYPE: {
 		struct scoutfs_symlink_key *skey = key->data;
 
-		return snprintf_null(buf, size, "sym.%llu",
+		return snprintf_null(buf, size, "fs.%llu.sym",
 				     be64_to_cpu(skey->ino));
 	}
 
-	case SCOUTFS_FILE_EXTENT_KEY: {
+	case SCOUTFS_FILE_EXTENT_TYPE: {
 		struct scoutfs_file_extent_key *ekey = key->data;
 
-		return snprintf_null(buf, size, "ext.%llu.%llu.%llu.%llu.%x",
+		return snprintf_null(buf, size, "fs.%llu.ext.%llu.%llu.%llu.%x",
 				     be64_to_cpu(ekey->ino),
 				     be64_to_cpu(ekey->last_blk_off),
 				     be64_to_cpu(ekey->last_blkno),
@@ -203,49 +272,11 @@ int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 				     ekey->flags);
 	}
 
-	case SCOUTFS_ORPHAN_KEY: {
-		struct scoutfs_orphan_key *okey = key->data;
-
-		return snprintf_null(buf, size, "orp.%llu",
-				     be64_to_cpu(okey->ino));
-	}
-
-	case SCOUTFS_FREE_EXTENT_BLKNO_KEY:
-	case SCOUTFS_FREE_EXTENT_BLOCKS_KEY: {
-		struct scoutfs_free_extent_blkno_key *fkey = key->data;
-
-		return snprintf_null(buf, size, "%s.%llu.%llu.%llu",
-			fkey->type == SCOUTFS_FREE_EXTENT_BLKNO_KEY ? "fel" :
-								      "fes",
-				be64_to_cpu(fkey->node_id),
-				be64_to_cpu(fkey->last_blkno),
-				be64_to_cpu(fkey->blocks));
-	}
-
-	case SCOUTFS_INODE_INDEX_CTIME_KEY:
-	case SCOUTFS_INODE_INDEX_MTIME_KEY:
-	case SCOUTFS_INODE_INDEX_SIZE_KEY:
-	case SCOUTFS_INODE_INDEX_META_SEQ_KEY:
-	case SCOUTFS_INODE_INDEX_DATA_SEQ_KEY: {
-		struct scoutfs_inode_index_key *ikey = key->data;
-
-		return snprintf_null(buf, size, "%s.%llu.%u.%llu",
-			ikey->type == SCOUTFS_INODE_INDEX_CTIME_KEY ? "ctm" :
-			ikey->type == SCOUTFS_INODE_INDEX_MTIME_KEY ? "mtm" :
-			ikey->type == SCOUTFS_INODE_INDEX_SIZE_KEY ? "siz" :
-			ikey->type == SCOUTFS_INODE_INDEX_META_SEQ_KEY ? "msq" :
-			ikey->type == SCOUTFS_INODE_INDEX_DATA_SEQ_KEY ? "dsq" :
-				"uii", be64_to_cpu(ikey->major),
-				be32_to_cpu(ikey->minor),
-				be64_to_cpu(ikey->ino));
-	}
-
 	default:
-		return snprintf_null(buf, size, "[unknown type %u len %u]",
-				     type, key->key_len);
+		return snprintf_null(buf, size, "[fs type %u?]", type);
 	}
 
-	return snprintf_null(buf, size, "[truncated type %u len %u]",
+	return snprintf_null(buf, size, "[fs type %u trunc len %u]",
 			     type, key->key_len);
 }
 

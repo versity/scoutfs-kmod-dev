@@ -236,73 +236,78 @@ struct scoutfs_segment_block {
 } __packed;
 
 /*
- * Currently we sort keys by the numeric value of the types, but that
- * isn't necessary.  We could have an arbitrary sort order.  So we don't
- * have to stress about cleverly allocating the types.
+ * Keys are first sorted by major key zones.
  */
-#define SCOUTFS_INODE_KEY		1
-#define SCOUTFS_XATTR_KEY		3
-#define SCOUTFS_DIRENT_KEY		5
-#define SCOUTFS_READDIR_KEY		6
-#define SCOUTFS_LINK_BACKREF_KEY	7
-#define SCOUTFS_SYMLINK_KEY		8
-#define SCOUTFS_FILE_EXTENT_KEY		9
-#define SCOUTFS_ORPHAN_KEY		10
-#define SCOUTFS_FREE_EXTENT_BLKNO_KEY	11
-#define SCOUTFS_FREE_EXTENT_BLOCKS_KEY	12
-#define SCOUTFS_INODE_INDEX_CTIME_KEY	13  /* don't forget first and last */
-#define SCOUTFS_INODE_INDEX_MTIME_KEY	14
-#define SCOUTFS_INODE_INDEX_SIZE_KEY	15
-#define SCOUTFS_INODE_INDEX_META_SEQ_KEY	16
-#define SCOUTFS_INODE_INDEX_DATA_SEQ_KEY	17
-/* not found in the fs */
-#define SCOUTFS_MAX_UNUSED_KEY		253
-#define SCOUTFS_NET_ADDR_KEY		254
-#define SCOUTFS_NET_LISTEN_KEY		255
+#define SCOUTFS_INODE_INDEX_ZONE		1
+#define SCOUTFS_NODE_ZONE			2
+#define SCOUTFS_FS_ZONE				3
 
-#define SCOUTFS_INODE_INDEX_FIRST SCOUTFS_INODE_INDEX_CTIME_KEY
-#define SCOUTFS_INODE_INDEX_LAST SCOUTFS_INODE_INDEX_DATA_SEQ_KEY
+/* inode index zone */
+#define SCOUTFS_INODE_INDEX_CTIME_TYPE		1
+#define SCOUTFS_INODE_INDEX_MTIME_TYPE		2
+#define SCOUTFS_INODE_INDEX_SIZE_TYPE		3
+#define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	4
+#define SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE	5
+
 #define SCOUTFS_INODE_INDEX_NR \
-	(SCOUTFS_INODE_INDEX_LAST - SCOUTFS_INODE_INDEX_FIRST + 1)
+	(SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE - SCOUTFS_INODE_INDEX_CTIME_TYPE + 1)
+
+/* node zone */
+#define SCOUTFS_FREE_EXTENT_BLKNO_TYPE	11
+#define SCOUTFS_FREE_EXTENT_BLOCKS_TYPE	12
+
+/* fs zone */
+#define SCOUTFS_INODE_TYPE			1
+#define SCOUTFS_XATTR_TYPE			2
+#define SCOUTFS_DIRENT_TYPE			3
+#define SCOUTFS_READDIR_TYPE			4
+#define SCOUTFS_LINK_BACKREF_TYPE		5
+#define SCOUTFS_SYMLINK_TYPE			6
+#define SCOUTFS_FILE_EXTENT_TYPE		7
+#define SCOUTFS_ORPHAN_TYPE			8
+
+/* XXX don't need these now that we have dlm lock spaces and resources */
+#define SCOUTFS_NET_ADDR_TYPE			254
+#define SCOUTFS_NET_LISTEN_TYPE			255
 
 /* value is struct scoutfs_inode */
 struct scoutfs_inode_key {
-	__u8 type;
+	__u8 zone;
 	__be64 ino;
+	__u8 type;
 } __packed;
 
 /* value is struct scoutfs_dirent without the name */
 struct scoutfs_dirent_key {
-	__u8 type;
+	__u8 zone;
 	__be64 ino;
+	__u8 type;
 	__u8 name[0];
 } __packed;
 
 /* value is struct scoutfs_dirent with the name */
 struct scoutfs_readdir_key {
-	__u8 type;
+	__u8 zone;
 	__be64 ino;
+	__u8 type;
 	__be64 pos;
 } __packed;
 
 /* value is empty */
 struct scoutfs_link_backref_key {
-	__u8 type;
+	__u8 zone;
 	__be64 ino;
+	__u8 type;
 	__be64 dir_ino;
 	__u8 name[0];
 } __packed;
 
-/* no value */
-struct scoutfs_orphan_key {
-	__u8 type;
-	__be64 ino;
-} __packed;
 
 /* no value */
 struct scoutfs_file_extent_key {
-	__u8 type;
+	__u8 zone;
 	__be64 ino;
+	__u8 type;
 	__be64 last_blk_off;
 	__be64 last_blkno;
 	__be64 blocks;
@@ -313,23 +318,34 @@ struct scoutfs_file_extent_key {
 
 /* no value */
 struct scoutfs_free_extent_blkno_key {
-	__u8 type;
+	__u8 zone;
 	__be64 node_id;
+	__u8 type;
 	__be64 last_blkno;
 	__be64 blocks;
 } __packed;
 
 struct scoutfs_free_extent_blocks_key {
-	__u8 type;
+	__u8 zone;
 	__be64 node_id;
+	__u8 type;
 	__be64 blocks;
 	__be64 last_blkno;
 } __packed;
 
-/* value is each item's part of the full xattr value for the off/len */
-struct scoutfs_xattr_key {
+/* no value */
+struct scoutfs_orphan_key {
+	__u8 zone;
+	__be64 node_id;
 	__u8 type;
 	__be64 ino;
+} __packed;
+
+/* value is each item's part of the full xattr value for the off/len */
+struct scoutfs_xattr_key {
+	__u8 zone;
+	__be64 ino;
+	__u8 type;
 	__u8 name[0];
 } __packed;
 
@@ -345,8 +361,9 @@ struct scoutfs_xattr_val_header {
 
 /* size determines nr needed to store full target path in their values */
 struct scoutfs_symlink_key {
-	__u8 type;
+	__u8 zone;
 	__be64 ino;
+	__u8 type;
 	__u8 nr;
 } __packed;
 
@@ -356,6 +373,7 @@ struct scoutfs_betimespec {
 } __packed;
 
 struct scoutfs_inode_index_key {
+	__u8 zone;
 	__u8 type;
 	__be64 major;
 	__be32 minor;

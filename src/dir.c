@@ -251,7 +251,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 
 	scoutfs_kvec_init(val, &dent, sizeof(dent));
 
-	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent));
+	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent), NULL);
 	if (ret == -ENOENT) {
 		ino = 0;
 		ret = 0;
@@ -689,7 +689,8 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 		if (op == SYM_CREATE)
 			ret = scoutfs_item_create(sb, &key, val);
 		else if (op == SYM_LOOKUP)
-			ret = scoutfs_item_lookup_exact(sb, &key, val, bytes);
+			ret = scoutfs_item_lookup_exact(sb, &key, val, bytes,
+							NULL);
 		else if (op == SYM_DELETE)
 			ret = scoutfs_item_delete(sb, &key);
 		if (ret)

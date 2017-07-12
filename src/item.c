@@ -717,24 +717,20 @@ restart:
  * Find an item with the given key and copy its value into the caller's
  * value vector.  The amount of bytes copied is returned which can be 0
  * or truncated if the caller's buffer isn't big enough.
+ *
+ * The end key limits how many keys after the search key can be read
+ * and inserted into the cache.
  */
 int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
-			struct kvec *val)
+			struct kvec *val, struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct scoutfs_key_buf *end;
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
 
 	trace_scoutfs_item_lookup(sb, key);
-
-	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!end) {
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
@@ -743,7 +739,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 		if (item) {
 			item_referenced(cac, item);
 			ret = scoutfs_kvec_memcpy(val, item->val);
-		} else if (check_range(sb, &cac->ranges, key, end)) {
+		} else if (check_range(sb, &cac->ranges, key, NULL)) {
 			ret = -ENOENT;
 		} else {
 			ret = -ENODATA;
@@ -754,8 +750,6 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
-	scoutfs_key_free(sb, end);
-out:
 	trace_printk("ret %d\n", ret);
 	return ret;
 }
@@ -768,15 +762,18 @@ out:
  * overhead that comes from only detecting the size mismatch after the
  * copy by reusing the more permissive _lookup().
  *
+ * The end key limits how many keys after the search key can be read
+ * and inserted into the cache.
+ *
  * Returns 0 or -errno.
  */
 int scoutfs_item_lookup_exact(struct super_block *sb,
 			      struct scoutfs_key_buf *key, struct kvec *val,
-			      int size)
+			      int size, struct scoutfs_key_buf *end)
 {
 	int ret;
 
-	ret = scoutfs_item_lookup(sb, key, val);
+	ret = scoutfs_item_lookup(sb, key, val, end);
 	if (ret == size)
 		ret = 0;
 	else if (ret >= 0)

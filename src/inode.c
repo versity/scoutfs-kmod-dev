@@ -243,7 +243,7 @@ static int scoutfs_read_locked_inode(struct inode *inode)
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode));
+	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
 	if (ret == 0)
 		load_inode(inode, &sinode);
 
@@ -838,7 +838,7 @@ static void delete_inode(struct super_block *sb, u64 ino)
 	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode));
+	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
 	if (ret < 0)
 		goto out;
 
@@ -892,7 +892,7 @@ static int process_orphaned_inode(struct super_block *sb, u64 ino)
 	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode));
+	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;

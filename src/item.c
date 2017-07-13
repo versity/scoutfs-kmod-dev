@@ -844,6 +844,10 @@ static struct cached_item *item_for_next(struct rb_root *root,
  * Return the next item starting with the given key, returning the last
  * key at the most.
  *
+ * While iteration stops the last key we can cache up to the end key so
+ * that a sequence of small iterations covered by one lock are satisfied
+ * with a large read of items from segments into the cache.
+ *
  * -ENOENT is returned if there are no items between the given and last
  * keys.
  *
@@ -855,12 +859,12 @@ static struct cached_item *item_for_next(struct rb_root *root,
  * by the caller's value buffer length.
  */
 int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
-		      struct scoutfs_key_buf *last, struct kvec *val)
+		      struct scoutfs_key_buf *last, struct kvec *val,
+		      struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct scoutfs_key_buf *read_start = NULL;
-	struct scoutfs_key_buf *read_end = NULL;
 	struct scoutfs_key_buf *range_end = NULL;
 	struct cached_item *item;
 	unsigned long flags;
@@ -874,9 +878,8 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 	}
 
 	read_start = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	read_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
 	range_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!read_start || !read_end || !range_end) {
+	if (!read_start || !range_end) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -902,12 +905,10 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		if (!cached) {
 			/* missing cache starts at key */
 			scoutfs_key_copy(read_start, key);
-			scoutfs_key_copy(read_end, range_end);
 
 		} else if (scoutfs_key_compare(range_end, last) < 0) {
 			/* missing cache starts at range_end */
 			scoutfs_key_copy(read_start, range_end);
-			scoutfs_key_copy(read_end, last);
 
 		} else {
 			/* no items and we have cache between key and last */
@@ -917,7 +918,7 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 
 		spin_unlock_irqrestore(&cac->lock, flags);
 
-		ret = scoutfs_manifest_read_items(sb, read_start, read_end);
+		ret = scoutfs_manifest_read_items(sb, read_start, end);
 
 		spin_lock_irqsave(&cac->lock, flags);
 		if (ret)
@@ -927,7 +928,6 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 	spin_unlock_irqrestore(&cac->lock, flags);
 out:
 	scoutfs_key_free(sb, read_start);
-	scoutfs_key_free(sb, read_end);
 	scoutfs_key_free(sb, range_end);
 
 	trace_printk("ret %d\n", ret);
@@ -943,7 +943,8 @@ out:
 int scoutfs_item_next_same_min(struct super_block *sb,
 			       struct scoutfs_key_buf *key,
 			       struct scoutfs_key_buf *last,
-			       struct kvec *val, int len)
+			       struct kvec *val, int len,
+			       struct scoutfs_key_buf *end)
 {
 	int key_len = key->key_len;
 	int ret;
@@ -953,7 +954,7 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 	if (WARN_ON_ONCE(!val || scoutfs_kvec_length(val) < len))
 		return -EINVAL;
 
-	ret = scoutfs_item_next(sb, key, last, val);
+	ret = scoutfs_item_next(sb, key, last, val, end);
 	if (ret >= 0 && (key->key_len != key_len || ret < len))
 		ret = -EIO;
 
@@ -967,14 +968,15 @@ int scoutfs_item_next_same_min(struct super_block *sb,
  * search key.  It treats size mismatches as a sign of corruption.
  */
 int scoutfs_item_next_same(struct super_block *sb, struct scoutfs_key_buf *key,
-			   struct scoutfs_key_buf *last, struct kvec *val)
+			   struct scoutfs_key_buf *last, struct kvec *val,
+			   struct scoutfs_key_buf *end)
 {
 	int key_len = key->key_len;
 	int ret;
 
 	trace_printk("key len %u\n", key_len);
 
-	ret = scoutfs_item_next(sb, key, last, val);
+	ret = scoutfs_item_next(sb, key, last, val, end);
 	if (ret >= 0 && (key->key_len != key_len))
 		ret = -EIO;
 

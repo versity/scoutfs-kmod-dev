@@ -309,7 +309,7 @@ static int try_merge(struct super_block *sb, struct native_extent *cur,
 	ext.flags = 0;
 	init_extent_key(&key, key_bytes, &ext, arg, type);
 
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;
@@ -455,7 +455,7 @@ static int remove_extent(struct super_block *sb,
 
 	/* find outer existing extent that contains removal extent */
 	init_extent_key(&key, key_bytes, rem, arg, type);
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
 	if (ret)
 		goto out;
 
@@ -552,7 +552,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		init_extent_key(&key, key_bytes, &rng, ino,
 				SCOUTFS_FILE_EXTENT_TYPE);
 
-		ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+		ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -797,7 +797,7 @@ retry:
 	init_extent_key(&key, key_bytes, &ext, sbi->node_id, type);
 	init_extent_key(&last, last_bytes, &last_ext, sbi->node_id, type);
 
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
 	if (ret < 0) {
 		if (ret == -ENOENT) {
 			/* if the cursor's empty fall back to next large */
@@ -966,7 +966,7 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	 * item consistency.
 	 */
 	down_read(&datinf->alloc_rwsem);
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
 	up_read(&datinf->alloc_rwsem);
 	if (ret < 0) {
 		if (ret == -ENOENT)
@@ -1146,7 +1146,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		ext.flags = 0;
 		init_extent_key(&key, key_bytes, &ext, ino, type);
 
-		ret = scoutfs_item_next_same(sb, &key, &last, NULL);
+		ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
 		if (ret < 0) {
 			if (ret != -ENOENT)
 				break;

@@ -344,7 +344,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 
 		scoutfs_kvec_init(val, dent, item_len);
 		ret = scoutfs_item_next_same_min(sb, &key, &last_key, val,
-				offsetof(struct scoutfs_dirent, name[1]));
+				offsetof(struct scoutfs_dirent, name[1]), NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -878,7 +878,7 @@ static int add_next_linkref(struct super_block *sb, u64 ino,
 	init_link_backref_key(&last, &last_lbkey, ino, U64_MAX, NULL, 0);
 
 	/* next backref key is now in ent */
-	ret = scoutfs_item_next(sb, &key, &last, NULL);
+	ret = scoutfs_item_next(sb, &key, &last, NULL, NULL);
 	trace_printk("ino %llu dir_ino %llu ret %d key_len %u\n",
 		      ino, dir_ino, ret, key.key_len);
 	if (ret < 0)

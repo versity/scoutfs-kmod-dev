@@ -394,7 +394,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 	total = 0;
 	for (;;) {
-		ret = scoutfs_item_next(sb, key, last, NULL);
+		ret = scoutfs_item_next(sb, key, last, NULL, lck->end);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = total;
@@ -476,7 +476,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 	/* the inode is dead so we don't need the xattr sem */
 
 	for (;;) {
-		ret = scoutfs_item_next(sb, key, last, NULL);
+		ret = scoutfs_item_next(sb, key, last, NULL, lck->end);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;

@@ -1125,12 +1125,13 @@ out:
  * batch item does have an existing item.
  */
 int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
-			   struct scoutfs_key_buf *start,
-			   struct scoutfs_key_buf *end, int sif)
+			   struct scoutfs_key_buf *first,
+			   struct scoutfs_key_buf *last, int sif,
+			   struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct scoutfs_key_buf *missing;
+	struct scoutfs_key_buf *range_end;
 	SCOUTFS_DECLARE_KVEC(del_val);
 	struct cached_item *exist;
 	struct cached_item *item;
@@ -1147,21 +1148,31 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 			return -EINVAL;
 	}
 
-	trace_scoutfs_item_set_batch(sb, start, end);
+	trace_scoutfs_item_set_batch(sb, first, last);
 
-	if (WARN_ON_ONCE(scoutfs_key_compare(start, end) > 0))
+	if (WARN_ON_ONCE(scoutfs_key_compare(first, last) > 0) ||
+	    WARN_ON_ONCE(scoutfs_key_compare(end, last) < 0))
 		return -EINVAL;
 
-	missing = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!missing)
+	range_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!range_end)
 		return -ENOMEM;
 
 	spin_lock_irqsave(&cac->lock, flags);
 
-	while (!check_range(sb, &cac->ranges, start, missing)) {
+	/* make sure all of first through last are cached */
+	scoutfs_key_copy(range_end, first);
+	for (;;) {
+		if (check_range(sb, &cac->ranges, range_end, range_end)) {
+			if (scoutfs_key_compare(range_end, last) >= 0)
+				break;
+			/* start reading from hole starting at range_end */
+		} else {
+			scoutfs_key_copy(range_end, first);
+		}
 
 		spin_unlock_irqrestore(&cac->lock, flags);
-		ret = scoutfs_manifest_read_items(sb, start, missing);
+		ret = scoutfs_manifest_read_items(sb, range_end, end);
 		spin_lock_irqsave(&cac->lock, flags);
 
 		if (ret)
@@ -1172,7 +1183,7 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	if (!list_empty(list) && (sif & (SIF_EXCLUSIVE | SIF_REPLACE))) {
 
 		item = list_first_entry(list, struct cached_item, entry);
-		exist = item_for_next(&cac->items, start, NULL, end);
+		exist = item_for_next(&cac->items, first, NULL, last);
 
 		while (item) {
 			/* compare keys, with bias to finding _REPLACE err */
@@ -1193,7 +1204,7 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 					item = NULL;
 
 			} else if (cmp > 0) {
-				exist = next_item_node(&cac->items, exist, end);
+				exist = next_item_node(&cac->items, exist, last);
 
 			} else {
 				/* cmp == 0 */
@@ -1207,8 +1218,8 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	}
 
 	/* delete everything in the range */
-	for (exist = item_for_next(&cac->items, start, NULL, end);
-	     exist; exist = next_item_node(&cac->items, exist, end)) {
+	for (exist = item_for_next(&cac->items, first, NULL, last);
+	     exist; exist = next_item_node(&cac->items, exist, last)) {
 
 		scoutfs_kvec_init_null(del_val);
 		become_deletion_item(sb, cac, exist, del_val);
@@ -1225,7 +1236,7 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	ret = 0;
 out:
 	spin_unlock_irqrestore(&cac->lock, flags);
-	scoutfs_key_free(sb, missing);
+	scoutfs_key_free(sb, range_end);
 
 	return ret;
 }

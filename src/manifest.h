@@ -34,6 +34,9 @@ int scoutfs_manifest_unlock(struct super_block *sb);
 int scoutfs_manifest_read_items(struct super_block *sb,
 				struct scoutfs_key_buf *key,
 				struct scoutfs_key_buf *end);
+int scoutfs_manifest_next_key(struct super_block *sb,
+			      struct scoutfs_key_buf *key,
+			      struct scoutfs_key_buf *next_key);
 
 int scoutfs_manifest_next_compact(struct super_block *sb, void *data);
 

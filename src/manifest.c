@@ -542,6 +542,9 @@ out:
  * from the key to the end key.  If the end key is null then we'll read
  * as many items as the intersecting segments contain.
  *
+ * If next_key is provided then the segments are only walked to find the
+ * next key after the search key.  If none is found -ENOENT is returned.
+ *
  * As we insert the batch of items we give the item cache the range of
  * keys that contain these items.  This lets the cache return negative
  * cache lookups for missing items within the range.
@@ -559,9 +562,9 @@ out:
  * The segments are immutable at this point so we can use their contents
  * as long as we hold refs.
  */
-int scoutfs_manifest_read_items(struct super_block *sb,
-				struct scoutfs_key_buf *key,
-				struct scoutfs_key_buf *end)
+static int read_items(struct super_block *sb, struct scoutfs_key_buf *key,
+		      struct scoutfs_key_buf *end,
+		      struct scoutfs_key_buf *next_key)
 {
 	struct scoutfs_key_buf item_key;
 	struct scoutfs_key_buf found_key;
@@ -702,6 +705,16 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 			found = true;
 		}
 
+		if (next_key) {
+			if (found) {
+				scoutfs_key_copy(next_key, &found_key);
+				ret = 0;
+			} else {
+				ret = -ENOENT;
+			}
+			break;
+		}
+
 		/* ran out of keys in segs, range extends to seg end */
 		if (!found) {
 			scoutfs_key_clone(&batch_end, &seg_end);
@@ -748,7 +761,7 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 		ret = 0;
 	}
 
-	if (ret)
+	if (next_key || ret)
 		scoutfs_item_free_batch(sb, &batch);
 	else
 		ret = scoutfs_item_insert_batch(sb, &batch, key, &batch_end);
@@ -759,6 +772,20 @@ out:
 	}
 
 	return ret;
+}
+
+int scoutfs_manifest_read_items(struct super_block *sb,
+				struct scoutfs_key_buf *key,
+				struct scoutfs_key_buf *end)
+{
+	return read_items(sb, key, end, NULL);
+}
+
+int scoutfs_manifest_next_key(struct super_block *sb,
+			      struct scoutfs_key_buf *key,
+			      struct scoutfs_key_buf *next_key)
+{
+	return read_items(sb, key, NULL, next_key);
 }
 
 /*

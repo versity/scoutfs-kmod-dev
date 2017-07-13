@@ -30,10 +30,23 @@
 #include "item.h"
 #include "data.h"
 #include "net.h"
+#include "lock.h"
+#include "manifest.h"
 
 /*
- * Walk one of the inode index items.  This is a thin ioctl wrapper
- * around the core item interface.
+ * We make inode index items coherent by locking fixed size regions of
+ * the key space.  But the inode index item key space is vast and can
+ * have huge sparse regions.  To avoid trying every possible lock in the
+ * sparse regions we use the manifest to find the next stable key in the
+ * key space after we find no items in a given lock region.  This is
+ * relatively cheap because reading is going to check the segments
+ * anyway.
+ *
+ * This is copying to userspace while holding a DLM lock.  This is safe
+ * because faulting can convert the lock to a higher level while we hold
+ * the lower level.  DLM locks don't block tasks in a node, they match
+ * and the tasks fall back to local locking.  In this case the spin
+ * locks around the item cache.
  */
 static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 {
@@ -43,12 +56,14 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	struct scoutfs_ioctl_walk_inodes_entry ent;
 	struct scoutfs_inode_index_key last_ikey;
 	struct scoutfs_inode_index_key ikey;
+	struct scoutfs_key_buf *next_key;
 	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
+	struct scoutfs_lock *lock;
 	u64 last_seq;
 	int ret = 0;
+	u32 nr = 0;
 	u8 type;
-	u32 nr;
 
 	if (copy_from_user(&walk, uwalk, sizeof(walk)))
 		return -EFAULT;
@@ -86,6 +101,10 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		}
 	}
 
+	next_key = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	if (!next_key)
+		return -ENOMEM;
+
 	ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
 	ikey.type = type;
 	ikey.major = cpu_to_be64(walk.first.major);
@@ -103,14 +122,54 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	/* cap nr to the max the ioctl can return to a compat task */
 	walk.nr_entries = min_t(u64, walk.nr_entries, INT_MAX);
 
+	ret = scoutfs_lock_inode_index(sb, DLM_LOCK_PR, type, walk.first.major,
+				       walk.first.ino, &lock);
+	if (ret < 0)
+		goto out;
+
 	for (nr = 0; nr < walk.nr_entries;
 	     nr++, walk.entries_ptr += sizeof(ent)) {
 
-		ret = scoutfs_item_next_same(sb, &key, &last_key, NULL);
-		if (ret < 0) {
-			if (ret == -ENOENT)
-				ret = 0;
+		ret = scoutfs_item_next_same(sb, &key, &last_key, NULL, lock->end);
+		if (ret < 0 && ret != -ENOENT)
 			break;
+
+		if (ret == -ENOENT) {
+
+			scoutfs_unlock(sb, lock);
+			/*
+			 * XXX This will miss dirty items.  We'd need to
+			 * force writeouts of dirty items in our
+			 * zone|type and get the manifest root for that.
+			 * It'd mean adding a lock to the inode index
+			 * items which isn't quite there yet.
+			 */
+			ret = scoutfs_manifest_next_key(sb, &key, next_key);
+			if (ret < 0 && ret != -ENOENT)
+				goto out;
+
+			if (ret == -ENOENT ||
+			    scoutfs_key_compare(next_key, &last_key) > 0) {
+				ret = 0;
+				goto out;
+			}
+
+			/* if it's within last it should be same size */
+			if (next_key->key_len != key.key_len) {
+				ret = -EIO;
+				goto out;
+			}
+
+			scoutfs_key_copy(&key, next_key);
+
+			ret = scoutfs_lock_inode_index(sb, DLM_LOCK_PR, ikey.type,
+						       be64_to_cpu(ikey.major),
+						       be64_to_cpu(ikey.ino),
+						       &lock);
+			if (ret < 0)
+				goto out;
+
+			continue;
 		}
 
 		ent.major = be64_to_cpu(ikey.major);
@@ -126,7 +185,15 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		scoutfs_key_inc_cur_len(&key);
 	}
 
-	return nr ?: ret;
+	scoutfs_unlock(sb, lock);
+
+out:
+	scoutfs_key_free(sb, next_key);
+
+	if (nr > 0)
+		ret = nr;
+
+	return ret;
 }
 
 struct ino_path_cursor {

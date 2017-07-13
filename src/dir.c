@@ -600,7 +600,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		goto out;
 	}
 
-	ret = scoutfs_item_delete_many(sb, keys, ARRAY_SIZE(keys));
+	ret = scoutfs_item_delete_many(sb, keys, ARRAY_SIZE(keys), NULL);
 	if (ret)
 		goto out;
 

@@ -428,7 +428,7 @@ int scoutfs_dirty_inode_item(struct inode *inode)
 
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 
-	ret = scoutfs_item_dirty(sb, &key);
+	ret = scoutfs_item_dirty(sb, &key, NULL);
 	if (!ret)
 		trace_scoutfs_dirty_inode(inode);
 	return ret;
@@ -551,7 +551,7 @@ void scoutfs_update_inode_item(struct inode *inode)
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	err = scoutfs_item_update(sb, &key, val);
+	err = scoutfs_item_update(sb, &key, val, NULL);
 	if (err) {
 		scoutfs_err(sb, "inode %llu update err %d",
 			    scoutfs_ino(inode), err);

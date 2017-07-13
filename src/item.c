@@ -1257,20 +1257,14 @@ void scoutfs_item_free_batch(struct super_block *sb, struct list_head *list)
  * If the item exists make sure it's dirty and pinned.  It can be read
  * if it wasn't cached.  -ENOENT is returned if the item doesn't exist.
  */
-int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key)
+int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
+		       struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct scoutfs_key_buf *end;
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
-
-	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!end) {
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
@@ -1279,7 +1273,7 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key)
 		if (item) {
 			mark_item_dirty(sb, cac, item);
 			ret = 0;
-		} else if (check_range(sb, &cac->ranges, key, end)) {
+		} else if (check_range(sb, &cac->ranges, key, NULL)) {
 			ret = -ENOENT;
 		} else {
 			ret = -ENODATA;
@@ -1290,8 +1284,6 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key)
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
-	scoutfs_key_free(sb, end);
-out:
 	trace_printk("ret %d\n", ret);
 	return ret;
 }
@@ -1303,11 +1295,10 @@ out:
  * Returns -ENOENT if the item doesn't exist.
  */
 int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
-			struct kvec *val)
+			struct kvec *val, struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct scoutfs_key_buf *end;
 	SCOUTFS_DECLARE_KVEC(up_val);
 	struct cached_item *item;
 	unsigned long flags;
@@ -1315,12 +1306,6 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 
 	if (invalid_key_val(key, val))
 		return -EINVAL;
-
-	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!end) {
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	if (val) {
 		ret = scoutfs_kvec_dup_flatten(up_val, val);
@@ -1339,7 +1324,7 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 			scoutfs_kvec_swap(up_val, item->val);
 			mark_item_dirty(sb, cac, item);
 			ret = 0;
-		} else if (check_range(sb, &cac->ranges, key, end)) {
+		} else if (check_range(sb, &cac->ranges, key, NULL)) {
 			ret = -ENOENT;
 		} else {
 			ret = -ENODATA;
@@ -1350,7 +1335,6 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 out:
-	scoutfs_key_free(sb, end);
 	scoutfs_kvec_kfree(up_val);
 
 	trace_printk("ret %d\n", ret);
@@ -1449,13 +1433,14 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
  * searches if we remembered the items we dirtied.
  */
 int scoutfs_item_delete_many(struct super_block *sb,
-			     struct scoutfs_key_buf **keys, unsigned nr)
+			     struct scoutfs_key_buf **keys, unsigned nr,
+			     struct scoutfs_key_buf *end)
 {
 	int ret = 0;
 	int i;
 
 	for (i = 0; i < nr; i++) {
-		ret = scoutfs_item_dirty(sb, keys[i]);
+		ret = scoutfs_item_dirty(sb, keys[i], end);
 		if (ret)
 			goto out;
 	}

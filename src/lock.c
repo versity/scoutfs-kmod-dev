@@ -439,6 +439,76 @@ int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
 	return lock_name_keys(sb, mode, &lock_name, &start, &end, ret_lock);
 }
 
+/*
+ * map inode index items to locks.  The idea is to not have to
+ * constantly get locks over a reasonable distribution of items, but
+ * also not have an insane amount of items covered by locks.  time and
+ * seq indexes have natural batching and limits on the number of keys
+ * per major value.  Size keys are very different.  For them we use a
+ * mix of a sort of linear-log distribution (top 4 bits of size), and
+ * then also a lot of inodes per size.
+ */
+int scoutfs_lock_inode_index(struct super_block *sb, int mode,
+			     u8 type, u64 major, u64 ino,
+			     struct scoutfs_lock **ret_lock)
+{
+	struct scoutfs_lock_name lock_name;
+	struct scoutfs_inode_index_key start_ikey;
+	struct scoutfs_inode_index_key end_ikey;
+	struct scoutfs_key_buf start;
+	struct scoutfs_key_buf end;
+	u64 major_mask;
+	u64 ino_mask;
+	int bit;
+
+	switch(type) {
+	case SCOUTFS_INODE_INDEX_CTIME_TYPE:
+	case SCOUTFS_INODE_INDEX_MTIME_TYPE:
+		major_mask = (1 << 5) - 1;
+		ino_mask = ~0ULL;
+		break;
+
+	case SCOUTFS_INODE_INDEX_SIZE_TYPE:
+		major_mask = 0;
+		if (major) {
+			bit = fls64(major);
+			if (bit > 4)
+				major_mask = (1 << (bit - 4)) - 1;
+		}
+		ino_mask = (1 << 12) - 1;
+		break;
+
+	case SCOUTFS_INODE_INDEX_META_SEQ_TYPE:
+	case SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE:
+		major_mask = (1 << 10) - 1;
+		ino_mask = ~0ULL;
+		break;
+	default:
+		BUG();
+	}
+
+	lock_name.zone = SCOUTFS_INODE_INDEX_ZONE;
+	lock_name.type = type;
+	lock_name.first = cpu_to_le64(major & ~major_mask);
+	lock_name.second = cpu_to_le64(ino & ~ino_mask);
+
+	start_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
+	start_ikey.type = type;
+	start_ikey.major = cpu_to_be64(major & ~major_mask);
+	start_ikey.minor = cpu_to_be32(0);
+	start_ikey.ino = cpu_to_be64(ino & ~ino_mask);
+	scoutfs_key_init(&start, &start_ikey, sizeof(start_ikey));
+
+	end_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
+	end_ikey.type = type;
+	end_ikey.major = cpu_to_be64(major | major_mask);
+	end_ikey.minor = cpu_to_be32(U32_MAX);
+	end_ikey.ino = cpu_to_be64(ino | ino_mask);
+	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
+
+	return lock_name_keys(sb, mode, &lock_name, &start, &end, ret_lock);
+}
+
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock)
 {
 	DECLARE_LOCK_INFO(sb, linfo);

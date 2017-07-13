@@ -26,6 +26,9 @@ struct scoutfs_lock {
 
 int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
 			   struct scoutfs_lock **ret_lock);
+int scoutfs_lock_inode_index(struct super_block *sb, int mode,
+			     u8 type, u64 major, u64 ino,
+			     struct scoutfs_lock **ret_lock);
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock);
 
 int scoutfs_lock_addr(struct super_block *sb, int wanted_mode,

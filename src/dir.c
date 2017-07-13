@@ -443,7 +443,7 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	ret = 0;
 out:
 	while (ret < 0 && --del >= 0) {
-		err = scoutfs_item_delete(sb, del_keys[del]);
+		err = scoutfs_item_delete(sb, del_keys[del], NULL);
 		/* can always delete dirty while holding */
 		BUG_ON(err);
 	}
@@ -692,7 +692,7 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 			ret = scoutfs_item_lookup_exact(sb, &key, val, bytes,
 							NULL);
 		else if (op == SYM_DELETE)
-			ret = scoutfs_item_delete(sb, &key);
+			ret = scoutfs_item_delete(sb, &key, NULL);
 		if (ret)
 			break;
 

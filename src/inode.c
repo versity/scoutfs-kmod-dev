@@ -498,9 +498,9 @@ static int update_index(struct inode *inode, u8 type, u64 now_major,
 	del_ikey.ino = cpu_to_be64(scoutfs_ino(inode));
 	scoutfs_key_init(&del, &del_ikey, sizeof(del_ikey));
 
-	ret = scoutfs_item_delete(sb, &del);
+	ret = scoutfs_item_delete(sb, &del, NULL);
 	if (ret) {
-		err = scoutfs_item_delete(sb, &ins);
+		err = scoutfs_item_delete(sb, &ins, NULL);
 		BUG_ON(err);
 	}
 
@@ -775,7 +775,7 @@ static int remove_orphan_item(struct super_block *sb, u64 ino)
 
 	init_orphan_key(&key, &okey, sbi->node_id, ino);
 
-	ret = scoutfs_item_delete(sb, &key);
+	ret = scoutfs_item_delete(sb, &key, NULL);
 	if (ret == -ENOENT)
 		ret = 0;
 
@@ -811,7 +811,7 @@ static int __delete_inode(struct super_block *sb, struct scoutfs_key_buf *key,
 		goto out;
 
 #endif
-	ret = scoutfs_item_delete(sb, key);
+	ret = scoutfs_item_delete(sb, key, NULL);
 	if (ret)
 		goto out;
 

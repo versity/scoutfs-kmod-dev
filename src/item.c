@@ -1353,23 +1353,17 @@ out:
  * there are any ways for userspace to overwhelm the system with
  * deletion items for items that didn't exist in the first place.
  */
-int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key)
+int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
+			struct scoutfs_key_buf *end)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct scoutfs_key_buf *end;
 	struct cached_item *item;
 	SCOUTFS_DECLARE_KVEC(del_val);
 	unsigned long flags;
 	int ret;
 
 	scoutfs_kvec_init_null(del_val);
-
-	end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!end) {
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
@@ -1378,7 +1372,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key)
 		if (item) {
 			become_deletion_item(sb, cac, item, del_val);
 			ret = 0;
-		} else if (check_range(sb, &cac->ranges, key, end)) {
+		} else if (check_range(sb, &cac->ranges, key, NULL)) {
 			ret = -ENOENT;
 		} else {
 			ret = -ENODATA;
@@ -1389,9 +1383,8 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key)
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
-	scoutfs_key_free(sb, end);
 	scoutfs_kvec_kfree(del_val);
-out:
+
 	trace_printk("ret %d\n", ret);
 	return ret;
 }

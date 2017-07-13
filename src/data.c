@@ -351,16 +351,16 @@ static int modify_items(struct super_block *sb, struct native_extent *ext,
 
 	init_extent_key(&key, key_bytes, ext, arg, type);
 	ret = create ? scoutfs_item_create(sb, &key, NULL) :
-		       scoutfs_item_delete(sb, &key);
+		       scoutfs_item_delete(sb, &key, NULL);
 
 	if (ret == 0 && type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE) {
 		init_extent_key(&key, key_bytes, ext, arg,
 				SCOUTFS_FREE_EXTENT_BLOCKS_TYPE);
 		ret = create ? scoutfs_item_create(sb, &key, NULL) :
-			       scoutfs_item_delete(sb, &key);
+			       scoutfs_item_delete(sb, &key, NULL);
 		if (ret) {
 			init_extent_key(&key, key_bytes, ext, arg, type);
-			err = create ? scoutfs_item_delete(sb, &key) :
+			err = create ? scoutfs_item_delete(sb, &key, NULL) :
 				       scoutfs_item_create(sb, &key, NULL);
 			BUG_ON(err);
 		}

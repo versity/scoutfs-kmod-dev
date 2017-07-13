@@ -39,7 +39,8 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
 int scoutfs_item_delete_many(struct super_block *sb,
 			     struct scoutfs_key_buf **keys, unsigned nr,
 			     struct scoutfs_key_buf *end);
-int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key);
+int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
+			struct scoutfs_key_buf *end);
 
 int scoutfs_item_add_batch(struct super_block *sb, struct list_head *list,
 			   struct scoutfs_key_buf *key, struct kvec *val);

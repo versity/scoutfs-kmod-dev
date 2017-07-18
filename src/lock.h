@@ -31,11 +31,6 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     struct scoutfs_lock **ret_lock);
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock);
 
-int scoutfs_lock_addr(struct super_block *sb, int wanted_mode,
-		      void *caller_lvb, unsigned lvb_len);
-void scoutfs_unlock_addr(struct super_block *sb, void *caller_lvb,
-			 unsigned lvb_len);
-
 int scoutfs_lock_setup(struct super_block *sb);
 void scoutfs_lock_shutdown(struct super_block *sb);
 void scoutfs_lock_destroy(struct super_block *sb);

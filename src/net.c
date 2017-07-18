@@ -2083,7 +2083,7 @@ static void scoutfs_net_server_func(struct work_struct *work)
 	INIT_WORK(&sinf->listen_work, scoutfs_net_listen_func);
 	INIT_WORK(&sinf->accept_work, scoutfs_net_accept_func);
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, 0, &sinf->listen_lck);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, ~0ULL, &sinf->listen_lck);
 	if (ret) {
 		kfree(sinf);
 		goto out;

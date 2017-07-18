@@ -21,7 +21,7 @@ struct scoutfs_lock {
 	unsigned int refcnt;
 	unsigned int holders; /* Tracks active users of this lock */
 	unsigned int flags;
-	struct delayed_work dc_work;
+	struct work_struct dc_work;
 };
 
 int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,

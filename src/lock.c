@@ -97,7 +97,8 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 		refs = --lock->refcnt;
 		if (!refs) {
 			BUG_ON(lock->holders);
-			BUG_ON(delayed_work_pending(&lock->dc_work));
+			/* can't be (even racy) busy without refs */
+			BUG_ON(work_busy(&lock->dc_work));
 			rb_erase(&lock->node, &linfo->lock_tree);
 			list_del(&lock->lru_entry);
 			spin_unlock(&linfo->lock);
@@ -128,8 +129,7 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 			lock->sb = sb;
 			lock->lock_name = *lock_name;
 			lock->mode = DLM_LOCK_IV;
-			INIT_DELAYED_WORK(&lock->dc_work,
-					  scoutfs_downconvert_func);
+			INIT_WORK(&lock->dc_work, scoutfs_downconvert_func);
 			INIT_LIST_HEAD(&lock->lru_entry);
 		}
 	}
@@ -279,24 +279,24 @@ static void scoutfs_ast(void *astarg)
 }
 
 static void queue_blocking_work(struct lock_info *linfo,
-				struct scoutfs_lock *lock, unsigned int seconds)
+				struct scoutfs_lock *lock)
 {
 	assert_spin_locked(&linfo->lock);
 	if (!(lock->flags & SCOUTFS_LOCK_QUEUED)) {
 		/* Take a ref for the workqueue */
 		lock->flags |= SCOUTFS_LOCK_QUEUED;
 		lock->refcnt++;
+		queue_work(linfo->downconvert_wq, &lock->dc_work);
 	}
-	mod_delayed_work(linfo->downconvert_wq, &lock->dc_work, seconds * HZ);
 }
 
-static void set_lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lock,
-			      unsigned int seconds)
+static void set_lock_blocking(struct lock_info *linfo,
+			      struct scoutfs_lock *lock)
 {
 	assert_spin_locked(&linfo->lock);
 	lock->flags |= SCOUTFS_LOCK_BLOCKING;
 	if (lock->holders == 0)
-		queue_blocking_work(linfo, lock, seconds);
+		queue_blocking_work(linfo, lock);
 }
 
 static void scoutfs_bast(void *astarg, int mode)
@@ -307,7 +307,7 @@ static void scoutfs_bast(void *astarg, int mode)
 	trace_scoutfs_bast(lock->sb, lock);
 
 	spin_lock(&linfo->lock);
-	set_lock_blocking(linfo, lock, 0);
+	set_lock_blocking(linfo, lock);
 	spin_unlock(&linfo->lock);
 }
 
@@ -381,7 +381,7 @@ check_lock_state:
 			 * blocking to let the downconvert thread do it's work
 			 * so we can reacquire at the correct mode.
 			 */
-			set_lock_blocking(linfo, lock, 0);
+			set_lock_blocking(linfo, lock);
 			spin_unlock(&linfo->lock);
 			goto check_lock_state;
 		}
@@ -512,17 +512,13 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	unsigned int seconds = 60;
 
 	trace_scoutfs_unlock(sb, lock);
 
 	spin_lock(&linfo->lock);
 	lock->holders--;
-	if (lock->holders == 0) {
-		if (lock->flags & SCOUTFS_LOCK_BLOCKING)
-			seconds = 0;
-		queue_blocking_work(linfo, lock, seconds);
-	}
+	if (lock->holders == 0 && (lock->flags & SCOUTFS_LOCK_BLOCKING))
+		queue_blocking_work(linfo, lock);
 	spin_unlock(&linfo->lock);
 
 	put_scoutfs_lock(sb, lock);
@@ -556,7 +552,7 @@ out:
 static void scoutfs_downconvert_func(struct work_struct *work)
 {
 	struct scoutfs_lock *lock = container_of(work, struct scoutfs_lock,
-						dc_work.work);
+						 dc_work);
 	struct super_block *sb = lock->sb;
 	DECLARE_LOCK_INFO(sb, linfo);
 

@@ -459,7 +459,6 @@ static int get_manifest_refs(struct super_block *sb,
 			     struct list_head *ref_list)
 {
 	DECLARE_MANIFEST(sb, mani);
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_manifest_btree_key *mkey;
 	struct scoutfs_manifest_entry ment;
 	SCOUTFS_BTREE_ITEM_REF(iref);
@@ -475,8 +474,7 @@ static int get_manifest_refs(struct super_block *sb,
 
 	/* get level 0 segments that overlap with the missing range */
 	mkey_len = init_btree_key(mkey, 0, ~0ULL, NULL);
-	ret = scoutfs_btree_prev(sb, &super->manifest.root,
-				 mkey, mkey_len, &iref);
+	ret = scoutfs_btree_prev(sb, root, mkey, mkey_len, &iref);
 	while (ret == 0) {
 		init_ment_iref(&ment, &iref);
 
@@ -488,8 +486,8 @@ static int get_manifest_refs(struct super_block *sb,
 		}
 
 		swap(prev, iref);
-		ret = scoutfs_btree_before(sb, &super->manifest.root,
-					   prev.key, prev.key_len, &iref);
+		ret = scoutfs_btree_before(sb, root, prev.key, prev.key_len,
+					   &iref);
 		scoutfs_btree_put_iref(&prev);
 	}
 	if (ret != -ENOENT)
@@ -507,9 +505,8 @@ static int get_manifest_refs(struct super_block *sb,
 		/* XXX should use level counts to skip searches */
 
 		scoutfs_btree_put_iref(&iref);
-		ret = btree_prev_overlap_or_next(sb, &super->manifest.root,
-						 mkey, mkey_len, key, i,
-						 &iref);
+		ret = btree_prev_overlap_or_next(sb, root, mkey, mkey_len, key,
+						 i, &iref);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;

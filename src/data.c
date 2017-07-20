@@ -15,7 +15,6 @@
 #include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/mpage.h>
-#include <linux/rhashtable.h>
 #include <linux/sched.h>
 #include <linux/buffer_head.h>
 #include <linux/hash.h>
@@ -80,18 +79,21 @@
  *  - direct IO
  */
 
+/* more than enough for a few tasks per core on moderate hardware */
+#define NR_CURSORS		4096
+#define CURSOR_HASH_HEADS	(PAGE_SIZE / sizeof(void *) / 2)
+#define CURSOR_HASH_BITS	ilog2(CURSOR_HASH_HEADS)
+
 struct data_info {
 	struct rw_semaphore alloc_rwsem;
 	u64 next_large_blkno;
-	struct rhashtable cursors;
 	struct list_head cursor_lru;
+	struct hlist_head cursor_hash[CURSOR_HASH_HEADS];
 };
 
 #define DECLARE_DATA_INFO(sb, name) \
 	struct data_info *name = SCOUTFS_SB(sb)->data_info
 
-/* more than enough for a few tasks per core on moderate hardware */
-#define NR_CURSORS 4096
 
 /*
  * This is the size of extents that are tracked by a cursor and so end
@@ -103,17 +105,13 @@ struct data_info {
  */
 #define LARGE_EXTENT_BLOCKS SCOUTFS_SEGMENT_BLOCKS
 
-struct cursor_id {
-	struct task_struct *task;
-	pid_t pid;
-} __packed; /* rhashtable_lookup() always memcmp()s, avoid padding */
-
 struct task_cursor {
 	u64 blkno;
 	u64 blocks;
-	struct rhash_head hash_head;
+	struct hlist_node hnode;
 	struct list_head list_head;
-	struct cursor_id id;
+	struct task_struct *task;
+	pid_t pid;
 };
 
 /*
@@ -653,6 +651,44 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	return ret;
 }
 
+static inline struct hlist_head *cursor_head(struct data_info *datinf,
+					     struct task_struct *task,
+					     pid_t pid)
+{
+	unsigned h = hash_ptr(task, CURSOR_HASH_BITS) ^
+		     hash_long(pid, CURSOR_HASH_BITS);
+
+	return &datinf->cursor_hash[h];
+}
+
+static struct task_cursor *search_head(struct hlist_head *head,
+				       struct task_struct *task, pid_t pid)
+{
+	struct task_cursor *curs;
+
+	hlist_for_each_entry(curs, head, hnode) {
+		if (curs->task == task && curs->pid == pid)
+			return curs;
+	}
+
+	return NULL;
+}
+
+static void destroy_cursors(struct data_info *datinf)
+{
+	struct task_cursor *curs;
+	struct hlist_node *tmp;
+	int i;
+
+	for (i = 0; i < CURSOR_HASH_HEADS; i++) {
+		hlist_for_each_entry_safe(curs, tmp, &datinf->cursor_hash[i],
+					  hnode) {
+			hlist_del_init(&curs->hnode);
+			kfree(curs);
+		}
+	}
+}
+
 /*
  * These cheesy cursors are only meant to encourage nice IO patterns for
  * concurrent tasks either streaming large file writes or creating lots
@@ -662,21 +698,22 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
  */
 static struct task_cursor *get_cursor(struct data_info *datinf)
 {
+	struct task_struct *task = current;
+	pid_t pid = current->pid;
+	struct hlist_head *head;
 	struct task_cursor *curs;
-	struct cursor_id id = {
-		.task = current,
-		.pid = current->pid,
-	};
 
-	curs = rhashtable_lookup(&datinf->cursors, &id);
+	head = cursor_head(datinf, task, pid);
+	curs = search_head(head, task, pid);
 	if (!curs) {
 		curs = list_last_entry(&datinf->cursor_lru,
 				       struct task_cursor, list_head);
 		trace_printk("resetting curs %p was task %p pid %u\n",
-				curs, curs->id.task, curs->id.pid);
-		rhashtable_remove(&datinf->cursors, &curs->hash_head, GFP_NOFS);
-		curs->id = id;
-		rhashtable_insert(&datinf->cursors, &curs->hash_head, GFP_NOFS);
+				curs, task, pid);
+		hlist_del_init(&curs->hnode);
+		curs->task = task;
+		curs->pid = pid;
+		hlist_add_head(&curs->hnode, head);
 		curs->blkno = 0;
 		curs->blocks = 0;
 	}
@@ -791,7 +828,7 @@ reset_cursor:
 
 retry:
 	trace_printk("searching %llu,%llu curs %p task %p pid %u %llu,%llu\n",
-		     ext.blkno, ext.blocks, curs, curs->id.task, curs->id.pid,
+		     ext.blkno, ext.blocks, curs, curs->task, curs->pid,
 		     curs->blkno, curs->blocks);
 
 	ext.blk_off = ext.blkno;
@@ -1213,40 +1250,13 @@ const struct file_operations scoutfs_file_fops = {
 	.fsync		= scoutfs_file_fsync,
 };
 
-static int derpy_global_mutex_is_held(void)
-{
-	return 1;
-}
-
-static struct rhashtable_params cursor_hash_params = {
-	.key_len = member_sizeof(struct task_cursor, id),
-	.key_offset = offsetof(struct task_cursor, id),
-	.head_offset = offsetof(struct task_cursor, hash_head),
-	.hashfn = arch_fast_hash,
-	.grow_decision = rht_grow_above_75,
-	.shrink_decision = rht_shrink_below_30,
-
-	.mutex_is_held = derpy_global_mutex_is_held,
-};
-
-static void destroy_cursors(struct data_info *datinf)
-{
-	struct task_cursor *curs;
-	struct task_cursor *pos;
-
-	list_for_each_entry_safe(curs, pos, &datinf->cursor_lru, list_head) {
-		list_del_init(&curs->list_head);
-		kfree(curs);
-	}
-	rhashtable_destroy(&datinf->cursors);
-}
 
 int scoutfs_data_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct hlist_head *head;
 	struct data_info *datinf;
 	struct task_cursor *curs;
-	int ret;
 	int i;
 
 	datinf = kzalloc(sizeof(struct data_info), GFP_KERNEL);
@@ -1258,11 +1268,8 @@ int scoutfs_data_setup(struct super_block *sb)
 	/* always search for large aligned extents */
 	datinf->next_large_blkno = LARGE_EXTENT_BLOCKS;
 
-	ret = rhashtable_init(&datinf->cursors, &cursor_hash_params);
-	if (ret) {
-		kfree(datinf);
-		return -ENOMEM;
-	}
+	for (i = 0; i < CURSOR_HASH_HEADS; i++)
+		INIT_HLIST_HEAD(&datinf->cursor_hash[i]);
 
 	/* just allocate all of these up front */
 	for (i = 0; i < NR_CURSORS; i++) {
@@ -1273,9 +1280,11 @@ int scoutfs_data_setup(struct super_block *sb)
 			return -ENOMEM;
 		}
 
-		curs->id.pid = i;
-		rhashtable_insert(&datinf->cursors, &curs->hash_head,
-				  GFP_KERNEL);
+		curs->pid = i;
+
+		head = cursor_head(datinf, curs->task, curs->pid);
+		hlist_add_head(&curs->hnode, head);
+
 		list_add(&curs->list_head, &datinf->cursor_lru);
 	}
 

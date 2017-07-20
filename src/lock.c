@@ -513,6 +513,9 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 
+	if (!lock)
+		return;
+
 	trace_scoutfs_unlock(sb, lock);
 
 	spin_lock(&linfo->lock);

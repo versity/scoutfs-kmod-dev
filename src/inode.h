@@ -2,6 +2,7 @@
 #define _SCOUTFS_INODE_H_
 
 #include "key.h"
+#include "lock.h"
 
 struct scoutfs_lock;
 
@@ -59,6 +60,7 @@ void scoutfs_evict_inode(struct inode *inode);
 int scoutfs_orphan_inode(struct inode *inode);
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
+struct inode *scoutfs_ilookup(struct super_block *sb, u64 ino);
 int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end);
 void scoutfs_update_inode_item(struct inode *inode);
 void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr);

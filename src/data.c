@@ -31,6 +31,7 @@
 #include "ioctl.h"
 #include "client.h"
 #include "lock.h"
+#include "file.h"
 
 #define EXTF "[off %llu bno %llu bks %llu fl %x]"
 #define EXTA(ne) (ne)->blk_off, (ne)->blkno, (ne)->blocks, (ne)->flags
@@ -1070,13 +1071,47 @@ out:
 
 static int scoutfs_readpage(struct file *file, struct page *page)
 {
-	return mpage_readpage(page, scoutfs_get_block);
+	struct inode *inode = file->f_inode;
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *inode_lock = NULL;
+	int unlock = 1;
+	int ret;
+
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE |
+				 SCOUTFS_LKF_TRYLOCK, inode, &inode_lock);
+	if (ret) {
+		if (ret == -EAGAIN)
+			ret = AOP_TRUNCATED_PAGE;
+		goto out;
+	}
+
+	ret = mpage_readpage(page, scoutfs_get_block);
+	unlock = 0;
+
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+out:
+	if (unlock)
+		unlock_page(page);
+	return ret;
 }
 
 static int scoutfs_readpages(struct file *file, struct address_space *mapping,
 			     struct list_head *pages, unsigned nr_pages)
 {
-	return mpage_readpages(mapping, pages, nr_pages, scoutfs_get_block);
+	struct inode *inode = file->f_inode;
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *inode_lock = NULL;
+	int ret;
+
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &inode_lock);
+	if (ret)
+		return ret;
+
+	ret = mpage_readpages(mapping, pages, nr_pages, scoutfs_get_block);
+
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+	return ret;
 }
 
 static int scoutfs_writepage(struct page *page, struct writeback_control *wbc)
@@ -1256,8 +1291,8 @@ const struct address_space_operations scoutfs_file_aops = {
 const struct file_operations scoutfs_file_fops = {
 	.read		= do_sync_read,
 	.write		= do_sync_write,
-	.aio_read	= generic_file_aio_read,
-	.aio_write	= generic_file_aio_write,
+	.aio_read	= scoutfs_file_aio_read,
+	.aio_write	= scoutfs_file_aio_write,
 	.unlocked_ioctl	= scoutfs_ioctl,
 	.fsync		= scoutfs_file_fsync,
 	.llseek		= generic_file_llseek,

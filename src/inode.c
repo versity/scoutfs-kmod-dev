@@ -414,6 +414,11 @@ static int scoutfs_iget_set(struct inode *inode, void *arg)
 	return 0;
 }
 
+struct inode *scoutfs_ilookup(struct super_block *sb, u64 ino)
+{
+	return ilookup5(sb, ino, scoutfs_iget_test, &ino);
+}
+
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 {
 	struct inode *inode;

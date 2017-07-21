@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/dlm.h>
+#include <linux/mm.h>
 
 #include "super.h"
 #include "lock.h"
@@ -65,9 +66,12 @@ static void scoutfs_downconvert_func(struct work_struct *work);
  * to also invalidate all cached overlapping structures.
  */
 static int invalidate_caches(struct super_block *sb, int mode,
-			     struct scoutfs_key_buf *start,
-			     struct scoutfs_key_buf *end)
+			     struct scoutfs_lock *lock)
 {
+	struct scoutfs_key_buf *start = lock->start;
+	struct scoutfs_key_buf *end = lock->end;
+	struct inode *inode;
+	u64 ino, last;
 	int ret;
 
 	trace_scoutfs_lock_invalidate_sb(sb, mode, start, end);
@@ -76,8 +80,23 @@ static int invalidate_caches(struct super_block *sb, int mode,
 	if (ret)
 		return ret;
 
-	if (mode == DLM_LOCK_EX)
+	if (mode == DLM_LOCK_EX) {
+		if (lock->lock_name.zone == SCOUTFS_FS_ZONE) {
+			ino = le64_to_cpu(lock->lock_name.first);
+			last = ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1;
+			while (ino <= last) {
+				inode = scoutfs_ilookup(lock->sb, ino);
+				if (inode && S_ISREG(inode->i_mode))
+					truncate_inode_pages(inode->i_mapping,
+							     0);
+
+				iput(inode);
+				ino++;
+			}
+		}
+
 		ret = scoutfs_item_invalidate(sb, start, end);
+	}
 
 	return ret;
 }
@@ -133,7 +152,7 @@ static int ino_lock_downconvert(struct ocfs2_lock_res *lockres, int blocking)
 	struct scoutfs_lock *lock = lockres->l_priv;
 	struct super_block *sb = lock->sb;
 
-	invalidate_caches(sb, blocking, lock->start, lock->end);
+	invalidate_caches(sb, blocking, lock);
 
 	return UNBLOCK_CONTINUE;
 }
@@ -685,7 +704,7 @@ static void scoutfs_downconvert_func(struct work_struct *work)
 	 * invalidate based on what level we're downconverting to (PR,
 	 * NL).
 	 */
-	invalidate_caches(sb, DLM_LOCK_EX, lock->start, lock->end);
+	invalidate_caches(sb, DLM_LOCK_EX, lock);
 	unlock_range(sb, lock);
 
 	spin_lock(&linfo->lock);

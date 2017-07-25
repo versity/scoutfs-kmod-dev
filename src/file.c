@@ -83,3 +83,24 @@ out:
 
 	return ret;
 }
+
+int scoutfs_permission(struct inode *inode, int mask)
+{
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *inode_lock = NULL;
+	int ret;
+
+	if (mask & MAY_NOT_BLOCK)
+		return -ECHILD;
+
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &inode_lock);
+	if (ret)
+		return ret;
+
+	ret = generic_permission(inode, mask);
+
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+
+	return ret;
+}

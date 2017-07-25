@@ -19,6 +19,7 @@
 #include <linux/namei.h>
 
 #include "format.h"
+#include "file.h"
 #include "dir.h"
 #include "inode.h"
 #include "ioctl.h"
@@ -1131,6 +1132,7 @@ const struct inode_operations scoutfs_dir_iops = {
 	.listxattr	= scoutfs_listxattr,
 	.removexattr	= scoutfs_removexattr,
 	.symlink	= scoutfs_symlink,
+	.permission	= scoutfs_permission,
 };
 
 void scoutfs_dir_exit(void)

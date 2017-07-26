@@ -26,7 +26,7 @@
 #include "manifest.h"
 #include "seg.h"
 #include "counters.h"
-#include "net.h"
+#include "client.h"
 #include "inode.h"
 #include "scoutfs_trace.h"
 
@@ -130,14 +130,14 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		 * on crashes between us and the server.
 		 */
 		ret = scoutfs_inode_walk_writeback(sb, true) ?:
-		      scoutfs_net_alloc_segno(sb, &segno) ?:
+		      scoutfs_client_alloc_segno(sb, &segno) ?:
 		      scoutfs_seg_alloc(sb, segno, &seg) ?:
 		      scoutfs_item_dirty_seg(sb, seg) ?:
 		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
 		      scoutfs_inode_walk_writeback(sb, false) ?:
 		      scoutfs_bio_wait_comp(sb, &comp) ?:
-		      scoutfs_net_record_segment(sb, seg, 0) ?:
-		      scoutfs_net_advance_seq(sb, &sbi->trans_seq);
+		      scoutfs_client_record_segment(sb, seg, 0) ?:
+		      scoutfs_client_advance_seq(sb, &sbi->trans_seq);
 		scoutfs_seg_put(seg);
 		if (ret)
 			goto out;
@@ -152,7 +152,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		 * seq indices but doesn't send a message for every sync
 		 * syscall.
 		 */
-		ret = scoutfs_net_advance_seq(sb, &sbi->trans_seq);
+		ret = scoutfs_client_advance_seq(sb, &sbi->trans_seq);
 	}
 
 out:

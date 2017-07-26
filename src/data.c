@@ -29,7 +29,7 @@
 #include "scoutfs_trace.h"
 #include "item.h"
 #include "ioctl.h"
-#include "net.h"
+#include "client.h"
 #include "lock.h"
 
 #define EXTF "[off %llu bno %llu bks %llu fl %x]"
@@ -731,7 +731,7 @@ static int bulk_alloc(struct super_block *sb)
 	int ret;
 	int i;
 
-	segnos = scoutfs_net_bulk_alloc(sb);
+	segnos = scoutfs_client_bulk_alloc(sb);
 	if (IS_ERR(segnos)) {
 		ret = PTR_ERR(segnos);
 		goto out;

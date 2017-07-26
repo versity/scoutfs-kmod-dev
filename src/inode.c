@@ -31,7 +31,7 @@
 #include "msg.h"
 #include "kvec.h"
 #include "item.h"
-#include "net.h"
+#include "client.h"
 
 /*
  * XXX
@@ -670,7 +670,7 @@ static int alloc_ino(struct super_block *sb, u64 *ino)
 		spin_unlock(&pool->lock);
 
 		if (request) {
-			ret = scoutfs_net_alloc_inodes(sb);
+			ret = scoutfs_client_alloc_inodes(sb);
 			if (ret) {
 				spin_lock(&pool->lock);
 				pool->in_flight = false;

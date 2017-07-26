@@ -24,7 +24,7 @@
 #include "manifest.h"
 #include "counters.h"
 #include "alloc.h"
-#include "net.h"
+#include "server.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -579,7 +579,7 @@ static void scoutfs_compact_func(struct work_struct *work)
 	INIT_LIST_HEAD(&curs.csegs);
 	scoutfs_bio_init_comp(&comp);
 
-	ret = scoutfs_net_get_compaction(sb, (void *)&curs);
+	ret = scoutfs_client_get_compaction(sb, (void *)&curs);
 
 	/* short circuit no compaction work to do */
 	if (ret == 0 && list_empty(&curs.csegs))
@@ -610,7 +610,7 @@ static void scoutfs_compact_func(struct work_struct *work)
 		free_cseg_list(sb, &results);
 	}
 
-	err = scoutfs_net_finish_compaction(sb, &curs, &results);
+	err = scoutfs_client_finish_compaction(sb, &curs, &results);
 	if (!ret && err)
 		ret = err;
 

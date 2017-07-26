@@ -36,7 +36,8 @@
 #include "compact.h"
 #include "data.h"
 #include "lock.h"
-#include "net.h"
+#include "client.h"
+#include "server.h"
 #include "options.h"
 #include "scoutfs_trace.h"
 
@@ -241,27 +242,49 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_inode_setup(sb) ?:
 	      scoutfs_data_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:
-	      scoutfs_lock_setup(sb) ?:
-	      scoutfs_net_setup(sb);
+	      scoutfs_lock_setup(sb);
 	if (ret)
 		return ret;
+
+	/*
+	 * The server is a bit magical because it can try to read the
+	 * device in async work context.  Once we return an error from
+	 * here the kernel starts tearing down the mount and it isn't
+	 * safe to do IO.  So we shut the server down before returning
+	 * an error.
+	 *
+	 * But we still want to start the server before the client to
+	 * help single mounts come up without passing through connection
+	 * timeouts.
+	 */
+	ret = scoutfs_server_setup(sb) ?:
+	      scoutfs_client_setup(sb);
+	if (ret)
+		goto out;
 
 	inode = scoutfs_iget(sb, SCOUTFS_ROOT_INO);
-	if (IS_ERR(inode))
-		return PTR_ERR(inode);
+	if (IS_ERR(inode)) {
+		ret = PTR_ERR(inode);
+		goto out;
+	}
 
 	sb->s_root = d_make_root(inode);
-	if (!sb->s_root)
-		return -ENOMEM;
+	if (!sb->s_root) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
-	ret = scoutfs_net_advance_seq(sb, &sbi->trans_seq);
+	ret = scoutfs_client_advance_seq(sb, &sbi->trans_seq);
 	if (ret)
-		return ret;
+		goto out;
 
 	scoutfs_trans_restart_sync_deadline(sb);
 //	scoutfs_scan_orphans(sb);
-
-	return 0;
+	ret = 0;
+out:
+	if (ret)
+	      scoutfs_server_destroy(sb);
+	return ret;
 }
 
 static struct dentry *scoutfs_mount(struct file_system_type *fs_type, int flags,
@@ -283,14 +306,15 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		sync_filesystem(sb);
 
 		scoutfs_lock_shutdown(sb);
-		scoutfs_net_destroy(sb);
+		scoutfs_server_destroy(sb);
 	}
 
 	kill_block_super(sb);
 
 	if (sbi) {
 		scoutfs_lock_destroy(sb);
-		scoutfs_net_destroy(sb);
+		scoutfs_client_destroy(sb);
+		scoutfs_server_destroy(sb);
 		scoutfs_shutdown_trans(sb);
 		scoutfs_data_destroy(sb);
 		scoutfs_inode_destroy(sb);

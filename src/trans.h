@@ -1,7 +1,6 @@
 #ifndef _SCOUTFS_TRANS_H_
 #define _SCOUTFS_TRANS_H_
 
-#include "net.h"
 #include "count.h"
 
 void scoutfs_trans_write_func(struct work_struct *work);

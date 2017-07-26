@@ -23,6 +23,7 @@
 #define _TRACE_SCOUTFS_H
 
 #include <linux/tracepoint.h>
+#include <linux/in.h>
 #include <linux/unaligned/access_ok.h>
 
 #include "key.h"
@@ -418,6 +419,67 @@ DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_shrink,
 DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_free,
 	TP_PROTO(struct scoutfs_segment *seg),
         TP_ARGS(seg)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_net_class,
+        TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
+		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
+        TP_ARGS(sb, name, peer, nh),
+        TP_STRUCT__entry(
+		__field(unsigned int, major)
+		__field(unsigned int, minor)
+		__field(u32, name_addr)
+		__field(u16, name_port)
+		__field(u32, peer_addr)
+		__field(u16, peer_port)
+		__field(u64, id)
+		__field(u8, type)
+		__field(u8, status)
+		__field(u16, data_len)
+        ),
+        TP_fast_assign(
+		__entry->major = MAJOR(sb->s_bdev->bd_dev);
+		__entry->minor = MINOR(sb->s_bdev->bd_dev);
+		/* sparse can't handle this cpp nightmare */
+		__entry->name_addr = (u32 __force)name->sin_addr.s_addr;
+		__entry->name_port = be16_to_cpu(name->sin_port);
+		__entry->peer_addr = (u32 __force)peer->sin_addr.s_addr;
+		__entry->peer_port = be16_to_cpu(peer->sin_port);
+		__entry->id = le64_to_cpu(nh->id);
+		__entry->type = nh->type;
+		__entry->status = nh->status;
+		__entry->data_len = le16_to_cpu(nh->data_len);
+        ),
+        TP_printk("dev %u:%u %pI4:%u -> %pI4:%u id %llu type %u status %u data_len %u",
+		  __entry->major, __entry->minor,
+		  &__entry->name_addr, __entry->name_port,
+		  &__entry->peer_addr, __entry->peer_port,
+		  __entry->id, __entry->type, __entry->status,
+		  __entry->data_len)
+);
+
+DEFINE_EVENT(scoutfs_net_class, scoutfs_client_send_request,
+        TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
+		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
+        TP_ARGS(sb, name, peer, nh)
+);
+
+DEFINE_EVENT(scoutfs_net_class, scoutfs_server_recv_request,
+        TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
+		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
+        TP_ARGS(sb, name, peer, nh)
+);
+
+DEFINE_EVENT(scoutfs_net_class, scoutfs_server_send_reply,
+        TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
+		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
+        TP_ARGS(sb, name, peer, nh)
+);
+
+DEFINE_EVENT(scoutfs_net_class, scoutfs_client_recv_reply,
+        TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
+		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
+        TP_ARGS(sb, name, peer, nh)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

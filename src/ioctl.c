@@ -29,7 +29,7 @@
 #include "inode.h"
 #include "item.h"
 #include "data.h"
-#include "net.h"
+#include "client.h"
 #include "lock.h"
 #include "manifest.h"
 
@@ -90,7 +90,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	if (type == SCOUTFS_INODE_INDEX_META_SEQ_TYPE ||
 	    type == SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE) {
 
-		ret = scoutfs_net_get_last_seq(sb, &last_seq);
+		ret = scoutfs_client_get_last_seq(sb, &last_seq);
 		if (ret)
 			return ret;
 

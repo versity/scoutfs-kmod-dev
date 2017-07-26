@@ -26,7 +26,7 @@
 #include "manifest.h"
 #include "trans.h"
 #include "counters.h"
-#include "net.h"
+#include "client.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -601,7 +601,7 @@ static int read_items(struct super_block *sb, struct scoutfs_key_buf *key,
 	 * either get a manifest ref in the lvb of their lock or they'll
 	 * ask the server the first time the system sees the lock.
 	 */
-	ret = scoutfs_net_get_manifest_root(sb, &root);
+	ret = scoutfs_client_get_manifest_root(sb, &root);
 	if (ret)
 		goto out;
 

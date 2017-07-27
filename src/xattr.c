@@ -192,7 +192,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 		ret = scoutfs_item_lookup(sb, key, val, lck->end);
 		if (ret < 0) {
 			if (ret == -ENOENT)
-				ret = -EIO;
+				ret = -ENODATA;
 			break;
 		}
 

@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/dlm.h>
 #include <linux/mm.h>
+#include <linux/sort.h>
 
 #include "super.h"
 #include "lock.h"
@@ -564,6 +565,93 @@ int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
 	}
 
 out:
+	return ret;
+}
+
+struct lock_inodes_arg {
+	struct inode *inode;
+	struct scoutfs_lock **lockp;
+};
+
+/*
+ * All args with inodes go to the front of the array and are then sorted
+ * by their inode number.
+ */
+static int cmp_arg(const void *A, const void *B)
+{
+	const struct lock_inodes_arg *a = A;
+	const struct lock_inodes_arg *b = B;
+
+	if (a->inode && b->inode)
+		return scoutfs_cmp_u64s(scoutfs_ino(a->inode),
+					scoutfs_ino(b->inode));
+
+	return a->inode ? -1 : b->inode ? 1 : 0;
+}
+
+static void swap_arg(void *A, void *B, int size)
+{
+	struct lock_inodes_arg *a = A;
+	struct lock_inodes_arg *b = B;
+
+	swap(*a, *b);
+}
+
+/*
+ * Lock all the inodes in inode number order.  The inode arguments can
+ * be in any order and can be duplicated or null.  This relies on core
+ * lock matching to efficiently handle duplicate lock attempts of the
+ * same group.  Callers can try to use the lock range keys for all the
+ * locks they attempt to acquire without knowing that they map to the
+ * same groups.
+ *
+ * On error no locks are held and all pointers are set to null.  Lock
+ * pointers for null inodes are always set to null.
+ *
+ * (pretty great collision with d_lock() here)
+ */
+int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
+			struct inode *a, struct scoutfs_lock **a_lock,
+			struct inode *b, struct scoutfs_lock **b_lock,
+			struct inode *c, struct scoutfs_lock **c_lock,
+			struct inode *d, struct scoutfs_lock **D_lock)
+{
+	struct lock_inodes_arg args[] = {
+		{a, a_lock}, {b, b_lock}, {c, c_lock}, {d, D_lock},
+	};
+	int ret;
+	int i;
+
+	/* set all lock pointers to null and validating input */
+	ret = 0;
+	for (i = 0; i < ARRAY_SIZE(args); i++) {
+		if (WARN_ON_ONCE(args[i].inode && !args[i].lockp))
+			ret = -EINVAL;
+		if (args[i].lockp)
+			*args[i].lockp = NULL;
+	}
+	if (ret)
+		return ret;
+
+	/* sort by having an inode then inode number */
+	sort(args, ARRAY_SIZE(args), sizeof(args[0]), cmp_arg, swap_arg);
+
+	/* lock unique inodes */
+	for (i = 0; i < ARRAY_SIZE(args) && args[i].inode; i++) {
+		ret = scoutfs_lock_inode(sb, mode, flags, args[i].inode,
+					 args[i].lockp);
+		if (ret)
+			break;
+	}
+
+	/* unlock on error */
+	for (i = ARRAY_SIZE(args) - 1; ret < 0 && i >= 0; i--) {
+		if (args[i].lockp && *args[i].lockp) {
+			scoutfs_unlock(sb, *args[i].lockp, mode);
+			*args[i].lockp = NULL;
+		}
+	}
+
 	return ret;
 }
 

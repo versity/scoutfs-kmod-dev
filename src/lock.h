@@ -37,6 +37,11 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock);
+int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
+			struct inode *a, struct scoutfs_lock **a_lock,
+			struct inode *b, struct scoutfs_lock **b_lock,
+			struct inode *c, struct scoutfs_lock **c_lock,
+			struct inode *d, struct scoutfs_lock **D_lock);
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 		    int level);
 

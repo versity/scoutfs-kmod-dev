@@ -104,6 +104,29 @@ static inline void scoutfs_count_symlink(struct scoutfs_item_count *cnt,
 }
 
 /*
+ * This assumes the worst case of a rename between directories that
+ * unlinks an existing target.  That'll be worse than the common case
+ * by a few hundred bytes.
+ */
+static inline void scoutfs_count_rename(struct scoutfs_item_count *cnt,
+					unsigned old_len, unsigned new_len)
+{
+	/* dirty dirs and inodes */
+	scoutfs_count_dirty_inode(cnt);
+	scoutfs_count_dirty_inode(cnt);
+	scoutfs_count_dirty_inode(cnt);
+	scoutfs_count_dirty_inode(cnt);
+
+	/* unlink old and new, link new */
+	scoutfs_count_dirents(cnt, old_len);
+	scoutfs_count_dirents(cnt, new_len);
+	scoutfs_count_dirents(cnt, new_len);
+
+	/* orphan the existing target */
+	scoutfs_count_orphan(cnt);
+}
+
+/*
  * Setting an xattr can create a full set of items for an xattr with a
  * max name and length.  Any existing items will be dirtied rather than
  * deleted so we won't have more items than a max xattr's worth.

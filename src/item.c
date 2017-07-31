@@ -1417,36 +1417,6 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
 }
 
 /*
- * A helper that deletes a set of items.  It first dirties the items
- * will be pinned so that deletion won't fail as it tries to read and
- * populate the items.
- *
- * It's a little cleaner to have this helper than have the caller
- * iterate, but it could also give us the opportunity to reduce item
- * searches if we remembered the items we dirtied.
- */
-int scoutfs_item_delete_many(struct super_block *sb,
-			     struct scoutfs_key_buf **keys, unsigned nr,
-			     struct scoutfs_key_buf **ends)
-{
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		ret = scoutfs_item_dirty(sb, keys[i], ends[i]);
-		if (ret)
-			goto out;
-	}
-
-	for (i = 0; i < nr; i++)
-		scoutfs_item_delete_dirty(sb, keys[i]);
-
-out:
-	trace_printk("ret %d\n", ret);
-	return ret;
-}
-
-/*
  * Return the first dirty node in the subtree starting at the given node.
  */
 static struct cached_item *first_dirty(struct rb_node *node)

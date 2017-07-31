@@ -36,9 +36,6 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 			struct kvec *val, struct scoutfs_key_buf *end);
 void scoutfs_item_delete_dirty(struct super_block *sb,
 			       struct scoutfs_key_buf *key);
-int scoutfs_item_delete_many(struct super_block *sb,
-			     struct scoutfs_key_buf **keys, unsigned nr,
-			     struct scoutfs_key_buf **ends);
 int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 			struct scoutfs_key_buf *end);
 

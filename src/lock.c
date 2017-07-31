@@ -27,9 +27,9 @@
 #include "dlmglue.h"
 #include "inode.h"
 
-#define LN_FMT "%u.%u.%llu.%llu"
+#define LN_FMT "%u.%u.%u.%llu.%llu"
 #define LN_ARG(name) \
-	(name)->zone, (name)->type, le64_to_cpu((name)->first), \
+	(name)->scope, (name)->zone, (name)->type, le64_to_cpu((name)->first),\
 	le64_to_cpu((name)->second)
 
 typedef struct ocfs2_super dlmglue_ctxt;
@@ -174,6 +174,13 @@ static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
 	.flags			= 0,
 };
 
+static struct ocfs2_lock_res_ops scoutfs_global_lops = {
+	.get_osb 		= get_ino_lock_osb,
+	/* XXX: .post_unlock for lru */
+	/* XXX: .check_downconvert that queries the item cache for dirty items */
+	.flags			= 0,
+};
+
 static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 					       struct scoutfs_lock_name *lock_name,
 					       struct ocfs2_lock_res_ops *type,
@@ -185,30 +192,34 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 //	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_lock *lock;
 
+	if (WARN_ON_ONCE(!!start != !!end))
+		return NULL;
+
 	lock = kzalloc(sizeof(struct scoutfs_lock), GFP_NOFS);
-	if (lock) {
+	if (lock == NULL)
+		return NULL;
+
+	if (start) {
 		lock->start = scoutfs_key_dup(sb, start);
 		lock->end = scoutfs_key_dup(sb, end);
 		if (!lock->start || !lock->end) {
 			free_scoutfs_lock(lock);
-			lock = NULL;
-		} else {
-			RB_CLEAR_NODE(&lock->node);
-			lock->sb = sb;
-			lock->lock_name = *lock_name;
-			lock->mode = DLM_LOCK_IV;
-			INIT_WORK(&lock->dc_work, scoutfs_downconvert_func);
-			INIT_LIST_HEAD(&lock->lru_entry);
-			ocfs2_lock_res_init_once(&lock->lockres);
-			BUG_ON(sizeof(struct scoutfs_lock_name) >=
-			       OCFS2_LOCK_ID_MAX_LEN);
-			/* kzalloc above ensures that l_name is NULL terminated */
-			memcpy(&lock->lockres.l_name[0], &lock->lock_name,
-			       sizeof(struct scoutfs_lock_name));
-			ocfs2_lock_res_init_common(&linfo->dlmglue,
-						   &lock->lockres, type, lock);
+			return NULL;
 		}
 	}
+
+	RB_CLEAR_NODE(&lock->node);
+	lock->sb = sb;
+	lock->lock_name = *lock_name;
+	lock->mode = DLM_LOCK_IV;
+	INIT_WORK(&lock->dc_work, scoutfs_downconvert_func);
+	INIT_LIST_HEAD(&lock->lru_entry);
+	ocfs2_lock_res_init_once(&lock->lockres);
+	BUG_ON(sizeof(struct scoutfs_lock_name) >= OCFS2_LOCK_ID_MAX_LEN);
+	/* kzalloc above ensures that l_name is NULL terminated */
+	memcpy(&lock->lockres.l_name[0], &lock->lock_name,
+	       sizeof(struct scoutfs_lock_name));
+	ocfs2_lock_res_init_common(&linfo->dlmglue, &lock->lockres, type, lock);
 
 	return lock;
 }
@@ -216,7 +227,8 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 static int cmp_lock_names(struct scoutfs_lock_name *a,
 			  struct scoutfs_lock_name *b)
 {
-	return (int)a->zone - (int)b->zone ?:
+	return (int)a->scope - (int)b->scope ?:
+	       (int)a->zone - (int)b->zone ?:
 	       (int)a->type - (int)b->type ?:
 	       scoutfs_cmp_u64s(le64_to_cpu(a->first), le64_to_cpu(b->first)) ?:
 	       scoutfs_cmp_u64s(le64_to_cpu(b->second), le64_to_cpu(b->second));
@@ -520,6 +532,7 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 
 	ino &= ~(u64)SCOUTFS_LOCK_INODE_GROUP_MASK;
 
+	lock_name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
 	lock_name.zone = SCOUTFS_FS_ZONE;
 	lock_name.type = SCOUTFS_INODE_TYPE;
 	lock_name.first = cpu_to_le64(ino);
@@ -656,6 +669,22 @@ int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
 }
 
 /*
+ * Acquire a cluster lock with a global scope in the lock space.
+ */
+int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
+			struct scoutfs_lock **lock)
+{
+	struct scoutfs_lock_name lock_name;
+
+	memset(&lock_name, 0, sizeof(lock_name));
+	lock_name.scope = SCOUTFS_LOCK_SCOPE_GLOBAL;
+	lock_name.type = type;
+
+	return lock_name_keys(sb, mode, flags, &lock_name, &scoutfs_global_lops,
+			      NULL, NULL, lock);
+}
+
+/*
  * map inode index items to locks.  The idea is to not have to
  * constantly get locks over a reasonable distribution of items, but
  * also not have an insane amount of items covered by locks.  time and
@@ -697,6 +726,7 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 		BUG();
 	}
 
+	lock_name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
 	lock_name.zone = SCOUTFS_INODE_INDEX_ZONE;
 	lock_name.type = type;
 	lock_name.first = cpu_to_le64(major & ~major_mask);

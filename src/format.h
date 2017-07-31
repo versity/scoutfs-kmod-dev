@@ -507,7 +507,13 @@ enum {
 /*
  * structures used by dlm
  */
+#define SCOUTFS_LOCK_SCOPE_GLOBAL 1
+#define SCOUTFS_LOCK_SCOPE_FS_ITEMS 2
+
+#define SCOUTFS_LOCK_TYPE_GLOBAL_RENAME 1
+
 struct scoutfs_lock_name {
+	__u8 scope;
 	__u8 zone;
 	__u8 type;
 	__le64 first;

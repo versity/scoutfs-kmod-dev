@@ -632,9 +632,6 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		holding = false;
 	}
 
-	if (holding)
-		scoutfs_release_trans(sb);
-
 	if (ret) {
 		if (ins_ext) {
 			err = insert_extent(sb, &ext, ino,
@@ -647,6 +644,9 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 			BUG_ON(err);
 		}
 	}
+
+	if (holding)
+		scoutfs_release_trans(sb);
 
 	return ret;
 }

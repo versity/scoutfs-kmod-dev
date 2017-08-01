@@ -59,6 +59,12 @@
  * ensures that data is persistent before the metadata that references
  * it is visible.
  *
+ * Files can have offline extents.  They have no allocated file data but
+ * the offline status represents file data that can be recalled through
+ * staging.  While offline the extents have their physical blkno set to
+ * the logical blk_off so that all the usual block extent calculations
+ * still hold.  It's mapped back to phys == 0 for fiemap.
+ *
  * Weirdly, the extents are indexed by the *final* logical block and
  * blkno of the extent.  This lets us search for neighbouring previous
  * extents with a _next() call and avoids having to implement item
@@ -388,7 +394,7 @@ static int insert_extent(struct super_block *sb,
 	trace_printk("inserting "EXTF"\n", EXTA(caller_ins));
 
 	/* find previous that might be adjacent */
-	ret = try_merge(sb, &ins, -1, &left, arg, type);
+	ret = try_merge(sb, &ins, -1, &left, arg, type) ?:
 	      try_merge(sb, &ins, 1, &right, arg, type);
 	if (ret < 0)
 		goto out;
@@ -561,9 +567,9 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		load_extent(&found, &key);
 		trace_printk("found "EXTF"\n", EXTA(&found));
 
-		/* XXX corruption: offline and allocation are exclusive */
-		if (!!found.blkno ==
-		    !!(found.flags & SCOUTFS_FILE_EXTENT_OFFLINE)) {
+		/* XXX corruption: offline has phys == log */
+		if ((found.flags & SCOUTFS_FILE_EXTENT_OFFLINE) &&
+		    found.blkno != found.blk_off) {
 			ret = -EIO;
 			break;
 		}
@@ -618,9 +624,9 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		/* maybe add new file extents with the offline flag set */
 		if (offline) {
 			ofl = ext;
-			ofl.blkno = 0;
+			ofl.blkno = ofl.blk_off;
 			ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
-			ret = insert_extent(sb, &ofl, sbi->node_id,
+			ret = insert_extent(sb, &ofl, ino,
 					    SCOUTFS_FILE_EXTENT_TYPE);
 			if (ret)
 				break;
@@ -913,7 +919,7 @@ retry:
 	/* remove old offline block if we're staging */
 	if (was_offline) {
 		ofl.blk_off = iblock;
-		ofl.blkno = 0;
+		ofl.blkno = iblock;
 		ofl.blocks = 1;
 		ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
 		ret = remove_extent(sb, &ofl, ino, SCOUTFS_FILE_EXTENT_TYPE);
@@ -1219,8 +1225,12 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		logical = ext.blk_off << SCOUTFS_BLOCK_SHIFT;
 		phys = ext.blkno << SCOUTFS_BLOCK_SHIFT;
 		size = ext.blocks << SCOUTFS_BLOCK_SHIFT;
-		flags = ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE ?
-			FIEMAP_EXTENT_UNKNOWN : 0;
+		flags = 0;
+
+		if (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE) {
+			phys = 0;
+			flags = FIEMAP_EXTENT_UNKNOWN;
+		}
 
 		blk_off = ext.blk_off + ext.blocks;
 	}

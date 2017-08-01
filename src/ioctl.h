@@ -124,8 +124,30 @@ struct scoutfs_ioctl_ino_path {
 
 #define SCOUTFS_IOC_DATA_VERSION _IOW(SCOUTFS_IOCTL_MAGIC, 4, __u64)
 
+/*
+ * "Release" a contiguous range of logical blocks of file data.
+ * Released blocks are removed from the file system like truncation, but
+ * an offline record is left behind to trigger demand staging if the
+ * file is read.
+ *
+ * The starting block offset and number of blocks to release are in
+ * units 4KB blocks.
+ *
+ * The specified range can extend past i_size and can straddle sparse
+ * regions or blocks that are already offline.  The only change it makes
+ * is to free and mark offline any existing blocks that intersect with
+ * the region.
+ *
+ * Returns 0 if the operation succeeds.  If an error is returned then
+ * some partial region of the blocks in the region may have been marked
+ * offline.
+ *
+ * If the operation succeeds then inode metadata that reflects file data
+ * contents are not updated.  This is intended to be transparent to the
+ * presentation of the data in the file.
+ */
 struct scoutfs_ioctl_release {
-	__u64 offset;
+	__u64 block;
 	__u64 count;
 	__u64 data_version;
 } __packed;

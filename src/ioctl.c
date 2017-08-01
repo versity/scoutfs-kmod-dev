@@ -326,30 +326,19 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	struct scoutfs_ioctl_release args;
 	loff_t start;
 	loff_t end_inc;
-	u64 iblock;
-	u64 end_block;
-	u64 len;
 	int ret;
 
 	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
 		return -EFAULT;
 
-	trace_printk("offset %llu count %llu vers %llu\n",
-			args.offset, args.count, args.data_version);
+	trace_printk("block %llu count %llu vers %llu\n",
+		     args.block, args.count, args.data_version);
 
 	if (args.count == 0)
 		return 0;
-	if ((args.offset + args.count) < args.offset)
+	if ((args.block + args.count) < args.block)
 		return -EINVAL;
 
-	start = round_up(args.offset, SCOUTFS_BLOCK_SIZE);
-	end_inc = round_down(args.offset + args.count, SCOUTFS_BLOCK_SIZE) - 1;
-	if (end_inc < start)
-		return 0;
-
-	iblock = start >> SCOUTFS_BLOCK_SHIFT;
-	end_block = end_inc >> SCOUTFS_BLOCK_SHIFT;
-	len = end_block - iblock + 1;
 
 	ret = mnt_want_write_file(file);
 	if (ret)
@@ -375,10 +364,12 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	inode_dio_wait(inode);
 
 	/* drop all clean and dirty cached blocks in the range */
+	start = args.block << SCOUTFS_BLOCK_SHIFT;
+	end_inc = ((args.block + args.count) << SCOUTFS_BLOCK_SHIFT) - 1;
 	truncate_inode_pages_range(&inode->i_data, start, end_inc);
 
-	ret = scoutfs_data_truncate_items(sb, scoutfs_ino(inode), iblock, len,
-					  true);
+	ret = scoutfs_data_truncate_items(sb, scoutfs_ino(inode), args.block,
+					  args.count, true);
 out:
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);

@@ -12,7 +12,12 @@ else
 SP = @:
 endif
 
-SCOUTFS_ARGS := CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src
+SCOUTFS_GIT_DESCRIBE := \
+	$(shell git describe --all --abbrev=6 --long 2>/dev/null || \
+		echo not-in-a-git-repository)
+
+SCOUTFS_ARGS := SCOUTFS_GIT_DESCRIBE=$(SCOUTFS_GIT_DESCRIBE) \
+		CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src
 
 all: module
 

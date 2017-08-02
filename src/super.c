@@ -324,6 +324,15 @@ static int __init scoutfs_module_init(void)
 {
 	int ret;
 
+	/*
+	 * gcc only recently learned to let __attribute__(section) add
+	 * SHT_NOTE notes.  But the assembler always could.
+	 */
+	__asm__ __volatile__ (
+		".section	.note.git_describe,\"a\"\n"
+		".string	\""SCOUTFS_GIT_DESCRIBE"\\n\"\n"
+		".previous\n");
+
 	scoutfs_init_counters();
 
 	scoutfs_kset = kset_create_and_add("scoutfs", NULL, fs_kobj);
@@ -349,3 +358,4 @@ module_exit(scoutfs_module_exit)
 
 MODULE_AUTHOR("Zach Brown <zab@versity.com>");
 MODULE_LICENSE("GPL");
+MODULE_INFO(git_describe, SCOUTFS_GIT_DESCRIBE);

@@ -12,7 +12,7 @@ else
 SP = @:
 endif
 
-SCOUTFS_ARGS := CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) -I $(CURDIR)/dlm/include M=$(CURDIR)/src
+SCOUTFS_ARGS := CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src
 
 all: module
 

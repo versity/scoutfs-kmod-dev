@@ -7,3 +7,18 @@ CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
 scoutfs-y += alloc.o bio.o btree.o compact.o counters.o data.o dir.o kvec.o \
 	     inode.o ioctl.o item.o key.o lock.o manifest.o msg.o net.o \
 	     options.o seg.o scoutfs_trace.o sort_priv.o super.o trans.o xattr.o
+
+#
+# The raw types aren't available in userspace headers.  Make sure all
+# the types we use in the headers are the exported __ versions.
+#
+# XXX dunno how we're really supposed to do this in kbuild
+#
+.PHONY: $(src)/check_exported_types
+$(src)/check_exported_types:
+	@if egrep '\<[us](8|16|32|64\>)' $(src)/format.h $(src)/ioctl.h; then \
+		echo "no raw types in exported headers, preface with __";     \
+		exit 1;							      \
+	fi
+
+extra-y += check_exported_types

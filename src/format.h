@@ -212,8 +212,8 @@ struct scoutfs_segment_item {
 	__u8 nr_links;
 	__le32 skip_links[0];
 	/*
-	 * u8 key_bytes[key_len]
-	 * u8 val_bytes[val_len]
+	 * __u8 key_bytes[key_len]
+	 * __u8 val_bytes[val_len]
 	 */
 } __packed;
 

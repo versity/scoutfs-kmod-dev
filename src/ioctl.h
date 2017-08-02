@@ -116,7 +116,7 @@ struct scoutfs_ioctl_ino_path {
 } __packed;
 
 #define SCOUTFS_IOC_INO_PATH_CURSOR_BYTES \
-	(sizeof(u64) + SCOUTFS_NAME_LEN + 1)
+	(sizeof(__u64) + SCOUTFS_NAME_LEN + 1)
 
 /* Get a single path from the root to the given inode number */
 #define SCOUTFS_IOC_INO_PATH _IOW(SCOUTFS_IOCTL_MAGIC, 2, \

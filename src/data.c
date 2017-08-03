@@ -31,6 +31,7 @@
 #include "item.h"
 #include "ioctl.h"
 #include "net.h"
+#include "lock.h"
 
 #define EXTF "[off %llu bno %llu bks %llu fl %x]"
 #define EXTA(ne) (ne)->blk_off, (ne)->blkno, (ne)->blocks, (ne)->flags
@@ -1065,7 +1066,7 @@ static int scoutfs_write_begin(struct file *file,
 	flags |= AOP_FLAG_NOFS;
 
 	/* generic write_end updates i_size and calls dirty_inode */
-	ret = scoutfs_dirty_inode_item(inode);
+	ret = scoutfs_dirty_inode_item(inode, NULL);
 	if (ret == 0)
 		ret = block_write_begin(mapping, pos, len, flags, pagep,
 					scoutfs_get_block);
@@ -1116,17 +1117,18 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	struct scoutfs_key_buf last;
 	struct scoutfs_key_buf key;
 	struct native_extent ext;
+	struct scoutfs_lock *inode_lock = NULL;
 	u64 logical;
 	u64 blk_off;
 	u64 final;
 	u64 phys;
 	u64 size;
 	u32 flags;
-	int ret = 0;
+	int ret;
 
 	ret = fiemap_check_flags(fieinfo, FIEMAP_FLAG_SYNC);
 	if (ret)
-		goto out;
+		return ret;
 
 	memset(&ext, ~0, sizeof(ext));
 	init_extent_key(&last, last_bytes, &ext, ino, type);
@@ -1138,6 +1140,11 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 
 	/* XXX overkill? */
 	mutex_lock(&inode->i_mutex);
+
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
+				     &inode_lock);
+	if (ret)
+		goto out;
 
 	for (;;) {
 		ext.blk_off = blk_off;
@@ -1181,8 +1188,10 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		blk_off = ext.blk_off + ext.blocks;
 	}
 
-	mutex_unlock(&inode->i_mutex);
+	scoutfs_unlock(sb, inode_lock);
 out:
+	mutex_unlock(&inode->i_mutex);
+
 	return ret;
 }
 

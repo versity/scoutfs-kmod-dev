@@ -58,6 +58,8 @@ struct inode_sb_info {
 	struct inode_sb_info *name = SCOUTFS_SB(sb)->inode_sb_info
 
 static struct kmem_cache *scoutfs_inode_cachep;
+static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
+			   struct kstat *stat);
 
 /*
  * This is called once before all the allocations and frees of a inode
@@ -141,6 +143,7 @@ void scoutfs_destroy_inode(struct inode *inode)
 }
 
 static const struct inode_operations scoutfs_file_iops = {
+	.getattr	= scoutfs_getattr,
 	.setxattr	= scoutfs_setxattr,
 	.getxattr	= scoutfs_getxattr,
 	.listxattr	= scoutfs_listxattr,
@@ -221,6 +224,25 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	set_item_info(inode);
 }
 
+static int refresh_inode(struct inode *inode, struct scoutfs_lock *lock)
+{
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_key_buf key;
+	struct scoutfs_inode_key ikey;
+	struct scoutfs_inode sinode;
+	SCOUTFS_DECLARE_KVEC(val);
+	int ret;
+
+	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
+	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+
+	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), lock->end);
+	if (ret == 0)
+		load_inode(inode, &sinode);
+
+	return ret;
+}
+
 void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
 			    struct scoutfs_inode_key *ikey, u64 ino)
 {
@@ -231,22 +253,24 @@ void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
 	scoutfs_key_init(key, ikey, sizeof(struct scoutfs_inode_key));
 }
 
-static int scoutfs_read_locked_inode(struct inode *inode)
+static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
+			   struct kstat *stat)
 {
+	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_inode_key ikey;
-	struct scoutfs_key_buf key;
-	struct scoutfs_inode sinode;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct scoutfs_lock *lock = NULL;
 	int ret;
 
-	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
-	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
+				     &lock);
+	if (ret)
+		return ret;
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
+	ret = refresh_inode(inode, lock);
 	if (ret == 0)
-		load_inode(inode, &sinode);
+		generic_fillattr(inode, stat);
 
+	scoutfs_unlock(sb, lock);
 	return ret;
 }
 
@@ -352,15 +376,22 @@ static int scoutfs_iget_set(struct inode *inode, void *arg)
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 {
 	struct inode *inode;
+	struct scoutfs_lock *lock = NULL;
 	int ret;
+
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, ino, &lock);
+	if (ret)
+		return ERR_PTR(ret);
 
 	inode = iget5_locked(sb, ino, scoutfs_iget_test, scoutfs_iget_set,
 			     &ino);
-	if (!inode)
-		return ERR_PTR(-ENOMEM);
+	if (!inode) {
+		inode = ERR_PTR(-ENOMEM);
+		goto out;
+	}
 
 	if (inode->i_state & I_NEW) {
-		ret = scoutfs_read_locked_inode(inode);
+		ret = refresh_inode(inode, lock);
 		if (ret) {
 			iget_failed(inode);
 			inode = ERR_PTR(ret);
@@ -370,6 +401,8 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 		}
 	}
 
+out:
+	scoutfs_unlock(sb, lock);
 	return inode;
 }
 
@@ -416,7 +449,7 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
  *
  * XXX this will have to do something about variable length inodes
  */
-int scoutfs_dirty_inode_item(struct inode *inode)
+int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_inode_key ikey;
@@ -428,7 +461,7 @@ int scoutfs_dirty_inode_item(struct inode *inode)
 
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 
-	ret = scoutfs_item_dirty(sb, &key, NULL);
+	ret = scoutfs_item_dirty(sb, &key, end);
 	if (!ret)
 		trace_scoutfs_dirty_inode(inode);
 	return ret;
@@ -560,36 +593,6 @@ void scoutfs_update_inode_item(struct inode *inode)
 
 	set_item_info(inode);
 	trace_scoutfs_update_inode(inode);
-}
-
-/*
- * sop->dirty_inode() can't return failure.  Our use of it has to be
- * careful to pin the inode during a transaction.  The generic write
- * paths pin the inode in write_begin and get called to update the inode
- * in write_end.
- *
- * The caller should have a trans but it's cheap for us to grab it
- * ourselves to make sure.
- *
- * This will holler at us if a caller didn't pin the inode and we
- * couldn't dirty the inode ourselves.
- */
-void scoutfs_dirty_inode(struct inode *inode, int flags)
-{
-	struct super_block *sb = inode->i_sb;
-	DECLARE_ITEM_COUNT(cnt);
-	int ret;
-
-	scoutfs_count_dirty_inode(&cnt);
-	ret = scoutfs_hold_trans(sb, &cnt);
-	if (ret == 0) {
-		ret = scoutfs_dirty_inode_item(inode);
-		if (ret == 0)
-			scoutfs_update_inode_item(inode);
-		scoutfs_release_trans(sb);
-	}
-
-	WARN_ON_ONCE(ret);
 }
 
 /*

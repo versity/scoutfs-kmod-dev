@@ -79,7 +79,6 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
-	.dirty_inode = scoutfs_dirty_inode,
 	.drop_inode = scoutfs_drop_inode,
 	.evict_inode = scoutfs_evict_inode,
 	.destroy_inode = scoutfs_destroy_inode,

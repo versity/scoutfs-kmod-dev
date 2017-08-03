@@ -1427,13 +1427,13 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
  */
 int scoutfs_item_delete_many(struct super_block *sb,
 			     struct scoutfs_key_buf **keys, unsigned nr,
-			     struct scoutfs_key_buf *end)
+			     struct scoutfs_key_buf **ends)
 {
 	int ret = 0;
 	int i;
 
 	for (i = 0; i < nr; i++) {
-		ret = scoutfs_item_dirty(sb, keys[i], end);
+		ret = scoutfs_item_dirty(sb, keys[i], ends[i]);
 		if (ret)
 			goto out;
 	}

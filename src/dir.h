@@ -2,6 +2,7 @@
 #define _SCOUTFS_DIR_H_
 
 #include "format.h"
+#include "lock.h"
 
 extern const struct file_operations scoutfs_dir_fops;
 extern const struct inode_operations scoutfs_dir_iops;
@@ -19,7 +20,8 @@ int scoutfs_dir_get_backref_path(struct super_block *sb, u64 target_ino,
 void scoutfs_dir_free_backref_path(struct super_block *sb,
 				   struct list_head *list);
 
-int scoutfs_symlink_drop(struct super_block *sb, u64 ino, u64 i_size);
+int scoutfs_symlink_drop(struct super_block *sb, u64 ino,
+			 struct scoutfs_lock *lock, u64 i_size);
 
 int scoutfs_dir_init(void);
 void scoutfs_dir_exit(void);

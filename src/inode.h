@@ -46,8 +46,7 @@ void scoutfs_evict_inode(struct inode *inode);
 int scoutfs_orphan_inode(struct inode *inode);
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
-int scoutfs_dirty_inode_item(struct inode *inode);
-void scoutfs_dirty_inode(struct inode *inode, int flags);
+int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end);
 void scoutfs_update_inode_item(struct inode *inode);
 void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,

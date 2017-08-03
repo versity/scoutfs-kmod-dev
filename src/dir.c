@@ -28,6 +28,7 @@
 #include "xattr.h"
 #include "kvec.h"
 #include "item.h"
+#include "lock.h"
 
 /*
  * Directory entries are stored in entries with offsets calculated from
@@ -117,8 +118,16 @@ static void scoutfs_d_release(struct dentry *dentry)
 	}
 }
 
+static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+{
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;
+	return 0;/* Always revalidate for now */
+}
+
 static const struct dentry_operations scoutfs_dentry_ops = {
 	.d_release = scoutfs_d_release,
+	.d_revalidate = scoutfs_d_revalidate,
 };
 
 static int alloc_dentry_info(struct dentry *dentry)
@@ -229,6 +238,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	struct super_block *sb = dir->i_sb;
 	struct scoutfs_key_buf *key = NULL;
 	struct scoutfs_dirent dent;
+	struct scoutfs_lock *dir_lock = NULL;
 	SCOUTFS_DECLARE_KVEC(val);
 	struct inode *inode;
 	u64 ino = 0;
@@ -249,9 +259,15 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(dir),
+				     &dir_lock);
+	if (ret)
+		goto out;
+
 	scoutfs_kvec_init(val, &dent, sizeof(dent));
 
-	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent), NULL);
+	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent),
+					dir_lock->end);
 	if (ret == -ENOENT) {
 		ino = 0;
 		ret = 0;
@@ -259,7 +275,6 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		ino = le64_to_cpu(dent.ino);
 		update_dentry_info(dentry, &dent);
 	}
-
 out:
 	if (ret < 0)
 		inode = ERR_PTR(ret);
@@ -267,6 +282,8 @@ out:
 		inode = NULL;
 	else
 		inode = scoutfs_iget(sb, ino);
+
+	scoutfs_unlock(sb, dir_lock);
 
 	scoutfs_key_free(sb, key);
 
@@ -323,6 +340,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	struct scoutfs_key_buf last_key;
 	struct scoutfs_readdir_key rkey;
 	struct scoutfs_readdir_key last_rkey;
+	struct scoutfs_lock *dir_lock;
 	SCOUTFS_DECLARE_KVEC(val);
 	unsigned int item_len;
 	unsigned int name_len;
@@ -332,19 +350,27 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	if (!dir_emit_dots(file, dirent, filldir))
 		return 0;
 
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
+				     &dir_lock);
+	if (ret)
+		return ret;
+
 	init_readdir_key(&last_key, &last_rkey, inode, SCOUTFS_DIRENT_LAST_POS);
 
 	item_len = offsetof(struct scoutfs_dirent, name[SCOUTFS_NAME_LEN]);
 	dent = kmalloc(item_len, GFP_KERNEL);
-	if (!dent)
-		return -ENOMEM;
+	if (!dent) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	for (;;) {
 		init_readdir_key(&key, &rkey, inode, file->f_pos);
 
 		scoutfs_kvec_init(val, dent, item_len);
 		ret = scoutfs_item_next_same_min(sb, &key, &last_key, val,
-				offsetof(struct scoutfs_dirent, name[1]), NULL);
+				offsetof(struct scoutfs_dirent, name[1]),
+						 dir_lock->end);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -363,12 +389,16 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 		file->f_pos = pos + 1;
 	}
 
+out:
+	scoutfs_unlock(sb, dir_lock);
+
 	kfree(dent);
 	return ret;
 }
 
-static int add_entry_items(struct inode *dir, struct dentry *dentry,
-			   struct inode *inode)
+static int add_entry_items(struct inode *dir, struct scoutfs_lock *dir_lock,
+			   struct dentry *dentry, struct inode *inode,
+			   struct scoutfs_lock *inode_lock)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(dir);
 	struct dentry_info *di = dentry->d_fsdata;
@@ -376,6 +406,7 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	struct scoutfs_key_buf *ent_key = NULL;
 	struct scoutfs_key_buf *lb_key = NULL;
 	struct scoutfs_key_buf *del_keys[3];
+	struct scoutfs_key_buf *end_keys[3];
 	struct scoutfs_key_buf rdir_key;
 	struct scoutfs_readdir_key rkey;
 	struct scoutfs_dirent dent;
@@ -392,7 +423,7 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
-	ret = scoutfs_dirty_inode_item(dir);
+	ret = scoutfs_dirty_inode_item(dir, dir_lock->end);
 	if (ret)
 		return ret;
 
@@ -413,6 +444,7 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out;
 	del_keys[del++] = ent_key;
+	end_keys[del] = dir_lock->end;
 
 	/* readdir item for .. readdir */
 	init_readdir_key(&rdir_key, &rkey, dir, pos);
@@ -423,6 +455,7 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out;
 	del_keys[del++] = &rdir_key;
+	end_keys[del] = dir_lock->end;
 
 	/* link backref item for inode to path resolution */
 	lb_key = alloc_link_backref_key(sb, scoutfs_ino(inode),
@@ -438,12 +471,13 @@ static int add_entry_items(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out;
 	del_keys[del++] = lb_key;
+	end_keys[del] = inode_lock->end;
 
 	update_dentry_info(dentry, &dent);
 	ret = 0;
 out:
 	while (ret < 0 && --del >= 0) {
-		err = scoutfs_item_delete(sb, del_keys[del], NULL);
+		err = scoutfs_item_delete(sb, del_keys[del], end_keys[del]);
 		/* can always delete dirty while holding */
 		BUG_ON(err);
 	}
@@ -459,17 +493,24 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 {
 	struct super_block *sb = dir->i_sb;
 	DECLARE_ITEM_COUNT(cnt);
-	struct inode *inode;
+	struct inode *inode = NULL;
+	struct scoutfs_lock *dir_lock;
+	struct scoutfs_lock *inode_lock = NULL;
 	int ret;
 
 	ret = alloc_dentry_info(dentry);
 	if (ret)
 		return ret;
 
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
+				     &dir_lock);
+	if (ret)
+		return ret;
+
 	scoutfs_count_mknod(&cnt, dentry->d_name.len);
 	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
-		return ret;
+		goto out_unlock;
 
 	inode = scoutfs_new_inode(sb, dir, mode, rdev);
 	if (IS_ERR(inode)) {
@@ -477,7 +518,13 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		goto out;
 	}
 
-	ret = add_entry_items(dir, dentry, inode);
+	/* Now that we have ino from scoutfs_new_inode, allocate a lock */
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
+				     &inode_lock);
+	if (ret)
+		goto out;
+
+	ret = add_entry_items(dir, dir_lock, dentry, inode, inode_lock);
 	if (ret)
 		goto out;
 
@@ -496,10 +543,13 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	insert_inode_hash(inode);
 	d_instantiate(dentry, inode);
 out:
+	scoutfs_release_trans(sb);
+out_unlock:
+	scoutfs_unlock(sb, dir_lock);
+	scoutfs_unlock(sb, inode_lock);
 	/* XXX delete the inode item here */
 	if (ret && !IS_ERR_OR_NULL(inode))
 		iput(inode);
-	scoutfs_release_trans(sb);
 	return ret;
 }
 
@@ -520,22 +570,34 @@ static int scoutfs_link(struct dentry *old_dentry,
 {
 	struct inode *inode = old_dentry->d_inode;
 	struct super_block *sb = dir->i_sb;
+	struct scoutfs_lock *dir_lock;
+	struct scoutfs_lock *inode_lock = NULL;
 	DECLARE_ITEM_COUNT(cnt);
 	int ret;
 
 	if (inode->i_nlink >= SCOUTFS_LINK_MAX)
 		return -EMLINK;
 
-	ret = alloc_dentry_info(dentry);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
+				     &dir_lock);
 	if (ret)
 		return ret;
+
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
+				     &inode_lock);
+	if (ret)
+		goto out_unlock;
+
+	ret = alloc_dentry_info(dentry);
+	if (ret)
+		goto out_unlock;
 
 	scoutfs_count_link(&cnt, dentry->d_name.len);
 	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
-		return ret;
+		goto out_unlock;
 
-	ret = add_entry_items(dir, dentry, inode);
+	ret = add_entry_items(dir, dir_lock, dentry, inode, inode_lock);
 	if (ret)
 		goto out;
 
@@ -551,6 +613,9 @@ static int scoutfs_link(struct dentry *old_dentry,
 	d_instantiate(dentry, inode);
 out:
 	scoutfs_release_trans(sb);
+out_unlock:
+	scoutfs_unlock(sb, dir_lock);
+	scoutfs_unlock(sb, inode_lock);
 	return ret;
 }
 
@@ -564,21 +629,24 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct inode *inode = dentry->d_inode;
 	struct timespec ts = current_kernel_time();
 	struct scoutfs_key_buf *keys[3] = {NULL,};
+	struct scoutfs_key_buf *ends[3] = {NULL,};
 	struct scoutfs_key_buf rdir_key;
 	struct scoutfs_readdir_key rkey;
 	DECLARE_ITEM_COUNT(cnt);
+	struct scoutfs_lock *dir_lock = NULL;
+	struct scoutfs_lock *inode_lock = NULL;
 	int ret = 0;
 
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
 		return -ENOTEMPTY;
 
-	scoutfs_count_unlink(&cnt, dentry->d_name.len);
-	ret = scoutfs_hold_trans(sb, &cnt);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
+				     &dir_lock);
 	if (ret)
 		return ret;
 
-	ret = scoutfs_dirty_inode_item(dir) ?:
-	      scoutfs_dirty_inode_item(inode);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
+				     &inode_lock);
 	if (ret)
 		goto out;
 
@@ -587,9 +655,11 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		ret = -ENOMEM;
 		goto out;
 	}
+	ends[0] = dir_lock->end;
 
 	init_readdir_key(&rdir_key, &rkey, dir, dentry_info_pos(dentry));
 	keys[1] = &rdir_key;
+	ends[1] = dir_lock->end;
 
 	keys[2] = alloc_link_backref_key(sb, scoutfs_ino(inode),
 					 scoutfs_ino(dir),
@@ -600,9 +670,19 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		goto out;
 	}
 
-	ret = scoutfs_item_delete_many(sb, keys, ARRAY_SIZE(keys), NULL);
+	scoutfs_count_unlink(&cnt, dentry->d_name.len);
+	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
 		goto out;
+
+	ret = scoutfs_dirty_inode_item(dir, dir_lock->end) ?:
+		scoutfs_dirty_inode_item(inode, inode_lock->end);
+	if (ret)
+		goto out_trans;
+
+	ret = scoutfs_item_delete_many(sb, keys, ARRAY_SIZE(keys), ends);
+	if (ret)
+		goto out_trans;
 
 	if ((inode->i_nlink == 1) ||
 	    (S_ISDIR(inode->i_mode) && inode->i_nlink == 2)) {
@@ -613,7 +693,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		 */
 		ret = scoutfs_orphan_inode(inode);
 		if (ret)
-			goto out;
+			goto out_trans;
 	}
 
 	dir->i_ctime = ts;
@@ -629,10 +709,13 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	scoutfs_update_inode_item(inode);
 	scoutfs_update_inode_item(dir);
 
+out_trans:
+	scoutfs_release_trans(sb);
 out:
 	scoutfs_key_free(sb, keys[0]);
 	scoutfs_key_free(sb, keys[2]);
-	scoutfs_release_trans(sb);
+	scoutfs_unlock(sb, dir_lock);
+	scoutfs_unlock(sb, inode_lock);
 	return ret;
 }
 
@@ -665,7 +748,8 @@ enum {
 	SYM_DELETE,
 };
 static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
-			    const char *target, size_t size)
+			    struct scoutfs_lock *lock, const char *target,
+			    size_t size)
 {
 	struct scoutfs_symlink_key skey;
 	struct scoutfs_key_buf key;
@@ -690,9 +774,9 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 			ret = scoutfs_item_create(sb, &key, val);
 		else if (op == SYM_LOOKUP)
 			ret = scoutfs_item_lookup_exact(sb, &key, val, bytes,
-							NULL);
+							lock->end);
 		else if (op == SYM_DELETE)
-			ret = scoutfs_item_delete(sb, &key, NULL);
+			ret = scoutfs_item_delete(sb, &key, lock->end);
 		if (ret)
 			break;
 
@@ -715,6 +799,7 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *inode_lock = NULL;
 	loff_t size = i_size_read(inode);
 	char *path;
 	int ret;
@@ -727,11 +812,19 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	if (size > PATH_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
 
-	path = kmalloc(size, GFP_NOFS);
-	if (!path)
-		return ERR_PTR(-ENOMEM);
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
+				     &inode_lock);
+	if (ret)
+		return ERR_PTR(ret);
 
-	ret = symlink_item_ops(sb, SYM_LOOKUP, scoutfs_ino(inode), path, size);
+	path = kmalloc(size, GFP_NOFS);
+	if (!path) {
+		path = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	ret = symlink_item_ops(sb, SYM_LOOKUP, scoutfs_ino(inode), inode_lock,
+			       path, size);
 
 	/* XXX corruption: missing items or not null term */
 	if (ret == -ENOENT || (ret == 0 && path[size - 1]))
@@ -743,7 +836,8 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	} else {
 		nd_set_link(nd, path);
 	}
-
+out:
+	scoutfs_unlock(sb, inode_lock);
 	return path;
 }
 
@@ -774,6 +868,8 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	struct super_block *sb = dir->i_sb;
 	const int name_len = strlen(symname) + 1;
 	struct inode *inode = NULL;
+	struct scoutfs_lock *dir_lock;
+	struct scoutfs_lock *inode_lock = NULL;
 	DECLARE_ITEM_COUNT(cnt);
 	int ret;
 
@@ -785,10 +881,15 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		return ret;
 
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
+				     &dir_lock);
+	if (ret)
+		return ret;
+
 	scoutfs_count_symlink(&cnt, dentry->d_name.len, name_len);
 	ret = scoutfs_hold_trans(sb, &cnt);
 	if (ret)
-		return ret;
+		goto out_unlock;
 
 	inode = scoutfs_new_inode(sb, dir, S_IFLNK|S_IRWXUGO, 0);
 	if (IS_ERR(inode)) {
@@ -796,12 +897,17 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
-	ret = symlink_item_ops(sb, SYM_CREATE, scoutfs_ino(inode),
+	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
+				     &inode_lock);
+	if (ret)
+		goto out;
+
+	ret = symlink_item_ops(sb, SYM_CREATE, scoutfs_ino(inode), inode_lock,
 			       symname, name_len);
 	if (ret)
 		goto out;
 
-	ret = add_entry_items(dir, dentry, inode);
+	ret = add_entry_items(dir, dir_lock, dentry, inode, inode_lock);
 	if (ret)
 		goto out;
 
@@ -822,19 +928,23 @@ out:
 		if (!IS_ERR_OR_NULL(inode))
 			iput(inode);
 
-		symlink_item_ops(sb, SYM_DELETE, scoutfs_ino(inode),
+		symlink_item_ops(sb, SYM_DELETE, scoutfs_ino(inode), inode_lock,
 				 NULL, name_len);
 	}
 
 	scoutfs_release_trans(sb);
+out_unlock:
+	scoutfs_unlock(sb, dir_lock);
+	scoutfs_unlock(sb, inode_lock);
 	return ret;
 }
 
-int scoutfs_symlink_drop(struct super_block *sb, u64 ino, u64 i_size)
+int scoutfs_symlink_drop(struct super_block *sb, u64 ino,
+			 struct scoutfs_lock *lock, u64 i_size)
 {
 	int ret;
 
-	ret = symlink_item_ops(sb, SYM_DELETE, ino, NULL, i_size);
+	ret = symlink_item_ops(sb, SYM_DELETE, ino, lock, NULL, i_size);
 	if (ret == -ENOENT)
 		ret = 0;
 

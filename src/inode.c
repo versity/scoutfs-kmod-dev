@@ -594,10 +594,12 @@ void scoutfs_update_inode_item(struct inode *inode)
 			   le64_to_cpu(sinode.size), 0, si->item_size, 0) ?:
 	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
 			   le64_to_cpu(sinode.meta_seq), 0,
-			   si->item_meta_seq, 0) ?:
-	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
-			   le64_to_cpu(sinode.data_seq), 0,
-			   si->item_data_seq, 0);
+			   si->item_meta_seq, 0);
+	if (ret == 0 && S_ISREG(inode->i_mode))
+		ret = update_index(sb, si, ino,
+				   SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
+				   le64_to_cpu(sinode.data_seq), 0,
+				   si->item_data_seq, 0);
 	BUG_ON(ret);
 
 	scoutfs_inode_init_key(&key, &ikey, ino);

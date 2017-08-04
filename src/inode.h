@@ -64,8 +64,9 @@ struct inode *scoutfs_ilookup(struct super_block *sb, u64 ino);
 int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end);
 void scoutfs_update_inode_item(struct inode *inode);
 void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr);
+int scoutfs_alloc_ino(struct super_block *sb, u64 *ino);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
-				umode_t mode, dev_t rdev,
+				umode_t mode, dev_t rdev, u64 ino,
 				struct scoutfs_lock *lock);
 void scoutfs_inode_set_meta_seq(struct inode *inode);
 void scoutfs_inode_set_data_seq(struct inode *inode);

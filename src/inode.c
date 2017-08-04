@@ -745,7 +745,7 @@ static bool pool_in_flight(struct free_ino_pool *pool)
  * net layer calls us when it gets a reply.  If there's no more inodes
  * we'll get ino == ~0 and nr == 0.
  */
-static int alloc_ino(struct super_block *sb, u64 *ino)
+int scoutfs_alloc_ino(struct super_block *sb, u64 *ino)
 {
 	struct free_ino_pool *pool = &SCOUTFS_SB(sb)->inode_sb_info->pool;
 	bool request;
@@ -807,7 +807,7 @@ out:
  * creating links to it and updating it.  @dir can be null.
  */
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
-				umode_t mode, dev_t rdev,
+				umode_t mode, dev_t rdev, u64 ino,
 				struct scoutfs_lock *lock)
 {
 	struct scoutfs_inode_info *ci;
@@ -816,12 +816,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	struct scoutfs_inode sinode;
 	SCOUTFS_DECLARE_KVEC(val);
 	struct inode *inode;
-	u64 ino;
 	int ret;
-
-	ret = alloc_ino(sb, &ino);
-	if (ret)
-		return ERR_PTR(ret);
 
 	inode = new_inode(sb);
 	if (!inode)

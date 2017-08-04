@@ -1258,6 +1258,7 @@ const struct file_operations scoutfs_file_fops = {
 	.aio_write	= generic_file_aio_write,
 	.unlocked_ioctl	= scoutfs_ioctl,
 	.fsync		= scoutfs_file_fsync,
+	.llseek		= generic_file_llseek,
 };
 
 

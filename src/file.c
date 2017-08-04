@@ -104,3 +104,41 @@ int scoutfs_permission(struct inode *inode, int mask)
 
 	return ret;
 }
+
+loff_t scoutfs_file_llseek(struct file *file, loff_t offset, int whence)
+{
+	struct inode *inode = file->f_mapping->host;
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *lock = NULL;
+	int ret = 0;
+
+	switch (whence) {
+	case SEEK_END:
+	case SEEK_DATA:
+	case SEEK_HOLE:
+		/*
+		 * These require a lock and inode refresh as they
+		 * reference i_size.
+		 *
+		 * XXX: SEEK_DATA/SEEK_HOLE can search our extent
+		 * items instead of relying on generic_file_llseek()
+		 * trickery.
+		 */
+		ret = scoutfs_lock_inode(sb, DLM_LOCK_PR,
+					 SCOUTFS_LKF_REFRESH_INODE, inode,
+					 &lock);
+	case SEEK_SET:
+	case SEEK_CUR:
+		/* No lock required, fall through to the generic helper */
+		break;
+	default:
+		ret = -EINVAL;
+	}
+
+	if (ret == 0)
+		offset = generic_file_llseek(file, offset, whence);
+
+	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+
+	return ret ? ret : offset;
+}

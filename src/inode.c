@@ -70,6 +70,7 @@ static void scoutfs_inode_ctor(void *obj)
 {
 	struct scoutfs_inode_info *ci = obj;
 
+	mutex_init(&ci->item_mutex);
 	seqcount_init(&ci->seqcount);
 	ci->staging = false;
 	init_rwsem(&ci->xattr_rwsem);
@@ -187,16 +188,26 @@ static void set_inode_ops(struct inode *inode)
 	mapping_set_gfp_mask(inode->i_mapping, GFP_USER);
 }
 
-static void set_item_info(struct inode *inode)
+/*
+ * The caller has ensured that the fields in the incoming scoutfs inode
+ * reflect both the inode item and the inode index items.  This happens
+ * when reading, refreshing, or updating the inodes.  We set the inode
+ * info fields to match so that next time we try to update the inode we
+ * can tell which fields have changed.
+ */
+static void set_item_info(struct scoutfs_inode_info *si,
+			  struct scoutfs_inode *sinode)
 {
-	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+	BUG_ON(!mutex_is_locked(&si->item_mutex));
 
 	si->have_item = true;
-	si->item_size = i_size_read(inode);
-	si->item_ctime = inode->i_ctime;
-	si->item_mtime = inode->i_mtime;
-	si->item_meta_seq = scoutfs_inode_meta_seq(inode);
-	si->item_data_seq = scoutfs_inode_data_seq(inode);
+	si->item_size = le64_to_cpu(sinode->size);
+	si->item_ctime.tv_sec = le64_to_cpu(sinode->ctime.sec);
+	si->item_ctime.tv_nsec = le32_to_cpu(sinode->ctime.nsec);
+	si->item_mtime.tv_sec = le64_to_cpu(sinode->mtime.sec);
+	si->item_mtime.tv_nsec = le32_to_cpu(sinode->mtime.nsec);
+	si->item_meta_seq = le64_to_cpu(sinode->meta_seq);
+	si->item_data_seq = le64_to_cpu(sinode->data_seq);
 }
 
 static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
@@ -221,11 +232,12 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	ci->data_version = le64_to_cpu(cinode->data_version);
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
 
-	set_item_info(inode);
+	set_item_info(ci, cinode);
 }
 
 static int refresh_inode(struct inode *inode, struct scoutfs_lock *lock)
 {
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key_buf key;
 	struct scoutfs_inode_key ikey;
@@ -236,9 +248,11 @@ static int refresh_inode(struct inode *inode, struct scoutfs_lock *lock)
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
+	mutex_lock(&si->item_mutex);
 	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), lock->end);
 	if (ret == 0)
 		load_inode(inode, &sinode);
+	mutex_unlock(&si->item_mutex);
 
 	return ret;
 }
@@ -494,11 +508,10 @@ int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end)
  * - make sure deletion items safely vanish w/o finding existing item
  * - ... error handling :(
  */
-static int update_index(struct inode *inode, u8 type, u64 now_major,
-			u32 now_minor, u64 then_major, u32 then_minor)
+static int update_index(struct super_block *sb, struct scoutfs_inode_info *si,
+			u64 ino, u8 type, u64 now_major, u32 now_minor,
+			u64 then_major, u32 then_minor)
 {
-	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
-	struct super_block *sb = inode->i_sb;
 	struct scoutfs_inode_index_key ins_ikey;
 	struct scoutfs_inode_index_key del_ikey;
 	struct scoutfs_key_buf ins;
@@ -507,8 +520,8 @@ static int update_index(struct inode *inode, u8 type, u64 now_major,
 	int err;
 
 	trace_printk("ino %llu have %u now %llu.%u then %llu.%u \n",
-		     scoutfs_ino(inode), si->have_item,
-		     now_major, now_minor, then_major, then_minor);
+		     ino, si->have_item, now_major, now_minor, then_major,
+		     then_minor);
 
 	if (si->have_item && now_major == then_major && now_minor == then_minor)
 		return 0;
@@ -517,7 +530,7 @@ static int update_index(struct inode *inode, u8 type, u64 now_major,
 	ins_ikey.type = type;
 	ins_ikey.major = cpu_to_be64(now_major);
 	ins_ikey.minor = cpu_to_be32(now_minor);
-	ins_ikey.ino = cpu_to_be64(scoutfs_ino(inode));
+	ins_ikey.ino = cpu_to_be64(ino);
 	scoutfs_key_init(&ins, &ins_ikey, sizeof(ins_ikey));
 
 	ret = scoutfs_item_create(sb, &ins, NULL);
@@ -528,7 +541,7 @@ static int update_index(struct inode *inode, u8 type, u64 now_major,
 	del_ikey.type = type;
 	del_ikey.major = cpu_to_be64(then_major);
 	del_ikey.minor = cpu_to_be32(then_minor);
-	del_ikey.ino = cpu_to_be64(scoutfs_ino(inode));
+	del_ikey.ino = cpu_to_be64(ino);
 	scoutfs_key_init(&del, &del_ikey, sizeof(del_ikey));
 
 	ret = scoutfs_item_delete(sb, &del, NULL);
@@ -553,6 +566,7 @@ void scoutfs_update_inode_item(struct inode *inode)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
+	const u64 ino = scoutfs_ino(inode);
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_key_buf key;
 	struct scoutfs_inode sinode;
@@ -560,39 +574,45 @@ void scoutfs_update_inode_item(struct inode *inode)
 	int ret;
 	int err;
 
+	mutex_lock(&si->item_mutex);
+
 	/* set the meta version once per trans for any inode updates */
 	scoutfs_inode_set_meta_seq(inode);
 
-	ret = update_index(inode, SCOUTFS_INODE_INDEX_CTIME_TYPE,
-			   inode->i_ctime.tv_sec, inode->i_ctime.tv_nsec,
+	/* only race with other inode field stores once */
+	store_inode(&sinode, inode);
+
+	ret = update_index(sb, si, ino, SCOUTFS_INODE_INDEX_CTIME_TYPE,
+			   le64_to_cpu(sinode.ctime.sec),
+			   le32_to_cpu(sinode.ctime.nsec),
 			   si->item_ctime.tv_sec, si->item_ctime.tv_nsec) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_MTIME_TYPE,
-			   inode->i_mtime.tv_sec, inode->i_mtime.tv_nsec,
+	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_MTIME_TYPE,
+			   le64_to_cpu(sinode.mtime.sec),
+			   le32_to_cpu(sinode.mtime.nsec),
 			   si->item_mtime.tv_sec, si->item_mtime.tv_nsec) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_SIZE_TYPE,
-			   i_size_read(inode), 0, si->item_size, 0) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
-			   scoutfs_inode_meta_seq(inode), 0,
+	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
+			   le64_to_cpu(sinode.size), 0, si->item_size, 0) ?:
+	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
+			   le64_to_cpu(sinode.meta_seq), 0,
 			   si->item_meta_seq, 0) ?:
-	      update_index(inode, SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
-			   scoutfs_inode_data_seq(inode), 0,
+	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
+			   le64_to_cpu(sinode.data_seq), 0,
 			   si->item_data_seq, 0);
 	BUG_ON(ret);
 
-	store_inode(&sinode, inode);
-
-	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
+	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	err = scoutfs_item_update(sb, &key, val, NULL);
 	if (err) {
-		scoutfs_err(sb, "inode %llu update err %d",
-			    scoutfs_ino(inode), err);
+		scoutfs_err(sb, "inode %llu update err %d", ino, err);
 		BUG_ON(err);
 	}
 
-	set_item_info(inode);
+	set_item_info(si, &sinode);
 	trace_scoutfs_update_inode(inode);
+
+	mutex_unlock(&si->item_mutex);
 }
 
 /*

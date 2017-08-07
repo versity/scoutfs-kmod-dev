@@ -10,6 +10,14 @@ struct scoutfs_inode_info {
 	u64 meta_seq;
 	u64 data_seq;
 	u64 data_version;
+
+	/*
+	 * The in-memory item info caches the current index item values
+	 * so that we can decide to update them with comparisons instead
+	 * of by maintaining state that tracks the inode differing from
+	 * the item.  The "item_" prefix is a bit clumsy :/.
+	 */
+	struct mutex item_mutex;
 	bool have_item;
 	u64 item_size;
 	struct timespec item_ctime;

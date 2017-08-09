@@ -44,6 +44,11 @@
 static struct kset *scoutfs_kset;
 
 /*
+ * Ask the server for the current statfs fields.  The message is very
+ * cheap so we're not worrying about spinning in statfs flooding the
+ * server with requests.  We can add a cache and stale results if that
+ * becomes a problem.
+ *
  * We fake the number of free inodes value by assuming that we can fill
  * free blocks with a certain number of inodes.  We then the number of
  * current inodes to that free count to determine the total possible
@@ -55,20 +60,25 @@ static struct kset *scoutfs_kset;
 static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 {
 	struct super_block *sb = dentry->d_inode->i_sb;
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-	__le32 * __packed uuid = (void *)super->uuid;
+	struct scoutfs_net_statfs nstatfs;
+	__le32 * __packed uuid;
+	int ret;
 
-	kst->f_bfree = scoutfs_alloc_bfree(sb);
+	ret = scoutfs_client_statfs(sb, &nstatfs);
+	if (ret)
+		return ret;
+
+	kst->f_bfree = le64_to_cpu(nstatfs.bfree);
 	kst->f_type = SCOUTFS_SUPER_MAGIC;
 	kst->f_bsize = SCOUTFS_BLOCK_SIZE;
-	kst->f_blocks = le64_to_cpu(super->total_segs) * SCOUTFS_SEGMENT_BLOCKS;
+	kst->f_blocks = le64_to_cpu(nstatfs.total_segs) *
+			SCOUTFS_SEGMENT_BLOCKS;
 	kst->f_bavail = kst->f_bfree;
 
-	kst->f_ffree = kst->f_bfree * 17;
-	kst->f_files = kst->f_ffree + scoutfs_last_ino(sb);
+	kst->f_ffree = kst->f_bfree * 16;
+	kst->f_files = kst->f_ffree + le64_to_cpu(nstatfs.next_ino);
 
-	/* this fsid is constant.. the uuid is different */
+	uuid = (void *)nstatfs.uuid;
 	kst->f_fsid.val[0] = le32_to_cpu(uuid[0]) ^ le32_to_cpu(uuid[1]);
 	kst->f_fsid.val[1] = le32_to_cpu(uuid[2]) ^ le32_to_cpu(uuid[3]);
 	kst->f_namelen = SCOUTFS_NAME_LEN;

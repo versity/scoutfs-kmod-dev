@@ -582,6 +582,39 @@ static int process_get_manifest_root(struct server_connection *conn, u64 id,
 }
 
 /*
+ * Sample the super stats that the client wants for statfs by serializing
+ * with each component.
+ */
+static int process_statfs(struct server_connection *conn, u64 id, u8 type,
+			  void *data, unsigned data_len)
+{
+	struct server_info *server = conn->server;
+	struct super_block *sb = server->sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_net_statfs nstatfs;
+	int ret;
+
+	if (data_len == 0) {
+		/* uuid and total_segs are constant, so far */
+		memcpy(nstatfs.uuid, super->uuid, sizeof(nstatfs.uuid));
+		nstatfs.total_segs = super->total_segs;
+
+		spin_lock(&sbi->next_ino_lock);
+		nstatfs.next_ino = super->next_ino;
+		spin_unlock(&sbi->next_ino_lock);
+
+		/* alloc locks the bfree calculation */
+		nstatfs.bfree = cpu_to_le64(scoutfs_alloc_bfree(sb));
+		ret = 0;
+	} else {
+		ret = -EINVAL;
+	}
+
+	return send_reply(conn, id, type, ret, &nstatfs, sizeof(nstatfs));
+}
+
+/*
  * Eventually we're going to have messages that control compaction.
  * Each client mount would have long-lived work that sends requests
  * which are stuck in processing until there's work to do.  They'd get
@@ -692,6 +725,7 @@ static void scoutfs_server_process_func(struct work_struct *work)
 		[SCOUTFS_NET_ADVANCE_SEQ]	= process_advance_seq,
 		[SCOUTFS_NET_GET_LAST_SEQ]	= process_get_last_seq,
 		[SCOUTFS_NET_GET_MANIFEST_ROOT]	= process_get_manifest_root,
+		[SCOUTFS_NET_STATFS]		= process_statfs,
 	};
 	struct scoutfs_net_header *nh = &req->nh;
 	process_func_t func;

@@ -681,6 +681,15 @@ int scoutfs_client_get_manifest_root(struct super_block *sb,
 			      NULL, 0, root, sizeof(struct scoutfs_btree_root));
 }
 
+int scoutfs_client_statfs(struct super_block *sb,
+			  struct scoutfs_net_statfs *nstatfs)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return client_request(client, SCOUTFS_NET_STATFS, NULL, 0, nstatfs,
+			      sizeof(struct scoutfs_net_statfs));
+}
+
 int scoutfs_client_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);

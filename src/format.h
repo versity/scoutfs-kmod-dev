@@ -571,6 +571,13 @@ struct scoutfs_net_segnos {
 	__le64 segnos[0];
 } __packed;
 
+struct scoutfs_net_statfs {
+	__le64 total_segs;		/* total segments in device */
+	__le64 next_ino;		/* next unused inode number */
+	__le64 bfree;			/* total free small blocks */
+	__u8 uuid[SCOUTFS_UUID_BYTES];	/* logical volume uuid */
+} __packed;
+
 /* XXX eventually we'll have net compaction and will need agents to agree */
 
 /* one upper segment and fanout lower segments */
@@ -589,6 +596,7 @@ enum {
 	SCOUTFS_NET_ADVANCE_SEQ,
 	SCOUTFS_NET_GET_LAST_SEQ,
 	SCOUTFS_NET_GET_MANIFEST_ROOT,
+	SCOUTFS_NET_STATFS,
 	SCOUTFS_NET_UNKNOWN,
 };
 

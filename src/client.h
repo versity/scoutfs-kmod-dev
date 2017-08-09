@@ -10,6 +10,8 @@ int scoutfs_client_advance_seq(struct super_block *sb, u64 *seq);
 int scoutfs_client_get_last_seq(struct super_block *sb, u64 *seq);
 int scoutfs_client_get_manifest_root(struct super_block *sb,
 				     struct scoutfs_btree_root *root);
+int scoutfs_client_statfs(struct super_block *sb,
+			  struct scoutfs_net_statfs *nstatfs);
 
 int scoutfs_client_setup(struct super_block *sb);
 void scoutfs_client_destroy(struct super_block *sb);

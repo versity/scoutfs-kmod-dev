@@ -617,6 +617,59 @@ void scoutfs_update_inode_item(struct inode *inode)
 	mutex_unlock(&si->item_mutex);
 }
 
+/* this is called on final inode cleanup so enoent is fine */
+static int remove_index(struct super_block *sb, u64 ino, u8 type, u64 major,
+			u32 minor)
+{
+	struct scoutfs_inode_index_key ikey;
+	struct scoutfs_key_buf key;
+	int ret;
+
+	ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
+	ikey.type = type;
+	ikey.major = cpu_to_be64(major);
+	ikey.minor = cpu_to_be32(minor);
+	ikey.ino = cpu_to_be64(ino);
+	scoutfs_key_init(&key, &ikey, sizeof(ikey));
+
+	/* XXX would be deletion under CW that doesn't need to read */
+	ret = scoutfs_item_delete(sb, &key, NULL);
+	if (ret == -ENOENT)
+		ret = 0;
+	return ret;
+}
+
+/*
+ * Remove all the inode's index items.  The caller has ensured that
+ * there are no more active users of the inode.  This can be racing with
+ * users of the inode index items.  Once we can use them we'll get CW
+ * locks around the index items to invalidate remote caches.  Racing
+ * users of the index items already have to deal with the possibility
+ * that the inodes returned by the index queries can go out of sync by
+ * the time they get to it, including being deleted.
+ */
+static int remove_index_items(struct super_block *sb, u64 ino,
+			      struct scoutfs_inode *sinode)
+{
+	umode_t mode = le32_to_cpu(sinode->mode);
+	int ret;
+
+	ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_CTIME_TYPE,
+			   le64_to_cpu(sinode->ctime.sec),
+			   le32_to_cpu(sinode->ctime.nsec)) ?:
+	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_MTIME_TYPE,
+			   le64_to_cpu(sinode->mtime.sec),
+			   le32_to_cpu(sinode->mtime.nsec)) ?:
+	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
+			   le64_to_cpu(sinode->size), 0) ?:
+	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
+			   le64_to_cpu(sinode->meta_seq), 0);
+	if (ret == 0 && S_ISREG(mode))
+		ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
+				   le64_to_cpu(sinode->data_seq), 0);
+	return ret;
+}
+
 /*
  * A quick atomic sample of the last inode number that's been allocated.
  */
@@ -807,13 +860,42 @@ static int remove_orphan_item(struct super_block *sb, u64 ino)
 	return ret;
 }
 
-static int __delete_inode(struct super_block *sb, struct scoutfs_key_buf *key,
-			  u64 ino, umode_t mode)
+/*
+ * Remove all the items associated with a given inode.  This is only
+ * called once nlink has dropped to zero so we don't have to worry about
+ * dirents referencing the inode or link backrefs.  Dropping nlink to 0
+ * also created an orphan item.  That orphan item will continue
+ * triggering attempts to finish previous partial deletion until all
+ * deletion is complete and the orphan item is removed.
+ */
+static int delete_inode_items(struct super_block *sb, u64 ino)
 {
+	struct scoutfs_inode_key ikey;
+	struct scoutfs_inode sinode;
+	struct scoutfs_key_buf key;
+	SCOUTFS_DECLARE_KVEC(val);
 	DECLARE_ITEM_COUNT(cnt);
 	bool release = false;
+	umode_t mode;
 	int ret;
 
+	scoutfs_inode_init_key(&key, &ikey, ino);
+	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+
+	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
+	if (ret < 0) {
+		if (ret == -ENOENT)
+			ret = 0;
+		return ret;
+	}
+
+	/* XXX corruption, inode probably won't be freed without repair */
+	if (le32_to_cpu(sinode.nlink)) {
+		scoutfs_warn(sb, "Dangling orphan item for inode %llu.", ino);
+		return -EIO;
+	}
+
+	mode = le32_to_cpu(sinode.mode);
 	trace_delete_inode(sb, ino, mode);
 
 	/* XXX this is obviously not done yet :) */
@@ -822,6 +904,11 @@ static int __delete_inode(struct super_block *sb, struct scoutfs_key_buf *key,
 	if (ret)
 		goto out;
 	release = true;
+
+	/* first remove index items to try to avoid indexing partial deletion */
+	ret = remove_index_items(sb, ino, &sinode);
+	if (ret)
+		goto out;
 
 #if 0
 	ret = scoutfs_xattr_drop(sb, ino);
@@ -836,7 +923,7 @@ static int __delete_inode(struct super_block *sb, struct scoutfs_key_buf *key,
 		goto out;
 
 #endif
-	ret = scoutfs_item_delete(sb, key, NULL);
+	ret = scoutfs_item_delete(sb, &key, NULL);
 	if (ret)
 		goto out;
 
@@ -845,34 +932,6 @@ out:
 	if (release)
 		scoutfs_release_trans(sb);
 	return ret;
-}
-
-/*
- * Remove all the items associated with a given inode.
- */
-static void delete_inode(struct super_block *sb, u64 ino)
-{
-	struct scoutfs_inode sinode;
-	struct scoutfs_inode_key ikey;
-	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
-	umode_t mode;
-	int ret;
-
-	/* sample the inode mode, XXX don't need to copy whole thing here */
-	scoutfs_inode_init_key(&key, &ikey, ino);
-	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
-
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
-	if (ret < 0)
-		goto out;
-
-	mode = le32_to_cpu(sinode.mode);
-
-	ret = __delete_inode(sb, &key, ino, mode);
-out:
-	if (ret)
-		trace_printk("drop items failed ret %d ino %llu\n", ret, ino);
 }
 
 /*
@@ -892,7 +951,7 @@ void scoutfs_evict_inode(struct inode *inode)
 	truncate_inode_pages_final(&inode->i_data);
 
 	if (inode->i_nlink == 0)
-		delete_inode(inode->i_sb, scoutfs_ino(inode));
+		delete_inode_items(inode->i_sb, scoutfs_ino(inode));
 clear:
 	clear_inode(inode);
 }
@@ -903,32 +962,6 @@ int scoutfs_drop_inode(struct inode *inode)
 
 	trace_printk("ret %d nlink %d unhashed %d\n",
 		     ret, inode->i_nlink, inode_unhashed(inode));
-	return ret;
-}
-
-static int process_orphaned_inode(struct super_block *sb, u64 ino)
-{
-	struct scoutfs_inode_key ikey;
-	struct scoutfs_inode sinode;
-	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
-	int ret;
-
-	scoutfs_inode_init_key(&key, &ikey, ino);
-	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
-
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
-	if (ret < 0) {
-		if (ret == -ENOENT)
-			ret = 0;
-		return ret;
-	}
-
-	if (le32_to_cpu(sinode.nlink) == 0)
-		__delete_inode(sb, &key, ino, le32_to_cpu(sinode.mode));
-	else
-		scoutfs_warn(sb, "Dangling orphan item for inode %llu.", ino);
-
 	return ret;
 }
 
@@ -964,7 +997,7 @@ int scoutfs_scan_orphans(struct super_block *sb)
 		if (ret < 0)
 			goto out;
 
-		ret = process_orphaned_inode(sb, be64_to_cpu(okey.ino));
+		ret = delete_inode_items(sb, be64_to_cpu(okey.ino));
 		if (ret && ret != -ENOENT && !err)
 			err = ret;
 

@@ -334,6 +334,7 @@ static struct file_system_type scoutfs_fs_type = {
 	.kill_sb	= scoutfs_kill_sb,
 	.fs_flags	= FS_REQUIRES_DEV,
 };
+MODULE_ALIAS_FS("scoutfs");
 
 /* safe to call at any failure point in _init */
 static void teardown_module(void)

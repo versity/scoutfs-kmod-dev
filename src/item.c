@@ -841,15 +841,17 @@ static struct cached_item *item_for_next(struct rb_root *root,
 }
 
 /*
- * Return the next item starting with the given key, returning the last
- * key at the most.
+ * Return the next item starting with the given key and returning the
+ * last key at most.
  *
- * While iteration stops the last key we can cache up to the end key so
- * that a sequence of small iterations covered by one lock are satisfied
- * with a large read of items from segments into the cache.
+ * If the end key is specified then it limits items that can be read
+ * into the cache.  If it's less than the last key then it also limits
+ * iteration.  These are different values because locking granularity
+ * can be smaller or larger than the iteration.  Callers shouldn't have
+ * to be aware of that relationship.
  *
- * -ENOENT is returned if there are no items between the given and last
- * keys.
+ * -ENOENT is returned if there are no items between the given and
+ * last/end keys.
  *
  * The next item's key is copied to the caller's key.  The caller is
  * responsible for dealing with key lengths and truncation.
@@ -870,6 +872,10 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 	unsigned long flags;
 	bool cached;
 	int ret;
+
+	/* use the end key as the last key if it's closer to reduce compares */
+	if (end && scoutfs_key_compare(end, last) < 0)
+		last = end;
 
 	/* convenience to avoid searching if caller iterates past their last */
 	if (scoutfs_key_compare(key, last) > 0) {

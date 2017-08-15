@@ -530,6 +530,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	struct scoutfs_key_buf last;
 	struct scoutfs_key_buf key;
 	struct native_extent found;
+	struct native_extent first;
 	struct native_extent rng;
 	struct native_extent ext;
 	struct native_extent ofl;
@@ -554,7 +555,9 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 
 	while (rng.blocks) {
 		/* find the next extent that could include our first block */
-		init_extent_key(&key, key_bytes, &rng, ino,
+		first = rng;
+		first.blocks = 1;
+		init_extent_key(&key, key_bytes, &first, ino,
 				SCOUTFS_FILE_EXTENT_TYPE);
 
 		ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);

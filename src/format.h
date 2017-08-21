@@ -244,7 +244,6 @@ struct scoutfs_segment_block {
 
 /* inode index zone */
 #define SCOUTFS_INODE_INDEX_CTIME_TYPE		1
-#define SCOUTFS_INODE_INDEX_MTIME_TYPE		2
 #define SCOUTFS_INODE_INDEX_SIZE_TYPE		3
 #define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	4
 #define SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE	5

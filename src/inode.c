@@ -586,10 +586,6 @@ void scoutfs_update_inode_item(struct inode *inode)
 			   le64_to_cpu(sinode.ctime.sec),
 			   le32_to_cpu(sinode.ctime.nsec),
 			   si->item_ctime.tv_sec, si->item_ctime.tv_nsec) ?:
-	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_MTIME_TYPE,
-			   le64_to_cpu(sinode.mtime.sec),
-			   le32_to_cpu(sinode.mtime.nsec),
-			   si->item_mtime.tv_sec, si->item_mtime.tv_nsec) ?:
 	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
 			   le64_to_cpu(sinode.size), 0, si->item_size, 0) ?:
 	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
@@ -657,9 +653,6 @@ static int remove_index_items(struct super_block *sb, u64 ino,
 	ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_CTIME_TYPE,
 			   le64_to_cpu(sinode->ctime.sec),
 			   le32_to_cpu(sinode->ctime.nsec)) ?:
-	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_MTIME_TYPE,
-			   le64_to_cpu(sinode->mtime.sec),
-			   le32_to_cpu(sinode->mtime.nsec)) ?:
 	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
 			   le64_to_cpu(sinode->size), 0) ?:
 	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,

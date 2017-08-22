@@ -136,7 +136,6 @@ int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 	case SCOUTFS_INODE_INDEX_ZONE: {
 		struct scoutfs_inode_index_key *ikey = key->data;
 		static char *type_strings[] = {
-			[SCOUTFS_INODE_INDEX_CTIME_TYPE]	= "ctm",
 			[SCOUTFS_INODE_INDEX_SIZE_TYPE]		= "siz",
 			[SCOUTFS_INODE_INDEX_META_SEQ_TYPE]	= "msq",
 			[SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE]	= "dsq",

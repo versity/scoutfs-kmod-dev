@@ -582,11 +582,7 @@ void scoutfs_update_inode_item(struct inode *inode)
 	/* only race with other inode field stores once */
 	store_inode(&sinode, inode);
 
-	ret = update_index(sb, si, ino, SCOUTFS_INODE_INDEX_CTIME_TYPE,
-			   le64_to_cpu(sinode.ctime.sec),
-			   le32_to_cpu(sinode.ctime.nsec),
-			   si->item_ctime.tv_sec, si->item_ctime.tv_nsec) ?:
-	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
+	ret = update_index(sb, si, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
 			   le64_to_cpu(sinode.size), 0, si->item_size, 0) ?:
 	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
 			   le64_to_cpu(sinode.meta_seq), 0,
@@ -650,10 +646,7 @@ static int remove_index_items(struct super_block *sb, u64 ino,
 	umode_t mode = le32_to_cpu(sinode->mode);
 	int ret;
 
-	ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_CTIME_TYPE,
-			   le64_to_cpu(sinode->ctime.sec),
-			   le32_to_cpu(sinode->ctime.nsec)) ?:
-	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
+	ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
 			   le64_to_cpu(sinode->size), 0) ?:
 	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
 			   le64_to_cpu(sinode->meta_seq), 0);

@@ -462,11 +462,6 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 	int bit;
 
 	switch(type) {
-	case SCOUTFS_INODE_INDEX_CTIME_TYPE:
-		major_mask = (1 << 5) - 1;
-		ino_mask = ~0ULL;
-		break;
-
 	case SCOUTFS_INODE_INDEX_SIZE_TYPE:
 		major_mask = 0;
 		if (major) {

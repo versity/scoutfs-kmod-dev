@@ -35,6 +35,21 @@
 #include <linux/quotaops.h>
 #include <linux/sched.h>
 
+#define mlog(mask, fmt, args...) printk(KERN_INFO fmt , ##args)
+#define mlog_errno(st) do {						\
+	int _st = (st);							\
+	if (_st != -ERESTARTSYS && _st != -EINTR &&			\
+	    _st != AOP_TRUNCATED_PAGE && _st != -ENOSPC)		\
+		mlog(ML_ERROR, "status = %lld\n", (long long)_st);	\
+} while (0)
+
+#define mlog_bug_on_msg(cond, fmt, args...) do {			\
+	if (cond) {							\
+		mlog(ML_ERROR, "bug expression: " #cond "\n");		\
+		mlog(ML_ERROR, fmt, ##args);				\
+		BUG();							\
+	}								\
+} while (0)
 #if 0
 #define MLOG_MASK_PREFIX ML_DLM_GLUE
 #include <cluster/masklog.h>

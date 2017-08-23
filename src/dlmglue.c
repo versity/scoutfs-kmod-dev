@@ -35,6 +35,7 @@
 #include <linux/quotaops.h>
 #include <linux/sched/signal.h>
 
+#if 0
 #define MLOG_MASK_PREFIX ML_DLM_GLUE
 #include <cluster/masklog.h>
 
@@ -58,6 +59,7 @@
 #include "acl.h"
 
 #include "buffer_head_io.h"
+#endif
 
 struct ocfs2_mask_waiter {
 	struct list_head	mw_item;
@@ -70,10 +72,12 @@ struct ocfs2_mask_waiter {
 #endif
 };
 
+#if 0
 static struct ocfs2_super *ocfs2_get_dentry_osb(struct ocfs2_lock_res *lockres);
 static struct ocfs2_super *ocfs2_get_inode_osb(struct ocfs2_lock_res *lockres);
 static struct ocfs2_super *ocfs2_get_file_osb(struct ocfs2_lock_res *lockres);
 static struct ocfs2_super *ocfs2_get_qinfo_osb(struct ocfs2_lock_res *lockres);
+#endif
 
 /*
  * Return value from ->downconvert_worker functions.
@@ -98,6 +102,7 @@ struct ocfs2_unblock_ctl {
 /* Lockdep class keys */
 struct lock_class_key lockdep_keys[OCFS2_NUM_LOCK_TYPES];
 
+#if 0
 static int ocfs2_check_meta_downconvert(struct ocfs2_lock_res *lockres,
 					int new_level);
 static void ocfs2_set_meta_lvb(struct ocfs2_lock_res *lockres);
@@ -144,6 +149,7 @@ static void ocfs2_dump_meta_lvb_info(u64 level,
 	     (long long)be64_to_cpu(lvb->lvb_imtime_packed),
 	     be32_to_cpu(lvb->lvb_iattr));
 }
+#endif
 
 
 /*
@@ -234,6 +240,7 @@ struct ocfs2_lock_res_ops {
  */
 #define LOCK_TYPE_USES_LVB		0x2
 
+#if 0
 static struct ocfs2_lock_res_ops ocfs2_inode_rw_lops = {
 	.get_osb	= ocfs2_get_inode_osb,
 	.flags		= 0,
@@ -298,12 +305,13 @@ static inline int ocfs2_is_inode_lock(struct ocfs2_lock_res *lockres)
 		lockres->l_type == OCFS2_LOCK_TYPE_RW ||
 		lockres->l_type == OCFS2_LOCK_TYPE_OPEN;
 }
+#endif
 
 static inline struct ocfs2_lock_res *ocfs2_lksb_to_lock_res(struct ocfs2_dlm_lksb *lksb)
 {
 	return container_of(lksb, struct ocfs2_lock_res, l_lksb);
 }
-
+#if 0
 static inline struct inode *ocfs2_lock_res_inode(struct ocfs2_lock_res *lockres)
 {
 	BUG_ON(!ocfs2_is_inode_lock(lockres));
@@ -330,6 +338,7 @@ ocfs2_lock_res_refcount_tree(struct ocfs2_lock_res *res)
 {
 	return container_of(res, struct ocfs2_refcount_tree, rf_lockres);
 }
+#endif
 
 static inline struct ocfs2_super *ocfs2_get_lockres_osb(struct ocfs2_lock_res *lockres)
 {
@@ -375,9 +384,11 @@ static inline void ocfs2_recover_from_dlm_error(struct ocfs2_lock_res *lockres,
 static int ocfs2_downconvert_thread(void *arg);
 static void ocfs2_downconvert_on_unlock(struct ocfs2_super *osb,
 					struct ocfs2_lock_res *lockres);
+#if 0
 static int ocfs2_inode_lock_update(struct inode *inode,
 				  struct buffer_head **bh);
 static void ocfs2_drop_osb_locks(struct ocfs2_super *osb);
+#endif
 static inline int ocfs2_highest_compat_lock_level(int level);
 static unsigned int ocfs2_prepare_downconvert(struct ocfs2_lock_res *lockres,
 					      int new_level);
@@ -536,6 +547,7 @@ void ocfs2_lock_res_init_once(struct ocfs2_lock_res *res)
 	INIT_LIST_HEAD(&res->l_holders);
 }
 
+#if 0
 void ocfs2_inode_lock_res_init(struct ocfs2_lock_res *res,
 			       enum ocfs2_lock_type type,
 			       unsigned int generation,
@@ -721,6 +733,7 @@ void ocfs2_refcount_lock_res_init(struct ocfs2_lock_res *lockres,
 	ocfs2_lock_res_init_common(osb, lockres, OCFS2_LOCK_TYPE_REFCOUNT,
 				   &ocfs2_refcount_block_lops, osb);
 }
+#endif
 
 void ocfs2_lock_res_free(struct ocfs2_lock_res *res)
 {
@@ -1205,6 +1218,7 @@ static void ocfs2_unlock_ast(struct ocfs2_dlm_lksb *lksb, int error)
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
 }
 
+#if 0
 /*
  * This is the filesystem locking protocol.  It provides the lock handling
  * hooks for the underlying DLM.  It has a maximum version number.
@@ -1242,6 +1256,7 @@ void ocfs2_set_locking_protocol(void)
 {
 	ocfs2_stack_glue_set_max_proto_version(&lproto.lp_max_version);
 }
+#endif
 
 static inline void ocfs2_recover_from_dlm_error(struct ocfs2_lock_res *lockres,
 						int convert)
@@ -1670,6 +1685,7 @@ static int ocfs2_create_new_lock(struct ocfs2_super *osb,
 	return ocfs2_lock_create(osb, lockres, level, lkm_flags);
 }
 
+#if 0
 /* Grants us an EX lock on the data and metadata resources, skipping
  * the normal cluster directory lookup. Use this ONLY on newly created
  * inodes which other nodes can't possibly see, and which haven't been
@@ -2050,6 +2066,7 @@ void ocfs2_file_unlock(struct file *file)
 	if (ret)
 		mlog_errno(ret);
 }
+#endif
 
 static void ocfs2_downconvert_on_unlock(struct ocfs2_super *osb,
 					struct ocfs2_lock_res *lockres)
@@ -2078,6 +2095,7 @@ static void ocfs2_downconvert_on_unlock(struct ocfs2_super *osb,
 		ocfs2_wake_downconvert_thread(osb);
 }
 
+#if 0
 #define OCFS2_SEC_BITS   34
 #define OCFS2_SEC_SHIFT  (64 - 34)
 #define OCFS2_NSEC_MASK  ((1ULL << OCFS2_SEC_SHIFT) - 1)
@@ -2193,6 +2211,7 @@ static inline int ocfs2_meta_lvb_is_trustable(struct inode *inode,
 		return 1;
 	return 0;
 }
+#endif
 
 /* Determine whether a lock resource needs to be refreshed, and
  * arbitrate who gets to refresh it.
@@ -2246,6 +2265,7 @@ static inline void ocfs2_complete_lock_res_refresh(struct ocfs2_lock_res *lockre
 	wake_up(&lockres->l_event);
 }
 
+#if 0
 /* may or may not return a bh if it went to disk. */
 static int ocfs2_inode_lock_update(struct inode *inode,
 				  struct buffer_head **bh)
@@ -2779,6 +2799,7 @@ void ocfs2_dentry_unlock(struct dentry *dentry, int ex)
 	if (!ocfs2_is_hard_readonly(osb) && !ocfs2_mount_local(osb))
 		ocfs2_cluster_unlock(osb, &dl->dl_lockres, level);
 }
+#endif
 
 /* Reference counting of the dlm debug structure. We want this because
  * open references on the debug inodes can live on after a mount, so
@@ -3073,6 +3094,7 @@ static void ocfs2_dlm_shutdown_debug(struct ocfs2_super *osb)
 	}
 }
 
+#if 0
 int ocfs2_dlm_init(struct ocfs2_super *osb)
 {
 	int status = 0;
@@ -3164,6 +3186,7 @@ void ocfs2_dlm_shutdown(struct ocfs2_super *osb,
 
 	ocfs2_dlm_shutdown_debug(osb);
 }
+#endif
 
 static int ocfs2_drop_lock(struct ocfs2_super *osb,
 			   struct ocfs2_lock_res *lockres)
@@ -3327,6 +3350,7 @@ void ocfs2_simple_drop_lockres(struct ocfs2_super *osb,
 		mlog_errno(ret);
 }
 
+#if 0
 static void ocfs2_drop_osb_locks(struct ocfs2_super *osb)
 {
 	ocfs2_simple_drop_lockres(osb, &osb->osb_super_lockres);
@@ -3365,6 +3389,7 @@ int ocfs2_drop_inode_locks(struct inode *inode)
 
 	return status;
 }
+#endif
 
 static unsigned int ocfs2_prepare_downconvert(struct ocfs2_lock_res *lockres,
 					      int new_level)
@@ -3682,6 +3707,7 @@ leave_requeue:
 	return 0;
 }
 
+#if 0
 static int ocfs2_data_convert_worker(struct ocfs2_lock_res *lockres,
 				     int blocking)
 {
@@ -4042,6 +4068,7 @@ void ocfs2_refcount_unlock(struct ocfs2_refcount_tree *ref_tree, int ex)
 	if (!ocfs2_mount_local(osb))
 		ocfs2_cluster_unlock(osb, lockres, level);
 }
+#endif
 
 static void ocfs2_process_blocked_lock(struct ocfs2_super *osb,
 				       struct ocfs2_lock_res *lockres)

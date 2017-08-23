@@ -401,7 +401,7 @@ static int lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lock)
  * The caller provides the opaque lock structure used for storage and
  * their start and end pointers will be accessed while the lock is held.
  */
-static int lock_name_keys(struct super_block *sb, int mode,
+static int lock_name_keys(struct super_block *sb, int mode, int flags,
 			 struct scoutfs_lock_name *lock_name,
 			 struct ocfs2_lock_res_ops *type,
 			 struct scoutfs_key_buf *start,
@@ -410,6 +410,7 @@ static int lock_name_keys(struct super_block *sb, int mode,
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
+	int lkm_flags;
 	int ret;
 
 	lock = find_alloc_scoutfs_lock(sb, lock_name, type, start, end);
@@ -418,8 +419,12 @@ static int lock_name_keys(struct super_block *sb, int mode,
 
 	trace_scoutfs_lock_resource(sb, lock);
 
+	lkm_flags = DLM_LKF_NOORDER;
+	if (flags & SCOUTFS_LKF_TRYLOCK)
+		lkm_flags |= DLM_LKF_NOQUEUE; /* maybe also NONBLOCK? */
+
 	ret = ocfs2_cluster_lock(&linfo->dlmglue, &lock->lockres, mode,
-				 DLM_LKF_NOORDER, 0);
+				 lkm_flags, 0);
 	if (ret)
 		return ret;
 
@@ -510,8 +515,8 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 	end_ikey.type = ~0;
 	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
 
-	return lock_name_keys(sb, mode, &lock_name, &scoufs_ino_lops, &start,
-			      &end, ret_lock);
+	return lock_name_keys(sb, mode, flags, &lock_name, &scoufs_ino_lops,
+			      &start, &end, ret_lock);
 }
 
 /*
@@ -604,8 +609,8 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 	end_ikey.ino = cpu_to_be64(ino | ino_mask);
 	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
 
-	return lock_name_keys(sb, mode, &lock_name, &scoufs_ino_index_lops,
-			      &start, &end, ret_lock);
+	return lock_name_keys(sb, mode, 0, &lock_name,
+			      &scoufs_ino_index_lops, &start, &end, ret_lock);
 }
 
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,

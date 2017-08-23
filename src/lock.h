@@ -9,6 +9,7 @@
 #define	SCOUTFS_LOCK_QUEUED	0x02 /* Put on drop workqueue */
 
 #define SCOUTFS_LKF_REFRESH_INODE	0x01 /* update stale inode from item */
+#define SCOUTFS_LKF_TRYLOCK		0x02 /* EAGAIN if contention */
 
 struct scoutfs_lock {
 	struct super_block *sb;

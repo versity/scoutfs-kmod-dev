@@ -417,7 +417,7 @@ static int ocfs2_prepare_cancel_convert(struct ocfs2_super *osb,
 static int ocfs2_cancel_convert(struct ocfs2_super *osb,
 				struct ocfs2_lock_res *lockres);
 
-
+#if 0
 static void ocfs2_build_lock_name(enum ocfs2_lock_type type,
 				  u64 blkno,
 				  u32 generation,
@@ -435,7 +435,7 @@ static void ocfs2_build_lock_name(enum ocfs2_lock_type type,
 
 	mlog(0, "built lock resource with name: %s\n", name);
 }
-
+#endif
 static DEFINE_SPINLOCK(ocfs2_dlm_tracking_lock);
 
 static void ocfs2_add_lockres_tracking(struct ocfs2_lock_res *res,

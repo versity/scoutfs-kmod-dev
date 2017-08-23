@@ -404,9 +404,8 @@ static inline void ocfs2_recover_from_dlm_error(struct ocfs2_lock_res *lockres,
 } while (0)
 #endif
 #define ocfs2_log_dlm_error(_func, _err, _lockres) do {			\
-	mlog(ML_ERROR, "DLM error %d while calling %s on resource %.*s%08x\n",	\
-	     _err, _func, OCFS2_DENTRY_LOCK_INO_START - 1, (_lockres)->l_name,	\
-	     (unsigned int)ocfs2_get_dentry_lock_ino(_lockres));		\
+	mlog(ML_ERROR, "DLM error %d while calling %s on resource %s\n",	\
+	     _err, _func, (_lockres)->l_name);		\
 } while (0)
 
 static int ocfs2_downconvert_thread(void *arg);

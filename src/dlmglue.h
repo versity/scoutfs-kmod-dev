@@ -134,6 +134,12 @@ struct ocfs2_lock_res {
 #endif
 };
 
+struct ocfs2_dlm_debug {
+	struct kref d_refcnt;
+	struct dentry *d_locking_state;
+	struct list_head d_lockres_tracking;
+};
+
 struct ocfs2_super
 {
 	struct ocfs2_cluster_connection *cconn;

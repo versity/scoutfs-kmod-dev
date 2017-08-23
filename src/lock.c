@@ -479,6 +479,11 @@ out:
 #endif
 }
 
+u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock)
+{
+	return ocfs2_lock_refresh_gen(&lock->lockres);
+}
+
 int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 		     struct scoutfs_lock **ret_lock)
 {
@@ -509,10 +514,33 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 			      &end, ret_lock);
 }
 
+/*
+ * Acquire a lock on an inode.
+ *
+ * _REFRESH_INODE indicates that the caller needs to have the vfs inode
+ * fields current with respect to lock coverage.  dlmglue increases the
+ * lock's refresh_gen once every time its mode is changed from a mode
+ * that couldn't have the inode cached to one that could.
+ */
 int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
-		       struct inode *inode, struct scoutfs_lock **ret_lock)
+		       struct inode *inode, struct scoutfs_lock **lock)
 {
-	return scoutfs_lock_ino(sb, mode, flags, scoutfs_ino(inode), ret_lock);
+	int ret;
+
+	ret = scoutfs_lock_ino(sb, mode, flags, scoutfs_ino(inode), lock);
+	if (ret < 0)
+		goto out;
+
+	if (flags & SCOUTFS_LKF_REFRESH_INODE) {
+		ret = scoutfs_inode_refresh(inode, *lock, flags);
+		if (ret < 0) {
+			scoutfs_unlock(sb, *lock, mode);
+			*lock = NULL;
+		}
+	}
+
+out:
+	return ret;
 }
 
 /*

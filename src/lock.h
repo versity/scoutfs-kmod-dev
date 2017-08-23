@@ -8,6 +8,8 @@
 #define	SCOUTFS_LOCK_BLOCKING	0x01 /* Blocking another lock request */
 #define	SCOUTFS_LOCK_QUEUED	0x02 /* Put on drop workqueue */
 
+#define SCOUTFS_LKF_REFRESH_INODE	0x01 /* update stale inode from item */
+
 struct scoutfs_lock {
 	struct super_block *sb;
 	struct scoutfs_lock_name lock_name;
@@ -26,6 +28,7 @@ struct scoutfs_lock {
 	struct ocfs2_lock_res lockres;
 };
 
+u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock);
 int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
 		       struct inode *inode, struct scoutfs_lock **ret_lock);
 int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,

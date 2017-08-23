@@ -235,7 +235,19 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	set_item_info(ci, cinode);
 }
 
-static int refresh_inode(struct inode *inode, struct scoutfs_lock *lock)
+/*
+ * Refresh the vfs inode fields if the lock indicates that the current
+ * contents could be stale.
+ *
+ * This can be racing with many lock holders of an inode.  A bunch of
+ * readers can be checking to refresh while one of them is refreshing.
+ *
+ * The vfs inode field updates can't be racing with valid readers of the
+ * fields because they should have already had a locked refreshed inode
+ * to be dereferencing its contents.
+ */
+int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
+			  int flags)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
@@ -243,15 +255,34 @@ static int refresh_inode(struct inode *inode, struct scoutfs_lock *lock)
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
 	SCOUTFS_DECLARE_KVEC(val);
+	const u64 refresh_gen = scoutfs_lock_refresh_gen(lock);
 	int ret;
+
+	/*
+	 * Lock refresh gens are supposed to strictly increase.  Inodes
+	 * having a greater gen means memory corruption or
+	 * lifetime/logic bugs that could stop the inode from refreshing
+	 * and expose stale data.
+	 */
+	BUG_ON(atomic64_read(&si->last_refreshed) > refresh_gen);
+
+	if (atomic64_read(&si->last_refreshed) == refresh_gen)
+		return 0;
 
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
 	mutex_lock(&si->item_mutex);
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), lock->end);
-	if (ret == 0)
-		load_inode(inode, &sinode);
+	if (atomic64_read(&si->last_refreshed) < refresh_gen) {
+		ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode),
+						lock->end);
+		if (ret == 0) {
+			load_inode(inode, &sinode);
+			atomic64_set(&si->last_refreshed, refresh_gen);
+		}
+	} else {
+		ret = 0;
+	}
 	mutex_unlock(&si->item_mutex);
 
 	return ret;
@@ -279,7 +310,7 @@ static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	if (ret)
 		return ret;
 
-	ret = refresh_inode(inode, lock);
+	ret = scoutfs_inode_refresh(inode, lock, 0);
 	if (ret == 0)
 		generic_fillattr(inode, stat);
 
@@ -404,7 +435,10 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 	}
 
 	if (inode->i_state & I_NEW) {
-		ret = refresh_inode(inode, lock);
+		/* XXX ensure refresh, instead clear in drop_inode? */
+		atomic64_set(&SCOUTFS_I(inode)->last_refreshed, 0);
+
+		ret = scoutfs_inode_refresh(inode, lock, 0);
 		if (ret) {
 			iget_failed(inode);
 			inode = ERR_PTR(ret);
@@ -771,7 +805,8 @@ out:
  * creating links to it and updating it.  @dir can be null.
  */
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
-				umode_t mode, dev_t rdev)
+				umode_t mode, dev_t rdev,
+				struct scoutfs_lock *lock)
 {
 	struct scoutfs_inode_info *ci;
 	struct scoutfs_inode_key ikey;
@@ -797,6 +832,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->data_version = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->have_item = false;
+	atomic64_set(&ci->last_refreshed, scoutfs_lock_refresh_gen(lock));
 
 	inode->i_ino = ino; /* XXX overflow */
 	inode_init_owner(inode, dir, mode);

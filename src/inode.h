@@ -3,6 +3,8 @@
 
 #include "key.h"
 
+struct scoutfs_lock;
+
 struct scoutfs_inode_info {
 	/* read or initialized for each inode instance */
 	u64 ino;
@@ -24,6 +26,9 @@ struct scoutfs_inode_info {
 	struct timespec item_mtime;
 	u64 item_meta_seq;
 	u64 item_data_seq;
+
+	/* updated at on each new lock acquisition */
+	atomic64_t last_refreshed;
 
 	/* initialized once for slab object */
 	seqcount_t seqcount;
@@ -58,13 +63,17 @@ int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end);
 void scoutfs_update_inode_item(struct inode *inode);
 void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
-				umode_t mode, dev_t rdev);
+				umode_t mode, dev_t rdev,
+				struct scoutfs_lock *lock);
 void scoutfs_inode_set_meta_seq(struct inode *inode);
 void scoutfs_inode_set_data_seq(struct inode *inode);
 void scoutfs_inode_inc_data_version(struct inode *inode);
 u64 scoutfs_inode_meta_seq(struct inode *inode);
 u64 scoutfs_inode_data_seq(struct inode *inode);
 u64 scoutfs_inode_data_version(struct inode *inode);
+
+int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
+			  int flags);
 
 int scoutfs_scan_orphans(struct super_block *sb);
 

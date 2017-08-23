@@ -509,7 +509,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (ret)
 		goto out_unlock;
 
-	inode = scoutfs_new_inode(sb, dir, mode, rdev);
+	inode = scoutfs_new_inode(sb, dir, mode, rdev, dir_lock);
 	if (IS_ERR(inode)) {
 		ret = PTR_ERR(inode);
 		goto out;
@@ -881,7 +881,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out_unlock;
 
-	inode = scoutfs_new_inode(sb, dir, S_IFLNK|S_IRWXUGO, 0);
+	inode = scoutfs_new_inode(sb, dir, S_IFLNK|S_IRWXUGO, 0, dir_lock);
 	if (IS_ERR(inode)) {
 		ret = PTR_ERR(inode);
 		goto out;

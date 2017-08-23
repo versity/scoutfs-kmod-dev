@@ -137,6 +137,33 @@ struct ocfs2_lock_res {
 #endif
 };
 
+struct ocfs2_super
+{
+	struct ocfs2_cluster_connection *cconn;
+	struct ocfs2_dlm_debug *osb_dlm_debug;
+	struct dentry *osb_debug_root;
+
+	/* Downconvert thread */
+	spinlock_t dc_task_lock;
+	struct task_struct *dc_task;
+	wait_queue_head_t dc_event;
+	unsigned long dc_wake_sequence;
+	unsigned long dc_work_sequence;
+
+	/*
+	 * Any thread can add locks to the list, but the downconvert
+	 * thread is the only one allowed to remove locks. Any change
+	 * to this rule requires updating
+	 * ocfs2_downconvert_thread_do_work().
+	 */
+	struct list_head blocked_lock_list;
+	unsigned long blocked_lock_count;
+
+	unsigned long s_mount_opt;
+};
+/* For s_mount_opt */
+#define OCFS2_MOUNT_NOINTR (1 << 2)
+
 #if 0
 #include "dcache.h"
 

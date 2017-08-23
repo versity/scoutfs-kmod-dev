@@ -27,6 +27,113 @@
 #ifndef DLMGLUE_H
 #define DLMGLUE_H
 
+enum ocfs2_ast_action {
+	OCFS2_AST_INVALID = 0,
+	OCFS2_AST_ATTACH,
+	OCFS2_AST_CONVERT,
+	OCFS2_AST_DOWNCONVERT,
+};
+
+/* actions for an unlockast function to take. */
+enum ocfs2_unlock_action {
+	OCFS2_UNLOCK_INVALID = 0,
+	OCFS2_UNLOCK_CANCEL_CONVERT,
+	OCFS2_UNLOCK_DROP_LOCK,
+};
+
+/* ocfs2_lock_res->l_flags flags. */
+#define OCFS2_LOCK_ATTACHED      (0x00000001) /* we have initialized
+					       * the lvb */
+#define OCFS2_LOCK_BUSY          (0x00000002) /* we are currently in
+					       * dlm_lock */
+#define OCFS2_LOCK_BLOCKED       (0x00000004) /* blocked waiting to
+					       * downconvert*/
+#define OCFS2_LOCK_LOCAL         (0x00000008) /* newly created inode */
+#define OCFS2_LOCK_NEEDS_REFRESH (0x00000010)
+#define OCFS2_LOCK_REFRESHING    (0x00000020)
+#define OCFS2_LOCK_INITIALIZED   (0x00000040) /* track initialization
+					       * for shutdown paths */
+#define OCFS2_LOCK_FREEING       (0x00000080) /* help dlmglue track
+					       * when to skip queueing
+					       * a lock because it's
+					       * about to be
+					       * dropped. */
+#define OCFS2_LOCK_QUEUED        (0x00000100) /* queued for downconvert */
+#define OCFS2_LOCK_NOCACHE       (0x00000200) /* don't use a holder count */
+#define OCFS2_LOCK_PENDING       (0x00000400) /* This lockres is pending a
+						 call to dlm_lock.  Only
+						 exists with BUSY set. */
+#define OCFS2_LOCK_UPCONVERT_FINISHING (0x00000800) /* blocks the dc thread
+						     * from downconverting
+						     * before the upconvert
+						     * has completed */
+
+#define OCFS2_LOCK_NONBLOCK_FINISHED (0x00001000) /* NONBLOCK cluster
+						   * lock has already
+						   * returned, do not block
+						   * dc thread from
+						   * downconverting */
+
+struct ocfs2_lock_res_ops;
+
+typedef void (*ocfs2_lock_callback)(int status, unsigned long data);
+
+#ifdef CONFIG_OCFS2_FS_STATS
+struct ocfs2_lock_stats {
+	u64		ls_total;	/* Total wait in NSEC */
+	u32		ls_gets;	/* Num acquires */
+	u32		ls_fail;	/* Num failed acquires */
+
+	/* Storing max wait in usecs saves 24 bytes per inode */
+	u32		ls_max;		/* Max wait in USEC */
+};
+#endif
+
+struct ocfs2_lock_res {
+	void                    *l_priv;
+	struct ocfs2_lock_res_ops *l_ops;
+
+
+	struct list_head         l_blocked_list;
+	struct list_head         l_mask_waiters;
+	struct list_head	 l_holders;
+
+	unsigned long		 l_flags;
+	char                     l_name[OCFS2_LOCK_ID_MAX_LEN];
+	unsigned int             l_ro_holders;
+	unsigned int             l_ex_holders;
+	signed char		 l_level;
+	signed char		 l_requested;
+	signed char		 l_blocking;
+
+	/* Data packed - type enum ocfs2_lock_type */
+	unsigned char            l_type;
+
+	/* used from AST/BAST funcs. */
+	/* Data packed - enum type ocfs2_ast_action */
+	unsigned char            l_action;
+	/* Data packed - enum type ocfs2_unlock_action */
+	unsigned char            l_unlock_action;
+	unsigned int             l_pending_gen;
+
+	spinlock_t               l_lock;
+
+	struct ocfs2_dlm_lksb    l_lksb;
+
+	wait_queue_head_t        l_event;
+
+	struct list_head         l_debug_list;
+
+#ifdef CONFIG_OCFS2_FS_STATS
+	struct ocfs2_lock_stats  l_lock_prmode;		/* PR mode stats */
+	u32                      l_lock_refresh;	/* Disk refreshes */
+	struct ocfs2_lock_stats  l_lock_exmode;		/* EX mode stats */
+#endif
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct lockdep_map	 l_lockdep_map;
+#endif
+};
+
 #if 0
 #include "dcache.h"
 

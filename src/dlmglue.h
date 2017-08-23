@@ -27,6 +27,9 @@
 #ifndef DLMGLUE_H
 #define DLMGLUE_H
 
+/* Max length of lockid name */
+#define OCFS2_LOCK_ID_MAX_LEN  32
+
 enum ocfs2_ast_action {
 	OCFS2_AST_INVALID = 0,
 	OCFS2_AST_ATTACH,

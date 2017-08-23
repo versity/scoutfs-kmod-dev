@@ -389,7 +389,8 @@ static void ocfs2_schedule_blocked_lock(struct ocfs2_super *osb,
 					struct ocfs2_lock_res *lockres);
 static inline void ocfs2_recover_from_dlm_error(struct ocfs2_lock_res *lockres,
 						int convert);
-#define ocfs2_log_dlm_error(_func, _err, _lockres) do {					\
+#if 0
+#define ocfs2_log_dlm_error(_func, _err, _lockres) do {			\
 	if ((_lockres)->l_type != OCFS2_LOCK_TYPE_DENTRY)				\
 		mlog(ML_ERROR, "DLM error %d while calling %s on resource %s\n",	\
 		     _err, _func, _lockres->l_name);					\
@@ -398,6 +399,13 @@ static inline void ocfs2_recover_from_dlm_error(struct ocfs2_lock_res *lockres,
 		     _err, _func, OCFS2_DENTRY_LOCK_INO_START - 1, (_lockres)->l_name,	\
 		     (unsigned int)ocfs2_get_dentry_lock_ino(_lockres));		\
 } while (0)
+#endif
+#define ocfs2_log_dlm_error(_func, _err, _lockres) do {			\
+	mlog(ML_ERROR, "DLM error %d while calling %s on resource %.*s%08x\n",	\
+	     _err, _func, OCFS2_DENTRY_LOCK_INO_START - 1, (_lockres)->l_name,	\
+	     (unsigned int)ocfs2_get_dentry_lock_ino(_lockres));		\
+} while (0)
+
 static int ocfs2_downconvert_thread(void *arg);
 static void ocfs2_downconvert_on_unlock(struct ocfs2_super *osb,
 					struct ocfs2_lock_res *lockres);
@@ -2957,11 +2965,13 @@ static int ocfs2_dlm_seq_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "0x%x\t", OCFS2_DLM_DEBUG_STR_VERSION);
 
+#if 0
 	if (lockres->l_type == OCFS2_LOCK_TYPE_DENTRY)
 		seq_printf(m, "%.*s%08x\t", OCFS2_DENTRY_LOCK_INO_START - 1,
 			   lockres->l_name,
 			   (unsigned int)ocfs2_get_dentry_lock_ino(lockres));
 	else
+#endif
 		seq_printf(m, "%.*s\t", OCFS2_LOCK_ID_MAX_LEN, lockres->l_name);
 
 	seq_printf(m, "%d\t"

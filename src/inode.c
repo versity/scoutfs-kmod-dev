@@ -306,15 +306,12 @@ static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	struct scoutfs_lock *lock = NULL;
 	int ret;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &lock);
-	if (ret)
-		return ret;
-
-	ret = scoutfs_inode_refresh(inode, lock, 0);
-	if (ret == 0)
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &lock);
+	if (ret == 0) {
 		generic_fillattr(inode, stat);
-
-	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+		scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+	}
 	return ret;
 }
 

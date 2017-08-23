@@ -109,9 +109,6 @@ struct ocfs2_lock_res {
 	signed char		 l_requested;
 	signed char		 l_blocking;
 
-	/* Data packed - type enum ocfs2_lock_type */
-	unsigned char            l_type;
-
 	/* used from AST/BAST funcs. */
 	/* Data packed - enum type ocfs2_ast_action */
 	unsigned char            l_action;
@@ -238,12 +235,11 @@ int ocfs2_dlm_init(struct ocfs2_super *osb);
 void ocfs2_dlm_shutdown(struct ocfs2_super *osb, int hangup_pending);
 #endif
 void ocfs2_lock_res_init_once(struct ocfs2_lock_res *res);
+#if 0
 void ocfs2_inode_lock_res_init(struct ocfs2_lock_res *res,
 			       enum ocfs2_lock_type type,
 			       unsigned int generation,
 			       struct inode *inode);
-
-#if 0
 void ocfs2_dentry_lock_res_init(struct ocfs2_dentry_lock *dl,
 				u64 parent, struct inode *inode);
 struct ocfs2_file_private;

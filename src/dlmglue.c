@@ -536,11 +536,9 @@ static inline void ocfs2_init_start_time(struct ocfs2_mask_waiter *mw)
 
 static void ocfs2_lock_res_init_common(struct ocfs2_super *osb,
 				       struct ocfs2_lock_res *res,
-				       enum ocfs2_lock_type type,
 				       struct ocfs2_lock_res_ops *ops,
 				       void *priv)
 {
-	res->l_type          = type;
 	res->l_ops           = ops;
 	res->l_priv          = priv;
 
@@ -3434,10 +3432,10 @@ static unsigned int ocfs2_prepare_downconvert(struct ocfs2_lock_res *lockres,
 
 	if (lockres->l_level <= new_level) {
 		mlog(ML_ERROR, "lockres %s, lvl %d <= %d, blcklst %d, mask %d, "
-		     "type %d, flags 0x%lx, hold %d %d, act %d %d, req %d, "
+		     "flags 0x%lx, hold %d %d, act %d %d, req %d, "
 		     "block %d, pgen %d\n", lockres->l_name, lockres->l_level,
 		     new_level, list_empty(&lockres->l_blocked_list),
-		     list_empty(&lockres->l_mask_waiters), lockres->l_type,
+		     list_empty(&lockres->l_mask_waiters),
 		     lockres->l_flags, lockres->l_ro_holders,
 		     lockres->l_ex_holders, lockres->l_action,
 		     lockres->l_unlock_action, lockres->l_requested,

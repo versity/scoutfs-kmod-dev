@@ -36,6 +36,8 @@
 #include <linux/sched.h>
 #include <linux/dlm.h>
 
+#include "dlmglue.h"
+
 #define mlog(mask, fmt, args...) printk(KERN_INFO fmt , ##args)
 #define mlog_errno(st) do {						\
 	int _st = (st);							\

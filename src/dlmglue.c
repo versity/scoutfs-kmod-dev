@@ -34,6 +34,7 @@
 #include <linux/time.h>
 #include <linux/quotaops.h>
 #include <linux/sched.h>
+#include <linux/dlm.h>
 
 #define mlog(mask, fmt, args...) printk(KERN_INFO fmt , ##args)
 #define mlog_errno(st) do {						\

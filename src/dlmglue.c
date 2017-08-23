@@ -1119,9 +1119,13 @@ static void ocfs2_blocking_ast(struct ocfs2_dlm_lksb *lksb, int level)
 
 	BUG_ON(level <= DLM_LOCK_NL);
 
+#if 0
 	mlog(ML_BASTS, "BAST fired for lockres %s, blocking %d, level %d, "
 	     "type %s\n", lockres->l_name, level, lockres->l_level,
 	     ocfs2_lock_type_string(lockres->l_type));
+#endif
+	mlog(ML_BASTS, "BAST fired for lockres %s, blocking %d, level %d\n",
+	     lockres->l_name, level, lockres->l_level);
 
 	/*
 	 * We can skip the bast for locks which don't enable caching -

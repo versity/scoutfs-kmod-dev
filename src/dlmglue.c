@@ -114,8 +114,10 @@ struct ocfs2_unblock_ctl {
 	enum ocfs2_unblock_action unblock_action;
 };
 
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
 /* Lockdep class keys */
 struct lock_class_key lockdep_keys[OCFS2_NUM_LOCK_TYPES];
+#endif
 
 #if 0
 static int ocfs2_check_meta_downconvert(struct ocfs2_lock_res *lockres,

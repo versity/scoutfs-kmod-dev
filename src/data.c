@@ -1187,8 +1187,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	/* XXX overkill? */
 	mutex_lock(&inode->i_mutex);
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
-				     &inode_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &inode_lock);
 	if (ret)
 		goto out;
 

@@ -26,8 +26,10 @@ struct scoutfs_lock {
 	struct ocfs2_lock_res lockres;
 };
 
-int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
-			   struct scoutfs_lock **ret_lock);
+int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
+		       struct inode *inode, struct scoutfs_lock **ret_lock);
+int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
+		     struct scoutfs_lock **ret_lock);
 int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock);

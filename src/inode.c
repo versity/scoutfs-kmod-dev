@@ -275,8 +275,7 @@ static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	struct scoutfs_lock *lock = NULL;
 	int ret;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
-				     &lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &lock);
 	if (ret)
 		return ret;
 
@@ -393,7 +392,7 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 	struct scoutfs_lock *lock = NULL;
 	int ret;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, ino, &lock);
+	ret = scoutfs_lock_ino(sb, DLM_LOCK_PR, 0, ino, &lock);
 	if (ret)
 		return ERR_PTR(ret);
 

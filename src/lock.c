@@ -23,6 +23,7 @@
 #include "msg.h"
 #include "cmp.h"
 #include "dlmglue.h"
+#include "inode.h"
 
 #define LN_FMT "%u.%u.%llu.%llu"
 #define LN_ARG(name) \
@@ -478,8 +479,8 @@ out:
 #endif
 }
 
-int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
-			   struct scoutfs_lock **ret_lock)
+int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
+		     struct scoutfs_lock **ret_lock)
 {
 	struct scoutfs_lock_name lock_name;
 	struct scoutfs_inode_key start_ikey;
@@ -506,6 +507,12 @@ int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
 
 	return lock_name_keys(sb, mode, &lock_name, &scoufs_ino_lops, &start,
 			      &end, ret_lock);
+}
+
+int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
+		       struct inode *inode, struct scoutfs_lock **ret_lock)
+{
+	return scoutfs_lock_ino(sb, mode, flags, scoutfs_ino(inode), ret_lock);
 }
 
 /*

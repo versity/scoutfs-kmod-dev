@@ -259,8 +259,7 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(dir),
-				     &dir_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, dir, &dir_lock);
 	if (ret)
 		goto out;
 
@@ -350,8 +349,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	if (!dir_emit_dots(file, dirent, filldir))
 		return 0;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
-				     &dir_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &dir_lock);
 	if (ret)
 		return ret;
 
@@ -502,8 +500,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (ret)
 		return ret;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
-				     &dir_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, dir, &dir_lock);
 	if (ret)
 		return ret;
 
@@ -519,8 +516,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	}
 
 	/* Now that we have ino from scoutfs_new_inode, allocate a lock */
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
-				     &inode_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, inode, &inode_lock);
 	if (ret)
 		goto out;
 
@@ -578,13 +574,11 @@ static int scoutfs_link(struct dentry *old_dentry,
 	if (inode->i_nlink >= SCOUTFS_LINK_MAX)
 		return -EMLINK;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
-				     &dir_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, dir, &dir_lock);
 	if (ret)
 		return ret;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
-				     &inode_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, inode, &inode_lock);
 	if (ret)
 		goto out_unlock;
 
@@ -640,13 +634,11 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (S_ISDIR(inode->i_mode) && i_size_read(inode))
 		return -ENOTEMPTY;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
-				     &dir_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, dir, &dir_lock);
 	if (ret)
 		return ret;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
-				     &inode_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, inode, &inode_lock);
 	if (ret)
 		goto out;
 
@@ -812,8 +804,7 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	if (size > PATH_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_PR, scoutfs_ino(inode),
-				     &inode_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &inode_lock);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -881,8 +872,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		return ret;
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(dir),
-				     &dir_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, dir, &dir_lock);
 	if (ret)
 		return ret;
 
@@ -897,8 +887,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
-	ret = scoutfs_lock_ino_group(sb, DLM_LOCK_EX, scoutfs_ino(inode),
-				     &inode_lock);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, inode, &inode_lock);
 	if (ret)
 		goto out;
 

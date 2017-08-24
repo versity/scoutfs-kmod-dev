@@ -19,6 +19,7 @@
 #include <linux/random.h>
 #include <linux/statfs.h>
 #include <linux/sched.h>
+#include <linux/debugfs.h>
 
 #include "super.h"
 #include "format.h"
@@ -42,6 +43,7 @@
 #include "scoutfs_trace.h"
 
 static struct kset *scoutfs_kset;
+static struct dentry *scoutfs_debugfs_root;
 
 /*
  * Ask the server for the current statfs fields.  The message is very
@@ -202,6 +204,24 @@ int scoutfs_read_supers(struct super_block *sb,
 	return 0;
 }
 
+static int scoutfs_debugfs_setup(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	char name[32];
+
+	/*
+	 * XXX: Move the name variable to sbi and use it in
+	 * init_lock_info as well.
+	 */
+	snprintf(name, 32, "%llx", le64_to_cpu(sbi->super.hdr.fsid));
+
+	sbi->debug_root = debugfs_create_dir(name, scoutfs_debugfs_root);
+	if (!sbi->debug_root)
+		return -ENOMEM;
+
+	return 0;
+}
+
 static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct scoutfs_sb_info *sbi;
@@ -247,6 +267,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	ret = scoutfs_setup_counters(sb) ?:
 	      scoutfs_read_supers(sb, &SCOUTFS_SB(sb)->super) ?:
+	      scoutfs_debugfs_setup(sb) ?:
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
 	      scoutfs_inode_setup(sb) ?:
@@ -330,6 +351,7 @@ static void scoutfs_kill_sb(struct super_block *sb)
 		scoutfs_inode_destroy(sb);
 		scoutfs_item_destroy(sb);
 		scoutfs_seg_destroy(sb);
+		debugfs_remove(sbi->debug_root);
 		scoutfs_destroy_counters(sb);
 		if (sbi->kset)
 			kset_unregister(sbi->kset);
@@ -349,6 +371,7 @@ MODULE_ALIAS_FS("scoutfs");
 /* safe to call at any failure point in _init */
 static void teardown_module(void)
 {
+	debugfs_remove(scoutfs_debugfs_root);
 	scoutfs_dir_exit();
 	scoutfs_inode_exit();
 	if (scoutfs_kset)
@@ -374,10 +397,16 @@ static int __init scoutfs_module_init(void)
 	if (!scoutfs_kset)
 		return -ENOMEM;
 
+	scoutfs_debugfs_root = debugfs_create_dir("scoutfs", NULL);
+	if (!scoutfs_debugfs_root) {
+		ret = -ENOMEM;
+		goto out;
+	}
 	ret = scoutfs_inode_init() ?:
 	      scoutfs_dir_init() ?:
 	      scoutfs_xattr_init() ?:
 	      register_filesystem(&scoutfs_fs_type);
+out:
 	if (ret)
 		teardown_module();
 	return ret;

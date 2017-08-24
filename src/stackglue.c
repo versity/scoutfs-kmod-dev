@@ -194,7 +194,29 @@ int ocfs2_plock(struct ocfs2_cluster_connection *conn, u64 ino,
 	return user_plock(conn, ino, file, cmd, fl);
 }
 
-static struct dlm_lockspace_ops *ocfs2_ls_ops = NULL;
+static void user_recover_prep(void *arg)
+{
+	/* XXX: Set FS in recovery here */
+}
+
+static void user_recover_slot(void *arg, struct dlm_slot *slot)
+{
+	printk(KERN_INFO "scoutfs: Node %d/%d down. Initiating recovery.\n",
+			slot->nodeid, slot->slot);
+}
+
+static void user_recover_done(void *arg, struct dlm_slot *slots,
+		int num_slots, int our_slot,
+		uint32_t generation)
+{
+	/* XXX: Do actual fs recovery here */
+}
+
+static const struct dlm_lockspace_ops ocfs2_ls_ops = {
+	.recover_prep = user_recover_prep,
+	.recover_slot = user_recover_slot,
+	.recover_done = user_recover_done,
+};
 
 static int user_cluster_connect(struct ocfs2_cluster_connection *conn)
 {
@@ -218,7 +240,7 @@ static int user_cluster_connect(struct ocfs2_cluster_connection *conn)
 
 	rc = dlm_new_lockspace(conn->cc_name, conn->cc_cluster_name,
 			       DLM_LSFL_FS | DLM_LSFL_NEWEXCL, DLM_LVB_LEN,
-			       ocfs2_ls_ops, conn, &ops_rv, &fsdlm);
+			       &ocfs2_ls_ops, conn, &ops_rv, &fsdlm);
 	if (rc) {
 		if (rc == -EEXIST || rc == -EPROTO)
 			printk(KERN_ERR "scoutfs: Unable to create the "

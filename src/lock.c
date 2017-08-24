@@ -22,18 +22,22 @@
 #include "scoutfs_trace.h"
 #include "msg.h"
 #include "cmp.h"
+#include "dlmglue.h"
 
 #define LN_FMT "%u.%u.%llu.%llu"
 #define LN_ARG(name) \
 	(name)->zone, (name)->type, le64_to_cpu((name)->first), \
 	le64_to_cpu((name)->second)
 
+typedef struct ocfs2_super dlmglue_ctxt;
+
 /*
  * allocated per-super, freed on unmount.
  */
 struct lock_info {
 	struct super_block *sb;
-	dlm_lockspace_t *ls;
+	dlmglue_ctxt dlmglue;
+	bool dlmglue_online;
 	char ls_name[DLM_LOCKSPACE_LEN];
 	bool shutdown;
 	struct list_head id_head;
@@ -394,8 +398,9 @@ check_lock_state:
 	lock->holders++;
 	spin_unlock(&linfo->lock);
 
-	ret = dlm_lock(linfo->ls, mode, &lock->lksb, DLM_LKF_NOORDER,
-		       &lock->lock_name, sizeof(struct scoutfs_lock_name),
+	ret = dlm_lock(linfo->dlmglue.cconn->cc_lockspace, mode, &lock->lksb,
+		       DLM_LKF_NOORDER, &lock->lock_name,
+		       sizeof(struct scoutfs_lock_name),
 		       0, scoutfs_ast, lock, scoutfs_bast);
 	if (ret) {
 		scoutfs_err(sb, "Error %d locking "LN_FMT, ret,
@@ -533,7 +538,8 @@ static void unlock_range(struct super_block *sb, struct scoutfs_lock *lock)
 	spin_lock(&linfo->lock);
 	lock->rqmode = DLM_LOCK_IV;
 	spin_unlock(&linfo->lock);
-	ret = dlm_unlock(linfo->ls, lock->lksb.sb_lkid, 0, &lock->lksb, lock);
+	ret = dlm_unlock(linfo->dlmglue.cconn->cc_lockspace, lock->lksb.sb_lkid,
+			 0, &lock->lksb, lock);
 	if (ret) {
 		scoutfs_err(sb, "Error %d unlocking "LN_FMT, ret,
 			    LN_ARG(&lock->lock_name));
@@ -601,10 +607,15 @@ static int init_lock_info(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct lock_info *linfo;
+	int ret;
 
 	linfo = kzalloc(sizeof(struct lock_info), GFP_KERNEL);
 	if (!linfo)
 		return -ENOMEM;
+
+	ret = ocfs2_init_super(&linfo->dlmglue, 0);
+	if (ret)
+		goto out;
 
 	spin_lock_init(&linfo->lock);
 	init_waitqueue_head(&linfo->waitq);
@@ -615,7 +626,6 @@ static int init_lock_info(struct super_block *sb)
 	linfo->sb = sb;
 	linfo->shutdown = false;
 	INIT_LIST_HEAD(&linfo->id_head);
-	linfo->ls = NULL;
 
 	snprintf(linfo->ls_name, DLM_LOCKSPACE_LEN, "%llx",
 		 le64_to_cpu(sbi->super.hdr.fsid));
@@ -624,6 +634,9 @@ static int init_lock_info(struct super_block *sb)
 
 	trace_printk("sb %p id %016llx allocated linfo %p held %p\n",
 		     sb, le64_to_cpu(sbi->super.id), linfo, linfo);
+out:
+	if (ret)
+		kfree(linfo);
 
 	return 0;
 }
@@ -651,17 +664,14 @@ void scoutfs_lock_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_LOCK_INFO(sb, linfo);
-	int ret;
 
 	if (linfo) {
 		if (linfo->downconvert_wq)
 			destroy_workqueue(linfo->downconvert_wq);
 		unregister_shrinker(&linfo->shrinker);
-		if (linfo->ls) {
-			ret = dlm_release_lockspace(linfo->ls, 2);
-			if (ret)
-				scoutfs_info(sb, "Error %d releasing lockspace %s\n",
-					     ret, linfo->ls_name);
+		if (linfo->dlmglue_online) {
+			ocfs2_dlm_shutdown(&linfo->dlmglue, 0);
+			ocfs2_uninit_super(&linfo->dlmglue);
 		}
 
 		free_lock_tree(sb);
@@ -684,23 +694,22 @@ int scoutfs_lock_setup(struct super_block *sb)
 	ret = init_lock_info(sb);
 	if (ret)
 		return ret;
-
 	linfo = sbi->lock_info;
+
 	linfo->downconvert_wq = alloc_workqueue("scoutfs_dc",
 					       WQ_UNBOUND|WQ_HIGHPRI, 0);
 	if (!linfo->downconvert_wq) {
-		kfree(linfo);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out;
 	}
 
-	/*
-	 * Open coded '64' here is for lvb_len. We never use the LVB
-	 * flag so this doesn't matter, but the dlm needs a non-zero
-	 * multiple of 8
-	 */
-	ret = dlm_new_lockspace(linfo->ls_name, sbi->opts.cluster_name,
-				DLM_LSFL_FS|DLM_LSFL_NEWEXCL, 64, NULL,
-				NULL, NULL, &linfo->ls);
+	ret = ocfs2_dlm_init(&linfo->dlmglue, "null", sbi->opts.cluster_name,
+			     linfo->ls_name, sbi->debug_root);
+	if (ret)
+		goto out;
+	linfo->dlmglue_online = true;
+
+out:
 	if (ret)
 		scoutfs_lock_destroy(sb);
 

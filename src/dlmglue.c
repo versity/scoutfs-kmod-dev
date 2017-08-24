@@ -1247,7 +1247,6 @@ static void ocfs2_unlock_ast(struct ocfs2_dlm_lksb *lksb, int error)
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
 }
 
-#if 0
 /*
  * This is the filesystem locking protocol.  It provides the lock handling
  * hooks for the underlying DLM.  It has a maximum version number.
@@ -1272,15 +1271,18 @@ static void ocfs2_unlock_ast(struct ocfs2_dlm_lksb *lksb, int error)
  * updated.
  */
 static struct ocfs2_locking_protocol lproto = {
+#if 0
 	.lp_max_version = {
 		.pv_major = OCFS2_LOCKING_PROTOCOL_MAJOR,
 		.pv_minor = OCFS2_LOCKING_PROTOCOL_MINOR,
 	},
+#endif
 	.lp_lock_ast		= ocfs2_locking_ast,
 	.lp_blocking_ast	= ocfs2_blocking_ast,
 	.lp_unlock_ast		= ocfs2_unlock_ast,
 };
 
+#if 0
 void ocfs2_set_locking_protocol(void)
 {
 	ocfs2_stack_glue_set_max_proto_version(&lproto.lp_max_version);
@@ -3093,14 +3095,15 @@ static const struct file_operations ocfs2_dlm_debug_fops = {
 	.llseek =	seq_lseek,
 };
 
-static int ocfs2_dlm_init_debug(struct ocfs2_super *osb)
+static int ocfs2_dlm_init_debug(struct ocfs2_super *osb,
+				struct dentry *debug_root)
 {
 	int ret = 0;
 	struct ocfs2_dlm_debug *dlm_debug = osb->osb_dlm_debug;
 
 	dlm_debug->d_locking_state = debugfs_create_file("locking_state",
 							 S_IFREG|S_IRUSR,
-							 osb->osb_debug_root,
+							 debug_root,
 							 osb,
 							 &ocfs2_dlm_debug_fops);
 	if (!dlm_debug->d_locking_state) {
@@ -3125,26 +3128,32 @@ static void ocfs2_dlm_shutdown_debug(struct ocfs2_super *osb)
 	}
 }
 
-#if 0
-int ocfs2_dlm_init(struct ocfs2_super *osb)
+static void ocfs2_do_node_down(int node_num, void *data)
+{
+}
+
+int ocfs2_dlm_init(struct ocfs2_super *osb, char *cluster_stack,
+		   char *cluster_name, char *ls_name, struct dentry *debug_root)
 {
 	int status = 0;
 	struct ocfs2_cluster_connection *conn = NULL;
 
+#if 0
 	if (ocfs2_mount_local(osb)) {
 		osb->node_num = 0;
 		goto local;
 	}
+#endif
 
-	status = ocfs2_dlm_init_debug(osb);
+	status = ocfs2_dlm_init_debug(osb, debug_root);
 	if (status < 0) {
 		mlog_errno(status);
 		goto bail;
 	}
 
 	/* launch downconvert thread */
-	osb->dc_task = kthread_run(ocfs2_downconvert_thread, osb, "ocfs2dc-%s",
-			osb->uuid_str);
+	osb->dc_task = kthread_run(ocfs2_downconvert_thread, osb, "scoutdc-%s",
+				   ls_name);
 	if (IS_ERR(osb->dc_task)) {
 		status = PTR_ERR(osb->dc_task);
 		osb->dc_task = NULL;
@@ -3153,11 +3162,11 @@ int ocfs2_dlm_init(struct ocfs2_super *osb)
 	}
 
 	/* for now, uuid == domain */
-	status = ocfs2_cluster_connect(osb->osb_cluster_stack,
-				       osb->osb_cluster_name,
-				       strlen(osb->osb_cluster_name),
-				       osb->uuid_str,
-				       strlen(osb->uuid_str),
+	status = ocfs2_cluster_connect(cluster_stack,
+				       cluster_name,
+				       strlen(cluster_name),
+				       ls_name,
+				       strlen(ls_name),
 				       &lproto, ocfs2_do_node_down, osb,
 				       &conn);
 	if (status) {
@@ -3165,6 +3174,7 @@ int ocfs2_dlm_init(struct ocfs2_super *osb)
 		goto bail;
 	}
 
+#if 0
 	status = ocfs2_cluster_this_node(conn, &osb->node_num);
 	if (status < 0) {
 		mlog_errno(status);
@@ -3179,7 +3189,7 @@ local:
 	ocfs2_rename_lock_res_init(&osb->osb_rename_lockres, osb);
 	ocfs2_nfs_sync_lock_res_init(&osb->osb_nfs_sync_lockres, osb);
 	ocfs2_orphan_scan_lock_res_init(&osb->osb_orphan_scan.os_lockres, osb);
-
+#endif
 	osb->cconn = conn;
 bail:
 	if (status < 0) {
@@ -3194,7 +3204,7 @@ bail:
 void ocfs2_dlm_shutdown(struct ocfs2_super *osb,
 			int hangup_pending)
 {
-	ocfs2_drop_osb_locks(osb);
+//	ocfs2_drop_osb_locks(osb);
 
 	/*
 	 * Now that we have dropped all locks and ocfs2_dismount_volume()
@@ -3207,17 +3217,18 @@ void ocfs2_dlm_shutdown(struct ocfs2_super *osb,
 		osb->dc_task = NULL;
 	}
 
+#if 0
 	ocfs2_lock_res_free(&osb->osb_super_lockres);
 	ocfs2_lock_res_free(&osb->osb_rename_lockres);
 	ocfs2_lock_res_free(&osb->osb_nfs_sync_lockres);
 	ocfs2_lock_res_free(&osb->osb_orphan_scan.os_lockres);
+#endif
 
 	ocfs2_cluster_disconnect(osb->cconn, hangup_pending);
 	osb->cconn = NULL;
 
 	ocfs2_dlm_shutdown_debug(osb);
 }
-#endif
 
 static int ocfs2_drop_lock(struct ocfs2_super *osb,
 			   struct ocfs2_lock_res *lockres)

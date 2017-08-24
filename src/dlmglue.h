@@ -142,11 +142,14 @@ struct ocfs2_dlm_debug {
 	struct list_head d_lockres_tracking;
 };
 
+/* The cluster stack fields */
+#define OCFS2_STACK_LABEL_LEN		4
+#define OCFS2_CLUSTER_NAME_LEN		16
+
 struct ocfs2_super
 {
 	struct ocfs2_cluster_connection *cconn;
 	struct ocfs2_dlm_debug *osb_dlm_debug;
-	struct dentry *osb_debug_root;
 
 	/* Downconvert thread */
 	spinlock_t dc_task_lock;
@@ -238,10 +241,9 @@ enum {
 	OI_LS_REFLINK_TARGET,
 };
 
-#if 0
-int ocfs2_dlm_init(struct ocfs2_super *osb);
+int ocfs2_dlm_init(struct ocfs2_super *osb, char *cluster_stack,
+		   char *cluster_name, char *ls_name, struct dentry *debug_root);
 void ocfs2_dlm_shutdown(struct ocfs2_super *osb, int hangup_pending);
-#endif
 void ocfs2_lock_res_init_once(struct ocfs2_lock_res *res);
 #if 0
 void ocfs2_inode_lock_res_init(struct ocfs2_lock_res *res,

@@ -458,7 +458,6 @@ static int get_manifest_refs(struct super_block *sb,
 			     struct scoutfs_key_buf *end,
 			     struct list_head *ref_list)
 {
-	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_manifest_btree_key *mkey;
 	struct scoutfs_manifest_entry ment;
 	SCOUTFS_BTREE_ITEM_REF(iref);
@@ -499,7 +498,7 @@ static int get_manifest_refs(struct super_block *sb,
 	 * cached items to their locks.
 	 */
 	mkey_len = init_btree_key(mkey, 1, 0, key);
-	for (i = 1; i < mani->nr_levels; i++) {
+	for (i = 1; ; i++) {
 		mkey->level = i;
 
 		/* XXX should use level counts to skip searches */

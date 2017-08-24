@@ -27,9 +27,10 @@
 #ifndef DLMGLUE_H
 #define DLMGLUE_H
 
+#include "stackglue.h"
+
 /* Max length of lockid name */
 #define OCFS2_LOCK_ID_MAX_LEN  32
-#define DLM_LVB_LEN  64
 
 enum ocfs2_ast_action {
 	OCFS2_AST_INVALID = 0,

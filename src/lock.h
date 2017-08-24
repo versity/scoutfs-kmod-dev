@@ -3,6 +3,7 @@
 
 #include <linux/dlm.h>
 #include "key.h"
+#include "dlmglue.h"
 
 #define	SCOUTFS_LOCK_BLOCKING	0x01 /* Blocking another lock request */
 #define	SCOUTFS_LOCK_QUEUED	0x02 /* Put on drop workqueue */
@@ -22,6 +23,7 @@ struct scoutfs_lock {
 	unsigned int holders; /* Tracks active users of this lock */
 	unsigned int flags;
 	struct work_struct dc_work;
+	struct ocfs2_lock_res lockres;
 };
 
 int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
@@ -29,7 +31,8 @@ int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
 int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock);
-void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock);
+void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
+		    int level);
 
 int scoutfs_lock_setup(struct super_block *sb);
 void scoutfs_lock_shutdown(struct super_block *sb);

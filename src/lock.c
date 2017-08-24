@@ -83,7 +83,12 @@ static int invalidate_caches(struct super_block *sb, int mode,
 
 static void free_scoutfs_lock(struct scoutfs_lock *lock)
 {
+	struct lock_info *linfo;
+
 	if (lock) {
+		linfo = SCOUTFS_SB(lock->sb)->lock_info;
+
+		ocfs2_simple_drop_lockres(&linfo->dlmglue, &lock->lockres);
 		scoutfs_key_free(lock->sb, lock->start);
 		scoutfs_key_free(lock->sb, lock->end);
 		kfree(lock);
@@ -113,12 +118,50 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 	}
 }
 
+static struct ocfs2_super *get_ino_lock_osb(struct ocfs2_lock_res *lockres)
+{
+	struct scoutfs_lock *lock = lockres->l_priv;
+	struct super_block *sb = lock->sb;
+	DECLARE_LOCK_INFO(sb, linfo);
+
+	return &linfo->dlmglue;
+}
+
+static int ino_lock_downconvert(struct ocfs2_lock_res *lockres, int blocking)
+{
+	struct scoutfs_lock *lock = lockres->l_priv;
+	struct super_block *sb = lock->sb;
+
+	invalidate_caches(sb, blocking, lock->start, lock->end);
+
+	return UNBLOCK_CONTINUE;
+}
+
+static struct ocfs2_lock_res_ops scoufs_ino_lops = {
+	.get_osb 		= get_ino_lock_osb,
+	.downconvert_worker 	= ino_lock_downconvert,
+	/* XXX: .post_unlock for lru */
+	/* XXX: .check_downconvert that queries the item cache for dirty items */
+	.flags			= LOCK_TYPE_REQUIRES_REFRESH,
+};
+
+static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
+	.get_osb 		= get_ino_lock_osb,
+	.downconvert_worker 	= ino_lock_downconvert,
+	/* XXX: .post_unlock for lru */
+	/* XXX: .check_downconvert that queries the item cache for dirty items */
+	.flags			= 0,
+};
+
 static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 					       struct scoutfs_lock_name *lock_name,
+					       struct ocfs2_lock_res_ops *type,
 					       struct scoutfs_key_buf *start,
 					       struct scoutfs_key_buf *end)
 
 {
+	DECLARE_LOCK_INFO(sb, linfo);
+//	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_lock *lock;
 
 	lock = kzalloc(sizeof(struct scoutfs_lock), GFP_NOFS);
@@ -135,6 +178,14 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 			lock->mode = DLM_LOCK_IV;
 			INIT_WORK(&lock->dc_work, scoutfs_downconvert_func);
 			INIT_LIST_HEAD(&lock->lru_entry);
+			ocfs2_lock_res_init_once(&lock->lockres);
+			BUG_ON(sizeof(struct scoutfs_lock_name) >=
+			       OCFS2_LOCK_ID_MAX_LEN);
+			/* kzalloc above ensures that l_name is NULL terminated */
+			memcpy(&lock->lockres.l_name[0], &lock->lock_name,
+			       sizeof(struct scoutfs_lock_name));
+			ocfs2_lock_res_init_common(&linfo->dlmglue,
+						   &lock->lockres, type, lock);
 		}
 	}
 
@@ -152,6 +203,7 @@ static int cmp_lock_names(struct scoutfs_lock_name *a,
 
 static struct scoutfs_lock *find_alloc_scoutfs_lock(struct super_block *sb,
 					struct scoutfs_lock_name *lock_name,
+					struct ocfs2_lock_res_ops *type,
 					struct scoutfs_key_buf *start,
 					struct scoutfs_key_buf *end)
 {
@@ -187,7 +239,8 @@ search:
 	if (!found) {
 		if (!new) {
 			spin_unlock(&linfo->lock);
-			new = alloc_scoutfs_lock(sb, lock_name, start, end);
+			new = alloc_scoutfs_lock(sb, lock_name, type, start,
+						 end);
 			if (!new)
 				return NULL;
 
@@ -349,6 +402,7 @@ static int lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lock)
  */
 static int lock_name_keys(struct super_block *sb, int mode,
 			 struct scoutfs_lock_name *lock_name,
+			 struct ocfs2_lock_res_ops *type,
 			 struct scoutfs_key_buf *start,
 			 struct scoutfs_key_buf *end,
 			 struct scoutfs_lock **ret_lock)
@@ -357,12 +411,20 @@ static int lock_name_keys(struct super_block *sb, int mode,
 	struct scoutfs_lock *lock;
 	int ret;
 
-	lock = find_alloc_scoutfs_lock(sb, lock_name, start, end);
+	lock = find_alloc_scoutfs_lock(sb, lock_name, type, start, end);
 	if (!lock)
 		return -ENOMEM;
 
 	trace_scoutfs_lock_resource(sb, lock);
 
+	ret = ocfs2_cluster_lock(&linfo->dlmglue, &lock->lockres, mode,
+				 DLM_LKF_NOORDER, 0);
+	if (ret)
+		return ret;
+
+	*ret_lock = lock;
+	return 0;
+#if 0
 check_lock_state:
 	spin_lock(&linfo->lock);
 	if (linfo->shutdown) {
@@ -413,6 +475,7 @@ check_lock_state:
 out:
 	*ret_lock = lock;
 	return 0;
+#endif
 }
 
 int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
@@ -441,7 +504,8 @@ int scoutfs_lock_ino_group(struct super_block *sb, int mode, u64 ino,
 	end_ikey.type = ~0;
 	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
 
-	return lock_name_keys(sb, mode, &lock_name, &start, &end, ret_lock);
+	return lock_name_keys(sb, mode, &lock_name, &scoufs_ino_lops, &start,
+			      &end, ret_lock);
 }
 
 /*
@@ -505,10 +569,12 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 	end_ikey.ino = cpu_to_be64(ino | ino_mask);
 	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
 
-	return lock_name_keys(sb, mode, &lock_name, &start, &end, ret_lock);
+	return lock_name_keys(sb, mode, &lock_name, &scoufs_ino_index_lops,
+			      &start, &end, ret_lock);
 }
 
-void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock)
+void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
+		    int level)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 
@@ -517,12 +583,15 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock)
 
 	trace_scoutfs_unlock(sb, lock);
 
+	ocfs2_cluster_unlock(&linfo->dlmglue, &lock->lockres, level);
+
+#if 0
 	spin_lock(&linfo->lock);
 	lock->holders--;
 	if (lock->holders == 0 && (lock->flags & SCOUTFS_LOCK_BLOCKING))
 		queue_blocking_work(linfo, lock);
 	spin_unlock(&linfo->lock);
-
+#endif
 	put_scoutfs_lock(sb, lock);
 }
 
@@ -666,6 +735,8 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	DECLARE_LOCK_INFO(sb, linfo);
 
 	if (linfo) {
+		free_lock_tree(sb); /* Do this before uninitializing the dlm. */
+
 		if (linfo->downconvert_wq)
 			destroy_workqueue(linfo->downconvert_wq);
 		unregister_shrinker(&linfo->shrinker);
@@ -673,8 +744,6 @@ void scoutfs_lock_destroy(struct super_block *sb)
 			ocfs2_dlm_shutdown(&linfo->dlmglue, 0);
 			ocfs2_uninit_super(&linfo->dlmglue);
 		}
-
-		free_lock_tree(sb);
 
 		sbi->lock_info = NULL;
 

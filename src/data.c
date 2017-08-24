@@ -1238,7 +1238,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		blk_off = ext.blk_off + ext.blocks;
 	}
 
-	scoutfs_unlock(sb, inode_lock);
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
 out:
 	mutex_unlock(&inode->i_mutex);
 

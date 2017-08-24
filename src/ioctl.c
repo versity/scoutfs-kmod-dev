@@ -132,7 +132,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 		if (ret == -ENOENT) {
 
-			scoutfs_unlock(sb, lock);
+			scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 			/*
 			 * XXX This will miss dirty items.  We'd need to
 			 * force writeouts of dirty items in our
@@ -181,7 +181,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		scoutfs_key_inc_cur_len(&key);
 	}
 
-	scoutfs_unlock(sb, lock);
+	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 
 out:
 	scoutfs_key_free(sb, next_key);

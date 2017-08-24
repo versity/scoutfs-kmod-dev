@@ -284,7 +284,7 @@ static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	if (ret == 0)
 		generic_fillattr(inode, stat);
 
-	scoutfs_unlock(sb, lock);
+	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 	return ret;
 }
 
@@ -416,7 +416,7 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 	}
 
 out:
-	scoutfs_unlock(sb, lock);
+	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 	return inode;
 }
 

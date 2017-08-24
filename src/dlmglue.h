@@ -172,6 +172,110 @@ struct ocfs2_super
 /* For s_mount_opt */
 #define OCFS2_MOUNT_NOINTR (1 << 2)
 
+/*
+ * Return value from ->downconvert_worker functions.
+ *
+ * These control the precise actions of ocfs2_unblock_lock()
+ * and ocfs2_process_blocked_lock()
+ *
+ */
+enum ocfs2_unblock_action {
+	UNBLOCK_CONTINUE	= 0, /* Continue downconvert */
+	UNBLOCK_CONTINUE_POST	= 1, /* Continue downconvert, fire
+				      * ->post_unlock callback */
+	UNBLOCK_STOP_POST	= 2, /* Do not downconvert, fire
+				      * ->post_unlock() callback. */
+};
+
+/*
+ * OCFS2 Lock Resource Operations
+ *
+ * These fine tune the behavior of the generic dlmglue locking infrastructure.
+ *
+ * The most basic of lock types can point ->l_priv to their respective
+ * struct ocfs2_super and allow the default actions to manage things.
+ *
+ * Right now, each lock type also needs to implement an init function,
+ * and trivial lock/unlock wrappers. ocfs2_simple_drop_lockres()
+ * should be called when the lock is no longer needed (i.e., object
+ * destruction time).
+ */
+struct ocfs2_lock_res_ops {
+	/*
+	 * Translate an ocfs2_lock_res * into an ocfs2_super *. Define
+	 * this callback if ->l_priv is not an ocfs2_super pointer
+	 */
+	struct ocfs2_super * (*get_osb)(struct ocfs2_lock_res *);
+
+	/*
+	 * Optionally called in the downconvert thread after a
+	 * successful downconvert. The lockres will not be referenced
+	 * after this callback is called, so it is safe to free
+	 * memory, etc.
+	 *
+	 * The exact semantics of when this is called are controlled
+	 * by ->downconvert_worker()
+	 */
+	void (*post_unlock)(struct ocfs2_super *, struct ocfs2_lock_res *);
+
+	/*
+	 * Allow a lock type to add checks to determine whether it is
+	 * safe to downconvert a lock. Return 0 to re-queue the
+	 * downconvert at a later time, nonzero to continue.
+	 *
+	 * For most locks, the default checks that there are no
+	 * incompatible holders are sufficient.
+	 *
+	 * Called with the lockres spinlock held.
+	 */
+	int (*check_downconvert)(struct ocfs2_lock_res *, int);
+
+	/*
+	 * Allows a lock type to populate the lock value block. This
+	 * is called on downconvert, and when we drop a lock.
+	 *
+	 * Locks that want to use this should set LOCK_TYPE_USES_LVB
+	 * in the flags field.
+	 *
+	 * Called with the lockres spinlock held.
+	 */
+	void (*set_lvb)(struct ocfs2_lock_res *);
+
+	/*
+	 * Called from the downconvert thread when it is determined
+	 * that a lock will be downconverted. This is called without
+	 * any locks held so the function can do work that might
+	 * schedule (syncing out data, etc).
+	 *
+	 * This should return any one of the ocfs2_unblock_action
+	 * values, depending on what it wants the thread to do.
+	 */
+	int (*downconvert_worker)(struct ocfs2_lock_res *, int);
+
+	/*
+	 * LOCK_TYPE_* flags which describe the specific requirements
+	 * of a lock type. Descriptions of each individual flag follow.
+	 */
+	int flags;
+};
+
+/*
+ * Some locks want to "refresh" potentially stale data when a
+ * meaningful (PRMODE or EXMODE) lock level is first obtained. If this
+ * flag is set, the OCFS2_LOCK_NEEDS_REFRESH flag will be set on the
+ * individual lockres l_flags member from the ast function. It is
+ * expected that the locking wrapper will clear the
+ * OCFS2_LOCK_NEEDS_REFRESH flag when done.
+ */
+#define LOCK_TYPE_REQUIRES_REFRESH 0x1
+
+/*
+ * Indicate that a lock type makes use of the lock value block. The
+ * ->set_lvb lock type callback must be defined.
+ */
+#define LOCK_TYPE_USES_LVB		0x2
+
+
 #if 0
 #include "dcache.h"
 
@@ -253,6 +357,10 @@ int ocfs2_dlm_init(struct ocfs2_super *osb, char *cluster_stack,
 		   char *cluster_name, char *ls_name, struct dentry *debug_root);
 void ocfs2_dlm_shutdown(struct ocfs2_super *osb, int hangup_pending);
 void ocfs2_lock_res_init_once(struct ocfs2_lock_res *res);
+void ocfs2_lock_res_init_common(struct ocfs2_super *osb,
+				struct ocfs2_lock_res *res,
+				struct ocfs2_lock_res_ops *ops,
+				void *priv);
 #if 0
 void ocfs2_inode_lock_res_init(struct ocfs2_lock_res *res,
 			       enum ocfs2_lock_type type,

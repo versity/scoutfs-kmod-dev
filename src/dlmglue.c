@@ -97,6 +97,7 @@ static struct ocfs2_super *ocfs2_get_file_osb(struct ocfs2_lock_res *lockres);
 static struct ocfs2_super *ocfs2_get_qinfo_osb(struct ocfs2_lock_res *lockres);
 #endif
 
+#if 0
 /*
  * Return value from ->downconvert_worker functions.
  *
@@ -111,7 +112,7 @@ enum ocfs2_unblock_action {
 	UNBLOCK_STOP_POST	= 2, /* Do not downconvert, fire
 				      * ->post_unlock() callback. */
 };
-
+#endif
 struct ocfs2_unblock_ctl {
 	int requeue;
 	enum ocfs2_unblock_action unblock_action;
@@ -169,7 +170,6 @@ static void ocfs2_dump_meta_lvb_info(u64 level,
 	     (long long)be64_to_cpu(lvb->lvb_imtime_packed),
 	     be32_to_cpu(lvb->lvb_iattr));
 }
-#endif
 
 
 /*
@@ -260,7 +260,6 @@ struct ocfs2_lock_res_ops {
  */
 #define LOCK_TYPE_USES_LVB		0x2
 
-#if 0
 static struct ocfs2_lock_res_ops ocfs2_inode_rw_lops = {
 	.get_osb	= ocfs2_get_inode_osb,
 	.flags		= 0,
@@ -532,10 +531,10 @@ static inline void ocfs2_init_start_time(struct ocfs2_mask_waiter *mw)
 }
 #endif
 
-static void ocfs2_lock_res_init_common(struct ocfs2_super *osb,
-				       struct ocfs2_lock_res *res,
-				       struct ocfs2_lock_res_ops *ops,
-				       void *priv)
+void ocfs2_lock_res_init_common(struct ocfs2_super *osb,
+				struct ocfs2_lock_res *res,
+				struct ocfs2_lock_res_ops *ops,
+				void *priv)
 {
 	res->l_ops           = ops;
 	res->l_priv          = priv;

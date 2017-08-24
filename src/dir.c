@@ -283,7 +283,7 @@ out:
 	else
 		inode = scoutfs_iget(sb, ino);
 
-	scoutfs_unlock(sb, dir_lock);
+	scoutfs_unlock(sb, dir_lock, DLM_LOCK_PR);
 
 	scoutfs_key_free(sb, key);
 
@@ -390,7 +390,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	}
 
 out:
-	scoutfs_unlock(sb, dir_lock);
+	scoutfs_unlock(sb, dir_lock, DLM_LOCK_PR);
 
 	kfree(dent);
 	return ret;
@@ -545,8 +545,8 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 out:
 	scoutfs_release_trans(sb);
 out_unlock:
-	scoutfs_unlock(sb, dir_lock);
-	scoutfs_unlock(sb, inode_lock);
+	scoutfs_unlock(sb, dir_lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_EX);
 	/* XXX delete the inode item here */
 	if (ret && !IS_ERR_OR_NULL(inode))
 		iput(inode);
@@ -614,8 +614,8 @@ static int scoutfs_link(struct dentry *old_dentry,
 out:
 	scoutfs_release_trans(sb);
 out_unlock:
-	scoutfs_unlock(sb, dir_lock);
-	scoutfs_unlock(sb, inode_lock);
+	scoutfs_unlock(sb, dir_lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_EX);
 	return ret;
 }
 
@@ -714,8 +714,8 @@ out_trans:
 out:
 	scoutfs_key_free(sb, keys[0]);
 	scoutfs_key_free(sb, keys[2]);
-	scoutfs_unlock(sb, dir_lock);
-	scoutfs_unlock(sb, inode_lock);
+	scoutfs_unlock(sb, dir_lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_EX);
 	return ret;
 }
 
@@ -837,7 +837,7 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 		nd_set_link(nd, path);
 	}
 out:
-	scoutfs_unlock(sb, inode_lock);
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
 	return path;
 }
 
@@ -934,8 +934,8 @@ out:
 
 	scoutfs_release_trans(sb);
 out_unlock:
-	scoutfs_unlock(sb, dir_lock);
-	scoutfs_unlock(sb, inode_lock);
+	scoutfs_unlock(sb, dir_lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, inode_lock, DLM_LOCK_EX);
 	return ret;
 }
 

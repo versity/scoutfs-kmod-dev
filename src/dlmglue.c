@@ -909,6 +909,23 @@ static void lockres_clear_flags(struct ocfs2_lock_res *lockres,
 	lockres_set_flags(lockres, lockres->l_flags & ~clear);
 }
 
+/*
+ * Make sure that a lock gets a strictly increasing number only once
+ * each time it needs to be refreshed.  The gen needs to be larger than
+ * any previous gen the locked resources has seen so we maintain the gen
+ * in the super.  The caller has serialized on the lock but lots of
+ * locks can all be racing on the super.
+ *
+ * This is used by callers to have a single read-only indicator that
+ * they need to refresh their resource while they have it locked.
+ */
+static void lockres_inc_refresh_gen(struct ocfs2_lock_res *lockres)
+{
+	struct ocfs2_super *osb = ocfs2_get_lockres_osb(lockres);
+
+	lockres->l_refresh_gen = atomic64_inc_return(&osb->refresh_gen);
+}
+
 static inline void ocfs2_generic_handle_downconvert_action(struct ocfs2_lock_res *lockres)
 {
 	BUG_ON(!(lockres->l_flags & OCFS2_LOCK_BUSY));
@@ -935,8 +952,10 @@ static inline void ocfs2_generic_handle_convert_action(struct ocfs2_lock_res *lo
 	 * *anything* however should mark ourselves as needing an
 	 * update */
 	if (lockres->l_level == DLM_LOCK_NL &&
-	    lockres->l_ops->flags & LOCK_TYPE_REQUIRES_REFRESH)
+	    lockres->l_ops->flags & LOCK_TYPE_REQUIRES_REFRESH) {
 		lockres_or_flags(lockres, OCFS2_LOCK_NEEDS_REFRESH);
+		lockres_inc_refresh_gen(lockres);
+	}
 
 	lockres->l_level = lockres->l_requested;
 
@@ -962,8 +981,10 @@ static inline void ocfs2_generic_handle_attach_action(struct ocfs2_lock_res *loc
 
 	if (lockres->l_requested > DLM_LOCK_NL &&
 	    !(lockres->l_flags & OCFS2_LOCK_LOCAL) &&
-	    lockres->l_ops->flags & LOCK_TYPE_REQUIRES_REFRESH)
+	    lockres->l_ops->flags & LOCK_TYPE_REQUIRES_REFRESH) {
 		lockres_or_flags(lockres, OCFS2_LOCK_NEEDS_REFRESH);
+		lockres_inc_refresh_gen(lockres);
+	}
 
 	lockres->l_level = lockres->l_requested;
 	lockres_or_flags(lockres, OCFS2_LOCK_ATTACHED);
@@ -2292,6 +2313,11 @@ static inline void ocfs2_complete_lock_res_refresh(struct ocfs2_lock_res *lockre
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
 
 	wake_up(&lockres->l_event);
+}
+
+u64 ocfs2_lock_refresh_gen(struct ocfs2_lock_res *lockres)
+{
+	return lockres->l_refresh_gen;
 }
 
 #if 0
@@ -4291,6 +4317,7 @@ int ocfs2_init_super(struct ocfs2_super *osb, int flags)
 	init_waitqueue_head(&osb->dc_event);
 	INIT_LIST_HEAD(&osb->blocked_lock_list);
 	osb->s_mount_opt = flags;
+	atomic64_set(&osb->refresh_gen, 0);
 
 	return 0;
 }

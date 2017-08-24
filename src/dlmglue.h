@@ -103,6 +103,7 @@ struct ocfs2_lock_res {
 	struct list_head         l_mask_waiters;
 	struct list_head	 l_holders;
 
+	u64			 l_refresh_gen;
 	unsigned long		 l_flags;
 	char                     l_name[OCFS2_LOCK_ID_MAX_LEN];
 	unsigned int             l_ro_holders;
@@ -166,6 +167,9 @@ struct ocfs2_super
 	 */
 	struct list_head blocked_lock_list;
 	unsigned long blocked_lock_count;
+
+	/* refresh_gen needs to strictly increase as locks come and go */
+	atomic64_t refresh_gen;
 
 	unsigned long s_mount_opt;
 };
@@ -316,6 +320,8 @@ void ocfs2_lock_res_init_common(struct ocfs2_super *osb,
 				struct ocfs2_lock_res_ops *ops,
 				void *priv);
 void ocfs2_lock_res_free(struct ocfs2_lock_res *res);
+
+u64 ocfs2_lock_refresh_gen(struct ocfs2_lock_res *lockres);
 
 void ocfs2_mark_lockres_freeing(struct ocfs2_super *osb,
 				struct ocfs2_lock_res *lockres);

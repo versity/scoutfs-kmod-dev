@@ -4279,3 +4279,24 @@ void ocfs2_wake_downconvert_thread(struct ocfs2_super *osb)
 	spin_unlock_irqrestore(&osb->dc_task_lock, flags);
 	wake_up(&osb->dc_event);
 }
+
+int ocfs2_init_super(struct ocfs2_super *osb, int flags)
+{
+	memset(osb, 0, sizeof(*osb));
+
+	osb->osb_dlm_debug = ocfs2_new_dlm_debug();
+	if (!osb->osb_dlm_debug)
+		return -ENOMEM;
+
+	spin_lock_init(&osb->dc_task_lock);
+	init_waitqueue_head(&osb->dc_event);
+	INIT_LIST_HEAD(&osb->blocked_lock_list);
+	osb->s_mount_opt = flags;
+
+	return 0;
+}
+
+void ocfs2_uninit_super(struct ocfs2_super *osb)
+{
+	ocfs2_dlm_shutdown_debug(osb);
+}

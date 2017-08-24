@@ -246,6 +246,9 @@ int ocfs2_cluster_lock(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres,
 void ocfs2_cluster_unlock(struct ocfs2_super *osb,
 			  struct ocfs2_lock_res *lockres, int level);
 
+int ocfs2_init_super(struct ocfs2_super *osb, int flags);
+void ocfs2_uninit_super(struct ocfs2_super *osb);
+
 int ocfs2_dlm_init(struct ocfs2_super *osb, char *cluster_stack,
 		   char *cluster_name, char *ls_name, struct dentry *debug_root);
 void ocfs2_dlm_shutdown(struct ocfs2_super *osb, int hangup_pending);

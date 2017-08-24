@@ -377,9 +377,8 @@ static inline int ocfs2_may_continue_on_blocked_lock(struct ocfs2_lock_res *lock
 static void __ocfs2_cluster_unlock(struct ocfs2_super *osb,
 				   struct ocfs2_lock_res *lockres,
 				   int level, unsigned long caller_ip);
-static inline void ocfs2_cluster_unlock(struct ocfs2_super *osb,
-					struct ocfs2_lock_res *lockres,
-					int level)
+void ocfs2_cluster_unlock(struct ocfs2_super *osb,
+			  struct ocfs2_lock_res *lockres, int level)
 {
 	__ocfs2_cluster_unlock(osb, lockres, level, _RET_IP_);
 }
@@ -1671,11 +1670,11 @@ out:
 	return ret;
 }
 
-static inline int ocfs2_cluster_lock(struct ocfs2_super *osb,
-				     struct ocfs2_lock_res *lockres,
-				     int level,
-				     u32 lkm_flags,
-				     int arg_flags)
+int ocfs2_cluster_lock(struct ocfs2_super *osb,
+		       struct ocfs2_lock_res *lockres,
+		       int level,
+		       u32 lkm_flags,
+		       int arg_flags)
 {
 	return __ocfs2_cluster_lock(osb, lockres, level, lkm_flags, arg_flags,
 				    0, _RET_IP_);

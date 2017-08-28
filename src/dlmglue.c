@@ -118,7 +118,7 @@ struct ocfs2_unblock_ctl {
 	enum ocfs2_unblock_action unblock_action;
 };
 
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#if 0 && CONFIG_DEBUG_LOCK_ALLOC
 /* Lockdep class keys */
 struct lock_class_key lockdep_keys[OCFS2_NUM_LOCK_TYPES];
 #endif
@@ -550,7 +550,7 @@ void ocfs2_lock_res_init_common(struct ocfs2_super *osb,
 	ocfs2_add_lockres_tracking(res, osb->osb_dlm_debug);
 
 	ocfs2_init_lock_stats(res);
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#if 0 && CONFIG_DEBUG_LOCK_ALLOC
 	if (type != OCFS2_LOCK_TYPE_OPEN)
 		lockdep_init_map(&res->l_lockdep_map, ocfs2_lock_type_strings[type],
 				 &lockdep_keys[type], 0);
@@ -1654,7 +1654,7 @@ out:
 	}
 	ocfs2_update_lock_stats(lockres, level, &mw, ret);
 
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#if 0 && CONFIG_DEBUG_LOCK_ALLOC
 	if (!ret && lockres->l_lockdep_map.key != NULL) {
 		if (level == DLM_LOCK_PR)
 			rwsem_acquire_read(&lockres->l_lockdep_map, l_subclass,
@@ -1691,7 +1691,7 @@ static void __ocfs2_cluster_unlock(struct ocfs2_super *osb,
 	ocfs2_dec_holders(lockres, level);
 	ocfs2_downconvert_on_unlock(osb, lockres);
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#if 0 && CONFIG_DEBUG_LOCK_ALLOC
 	if (lockres->l_lockdep_map.key != NULL)
 		rwsem_release(&lockres->l_lockdep_map, 1, caller_ip);
 #endif

@@ -367,10 +367,12 @@ static inline struct ocfs2_super *ocfs2_get_lockres_osb(struct ocfs2_lock_res *l
 	return (struct ocfs2_super *)lockres->l_priv;
 }
 
+#if 0
 static int ocfs2_lock_create(struct ocfs2_super *osb,
 			     struct ocfs2_lock_res *lockres,
 			     int level,
 			     u32 dlm_flags);
+#endif
 static inline int ocfs2_may_continue_on_blocked_lock(struct ocfs2_lock_res *lockres,
 						     int wanted);
 static void __ocfs2_cluster_unlock(struct ocfs2_super *osb,
@@ -1325,6 +1327,7 @@ static inline void ocfs2_recover_from_dlm_error(struct ocfs2_lock_res *lockres,
 	wake_up(&lockres->l_event);
 }
 
+#if 0
 /* Note: If we detect another process working on the lock (i.e.,
  * OCFS2_LOCK_BUSY), we'll bail out returning 0. It's up to the caller
  * to do the right thing in that case.
@@ -1371,6 +1374,7 @@ static int ocfs2_lock_create(struct ocfs2_super *osb,
 bail:
 	return ret;
 }
+#endif
 
 static inline int ocfs2_check_wait_flag(struct ocfs2_lock_res *lockres,
 					int flag)
@@ -1458,6 +1462,7 @@ static int __lockres_remove_mask_waiter(struct ocfs2_lock_res *lockres,
 	return ret;
 }
 
+#if 0
 static int lockres_remove_mask_waiter(struct ocfs2_lock_res *lockres,
 				      struct ocfs2_mask_waiter *mw)
 {
@@ -1486,6 +1491,7 @@ static int ocfs2_wait_for_mask_interruptible(struct ocfs2_mask_waiter *mw,
 	reinit_completion(&mw->mw_complete);
 	return ret;
 }
+#endif
 
 static int __ocfs2_cluster_lock(struct ocfs2_super *osb,
 				struct ocfs2_lock_res *lockres,
@@ -1718,6 +1724,7 @@ static void __ocfs2_cluster_unlock(struct ocfs2_super *osb,
 #endif
 }
 
+#if 0
 static int ocfs2_create_new_lock(struct ocfs2_super *osb,
 				 struct ocfs2_lock_res *lockres,
 				 int ex,
@@ -1734,6 +1741,7 @@ static int ocfs2_create_new_lock(struct ocfs2_super *osb,
 
 	return ocfs2_lock_create(osb, lockres, level, lkm_flags);
 }
+#endif
 
 #if 0
 /* Grants us an EX lock on the data and metadata resources, skipping
@@ -2263,6 +2271,8 @@ static inline int ocfs2_meta_lvb_is_trustable(struct inode *inode,
 }
 #endif
 
+
+#if 0
 /* Determine whether a lock resource needs to be refreshed, and
  * arbitrate who gets to refresh it.
  *
@@ -2298,6 +2308,7 @@ bail:
 	mlog(0, "status %d\n", status);
 	return status;
 }
+#endif
 
 /* If status is non zero, I'll mark it as not being in refresh
  * anymroe, but i won't clear the needs refresh flag. */

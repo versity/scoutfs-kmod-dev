@@ -157,6 +157,7 @@ void ocfs2_dlm_dump_lksb(struct ocfs2_dlm_lksb *lksb)
 {
 }
 
+#if 0
 static int user_plock(struct ocfs2_cluster_connection *conn,
 		      u64 ino,
 		      struct file *file,
@@ -193,6 +194,7 @@ int ocfs2_plock(struct ocfs2_cluster_connection *conn, u64 ino,
 {
 	return user_plock(conn, ino, file, cmd, fl);
 }
+#endif
 
 static void user_recover_prep(void *arg)
 {

@@ -350,57 +350,6 @@ static void free_lock_tree(struct super_block *sb)
 	}
 }
 
-static void scoutfs_ast(void *astarg)
-{
-	struct scoutfs_lock *lock = astarg;
-	DECLARE_LOCK_INFO(lock->sb, linfo);
-
-	trace_scoutfs_ast(lock->sb, lock);
-
-	spin_lock(&linfo->lock);
-	lock->mode = lock->rqmode;
-	/* Clear blocking flag when we are granted an unlock request */
-	if (lock->rqmode == DLM_LOCK_IV)
-		lock->flags &= ~SCOUTFS_LOCK_BLOCKING;
-	lock->rqmode = DLM_LOCK_IV;
-	spin_unlock(&linfo->lock);
-
-	wake_up(&linfo->waitq);
-}
-
-static void queue_blocking_work(struct lock_info *linfo,
-				struct scoutfs_lock *lock)
-{
-	assert_spin_locked(&linfo->lock);
-	if (!(lock->flags & SCOUTFS_LOCK_QUEUED)) {
-		/* Take a ref for the workqueue */
-		lock->flags |= SCOUTFS_LOCK_QUEUED;
-		lock->refcnt++;
-		queue_work(linfo->downconvert_wq, &lock->dc_work);
-	}
-}
-
-static void set_lock_blocking(struct lock_info *linfo,
-			      struct scoutfs_lock *lock)
-{
-	assert_spin_locked(&linfo->lock);
-	lock->flags |= SCOUTFS_LOCK_BLOCKING;
-	if (lock->holders == 0)
-		queue_blocking_work(linfo, lock);
-}
-
-static void scoutfs_bast(void *astarg, int mode)
-{
-	struct scoutfs_lock *lock = astarg;
-	struct lock_info *linfo = SCOUTFS_SB(lock->sb)->lock_info;
-
-	trace_scoutfs_bast(lock->sb, lock);
-
-	spin_lock(&linfo->lock);
-	set_lock_blocking(linfo, lock);
-	spin_unlock(&linfo->lock);
-}
-
 static int lock_granted(struct lock_info *linfo, struct scoutfs_lock *lock,
 			int mode)
 {
@@ -408,17 +357,6 @@ static int lock_granted(struct lock_info *linfo, struct scoutfs_lock *lock,
 
 	spin_lock(&linfo->lock);
 	ret = !!(mode == lock->mode);
-	spin_unlock(&linfo->lock);
-
-	return ret;
-}
-
-static int lock_blocking(struct lock_info *linfo, struct scoutfs_lock *lock)
-{
-	int ret;
-
-	spin_lock(&linfo->lock);
-	ret = !!(lock->flags & SCOUTFS_LOCK_BLOCKING);
 	spin_unlock(&linfo->lock);
 
 	return ret;

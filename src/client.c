@@ -60,9 +60,15 @@
 #define KEEPCNT			3
 #define KEEPIDLE		7
 #define KEEPINTVL		1
-#define KEEP_TIMEO_SECS		(KEEPIDLE + (KEEPCNT * KEEPINTVL))
-#define CONNECT_TIMEO_SECS	KEEP_TIMEO_SECS
-#define CONNECT_TIMEO_MSECS	(KEEP_TIMEO_SECS * MSEC_PER_SEC)
+
+
+/*
+ * Connection timeouts have to allow for enough time for servers to
+ * reboot.  Figure order minutes at the outside.
+ */
+#define CONN_RETRY_MIN_MS	10UL
+#define CONN_RETRY_MAX_MS	(5UL * MSEC_PER_SEC)
+#define CONN_RETRY_LIMIT_J	(5 * 60 * HZ)
 
 struct client_info {
 	struct super_block *sb;
@@ -82,6 +88,10 @@ struct client_info {
 
 	/* blocked senders sit on a waitq that's woken for resends */
 	wait_queue_head_t waitq;
+
+	/* connection timeouts are tracked across attempts */
+	unsigned long conn_retry_ms;
+	unsigned long conn_retry_limit_j;
 
 	struct workqueue_struct *recv_wq;
 	struct work_struct recv_work;
@@ -220,16 +230,22 @@ static void scoutfs_client_recv_func(struct work_struct *work)
 	kfree(rx_alloc);
 }
 
+static void reset_connect_timeouts(struct client_info *client)
+{
+	client->conn_retry_ms = CONN_RETRY_MIN_MS;
+	client->conn_retry_limit_j = jiffies + CONN_RETRY_LIMIT_J;
+}
+
 
 /*
- * Spin discovering the address of the server and trying to connect to
- * it until either we connect or we're interrupted by a signal.
+ * Clients who try to send and don't see a connected socket call here to
+ * connect to the server.  They get the server address and try to
+ * connect.
  *
- * A single mount coming up starts both the server and the client.  The
- * server takes a few IOs and network messages to get going and communicate
- * its address.  We want to aggressively retry getting the address so that
- * these mounts can be quick.  But we back off to avoid storms waiting for
- * recovery after an existing server explodes.
+ * Each sending client will always try to connect once.  After that
+ * it'll sleep and retry connecting at increasing intervals.  After long
+ * enough it will return an error.  Future attempts will retry once then
+ * return errors.
  */
 static int client_connect(struct client_info *client)
 {
@@ -238,35 +254,43 @@ static int client_connect(struct client_info *client)
 	struct sockaddr_in *sin;
 	struct socket *sock = NULL;
 	struct timeval tv;
-	unsigned int msecs = MSEC_PER_SEC / 10;
+	int retries;
 	int addrlen;
 	int optval;
 	int ret;
 
 	BUG_ON(!mutex_is_locked(&client->send_mutex));
 
-	for(;;) {
+	for(retries = 0; ; retries++) {
 		if (sock) {
 			sock_release(sock);
 			sock = NULL;
 		}
 
-		ret = scoutfs_read_supers(sb, &super);
-		if (ret)
-			continue;
+		if (retries) {
+			/* we tried, and we're past limit, return error */
+			if (time_after(jiffies, client->conn_retry_limit_j)) {
+				ret = -ENOTCONN;
+				break;
+			}
 
-		if (super.server_addr.addr == cpu_to_le32(INADDR_ANY)) {
-			msleep_interruptible(msecs);
-			if (msecs < CONNECT_TIMEO_MSECS)
-				msecs = max(msecs + MSEC_PER_SEC,
-					    CONNECT_TIMEO_MSECS);
-			continue;
+			msleep_interruptible(client->conn_retry_ms);
+
+			client->conn_retry_ms = min(client->conn_retry_ms * 2,
+						    CONN_RETRY_MAX_MS);
 		}
 
 		if (signal_pending(current)) {
 			ret = -ERESTARTSYS;
 			break;
 		}
+
+		ret = scoutfs_read_supers(sb, &super);
+		if (ret)
+			continue;
+
+		if (super.server_addr.addr == cpu_to_le32(INADDR_ANY))
+			continue;
 
 		sin = &client->peername;
 		sin->sin_family = AF_INET;
@@ -284,8 +308,8 @@ static int client_connect(struct client_info *client)
 		if (ret)
 			continue;
 
-		/* start with a connect timeout */
-		tv.tv_sec = CONNECT_TIMEO_SECS;
+		/* use short timeout for connect itself */
+		tv.tv_sec = 1;
 		tv.tv_usec = 0;
 		ret = kernel_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
 					(char *)&tv, sizeof(tv));
@@ -344,6 +368,7 @@ static int client_connect(struct client_info *client)
 
 		client->sock_gen++;
 		client->recv_shutdown = false;
+		reset_connect_timeouts(client);
 		queue_work(client->recv_wq, &client->recv_work);
 		wake_up(&client->waitq);
 		ret = 0;
@@ -705,6 +730,7 @@ int scoutfs_client_setup(struct super_block *sb)
 	mutex_init(&client->send_mutex);
 	init_waitqueue_head(&client->waitq);
 	INIT_WORK(&client->recv_work, scoutfs_client_recv_func);
+	reset_connect_timeouts(client);
 
 	client->recv_wq = alloc_workqueue("scoutfs_client_recv", WQ_UNBOUND, 1);
 	if (!client->recv_wq) {

@@ -370,6 +370,18 @@ int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt)
 	return ret;
 }
 
+/*
+ * Return true if the current task has a transaction held.  That is,
+ * true if the current transaction can't finish and be written out if
+ * the current task blocks.
+ */
+bool scoutfs_trans_held(void)
+{
+	struct scoutfs_reservation *rsv = current->journal_info;
+
+	return rsv && rsv->magic == SCOUTFS_RESERVATION_MAGIC;
+}
+
 void scoutfs_trans_track_item(struct super_block *sb, signed items,
 			      signed keys, signed vals)
 {

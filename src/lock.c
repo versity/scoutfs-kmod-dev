@@ -26,6 +26,7 @@
 #include "cmp.h"
 #include "dlmglue.h"
 #include "inode.h"
+#include "trans.h"
 
 #define LN_FMT "%u.%u.%u.%llu.%llu"
 #define LN_ARG(name) \
@@ -382,6 +383,10 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 	struct scoutfs_lock *lock;
 	int lkm_flags;
 	int ret;
+
+	if (WARN_ON_ONCE(!(flags & SCOUTFS_LKF_TRYLOCK) &&
+			 scoutfs_trans_held()))
+		return -EINVAL;
 
 	lock = find_alloc_scoutfs_lock(sb, lock_name, type, start, end);
 	if (!lock)

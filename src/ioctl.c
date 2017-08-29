@@ -123,8 +123,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	if (ret < 0)
 		goto out;
 
-	for (nr = 0; nr < walk.nr_entries;
-	     nr++, walk.entries_ptr += sizeof(ent)) {
+	for (nr = 0; nr < walk.nr_entries; ) {
 
 		ret = scoutfs_item_next_same(sb, &key, &last_key, NULL, lock->end);
 		if (ret < 0 && ret != -ENOENT)
@@ -177,6 +176,9 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 			ret = -EFAULT;
 			break;
 		}
+
+		nr++;
+		walk.entries_ptr += sizeof(ent);
 
 		scoutfs_key_inc_cur_len(&key);
 	}

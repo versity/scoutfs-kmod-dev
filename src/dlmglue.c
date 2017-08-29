@@ -38,7 +38,7 @@
 
 #include "dlmglue.h"
 
-#define mlog(mask, fmt, args...) printk(KERN_INFO fmt , ##args)
+#define mlog(mask, fmt, args...) trace_printk(fmt , ##args)
 #define mlog_errno(st) do {						\
 	int _st = (st);							\
 	if (_st != -ERESTARTSYS && _st != -EINTR &&			\

@@ -241,6 +241,7 @@ struct scoutfs_segment_block {
 #define SCOUTFS_INODE_INDEX_ZONE		1
 #define SCOUTFS_NODE_ZONE			2
 #define SCOUTFS_FS_ZONE				3
+#define SCOUTFS_MAX_ZONE			4 /* power of 2 is efficient */
 
 /* inode index zone */
 #define SCOUTFS_INODE_INDEX_SIZE_TYPE		3
@@ -264,6 +265,7 @@ struct scoutfs_segment_block {
 #define SCOUTFS_FILE_EXTENT_TYPE		7
 #define SCOUTFS_ORPHAN_TYPE			8
 
+#define SCOUTFS_MAX_TYPE			16 /* power of 2 is efficient */
 
 /* value is struct scoutfs_inode */
 struct scoutfs_inode_key {

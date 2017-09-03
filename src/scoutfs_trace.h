@@ -484,6 +484,36 @@ DEFINE_EVENT(scoutfs_net_class, scoutfs_client_recv_reply,
         TP_ARGS(sb, name, peer, nh)
 );
 
+TRACE_EVENT(scoutfs_item_next_range_check,
+        TP_PROTO(struct super_block *sb, int cached,
+		 struct scoutfs_key_buf *key, struct scoutfs_key_buf *pos,
+		 struct scoutfs_key_buf *last, struct scoutfs_key_buf *end,
+		 struct scoutfs_key_buf *range_end),
+        TP_ARGS(sb, cached, key, pos, last, end, range_end),
+        TP_STRUCT__entry(
+		__field(void *, sb)
+		__field(int, cached)
+                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
+                __dynamic_array(char, pos, scoutfs_key_str(NULL, pos))
+                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
+                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
+                __dynamic_array(char, range_end,
+				scoutfs_key_str(NULL, range_end))
+        ),
+        TP_fast_assign(
+		__entry->sb = sb;
+		__entry->cached = cached;
+		scoutfs_key_str(__get_dynamic_array(key), key);
+		scoutfs_key_str(__get_dynamic_array(pos), pos);
+		scoutfs_key_str(__get_dynamic_array(last), last);
+		scoutfs_key_str(__get_dynamic_array(end), end);
+		scoutfs_key_str(__get_dynamic_array(range_end), range_end);
+        ),
+        TP_printk("sb %p cached %d key %s pos %s last %s end %s range_end %s",
+		  __entry->sb, __entry->cached, __get_str(key), __get_str(pos),
+		  __get_str(last), __get_str(end), __get_str(range_end))
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

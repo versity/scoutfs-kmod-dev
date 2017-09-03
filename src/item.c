@@ -866,7 +866,7 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct scoutfs_key_buf *read_start = NULL;
+	struct scoutfs_key_buf *pos = NULL;
 	struct scoutfs_key_buf *range_end = NULL;
 	struct cached_item *item;
 	unsigned long flags;
@@ -883,57 +883,66 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		goto out;
 	}
 
-	read_start = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
+	pos = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
 	range_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!read_start || !range_end) {
+	if (!pos || !range_end) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
+	scoutfs_key_copy(pos, key);
+
 	spin_lock_irqsave(&cac->lock, flags);
 
 	for(;;) {
-		/* see if we have a usable item in cache and before last */
-		cached = check_range(sb, &cac->ranges, key, range_end);
+		/* see if we have cache coverage of our iterator pos */
+		cached = check_range(sb, &cac->ranges, pos, range_end);
 
-		if (cached && (item = item_for_next(&cac->items, key,
-						    range_end, last))) {
-			scoutfs_key_copy(key, item->key);
-			if (val) {
-				item_referenced(cac, item);
-				ret = scoutfs_kvec_memcpy(val, item->val);
-			} else {
-				ret = 0;
-			}
-			break;
-		}
+		trace_scoutfs_item_next_range_check(sb, !!cached, key,
+						    pos, last, end, range_end);
 
 		if (!cached) {
-			/* missing cache starts at key */
-			scoutfs_key_copy(read_start, key);
+			/* populate missing cached range starting at pos */
+			spin_unlock_irqrestore(&cac->lock, flags);
 
-		} else if (scoutfs_key_compare(range_end, last) < 0) {
-			/* missing cache starts at range_end */
-			scoutfs_key_copy(read_start, range_end);
+			ret = scoutfs_manifest_read_items(sb, pos, end);
 
-		} else {
-			/* no items and we have cache between key and last */
+			spin_lock_irqsave(&cac->lock, flags);
+			if (ret)
+				break;
+			else
+				continue;
+		}
+
+		/* see if there's an item in the cached range from pos */
+		item = item_for_next(&cac->items, pos, range_end, last);
+		if (!item) {
+			if (scoutfs_key_compare(range_end, last) < 0) {
+				/* keep searching after empty cached range */
+				scoutfs_key_copy(pos, range_end);
+				scoutfs_key_inc(pos);
+				continue;
+			}
+
+			/* no item and cache covers last, done */
 			ret = -ENOENT;
 			break;
 		}
 
-		spin_unlock_irqrestore(&cac->lock, flags);
-
-		ret = scoutfs_manifest_read_items(sb, read_start, end);
-
-		spin_lock_irqsave(&cac->lock, flags);
-		if (ret)
-			break;
+		/* we have a next item inside the cached range, done */
+		scoutfs_key_copy(key, item->key);
+		if (val) {
+			item_referenced(cac, item);
+			ret = scoutfs_kvec_memcpy(val, item->val);
+		} else {
+			ret = 0;
+		}
+		break;
 	}
 
 	spin_unlock_irqrestore(&cac->lock, flags);
 out:
-	scoutfs_key_free(sb, read_start);
+	scoutfs_key_free(sb, pos);
 	scoutfs_key_free(sb, range_end);
 
 	trace_printk("ret %d\n", ret);

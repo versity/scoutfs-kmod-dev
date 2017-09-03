@@ -264,9 +264,6 @@ struct scoutfs_segment_block {
 #define SCOUTFS_FILE_EXTENT_TYPE		7
 #define SCOUTFS_ORPHAN_TYPE			8
 
-/* XXX don't need these now that we have dlm lock spaces and resources */
-#define SCOUTFS_NET_ADDR_TYPE			254
-#define SCOUTFS_NET_LISTEN_TYPE			255
 
 /* value is struct scoutfs_inode */
 struct scoutfs_inode_key {

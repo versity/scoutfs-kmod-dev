@@ -995,9 +995,6 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	u64 off;
 	int ret;
 
-	bh->b_blocknr = 0;
-	bh->b_size = 0;
-
 	ext.blk_off = iblock;
 	ext.blocks = 1;
 	ext.blkno = 0;
@@ -1026,11 +1023,6 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 		trace_printk("found nei "EXTF"\n", EXTA(&ext));
 	}
 
-	if ((ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE) && !si->staging) {
-		ret = -EINVAL;
-		goto out;
-	}
-
 	/* use the extent if it intersects */
 	if (iblock >= ext.blk_off && iblock < (ext.blk_off + ext.blocks)) {
 
@@ -1045,8 +1037,9 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 			/* found online extent */
 			off = iblock - ext.blk_off;
 			map_bh(bh, inode->i_sb, ext.blkno + off);
-			bh->b_size = min_t(u64, SIZE_MAX,
+			bh->b_size = min_t(u64, bh->b_size,
 				    (ext.blocks - off) << SCOUTFS_BLOCK_SHIFT);
+			clear_buffer_new(bh);
 		}
 	}
 

@@ -306,6 +306,7 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__field(u64, name_second)
 		__field(unsigned int, seq)
 		__field(unsigned int, refcnt)
+		__field(unsigned int, users)
 	),
         TP_fast_assign(
 		__entry->name_scope = lck->lock_name.scope;
@@ -315,11 +316,12 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__entry->name_second = le64_to_cpu(lck->lock_name.second);
 		__entry->seq = lck->sequence;
 		__entry->refcnt = lck->refcnt;
+		__entry->users = lck->users;
         ),
-        TP_printk("name %u.%u.%u.%llu.%llu seq %u refs %d",
+        TP_printk("name %u.%u.%u.%llu.%llu seq %u refs %d users %d",
 		  __entry->name_scope, __entry->name_zone, __entry->name_type,
 		  __entry->name_first, __entry->name_second, __entry->seq,
-		  __entry->refcnt)
+		  __entry->refcnt, __entry->users)
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_resource,
@@ -342,7 +344,7 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_bast,
        TP_ARGS(sb, lck)
 );
 
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_downconvert_func,
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_reclaim,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );

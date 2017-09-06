@@ -50,10 +50,13 @@ struct lock_info {
 	struct shrinker shrinker;
 	struct list_head lru_list;
 	unsigned long long lru_nr;
+	struct workqueue_struct *lock_reclaim_wq;
 };
 
 #define DECLARE_LOCK_INFO(sb, name) \
 	struct lock_info *name = SCOUTFS_SB(sb)->lock_info
+
+static void scoutfs_lock_reclaim(struct work_struct *work);
 
 /*
  * Invalidate caches on this because another node wants a lock
@@ -104,7 +107,6 @@ static void free_scoutfs_lock(struct scoutfs_lock *lock)
 	if (lock) {
 		linfo = SCOUTFS_SB(lock->sb)->lock_info;
 
-		ocfs2_simple_drop_lockres(&linfo->dlmglue, &lock->lockres);
 		scoutfs_key_free(lock->sb, lock->start);
 		scoutfs_key_free(lock->sb, lock->end);
 		kfree(lock);
@@ -124,11 +126,26 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 			rb_erase(&lock->node, &linfo->lock_tree);
 			list_del(&lock->lru_entry);
 			spin_unlock(&linfo->lock);
+			ocfs2_simple_drop_lockres(&linfo->dlmglue,
+						  &lock->lockres);
 			free_scoutfs_lock(lock);
 			return;
 		}
 		spin_unlock(&linfo->lock);
 	}
+}
+
+static void dec_lock_users(struct scoutfs_lock *lock)
+{
+	DECLARE_LOCK_INFO(lock->sb, linfo);
+
+	spin_lock(&linfo->lock);
+	lock->users--;
+	if (list_empty(&lock->lru_entry) && lock->users == 0) {
+		list_add_tail(&lock->lru_entry, &linfo->lru_list);
+		linfo->lru_nr++;
+	}
+	spin_unlock(&linfo->lock);
 }
 
 static struct ocfs2_super *get_ino_lock_osb(struct ocfs2_lock_res *lockres)
@@ -209,6 +226,8 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 	memcpy(&lock->lockres.l_name[0], &lock->lock_name,
 	       sizeof(struct scoutfs_lock_name));
 	ocfs2_lock_res_init_common(&linfo->dlmglue, &lock->lockres, type, lock);
+	INIT_WORK(&lock->reclaim_work, scoutfs_lock_reclaim);
+	init_waitqueue_head(&lock->waitq);
 
 	return lock;
 }
@@ -276,14 +295,45 @@ search:
 		rb_insert_color(&found->node, &linfo->lock_tree);
 	}
 	found->refcnt++;
+	if (test_bit(SCOUTFS_LOCK_RECLAIM, &found->flags)) {
+		spin_unlock(&linfo->lock);
+		wait_event(found->waitq,
+			   test_bit(SCOUTFS_LOCK_DROPPED, &found->flags));
+		put_scoutfs_lock(sb, found);
+		goto search;
+	}
+
 	if (!list_empty(&found->lru_entry)) {
 		list_del_init(&found->lru_entry);
 		linfo->lru_nr--;
 	}
+	found->users++;
 	spin_unlock(&linfo->lock);
 
 	kfree(new);
 	return found;
+}
+
+static void scoutfs_lock_reclaim(struct work_struct *work)
+{
+	struct scoutfs_lock *lock = container_of(work, struct scoutfs_lock,
+						 reclaim_work);
+	struct lock_info *linfo = SCOUTFS_SB(lock->sb)->lock_info;
+
+	trace_scoutfs_lock_reclaim(lock->sb, lock);
+
+	/*
+	 * Drop the last ref on our lock here, allowing us to clean up
+	 * the dlm lock. We might race with another process in
+	 * find_alloc_scoutfs_lock(), hence the dropped flag telling
+	 * those processes to go ahead and drop the lock ref as well.
+	 */
+	BUG_ON(lock->users);
+
+	set_bit(SCOUTFS_LOCK_DROPPED, &lock->flags);
+	wake_up(&lock->waitq);
+
+	put_scoutfs_lock(linfo->sb, lock);
 }
 
 static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
@@ -294,7 +344,6 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 	struct scoutfs_lock *tmp;
 	unsigned long flags;
 	unsigned long nr;
-	LIST_HEAD(list);
 
 	nr = sc->nr_to_scan;
 	if (!nr)
@@ -305,20 +354,18 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 		if (nr-- == 0)
 			break;
 
-		WARN_ON(lock->refcnt != 1);
+		trace_shrink_lock_tree(linfo->sb, lock);
 
-		rb_erase(&lock->node, &linfo->lock_tree);
-		list_del(&lock->lru_entry);
-		list_add_tail(&lock->lru_entry, &list);
+		WARN_ON(lock->users);
+
+		set_bit(SCOUTFS_LOCK_RECLAIM, &lock->flags);
+		list_del_init(&lock->lru_entry);
 		linfo->lru_nr--;
+
+		queue_work(linfo->lock_reclaim_wq, &lock->reclaim_work);
 	}
 	spin_unlock_irqrestore(&linfo->lock, flags);
 
-	list_for_each_entry_safe(lock, tmp, &list, lru_entry) {
-		trace_shrink_lock_tree(linfo->sb, lock);
-		list_del(&lock->lru_entry);
-		free_scoutfs_lock(lock);
-	}
 out:
 	return min_t(unsigned long, linfo->lru_nr, INT_MAX);
 }
@@ -374,10 +421,11 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 
 	ret = ocfs2_cluster_lock(&linfo->dlmglue, &lock->lockres, mode,
 				 lkm_flags, 0);
-	if (ret)
-		return ret;
-
-	*ret_lock = lock;
+	if (ret) {
+		dec_lock_users(lock);
+		put_scoutfs_lock(sb, lock);
+	} else
+		*ret_lock = lock;
 	return 0;
 }
 
@@ -627,6 +675,8 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 
 	ocfs2_cluster_unlock(&linfo->dlmglue, &lock->lockres, level);
 
+	dec_lock_users(lock);
+
 	put_scoutfs_lock(sb, lock);
 }
 
@@ -675,9 +725,15 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	DECLARE_LOCK_INFO(sb, linfo);
 
 	if (linfo) {
-		free_lock_tree(sb); /* Do this before uninitializing the dlm. */
-
 		unregister_shrinker(&linfo->shrinker);
+		if (linfo->lock_reclaim_wq)
+			destroy_workqueue(linfo->lock_reclaim_wq);
+		/*
+		 * Do this before uninitializing the dlm and after
+		 * draining the reclaim workqueue.
+		 */
+		free_lock_tree(sb);
+
 		if (linfo->dlmglue_online) {
 			ocfs2_dlm_shutdown(&linfo->dlmglue, 0);
 			ocfs2_uninit_super(&linfo->dlmglue);
@@ -702,6 +758,13 @@ int scoutfs_lock_setup(struct super_block *sb)
 	if (ret)
 		return ret;
 	linfo = sbi->lock_info;
+
+	linfo->lock_reclaim_wq = alloc_workqueue("scoutfs_reclaim",
+						 WQ_UNBOUND|WQ_HIGHPRI, 0);
+	if (!linfo->lock_reclaim_wq) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	ret = ocfs2_dlm_init(&linfo->dlmglue, "null", sbi->opts.cluster_name,
 			     linfo->ls_name, sbi->debug_root);

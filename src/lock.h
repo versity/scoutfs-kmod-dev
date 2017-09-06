@@ -8,6 +8,12 @@
 #define SCOUTFS_LKF_REFRESH_INODE	0x01 /* update stale inode from item */
 #define SCOUTFS_LKF_TRYLOCK		0x02 /* EAGAIN if contention */
 
+/* flags for scoutfs_lock->flags */
+enum {
+	SCOUTFS_LOCK_RECLAIM = 0, /* lock is queued for reclaim */
+	SCOUTFS_LOCK_DROPPED, /* lock is going away, drop reference */
+};
+
 struct scoutfs_lock {
 	struct super_block *sb;
 	struct scoutfs_lock_name lock_name;
@@ -16,9 +22,13 @@ struct scoutfs_lock {
 	struct dlm_lksb lksb;
 	unsigned int sequence; /* for debugging and sanity checks */
 	struct rb_node node;
-	struct list_head lru_entry;
 	unsigned int refcnt;
 	struct ocfs2_lock_res lockres;
+	struct list_head lru_entry;
+	struct work_struct reclaim_work;
+	unsigned int users; /* Tracks active users of this lock */
+	unsigned long flags;
+	wait_queue_head_t waitq;
 };
 
 u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock);

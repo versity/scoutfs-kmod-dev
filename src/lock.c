@@ -43,14 +43,10 @@ struct lock_info {
 	dlmglue_ctxt dlmglue;
 	bool dlmglue_online;
 	char ls_name[DLM_LOCKSPACE_LEN];
-	bool shutdown;
-	struct list_head id_head;
 
 	spinlock_t lock;
 	unsigned int seq_cnt;
-	wait_queue_head_t waitq;
 	struct rb_root lock_tree;
-	struct workqueue_struct *downconvert_wq;
 	struct shrinker shrinker;
 	struct list_head lru_list;
 	unsigned long long lru_nr;
@@ -58,8 +54,6 @@ struct lock_info {
 
 #define DECLARE_LOCK_INFO(sb, name) \
 	struct lock_info *name = SCOUTFS_SB(sb)->lock_info
-
-static void scoutfs_downconvert_func(struct work_struct *work);
 
 /*
  * Invalidate caches on this because another node wants a lock
@@ -127,9 +121,6 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 		BUG_ON(!lock->refcnt);
 		refs = --lock->refcnt;
 		if (!refs) {
-			BUG_ON(lock->holders);
-			/* can't be (even racy) busy without refs */
-			BUG_ON(work_busy(&lock->dc_work));
 			rb_erase(&lock->node, &linfo->lock_tree);
 			list_del(&lock->lru_entry);
 			spin_unlock(&linfo->lock);
@@ -190,7 +181,6 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-//	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_lock *lock;
 
 	if (WARN_ON_ONCE(!!start != !!end))
@@ -212,8 +202,6 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 	RB_CLEAR_NODE(&lock->node);
 	lock->sb = sb;
 	lock->lock_name = *lock_name;
-	lock->mode = DLM_LOCK_IV;
-	INIT_WORK(&lock->dc_work, scoutfs_downconvert_func);
 	INIT_LIST_HEAD(&lock->lru_entry);
 	ocfs2_lock_res_init_once(&lock->lockres);
 	BUG_ON(sizeof(struct scoutfs_lock_name) >= OCFS2_LOCK_ID_MAX_LEN);
@@ -317,9 +305,7 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 		if (nr-- == 0)
 			break;
 
-		WARN_ON(lock->holders);
 		WARN_ON(lock->refcnt != 1);
-		WARN_ON(lock->flags & SCOUTFS_LOCK_QUEUED);
 
 		rb_erase(&lock->node, &linfo->lock_tree);
 		list_del(&lock->lru_entry);
@@ -349,18 +335,6 @@ static void free_lock_tree(struct super_block *sb)
 		node = rb_next(node);
 		put_scoutfs_lock(sb, lock);
 	}
-}
-
-static int lock_granted(struct lock_info *linfo, struct scoutfs_lock *lock,
-			int mode)
-{
-	int ret;
-
-	spin_lock(&linfo->lock);
-	ret = !!(mode == lock->mode);
-	spin_unlock(&linfo->lock);
-
-	return ret;
 }
 
 /*
@@ -405,58 +379,6 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 
 	*ret_lock = lock;
 	return 0;
-#if 0
-check_lock_state:
-	spin_lock(&linfo->lock);
-	if (linfo->shutdown) {
-		spin_unlock(&linfo->lock);
-		put_scoutfs_lock(sb, lock);
-		return -ESHUTDOWN;
-	}
-
-	if (lock->flags & SCOUTFS_LOCK_BLOCKING) {
-		spin_unlock(&linfo->lock);
-		wait_event(linfo->waitq, !lock_blocking(linfo, lock));
-		goto check_lock_state;
-	}
-
-	if (lock->mode > DLM_LOCK_IV) {
-		if (lock->mode < mode) {
-			/*
-			 * We already have the lock but at a mode which is not
-			 * compatible with what the caller wants. Set the lock
-			 * blocking to let the downconvert thread do it's work
-			 * so we can reacquire at the correct mode.
-			 */
-			set_lock_blocking(linfo, lock);
-			spin_unlock(&linfo->lock);
-			goto check_lock_state;
-		}
-		lock->holders++;
-		spin_unlock(&linfo->lock);
-		goto out;
-	}
-
-	lock->rqmode = mode;
-	lock->holders++;
-	spin_unlock(&linfo->lock);
-
-	ret = dlm_lock(linfo->dlmglue.cconn->cc_lockspace, mode, &lock->lksb,
-		       DLM_LKF_NOORDER, &lock->lock_name,
-		       sizeof(struct scoutfs_lock_name),
-		       0, scoutfs_ast, lock, scoutfs_bast);
-	if (ret) {
-		scoutfs_err(sb, "Error %d locking "LN_FMT, ret,
-			    LN_ARG(&lock->lock_name));
-		put_scoutfs_lock(sb, lock);
-		return ret;
-	}
-
-	wait_event(linfo->waitq, lock_granted(linfo, lock, mode));
-out:
-	*ret_lock = lock;
-	return 0;
-#endif
 }
 
 u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock)
@@ -705,86 +627,6 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 
 	ocfs2_cluster_unlock(&linfo->dlmglue, &lock->lockres, level);
 
-#if 0
-	spin_lock(&linfo->lock);
-	lock->holders--;
-	if (lock->holders == 0 && (lock->flags & SCOUTFS_LOCK_BLOCKING))
-		queue_blocking_work(linfo, lock);
-	spin_unlock(&linfo->lock);
-#endif
-	put_scoutfs_lock(sb, lock);
-}
-
-static void unlock_range(struct super_block *sb, struct scoutfs_lock *lock)
-{
-	DECLARE_LOCK_INFO(sb, linfo);
-	int ret;
-
-	trace_scoutfs_unlock(sb, lock);
-
-	BUG_ON(!lock->sequence);
-
-	spin_lock(&linfo->lock);
-	lock->rqmode = DLM_LOCK_IV;
-	spin_unlock(&linfo->lock);
-	ret = dlm_unlock(linfo->dlmglue.cconn->cc_lockspace, lock->lksb.sb_lkid,
-			 0, &lock->lksb, lock);
-	if (ret) {
-		scoutfs_err(sb, "Error %d unlocking "LN_FMT, ret,
-			    LN_ARG(&lock->lock_name));
-		goto out;
-	}
-
-	wait_event(linfo->waitq, lock_granted(linfo, lock, DLM_LOCK_IV));
-out:
-	/* lock was removed from tree, wake up umount process */
-	wake_up(&linfo->waitq);
-}
-
-static void scoutfs_downconvert_func(struct work_struct *work)
-{
-	struct scoutfs_lock *lock = container_of(work, struct scoutfs_lock,
-						 dc_work);
-	struct super_block *sb = lock->sb;
-	DECLARE_LOCK_INFO(sb, linfo);
-
-	trace_scoutfs_downconvert_func(sb, lock);
-
-	spin_lock(&linfo->lock);
-	lock->flags &= ~SCOUTFS_LOCK_QUEUED;
-	if (lock->holders)
-		goto out; /* scoutfs_unlock_range will requeue for us */
-
-	spin_unlock(&linfo->lock);
-
-	WARN_ON_ONCE(lock->holders);
-	WARN_ON_ONCE(lock->refcnt == 0);
-	/*
-	 * Use write mode to invalidate all since we are completely
-	 * dropping the lock. Once we are dowconverting, we can
-	 * invalidate based on what level we're downconverting to (PR,
-	 * NL).
-	 */
-	invalidate_caches(sb, DLM_LOCK_EX, lock);
-	unlock_range(sb, lock);
-
-	spin_lock(&linfo->lock);
-	/* Check whether we can add the lock to the LRU list:
-	 *
-	 * First, check mode to be sure that the lock wasn't reacquired
-	 * while we slept in unlock_range().
-	 *
-	 * Next, check refs. refcnt == 1 means the only holder is the
-	 * lock tree so in particular we have nobody in
-	 * scoutfs_lock_range concurrently trying to acquire a lock.
-	 */
-	if (lock->mode == DLM_LOCK_IV && lock->refcnt == 1 &&
-	    list_empty(&lock->lru_entry)) {
-		list_add_tail(&lock->lru_entry, &linfo->lru_list);
-		linfo->lru_nr++;
-	}
-out:
-	spin_unlock(&linfo->lock);
 	put_scoutfs_lock(sb, lock);
 }
 
@@ -807,14 +649,11 @@ static int init_lock_info(struct super_block *sb)
 		goto out;
 
 	spin_lock_init(&linfo->lock);
-	init_waitqueue_head(&linfo->waitq);
 	INIT_LIST_HEAD(&linfo->lru_list);
 	linfo->shrinker.shrink = shrink_lock_tree;
 	linfo->shrinker.seeks = DEFAULT_SEEKS;
 	register_shrinker(&linfo->shrinker);
 	linfo->sb = sb;
-	linfo->shutdown = false;
-	INIT_LIST_HEAD(&linfo->id_head);
 
 	snprintf(linfo->ls_name, DLM_LOCKSPACE_LEN, "%llx",
 		 le64_to_cpu(sbi->super.hdr.fsid));
@@ -830,25 +669,6 @@ out:
 	return 0;
 }
 
-/*
- * Cause all lock attempts from our super to fail, waking anyone who is
- * currently blocked attempting to lock.  Now that locks can't block we
- * can easily tear down subsystems that use locking before freeing lock
- * infrastructure.
- */
-void scoutfs_lock_shutdown(struct super_block *sb)
-{
-	DECLARE_LOCK_INFO(sb, linfo);
-
-	if (linfo) {
-		spin_lock(&linfo->lock);
-		linfo->shutdown = true;
-		spin_unlock(&linfo->lock);
-
-		wake_up(&linfo->waitq);
-	}
-}
-
 void scoutfs_lock_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -857,8 +677,6 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	if (linfo) {
 		free_lock_tree(sb); /* Do this before uninitializing the dlm. */
 
-		if (linfo->downconvert_wq)
-			destroy_workqueue(linfo->downconvert_wq);
 		unregister_shrinker(&linfo->shrinker);
 		if (linfo->dlmglue_online) {
 			ocfs2_dlm_shutdown(&linfo->dlmglue, 0);
@@ -884,13 +702,6 @@ int scoutfs_lock_setup(struct super_block *sb)
 	if (ret)
 		return ret;
 	linfo = sbi->lock_info;
-
-	linfo->downconvert_wq = alloc_workqueue("scoutfs_dc",
-					       WQ_UNBOUND|WQ_HIGHPRI, 0);
-	if (!linfo->downconvert_wq) {
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	ret = ocfs2_dlm_init(&linfo->dlmglue, "null", sbi->opts.cluster_name,
 			     linfo->ls_name, sbi->debug_root);

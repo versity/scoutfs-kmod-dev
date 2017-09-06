@@ -336,7 +336,6 @@ static void scoutfs_kill_sb(struct super_block *sb)
 	if (sb->s_root) {
 		sync_filesystem(sb);
 
-		scoutfs_lock_shutdown(sb);
 		scoutfs_server_destroy(sb);
 	}
 

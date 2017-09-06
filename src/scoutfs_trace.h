@@ -304,12 +304,8 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__field(u8, name_type)
 		__field(u64, name_first)
 		__field(u64, name_second)
-		__field(int, mode)
-		__field(int, rqmode)
 		__field(unsigned int, seq)
-		__field(unsigned int, flags)
 		__field(unsigned int, refcnt)
-		__field(unsigned int, holders)
 	),
         TP_fast_assign(
 		__entry->name_scope = lck->lock_name.scope;
@@ -317,18 +313,13 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__entry->name_type = lck->lock_name.type;
 		__entry->name_first = le64_to_cpu(lck->lock_name.first);
 		__entry->name_second = le64_to_cpu(lck->lock_name.second);
-		__entry->mode = lck->mode;
-		__entry->rqmode = lck->rqmode;
 		__entry->seq = lck->sequence;
-		__entry->flags = lck->flags;
 		__entry->refcnt = lck->refcnt;
-		__entry->holders = lck->holders;
         ),
-        TP_printk("name %u.%u.%u.%llu.%llu seq %u refs %d holders %d mode %s rqmode %s flags 0x%x",
+        TP_printk("name %u.%u.%u.%llu.%llu seq %u refs %d",
 		  __entry->name_scope, __entry->name_zone, __entry->name_type,
 		  __entry->name_first, __entry->name_second, __entry->seq,
-		  __entry->refcnt, __entry->holders, lock_mode(__entry->mode),
-		  lock_mode(__entry->rqmode), __entry->flags)
+		  __entry->refcnt)
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_resource,

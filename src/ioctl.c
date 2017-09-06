@@ -412,14 +412,21 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 	struct kiocb kiocb;
 	struct iovec iov;
 	size_t written;
+	loff_t end_size;
+	loff_t isize;
 	loff_t pos;
 	int ret;
 
 	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
 		return -EFAULT;
 
-	if (args.count < 0 || (args.offset + args.count < args.offset))
+	end_size = args.offset + args.count;
+
+	/* verify arg constraints that aren't dependent on file */
+	if (args.count < 0 || (end_size < args.offset) ||
+	    args.offset & SCOUTFS_BLOCK_MASK)
 		return -EINVAL;
+
 	if (args.count == 0)
 		return 0;
 
@@ -437,11 +444,14 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 
 	mutex_lock(&inode->i_mutex);
 
+	isize = i_size_read(inode);
+
 	if (!S_ISREG(inode->i_mode) ||
 	    !(file->f_mode & FMODE_WRITE) ||
 	    (file->f_flags & (O_APPEND | O_DIRECT | O_DSYNC)) ||
 	    IS_SYNC(file->f_mapping->host) ||
-	    (args.offset + args.count > i_size_read(inode))) {
+	    (end_size > isize) ||
+	    ((end_size & SCOUTFS_BLOCK_MASK) && (end_size != isize))) {
 		ret = -EINVAL;
 		goto out;
 	}

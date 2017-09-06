@@ -131,7 +131,18 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 		if (ret == -ENOENT) {
 
+			/* done if lock covers last iteration key */
+			if (scoutfs_key_compare(&last_key, lock->end) <= 0) {
+				ret = 0;
+				break;
+			}
+
+			/* continue iterating after locked empty region */
+			scoutfs_key_copy(&key, lock->end);
+			scoutfs_key_inc_cur_len(&key);
+
 			scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+
 			/*
 			 * XXX This will miss dirty items.  We'd need to
 			 * force writeouts of dirty items in our

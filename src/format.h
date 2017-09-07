@@ -535,6 +535,7 @@ enum {
 #define SCOUTFS_LOCK_SCOPE_FS_ITEMS 2
 
 #define SCOUTFS_LOCK_TYPE_GLOBAL_RENAME 1
+#define SCOUTFS_LOCK_TYPE_GLOBAL_SERVER 2
 
 struct scoutfs_lock_name {
 	__u8 scope;

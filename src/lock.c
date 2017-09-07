@@ -107,6 +107,7 @@ static void free_scoutfs_lock(struct scoutfs_lock *lock)
 	if (lock) {
 		linfo = SCOUTFS_SB(lock->sb)->lock_info;
 
+		ocfs2_lock_res_free(&lock->lockres);
 		scoutfs_key_free(lock->sb, lock->start);
 		scoutfs_key_free(lock->sb, lock->end);
 		kfree(lock);
@@ -310,7 +311,7 @@ search:
 	found->users++;
 	spin_unlock(&linfo->lock);
 
-	kfree(new);
+	free_scoutfs_lock(new);
 	return found;
 }
 

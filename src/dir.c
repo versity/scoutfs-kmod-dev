@@ -1259,7 +1259,8 @@ static int verify_ancestors(struct super_block *sb, u64 p1, u64 p2,
  * The caller has the name locked in the dir.
  */
 static int verify_entry(struct super_block *sb, u64 dir_ino, const char *name,
-			unsigned name_len, u64 ino)
+			unsigned name_len, u64 ino,
+			struct scoutfs_lock *lock)
 {
 	struct scoutfs_key_buf *key = NULL;
 	struct scoutfs_dirent dent;
@@ -1272,7 +1273,7 @@ static int verify_entry(struct super_block *sb, u64 dir_ino, const char *name,
 
 	scoutfs_kvec_init(val, &dent, sizeof(dent));
 
-	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent), NULL);
+	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent), lock->end);
 	if (ret == 0 && le64_to_cpu(dent.ino) != ino)
 		ret = -ENOENT;
 	else if (ret == -ENOENT && ino == 0)
@@ -1365,10 +1366,12 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 
 	/* make sure that the entries assumed by the argument still exist */
 	ret = verify_entry(sb, scoutfs_ino(old_dir), old_dentry->d_name.name,
-			   old_dentry->d_name.len, scoutfs_ino(old_inode)) ?:
+			   old_dentry->d_name.len, scoutfs_ino(old_inode),
+			   old_dir_lock) ?:
 	      verify_entry(sb, scoutfs_ino(new_dir), new_dentry->d_name.name,
 			   new_dentry->d_name.len,
-			   new_inode ? scoutfs_ino(new_inode) : 0);
+			   new_inode ? scoutfs_ino(new_inode) : 0,
+			   new_dir_lock);
 	if (ret)
 		goto out_unlock;
 

@@ -456,6 +456,7 @@ static void ocfs2_add_lockres_tracking(struct ocfs2_lock_res *res,
 	mlog(0, "Add tracking for lockres %s\n", res->l_name);
 
 	spin_lock(&ocfs2_dlm_tracking_lock);
+	BUG_ON(!list_empty(&res->l_debug_list));
 	list_add(&res->l_debug_list, &dlm_debug->d_lockres_tracking);
 	spin_unlock(&ocfs2_dlm_tracking_lock);
 }
@@ -570,6 +571,7 @@ void ocfs2_lock_res_init_once(struct ocfs2_lock_res *res)
 	INIT_LIST_HEAD(&res->l_blocked_list);
 	INIT_LIST_HEAD(&res->l_mask_waiters);
 	INIT_LIST_HEAD(&res->l_holders);
+	INIT_LIST_HEAD(&res->l_debug_list);
 }
 
 #if 0

@@ -406,6 +406,8 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 	int lkm_flags;
 	int ret;
 
+	*ret_lock = NULL;
+
 	if (WARN_ON_ONCE(!(flags & SCOUTFS_LKF_TRYLOCK) &&
 			 scoutfs_trans_held()))
 		return -EINVAL;
@@ -425,9 +427,11 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 	if (ret) {
 		dec_lock_users(lock);
 		put_scoutfs_lock(sb, lock);
-	} else
+	} else {
 		*ret_lock = lock;
-	return 0;
+	}
+
+	return ret;
 }
 
 u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock)

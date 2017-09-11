@@ -451,18 +451,6 @@ void scoutfs_release_trans(struct super_block *sb)
 		wake_up(&sbi->trans_hold_wq);
 }
 
-/*
- * This is called to wake people waiting on holders when the conditions
- * that they're waiting on change: levels being full, dirty count falling
- * under a segment, or holders falling to 0.
- */
-void scoutfs_trans_wake_holders(struct super_block *sb)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-
-	wake_up(&sbi->trans_hold_wq);
-}
-
 int scoutfs_setup_trans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);

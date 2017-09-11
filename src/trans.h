@@ -12,7 +12,6 @@ void scoutfs_trans_restart_sync_deadline(struct super_block *sb);
 int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt);
 bool scoutfs_trans_held(void);
 void scoutfs_release_trans(struct super_block *sb);
-void scoutfs_trans_wake_holders(struct super_block *sb);
 void scoutfs_trans_track_item(struct super_block *sb, signed items,
 			      signed keys, signed vals);
 

@@ -4334,8 +4334,3 @@ int ocfs2_init_super(struct ocfs2_super *osb, int flags)
 
 	return 0;
 }
-
-void ocfs2_uninit_super(struct ocfs2_super *osb)
-{
-	ocfs2_dlm_shutdown_debug(osb);
-}

@@ -739,10 +739,8 @@ void scoutfs_lock_destroy(struct super_block *sb)
 		 */
 		free_lock_tree(sb);
 
-		if (linfo->dlmglue_online) {
+		if (linfo->dlmglue_online)
 			ocfs2_dlm_shutdown(&linfo->dlmglue, 0);
-			ocfs2_uninit_super(&linfo->dlmglue);
-		}
 
 		sbi->lock_info = NULL;
 

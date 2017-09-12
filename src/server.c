@@ -96,6 +96,11 @@ struct commit_waiter {
  * that the caller can be sure to be woken by the next commit after they
  * queue and release the lock.
  *
+ * It's important to realize that the caller's commit_waiter list node
+ * might be serviced by a currently running commit work while queueing
+ * another work run in the future.  This caller can return from
+ * wait_for_commit() while the commit_work is still queued.
+ *
  * This could queue delayed work but we're first trying to have batching
  * work by having concurrent modification line up behind a commit in
  * flight.  Once the commit finishes it'll unlock and hopefully everyone
@@ -1077,6 +1082,9 @@ void scoutfs_server_destroy(struct super_block *sb)
 
 		/* wait for server work to wait for everything to shut down */
 		cancel_delayed_work_sync(&server->dwork);
+		/* recv work/compaction could have left commit_work queued */
+		cancel_work_sync(&server->commit_work);
+
 		destroy_workqueue(server->wq);
 
 		kfree(server);

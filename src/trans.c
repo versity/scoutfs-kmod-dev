@@ -346,6 +346,15 @@ int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt)
 	struct scoutfs_reservation *rsv;
 	int ret;
 
+	/*
+	 * Caller shouldn't provide garbage counts, nor counts that
+	 * can't fit in segments by themselves.
+	 */
+	if (WARN_ON_ONCE(cnt->items <= 0 || cnt->keys < 0 || cnt->vals < 0) ||
+	    WARN_ON_ONCE(!scoutfs_seg_fits_single(cnt->items, cnt->keys,
+						  cnt->vals)))
+		return -EINVAL;
+
 	if (current == sbi->trans_task)
 		return 0;
 

@@ -282,7 +282,7 @@ struct scoutfs_reservation {
  */
 static bool acquired_hold(struct super_block *sb,
 			  struct scoutfs_reservation *rsv,
-			  struct scoutfs_item_count *cnt)
+			  const struct scoutfs_item_count *cnt)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_TRANS_INFO(sb, tri);
@@ -340,7 +340,8 @@ out:
 	return acquired;
 }
 
-int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt)
+int scoutfs_hold_trans(struct super_block *sb,
+		       const struct scoutfs_item_count cnt)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_reservation *rsv;
@@ -350,9 +351,9 @@ int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt)
 	 * Caller shouldn't provide garbage counts, nor counts that
 	 * can't fit in segments by themselves.
 	 */
-	if (WARN_ON_ONCE(cnt->items <= 0 || cnt->keys < 0 || cnt->vals < 0) ||
-	    WARN_ON_ONCE(!scoutfs_seg_fits_single(cnt->items, cnt->keys,
-						  cnt->vals)))
+	if (WARN_ON_ONCE(cnt.items <= 0 || cnt.keys < 0 || cnt.vals < 0) ||
+	    WARN_ON_ONCE(!scoutfs_seg_fits_single(cnt.items, cnt.keys,
+						  cnt.vals)))
 		return -EINVAL;
 
 	if (current == sbi->trans_task)
@@ -371,7 +372,7 @@ int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt)
 	BUG_ON(rsv->magic != SCOUTFS_RESERVATION_MAGIC);
 
 	ret = wait_event_interruptible(sbi->trans_hold_wq,
-				       acquired_hold(sb, rsv, cnt));
+				       acquired_hold(sb, rsv, &cnt));
 	if (ret && rsv->holders == 0) {
 		current->journal_info = NULL;
 		kfree(rsv);

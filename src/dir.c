@@ -537,7 +537,7 @@ out:
  */
 static struct inode *lock_hold_create(struct inode *dir, struct dentry *dentry,
 				      umode_t mode, dev_t rdev,
-				      struct scoutfs_item_count *cnt,
+				      const struct scoutfs_item_count cnt,
 				      struct scoutfs_lock **dir_lock,
 				      struct scoutfs_lock **inode_lock)
 {
@@ -599,7 +599,6 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		       dev_t rdev)
 {
 	struct super_block *sb = dir->i_sb;
-	DECLARE_ITEM_COUNT(cnt);
 	struct inode *inode = NULL;
 	struct scoutfs_lock *dir_lock = NULL;
 	struct scoutfs_lock *inode_lock = NULL;
@@ -609,9 +608,9 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
-	scoutfs_count_mknod(&cnt, dentry->d_name.len);
 
-	inode = lock_hold_create(dir, dentry, mode, rdev, &cnt,
+	inode = lock_hold_create(dir, dentry, mode, rdev,
+				 SIC_MKNOD(dentry->d_name.len),
 				 &dir_lock, &inode_lock);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
@@ -670,7 +669,6 @@ static int scoutfs_link(struct dentry *old_dentry,
 	struct super_block *sb = dir->i_sb;
 	struct scoutfs_lock *dir_lock;
 	struct scoutfs_lock *inode_lock = NULL;
-	DECLARE_ITEM_COUNT(cnt);
 	u64 pos;
 	int ret;
 
@@ -692,8 +690,7 @@ static int scoutfs_link(struct dentry *old_dentry,
 	if (ret)
 		goto out_unlock;
 
-	scoutfs_count_link(&cnt, dentry->d_name.len);
-	ret = scoutfs_hold_trans(sb, &cnt);
+	ret = scoutfs_hold_trans(sb, SIC_LINK(dentry->d_name.len));
 	if (ret)
 		goto out_unlock;
 
@@ -750,7 +747,6 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct timespec ts = current_kernel_time();
 	struct scoutfs_lock *inode_lock = NULL;
 	struct scoutfs_lock *dir_lock = NULL;
-	DECLARE_ITEM_COUNT(cnt);
 	int ret = 0;
 
 	ret = scoutfs_lock_inodes(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
@@ -764,8 +760,7 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		goto unlock;
 	}
 
-	scoutfs_count_unlink(&cnt, dentry->d_name.len);
-	ret = scoutfs_hold_trans(sb, &cnt);
+	ret = scoutfs_hold_trans(sb, SIC_UNLINK(dentry->d_name.len));
 	if (ret)
 		goto unlock;
 
@@ -966,7 +961,6 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	struct inode *inode = NULL;
 	struct scoutfs_lock *dir_lock = NULL;
 	struct scoutfs_lock *inode_lock = NULL;
-	DECLARE_ITEM_COUNT(cnt);
 	u64 pos;
 	int ret;
 
@@ -979,8 +973,8 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		return ret;
 
-	scoutfs_count_symlink(&cnt, dentry->d_name.len, name_len);
-	inode = lock_hold_create(dir, dentry, S_IFLNK|S_IRWXUGO, 0, &cnt,
+	inode = lock_hold_create(dir, dentry, S_IFLNK|S_IRWXUGO, 0,
+				 SIC_SYMLINK(dentry->d_name.len, name_len),
 				 &dir_lock, &inode_lock);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
@@ -1328,7 +1322,6 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct scoutfs_lock *old_inode_lock = NULL;
 	struct scoutfs_lock *new_inode_lock = NULL;
 	struct timespec now;
-	DECLARE_ITEM_COUNT(cnt);
 	bool ins_new = false;
 	bool del_new = false;
 	bool ins_old = false;
@@ -1379,9 +1372,8 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	if (ret)
 		goto out_unlock;
 
-	scoutfs_count_rename(&cnt, old_dentry->d_name.len,
-				   new_dentry->d_name.len);
-	ret = scoutfs_hold_trans(sb, &cnt);
+	ret = scoutfs_hold_trans(sb, SIC_RENAME(old_dentry->d_name.len,
+						new_dentry->d_name.len));
 	if (ret)
 		goto out_unlock;
 

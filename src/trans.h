@@ -9,7 +9,8 @@ int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 		       int datasync);
 void scoutfs_trans_restart_sync_deadline(struct super_block *sb);
 
-int scoutfs_hold_trans(struct super_block *sb, struct scoutfs_item_count *cnt);
+int scoutfs_hold_trans(struct super_block *sb,
+		       const struct scoutfs_item_count cnt);
 bool scoutfs_trans_held(void);
 void scoutfs_release_trans(struct super_block *sb);
 void scoutfs_trans_track_item(struct super_block *sb, signed items,

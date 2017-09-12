@@ -536,7 +536,6 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	struct native_extent ext;
 	struct native_extent ofl;
 	struct native_extent fr;
-	DECLARE_ITEM_COUNT(cnt);
 	bool rem_fr = false;
 	bool ins_ext = false;
 	bool holding = false;
@@ -602,8 +601,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		if (offline && (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE))
 			continue;
 
-		scoutfs_count_trunc_block(&cnt);
-		ret = scoutfs_hold_trans(sb, &cnt);
+		ret = scoutfs_hold_trans(sb, SIC_TRUNC_BLOCK());
 		if (ret)
 			break;
 		holding = true;
@@ -1125,14 +1123,12 @@ static int scoutfs_write_begin(struct file *file,
 {
 	struct inode *inode = mapping->host;
 	struct super_block *sb = inode->i_sb;
-	DECLARE_ITEM_COUNT(cnt);
 	int ret;
 
 	trace_printk("ino %llu pos %llu len %u\n",
 		     scoutfs_ino(inode), (u64)pos, len);
 
-	scoutfs_count_write_begin(&cnt);
-	ret = scoutfs_hold_trans(sb, &cnt);
+	ret = scoutfs_hold_trans(sb, SIC_WRITE_BEGIN());
 	if (ret)
 		goto out;
 

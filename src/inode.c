@@ -892,7 +892,6 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	struct scoutfs_inode sinode;
 	struct scoutfs_key_buf key;
 	SCOUTFS_DECLARE_KVEC(val);
-	DECLARE_ITEM_COUNT(cnt);
 	bool release = false;
 	umode_t mode;
 	int ret;
@@ -917,8 +916,7 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	trace_delete_inode(sb, ino, mode);
 
 	/* XXX this is obviously not done yet :) */
-	scoutfs_count_dirty_inode(&cnt);
-	ret = scoutfs_hold_trans(sb, &cnt);
+	ret = scoutfs_hold_trans(sb, SIC_DIRTY_INODE());
 	if (ret)
 		goto out;
 	release = true;

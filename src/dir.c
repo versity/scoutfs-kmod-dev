@@ -852,7 +852,7 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 	for (i = 0; i < nr; i++) {
 
 		init_symlink_key(&key, &skey, ino, i);
-		bytes = min(size, SCOUTFS_MAX_VAL_SIZE);
+		bytes = min_t(u64, size, SCOUTFS_MAX_VAL_SIZE);
 		scoutfs_kvec_init(val, (void *)target, bytes);
 
 		if (op == SYM_CREATE)

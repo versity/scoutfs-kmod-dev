@@ -12,4 +12,6 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 int scoutfs_data_setup(struct super_block *sb);
 void scoutfs_data_destroy(struct super_block *sb);
 
+int __init scoutfs_data_test(void);
+
 #endif

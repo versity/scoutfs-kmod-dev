@@ -224,22 +224,20 @@ static int pr_ino_idx(char *buf, struct scoutfs_key_buf *key, size_t size)
 			    be32_to_cpu(ikey->minor), be64_to_cpu(ikey->ino));
 }
 
-static int pr_free_ext(char *buf, struct scoutfs_key_buf *key, size_t size)
+static int pr_free_bits(char *buf, struct scoutfs_key_buf *key, size_t size)
 {
-	struct scoutfs_free_extent_blkno_key *fkey = key->data;
-
 	static char *type_strings[] = {
-		[SCOUTFS_FREE_EXTENT_BLKNO_TYPE]	= "fno",
-		[SCOUTFS_FREE_EXTENT_BLOCKS_TYPE]	= "fks",
+		[SCOUTFS_FREE_BITS_SEGNO_TYPE]		= "fsg",
+		[SCOUTFS_FREE_BITS_BLKNO_TYPE]		= "fbk",
 	};
+	struct scoutfs_free_bits_key *frk = key->data;
 
 	return snprintf_key(buf, size, key,
-			    sizeof(struct scoutfs_free_extent_blkno_key), 0,
-			    "nod.%llu.%s.%llu.%llu",
-			    be64_to_cpu(fkey->node_id),
-			    type_strings[fkey->type],
-			    be64_to_cpu(fkey->last_blkno),
-			    be64_to_cpu(fkey->blocks));
+			    sizeof(struct scoutfs_block_mapping_key), 0,
+			    "nod.%llu.%s.%llu",
+			    be64_to_cpu(frk->node_id),
+			    type_strings[frk->type],
+			    be64_to_cpu(frk->base));
 }
 
 static int pr_orphan(char *buf, struct scoutfs_key_buf *key, size_t size)
@@ -319,18 +317,15 @@ static int pr_symlink(char *buf, struct scoutfs_key_buf *key, size_t size)
 			    be64_to_cpu(skey->ino));
 }
 
-static int pr_file_ext(char *buf, struct scoutfs_key_buf *key, size_t size)
+static int pr_block_mapping(char *buf, struct scoutfs_key_buf *key, size_t size)
 {
-	struct scoutfs_file_extent_key *ekey = key->data;
+	struct scoutfs_block_mapping_key *bmk = key->data;
 
 	return snprintf_key(buf, size, key,
-			    sizeof(struct scoutfs_file_extent_key), 0,
-			    "fs.%llu.ext.%llu.%llu.%llu.%x",
-			    be64_to_cpu(ekey->ino),
-			    be64_to_cpu(ekey->last_blk_off),
-			    be64_to_cpu(ekey->last_blkno),
-			    be64_to_cpu(ekey->blocks),
-			    ekey->flags);
+			    sizeof(struct scoutfs_block_mapping_key), 0,
+			    "fs.%llu.bmp.%llu",
+			    be64_to_cpu(bmk->ino),
+			    be64_to_cpu(bmk->base));
 }
 
 const static key_printer_t key_printers[SCOUTFS_MAX_ZONE][SCOUTFS_MAX_TYPE] = {
@@ -340,8 +335,8 @@ const static key_printer_t key_printers[SCOUTFS_MAX_ZONE][SCOUTFS_MAX_TYPE] = {
 		pr_ino_idx,
 	[SCOUTFS_INODE_INDEX_ZONE][SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE] =
 		pr_ino_idx,
-	[SCOUTFS_NODE_ZONE][SCOUTFS_FREE_EXTENT_BLKNO_TYPE] = pr_free_ext,
-	[SCOUTFS_NODE_ZONE][SCOUTFS_FREE_EXTENT_BLOCKS_TYPE] = pr_free_ext,
+	[SCOUTFS_NODE_ZONE][SCOUTFS_FREE_BITS_SEGNO_TYPE] = pr_free_bits,
+	[SCOUTFS_NODE_ZONE][SCOUTFS_FREE_BITS_BLKNO_TYPE] = pr_free_bits,
 	[SCOUTFS_NODE_ZONE][SCOUTFS_ORPHAN_TYPE] = pr_orphan,
 	[SCOUTFS_FS_ZONE][SCOUTFS_INODE_TYPE] = pr_inode,
 	[SCOUTFS_FS_ZONE][SCOUTFS_XATTR_TYPE] = pr_xattr,
@@ -349,7 +344,7 @@ const static key_printer_t key_printers[SCOUTFS_MAX_ZONE][SCOUTFS_MAX_TYPE] = {
 	[SCOUTFS_FS_ZONE][SCOUTFS_READDIR_TYPE] = pr_readdir,
 	[SCOUTFS_FS_ZONE][SCOUTFS_LINK_BACKREF_TYPE] = pr_link_backref,
 	[SCOUTFS_FS_ZONE][SCOUTFS_SYMLINK_TYPE] = pr_symlink,
-	[SCOUTFS_FS_ZONE][SCOUTFS_FILE_EXTENT_TYPE] = pr_file_ext,
+	[SCOUTFS_FS_ZONE][SCOUTFS_BLOCK_MAPPING_TYPE] = pr_block_mapping,
 };
 
 /*
@@ -382,7 +377,7 @@ int scoutfs_key_str_size(char *buf, struct scoutfs_key_buf *key, size_t size)
 		struct scoutfs_inode_index_key *ikey = key->data;
 		type = ikey->type;
 	} else if (zone == SCOUTFS_NODE_ZONE) {
-		struct scoutfs_free_extent_blkno_key *fkey = key->data;
+		struct scoutfs_free_bits_key *fkey = key->data;
 		type = fkey->type;
 	} else if (zone == SCOUTFS_FS_ZONE) {
 		struct scoutfs_inode_key *ikey = key->data;

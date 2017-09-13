@@ -392,6 +392,10 @@ static int __init scoutfs_module_init(void)
 
 	scoutfs_init_counters();
 
+	ret = scoutfs_data_test();
+	if (ret)
+		return ret;
+
 	scoutfs_kset = kset_create_and_add("scoutfs", NULL, fs_kobj);
 	if (!scoutfs_kset)
 		return -ENOMEM;

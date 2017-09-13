@@ -1,15 +1,15 @@
 /*
-* Copyright (C) 2017 Versity Software, Inc.  All rights reserved.
-*
-* This program is free software; you can redistribute it and/or
-* modify it under the terms of the GNU General Public
-* License v2 as published by the Free Software Foundation.
-*
-* This program is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-* General Public License for more details.
-*/
+ * Copyright (C) 2017 Versity Software, Inc.  All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public
+ * License v2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ */
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
@@ -18,6 +18,7 @@
 #include <linux/sched.h>
 #include <linux/buffer_head.h>
 #include <linux/hash.h>
+#include <linux/random.h>
 
 #include "format.h"
 #include "super.h"
@@ -33,50 +34,29 @@
 #include "lock.h"
 #include "file.h"
 
-#define EXTF "[off %llu bno %llu bks %llu fl %x]"
-#define EXTA(ne) (ne)->blk_off, (ne)->blkno, (ne)->blocks, (ne)->flags
-
 /*
- * scoutfs uses extent items to reference file data.
+ * scoutfs uses block mapping items at a fixed granularity to describe
+ * file data block allocations.
  *
- * The extent items map logical file regions to device blocks at 4K
- * block granularity.  File data isn't overwritten so that overwriting
- * doesn't generate extent item locking and modification.
+ * Each item describes a fixed number of blocks.  To keep the overhead
+ * of the items down the series of mapped blocks is encoded.  The
+ * mapping items also describe offline blocks.  They can only be written
+ * to newly allocated blocks with the staging ioctl.
  *
- * Nodes have their own free extent items stored at their node id to
- * avoid lock contention during allocation and freeing.  These pools are
- * filled and drained with messages to the server who allocates
- * segment-sized regions.
+ * Free segnos and blocks are kept in bitmap items that are private to
+ * nodes so they can be modified without cluster locks.
  *
  * Block allocation maintains a fixed number of allocation cursors that
  * remember the position of tasks within free regions.  This is very
- * simple and maintains decent extents for simple streaming writes.  It
- * eventually won't be good enough and we'll spend complexity on
- * delalloc but we want to put that off as long as possible.
+ * simple and maintains contiguous allocations for simple streaming
+ * writes.  It eventually won't be good enough and we'll spend
+ * complexity on delalloc but we want to put that off as long as
+ * possible.
  *
- * There's no unwritten extents.  As we dirty file data pages, possibly
- * allocating extents for the first time, we track their inodes.  Before
- * we commit dirty metadata we write out all tracked inodes.  This
- * ensures that data is persistent before the metadata that references
- * it is visible.
- *
- * Files can have offline extents.  They have no allocated file data but
- * the offline status represents file data that can be recalled through
- * staging.  While offline the extents have their physical blkno set to
- * the logical blk_off so that all the usual block extent calculations
- * still hold.  It's mapped back to phys == 0 for fiemap.
- *
- * Weirdly, the extents are indexed by the *final* logical block and
- * blkno of the extent.  This lets us search for neighbouring previous
- * extents with a _next() call and avoids having to implement item
- * reading that iterates backwards through the manifest and segments.
- *
- * There are two items that track free extents, one indexed by the block
- * location of the free extent and one indexed by the size of the free
- * extent.  This means that one allocation can update a great number of
- * items throughout the tree as items are created and deleted as extents
- * are split and merged.  This can introduce inconsistent failure
- * states.  We'll some day address that with preallocation and pinning.
+ * There's no unwritten extents.  As we dirty file data pages we track
+ * their inodes.  Before we commit dirty metadata we write out all
+ * tracked inodes.  This ensures that data is persistent before the
+ * metadata that references it is visible.
  *
  * XXX
  *  - truncate
@@ -84,6 +64,7 @@
  *  - better io error propagation
  *  - forced unmount with dirty data
  *  - direct IO
+ *  - need trans around each bulk alloc
  */
 
 /* more than enough for a few tasks per core on moderate hardware */
@@ -93,7 +74,6 @@
 
 struct data_info {
 	struct rw_semaphore alloc_rwsem;
-	u64 next_large_blkno;
 	struct list_head cursor_lru;
 	struct hlist_head cursor_hash[CURSOR_HASH_HEADS];
 };
@@ -101,20 +81,8 @@ struct data_info {
 #define DECLARE_DATA_INFO(sb, name) \
 	struct data_info *name = SCOUTFS_SB(sb)->data_info
 
-
-/*
- * This is the size of extents that are tracked by a cursor and so end
- * up being the largest file item extent length given concurrent
- * streaming writes.
- *
- * XXX We probably want this to be a bit larger to further reduce the
- * amount of item churn involved in truncating tremendous files.
- */
-#define LARGE_EXTENT_BLOCKS SCOUTFS_SEGMENT_BLOCKS
-
 struct task_cursor {
 	u64 blkno;
-	u64 blocks;
 	struct hlist_node hnode;
 	struct list_head list_head;
 	struct task_struct *task;
@@ -122,401 +90,509 @@ struct task_cursor {
 };
 
 /*
- * Both file extent and free extent keys are converted into this native
- * form for manipulation.  The free extents set blk_off to blkno.
+ * Block mapping items and their native decoded form can be pretty big.
+ * Let's allocate them to avoid blowing the stack.
  */
-struct native_extent {
-	u64 blk_off;
-	u64 blkno;
-	u64 blocks;
-	u8 flags;
-};
+struct block_mapping {
+	/* native representation */
+	unsigned long offline[DIV_ROUND_UP(SCOUTFS_BLOCK_MAPPING_BLOCKS,
+					   BITS_PER_LONG)];
+	u64 blknos[SCOUTFS_BLOCK_MAPPING_BLOCKS];
 
-/* avoiding dynamic on-stack array initializers :/ */
-union extent_key_union {
-	struct scoutfs_file_extent_key file;
-	struct scoutfs_free_extent_blkno_key blkno;
-	struct scoutfs_free_extent_blocks_key blocks;
+	/* encoded persistent item */
+	u8 encoded[SCOUTFS_BLOCK_MAPPING_MAX_BYTES];
 } __packed;
-#define MAX_KEY_BYTES sizeof(union extent_key_union)
 
-static void init_file_extent_key(struct scoutfs_key_buf *key, void *key_bytes,
-			         struct native_extent *ext, u64 arg)
+/*
+ * We encode u64 blknos as a vlq zigzag encoded delta from the previous
+ * blkno.  zigzag moves the sign bit down into the lsb so that small
+ * negative values have very few bits set.  Then vlq outputs the least
+ * significant set bits into bytes in groups of 7.
+ *
+ *   https://en.wikipedia.org/wiki/Variable-length_quantity
+ *
+ * The end result is that a series of blknos, which are limited by
+ * device size and often allocated near each other, are encoded with a
+ * handful of bytes.
+ */
+static unsigned zigzag_encode(u8 *bytes, u64 prev, u64 x)
 {
-	struct scoutfs_file_extent_key *fkey = key_bytes;
+	unsigned pos = 0;
 
-	fkey->zone = SCOUTFS_FS_ZONE;
-	fkey->ino = cpu_to_be64(arg);
-	fkey->type = SCOUTFS_FILE_EXTENT_TYPE;
-	fkey->last_blk_off = cpu_to_be64(ext->blk_off + ext->blocks - 1);
-	fkey->last_blkno = cpu_to_be64(ext->blkno + ext->blocks - 1);
-	fkey->blocks = cpu_to_be64(ext->blocks);
-	fkey->flags = ext->flags;
+	x -= prev;
+	/* careful, relying on shifting extending the sign bit */
+	x = (x << 1) ^ ((s64)x >> 63);
 
-	scoutfs_key_init(key, fkey, sizeof(struct scoutfs_file_extent_key));
+	do {
+		bytes[pos++] = x & 127;
+		x >>= 7;
+	} while (x);
+
+	bytes[pos - 1] |= 128;
+
+	return pos;
 }
 
-#define INIT_FREE_EXTENT_KEY(which_type, key, key_bytes, ext, arg, type)  \
-do {									  \
-	struct which_type *fkey = key_bytes;				  \
-									  \
-	fkey->zone = SCOUTFS_NODE_ZONE;					  \
-	fkey->node_id = cpu_to_be64(arg);				  \
-	fkey->type = type;						  \
-	fkey->last_blkno = cpu_to_be64(ext->blkno + ext->blocks - 1);	  \
-	fkey->blocks = cpu_to_be64(ext->blocks);			  \
-									  \
-	scoutfs_key_init(key, fkey, sizeof(struct which_type));		  \
-} while (0)
-
-static void init_extent_key(struct scoutfs_key_buf *key, void *key_bytes,
-			    struct native_extent *ext, u64 arg, u8 type)
+static int zigzag_decode(u64 *res, u64 prev, u8 *bytes, unsigned len)
 {
-	if (type == SCOUTFS_FILE_EXTENT_TYPE)
-		init_file_extent_key(key, key_bytes, ext, arg);
-	else if(type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE)
-		INIT_FREE_EXTENT_KEY(scoutfs_free_extent_blkno_key,
-				     key, key_bytes, ext, arg, type);
-	else
-		INIT_FREE_EXTENT_KEY(scoutfs_free_extent_blocks_key,
-				     key, key_bytes, ext, arg, type);
-}
+	unsigned shift = 0;
+	int ret = -EIO;
+	u64 x = 0;
+	int i;
+	u8 b;
 
-/* XXX could have some sanity checks */
-static void load_file_extent(struct native_extent *ext,
-			     struct scoutfs_key_buf *key)
-{
-	struct scoutfs_file_extent_key *fkey = key->data;
+	for (i = 0; i < len; i++) {
+		b = bytes[i];
+		x |= (u64)(b & 127) << shift;
+		if (b & 128) {
+			ret = i + 1;
+			break;
+		}
+		shift += 7;
 
-	ext->blocks = be64_to_cpu(fkey->blocks);
-	ext->blk_off = be64_to_cpu(fkey->last_blk_off) - ext->blocks + 1;
-	ext->blkno = be64_to_cpu(fkey->last_blkno) - ext->blocks + 1;
-	ext->flags = fkey->flags;
-}
+		/* falls through to return -EIO if we run out of bytes */
+	}
 
-#define LOAD_FREE_EXTENT(which_type, ext, key)		\
-do {							\
-	struct which_type *fkey = key->data;		\
-							\
-	ext->blkno = be64_to_cpu(fkey->last_blkno) -	\
-		     be64_to_cpu(fkey->blocks) + 1;	\
-	ext->blk_off = ext->blkno;			\
-	ext->blocks = be64_to_cpu(fkey->blocks);	\
-	ext->flags = 0;					\
-} while (0)
+	x = (x >> 1) ^ (-(x & 1));
+	*res = prev + x;
 
-static void load_extent(struct native_extent *ext, struct scoutfs_key_buf *key)
-{
-	struct scoutfs_free_extent_blocks_key *fkey = key->data;
-
-	BUILD_BUG_ON(offsetof(struct scoutfs_file_extent_key, type) !=
-		     offsetof(struct scoutfs_free_extent_blkno_key, type) ||
-		     offsetof(struct scoutfs_file_extent_key, type) !=
-		     offsetof(struct scoutfs_free_extent_blocks_key, type));
-
-	if (fkey->type == SCOUTFS_FILE_EXTENT_TYPE)
-		load_file_extent(ext, key);
-	else if (fkey->type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE)
-		LOAD_FREE_EXTENT(scoutfs_free_extent_blkno_key, ext, key);
-	else
-		LOAD_FREE_EXTENT(scoutfs_free_extent_blocks_key, ext, key);
+	return ret;
 }
 
 /*
- * Merge two extents if they're adjacent.  First we arrange them to
- * only test their adjoining endpoints, then are careful to not reference
- * fields after we've modified them.
+ * Block mappings are encoded into a byte stream.
+ *
+ * The first byte's low bits contains the last mapping index that will
+ * be decoded.
+ *
+ * As we walk through the encoded blocks we add control bits to the
+ * current control byte for the encoding of the block: zero, offline,
+ * increment from prev, or zigzag encoding.
+ *
+ * When the control byte is full we start filling the next byte in the
+ * output as the control byte for the coming blocks.  When we zigzag
+ * encode blocks we add them to the output stream.  The result is an
+ * interleaving of control bytes and zigzag blocks, when they're needed.
+ *
+ * In practice the typical mapping will have a zigzag for the first
+ * block and then the rest will be described by the control bits.
+ * Regions of sparse, advancing allocations, and offline are all
+ * described only by control bits, getting us down to 2 bits per block.
  */
-static int merge_extents(struct native_extent *mod,
-			 struct native_extent *ext)
+static unsigned encode_mapping(struct block_mapping *map)
 {
-	struct native_extent *left;
-	struct native_extent *right;
+	unsigned shift;
+	unsigned len;
+	u64 blkno;
+	u64 prev;
+	u8 *enc;
+	u8 *ctl;
+	u8 last;
+	int ret;
+	int i;
 
-	if (mod->blk_off < ext->blk_off) {
-		left = mod;
-		right = ext;
-	} else {
-		left = ext;
-		right = mod;
+	enc = map->encoded;
+	ctl = enc++;
+	len = 1;
+
+	/* find the last set block in the mapping */
+	last = SCOUTFS_BLOCK_MAPPING_BLOCKS;
+	for (i = 0; i < SCOUTFS_BLOCK_MAPPING_BLOCKS; i++) {
+		if (map->blknos[i] || test_bit(i, map->offline))
+			last = i;
 	}
 
-	if (left->blk_off + left->blocks == right->blk_off &&
-	    left->blkno + left->blocks == right->blkno &&
-	    left->flags == right->flags) {
-		mod->blk_off = left->blk_off;
-		mod->blkno = left->blkno;
-		mod->blocks = left->blocks + right->blocks;
-		return 1;
+	if (last == SCOUTFS_BLOCK_MAPPING_BLOCKS)
+		return 0;
+
+	/* start with 6 bits of last */
+	*ctl = last;
+	shift = 6;
+
+	prev = 0;
+	for (i = 0; i <= last; i++) {
+		blkno = map->blknos[i];
+
+
+		if (shift == 8) {
+			ctl = enc++;
+			len++;
+			*ctl = 0;
+			shift = 0;
+		}
+
+
+		if (blkno == prev + 1)
+			*ctl |= (SCOUTFS_BLOCK_ENC_INC << shift);
+		else if (test_bit(i, map->offline))
+			*ctl |= (SCOUTFS_BLOCK_ENC_OFFLINE << shift);
+		else if (!blkno)
+			*ctl |= (SCOUTFS_BLOCK_ENC_ZERO << shift);
+		else {
+			*ctl |= (SCOUTFS_BLOCK_ENC_DELTA << shift);
+
+			ret = zigzag_encode(enc, prev, blkno);
+			enc += ret;
+			len += ret;
+		}
+
+		shift += 2;
+		if (blkno)
+			prev = blkno;
 	}
+
+
+	return len;
+}
+
+static int decode_mapping(struct block_mapping *map, int size)
+{
+	unsigned ctl_bits;
+	u64 blkno;
+	u64 prev;
+	u8 *enc;
+	u8 ctl;
+	u8 last;
+	int ret;
+	int i;
+
+	if (size < 1 || size > SCOUTFS_BLOCK_MAPPING_MAX_BYTES)
+		return -EIO;
+
+	memset(map->blknos, 0, sizeof(map->blknos));
+	memset(map->offline, 0, sizeof(map->offline));
+
+	enc = map->encoded;
+	ctl = *(enc++);
+	size--;
+
+	/* start with lsb 6 bits of last */
+	last = ctl & SCOUTFS_BLOCK_MAPPING_MASK;
+	ctl >>= 6;
+	ctl_bits = 2;
+
+	prev = 0;
+	for (i = 0; i <= last; i++) {
+
+		if (ctl_bits == 0) {
+			if (size-- == 0)
+				return -EIO;
+			ctl = *(enc++);
+			ctl_bits = 8;
+		}
+
+
+		switch(ctl & SCOUTFS_BLOCK_ENC_MASK) {
+		case SCOUTFS_BLOCK_ENC_INC:
+			blkno = prev + 1;
+			break;
+		case SCOUTFS_BLOCK_ENC_OFFLINE:
+			set_bit(i, map->offline);
+			blkno = 0;
+			break;
+		case SCOUTFS_BLOCK_ENC_ZERO:
+			blkno = 0;
+			break;
+		case SCOUTFS_BLOCK_ENC_DELTA:
+			ret = zigzag_decode(&blkno, prev, enc, size);
+			/* XXX corruption, ran out of encoded bytes */
+			if (ret <= 0)
+				return -EIO;
+			enc += ret;
+			size -= ret;
+			break;
+		}
+
+		ctl >>= 2;
+		ctl_bits -= 2;
+
+		map->blknos[i] = blkno;
+		if (blkno)
+			prev = blkno;
+	}
+
+	/* XXX corruption: didn't use up all the bytes */
+	if (size != 0)
+		return -EIO;
 
 	return 0;
 }
 
-/*
- * The caller has ensured that the inner extent is entirely within
- * the outer extent.  Fill out the left and right regions of outter
- * that don't overlap with inner.
- */
-static void trim_extents(struct native_extent *left,
-			 struct native_extent *right,
-			 struct native_extent *outer,
-			 struct native_extent *inner)
+static void init_mapping_key(struct scoutfs_key_buf *key,
+			     struct scoutfs_block_mapping_key *bmk,
+			     u64 ino, u64 iblock)
 {
-	left->blk_off = outer->blk_off;
-	left->blkno = outer->blkno;
-	left->blocks = inner->blk_off - outer->blk_off;
-	left->flags = outer->flags;
 
-	right->blk_off = inner->blk_off + inner->blocks;
-	right->blkno = inner->blkno + inner->blocks;
-	right->blocks = (outer->blk_off + outer->blocks) - right->blk_off;
-	right->flags = outer->flags;
+	bmk->zone = SCOUTFS_FS_ZONE;
+	bmk->ino = cpu_to_be64(ino);
+	bmk->type = SCOUTFS_BLOCK_MAPPING_TYPE;
+	bmk->base = cpu_to_be64(iblock >> SCOUTFS_BLOCK_MAPPING_SHIFT);
+
+	scoutfs_key_init(key, bmk, sizeof(struct scoutfs_block_mapping_key));
 }
 
-/* return true if inner is fully contained by outer */
-static bool extents_within(struct native_extent *outer,
-			   struct native_extent *inner)
-{
-	u64 outer_end = outer->blk_off + outer->blocks - 1;
-	u64 inner_end = inner->blk_off + inner->blocks - 1;
 
-	return outer->blk_off <= inner_end && outer_end >= inner_end;
+static void init_free_key(struct scoutfs_key_buf *key,
+			  struct scoutfs_free_bits_key *fbk, u64 node_id,
+			  u64 full_bit, u8 type)
+{
+	fbk->zone = SCOUTFS_NODE_ZONE;
+	fbk->node_id = cpu_to_be64(node_id);
+	fbk->type = type;
+	fbk->base = cpu_to_be64(full_bit >> SCOUTFS_FREE_BITS_SHIFT);
+
+	scoutfs_key_init(key, fbk, sizeof(struct scoutfs_free_bits_key));
 }
 
 /*
- * Find an adjacent extent in the direction of the delta.  If we can
- * merge with it then we modify the incoming cur extent.  nei is set to
- * the neighbour we found.  If we didn't merge then nei's blocks is set
- * to 0.
+ * Mark the given segno as allocated.  We set its bit in a free segno
+ * item, possibly after creating it.
  */
-static int try_merge(struct super_block *sb, struct native_extent *cur,
-		     s64 delta, struct native_extent *nei, u64 arg, u8 type)
+static int set_segno_free(struct super_block *sb, u64 segno)
 {
-	u8 last_bytes[MAX_KEY_BYTES];
-	u8 key_bytes[MAX_KEY_BYTES];
-	struct scoutfs_key_buf last;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_free_bits_key fbk = {0,};
+	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
-	struct native_extent ext;
+	SCOUTFS_DECLARE_KVEC(val);
+	int bit = 0;
 	int ret;
 
-	memset(nei, 0, sizeof(struct native_extent));
+	init_free_key(&key, &fbk, sbi->node_id, segno,
+		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
+	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, val,
+					sizeof(struct scoutfs_free_bits),
+					NULL);
+	if (ret && ret != -ENOENT)
+		goto out;
 
-	/* short circuit prev search for common first block alloc */
-	if (cur->blk_off == 0 && delta < 0)
-		return 0;
+	bit = segno & SCOUTFS_FREE_BITS_MASK;
 
-	memset(&ext, ~0, sizeof(ext));
-	init_extent_key(&last, last_bytes, &ext, arg, type);
-
-	ext.blk_off = cur->blk_off + delta;
-	ext.blkno = cur->blkno + delta;
-	ext.blocks = 1;
-	ext.flags = 0;
-	init_extent_key(&key, key_bytes, &ext, arg, type);
-
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
-	if (ret < 0) {
-		if (ret == -ENOENT)
-			ret = 0;
+	if (ret == -ENOENT) {
+		memset(&frb, 0, sizeof(frb));
+		set_bit_le(bit, &frb);
+		ret = scoutfs_item_create(sb, &key, val);
 		goto out;
 	}
 
-	load_extent(&ext, &key);
-	trace_printk("merge nei "EXTF"\n", EXTA(&ext));
+	if (test_and_set_bit_le(bit, frb.bits)) {
+		ret = -EIO;
+		goto out;
+	}
 
-	if (merge_extents(cur, &ext))
-		*nei = ext;
+	ret = scoutfs_item_update(sb, &key, val, NULL);
+out:
+	trace_printk("segno %llu base %llu bit %u ret %d\n",
+		     segno, be64_to_cpu(fbk.base), bit, ret);
+	return ret;
+}
+
+/*
+ * Create a new free blkno item with all but the given blkno marked
+ * free.  We use the caller's key so they can delete it later if they
+ * need to.
+ */
+static int create_blkno_free(struct super_block *sb, u64 blkno,
+			     struct scoutfs_key_buf *key,
+			     struct scoutfs_free_bits_key *fbk)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_free_bits frb;
+	SCOUTFS_DECLARE_KVEC(val);
+	int bit;
+
+	init_free_key(key, fbk, sbi->node_id, blkno,
+		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
+	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+
+	bit = blkno & SCOUTFS_FREE_BITS_MASK;
+	memset(&frb, 0xff, sizeof(frb));
+	clear_bit_le(bit, frb.bits);
+
+	return scoutfs_item_create(sb, key, val);
+}
+
+/*
+ * Mark the first block in the segno as allocated.  This isn't a general
+ * purpose bit clear.  It knows that it's only called from allocation
+ * that found the bit so it won't create the segno item.
+ *
+ * And because it's allocating a block in the segno, it also has to
+ * create a free block item that marks the rest of the blknos in segno
+ * as free.
+ *
+ * It deletes the free segno item if it clears the last bit.
+ */
+static int clear_segno_free(struct super_block *sb, u64 segno)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_free_bits_key b_fbk;
+	struct scoutfs_free_bits_key fbk;
+	struct scoutfs_free_bits frb;
+	struct scoutfs_key_buf b_key;
+	struct scoutfs_key_buf key;
+	SCOUTFS_DECLARE_KVEC(val);
+	u64 blkno;
+	int bit;
+	int ret;
+
+	init_free_key(&key, &fbk, sbi->node_id, segno,
+		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
+	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, val,
+					sizeof(struct scoutfs_free_bits),
+					NULL);
+	if (ret) {
+		/* XXX corruption, caller saw item.. should still exist */
+		if (ret == -ENOENT)
+			ret = -EIO;
+		goto out;
+	}
+
+	/* XXX corruption, bit couldn't have been set */
+	bit = segno & SCOUTFS_FREE_BITS_MASK;
+	if (!test_and_clear_bit_le(bit, frb.bits)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/* create the new blkno item, we can safely delete it */
+	blkno = segno << SCOUTFS_SEGMENT_BLOCK_SHIFT;
+	ret = create_blkno_free(sb, blkno, &b_key, &b_fbk);
+	if (ret)
+		goto out;
+
+	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
+		ret = scoutfs_item_delete(sb, &key, NULL);
+	else
+		ret = scoutfs_item_update(sb, &key, val, NULL);
+	if (ret)
+		scoutfs_item_delete_dirty(sb, &b_key);
+out:
+	return ret;
+}
+
+/*
+ * Mark the given blkno free.  Set its bit in its free blkno item,
+ * possibly after creating it.  If all the bits are set we try to mark
+ * its segno free and delete the blkno item.
+ */
+static int set_blkno_free(struct super_block *sb, u64 blkno)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_free_bits_key fbk;
+	struct scoutfs_free_bits frb;
+	struct scoutfs_key_buf key;
+	SCOUTFS_DECLARE_KVEC(val);
+	u64 segno;
+	int bit;
+	int ret;
+
+	/* get the specified item */
+	init_free_key(&key, &fbk, sbi->node_id, blkno,
+		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
+	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, val,
+					sizeof(struct scoutfs_free_bits),
+					NULL);
+	if (ret && ret != -ENOENT)
+		goto out;
+
+	bit = blkno & SCOUTFS_FREE_BITS_MASK;
+
+	if (ret == -ENOENT) {
+		memset(&frb, 0, sizeof(frb));
+		set_bit_le(bit, &frb);
+		ret = scoutfs_item_create(sb, &key, val);
+		goto out;
+	}
+
+	if (test_and_set_bit_le(bit, frb.bits)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (!bitmap_full((long *)frb.bits, SCOUTFS_FREE_BITS_BITS)) {
+		ret = scoutfs_item_update(sb, &key, val, NULL);
+		goto out;
+	}
+
+	/* dirty so we can safely delete if set segno fails */
+	ret = scoutfs_item_dirty(sb, &key, NULL);
+	if (ret)
+		goto out;
+
+	segno = blkno >> SCOUTFS_SEGMENT_BLOCK_SHIFT;
+	ret = set_segno_free(sb, segno);
+	if (ret)
+		goto out;
+
+	scoutfs_item_delete_dirty(sb, &key);
 	ret = 0;
 out:
 	return ret;
 }
 
 /*
- * We have two item types for indexing free extents by either the
- * location of the extent or the size of the extent.  When we create
- * logical extents we might be finding neighbouring extents that could
- * be merged.  We can only search for neighbours in the location items.
- * Once we find them we mirror the item modifications for both the
- * location and size items.
- *
- * If this returns an error then nothing will have changed.
+ * Mark the given blkno as allocated.  This is working on behalf of a
+ * caller who just saw the item, it must exist.  We delete the free
+ * blkno item if all its bits are empty.
  */
-static int modify_items(struct super_block *sb, struct native_extent *ext,
-			u64 arg, u8 type, bool create)
+static int clear_blkno_free(struct super_block *sb, u64 blkno)
 {
-	u8 key_bytes[MAX_KEY_BYTES];
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_free_bits_key fbk;
+	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
-	int ret;
-	int err;
-
-	trace_printk("mod cre %u "EXTF"\n", create, EXTA(ext));
-
-	BUG_ON(type != SCOUTFS_FILE_EXTENT_TYPE &&
-	       type != SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
-
-	init_extent_key(&key, key_bytes, ext, arg, type);
-	ret = create ? scoutfs_item_create(sb, &key, NULL) :
-		       scoutfs_item_delete(sb, &key, NULL);
-
-	if (ret == 0 && type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE) {
-		init_extent_key(&key, key_bytes, ext, arg,
-				SCOUTFS_FREE_EXTENT_BLOCKS_TYPE);
-		ret = create ? scoutfs_item_create(sb, &key, NULL) :
-			       scoutfs_item_delete(sb, &key, NULL);
-		if (ret) {
-			init_extent_key(&key, key_bytes, ext, arg, type);
-			err = create ? scoutfs_item_delete(sb, &key, NULL) :
-				       scoutfs_item_create(sb, &key, NULL);
-			BUG_ON(err);
-		}
-	}
-
-	return ret;
-}
-
-/*
- * Insert a new extent.  We see if it can be merged with adjacent
- * existing extents.  If this returns an error then the existing extents
- * will not have changed.
- */
-static int insert_extent(struct super_block *sb,
-				 struct native_extent *caller_ins,
-				 u64 arg, u8 type)
-{
-	struct native_extent left;
-	struct native_extent right;
-	struct native_extent ins = *caller_ins;
-	bool del_ins = false;
-	bool ins_left = false;
-	int err;
+	SCOUTFS_DECLARE_KVEC(val);
+	int bit;
 	int ret;
 
-	trace_printk("inserting "EXTF"\n", EXTA(caller_ins));
-
-	/* find previous that might be adjacent */
-	ret = try_merge(sb, &ins, -1, &left, arg, type) ?:
-	      try_merge(sb, &ins, 1, &right, arg, type);
-	if (ret < 0)
-		goto out;
-
-	trace_printk("merge left "EXTF"\n", EXTA(&left));
-	trace_printk("merge right "EXTF"\n", EXTA(&right));
-
-	ret = modify_items(sb, &ins, arg, type, true);
-	if (ret)
-		goto out;
-	del_ins = true;
-
-	if (left.blocks) {
-		ret = modify_items(sb, &left, arg, type, false);
-		if (ret)
-			goto undo;
-		ins_left = true;
-	}
-
-	if (right.blocks)
-		ret = modify_items(sb, &right, arg, type, false);
-
-undo:
+	/* get the specified item */
+	init_free_key(&key, &fbk, sbi->node_id, blkno,
+		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
+	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, val,
+					sizeof(struct scoutfs_free_bits),
+					NULL);
 	if (ret) {
-		if (ins_left) {
-			err = modify_items(sb, &left, arg, type, true);
-			BUG_ON(err);
-		}
-		if (del_ins) {
-			err = modify_items(sb, &ins, arg, type, false);
-			BUG_ON(err);
-		}
+		/* XXX corruption, bits should have existed */
+		if (ret == -ENOENT)
+			ret = -EIO;
+		goto out;
 	}
 
-out:
-	return ret;
-}
-
-/*
- * Remove a portion of an existing extent.  The removal might leave
- * behind non-overlapping edges of the existing extent.  If this returns
- * an error then the existing extent will not have changed.
- */
-static int remove_extent(struct super_block *sb,
-			 struct native_extent *rem, u64 arg, u8 type)
-{
-	u8 last_bytes[MAX_KEY_BYTES];
-	u8 key_bytes[MAX_KEY_BYTES];
-	struct scoutfs_key_buf last;
-	struct scoutfs_key_buf key;
-	struct native_extent left = {0,};
-	struct native_extent right = {0,};
-	struct native_extent outer;
-	bool rem_left = false;
-	bool rem_right = false;
-	int err = 0;
-	int ret;
-
-	trace_printk("removing "EXTF"\n", EXTA(rem));
-
-	memset(&outer, ~0, sizeof(outer));
-	init_extent_key(&last, last_bytes, &outer, arg, type);
-
-	/* find outer existing extent that contains removal extent */
-	init_extent_key(&key, key_bytes, rem, arg, type);
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
-	if (ret)
-		goto out;
-
-	load_extent(&outer, &key);
-
-	trace_printk("outer "EXTF"\n", EXTA(&outer));
-
-	if (!extents_within(&outer, rem) || outer.flags != rem->flags) {
+	/* XXX corruption, bit couldn't have been set */
+	bit = blkno & SCOUTFS_FREE_BITS_MASK;
+	if (!test_and_clear_bit_le(bit, frb.bits)) {
 		ret = -EIO;
 		goto out;
 	}
 
-	trim_extents(&left, &right, &outer, rem);
-
-	trace_printk("trim left "EXTF"\n", EXTA(&left));
-	trace_printk("trim right "EXTF"\n", EXTA(&right));
-
-	if (left.blocks) {
-		ret = modify_items(sb, &left, arg, type, true);
-		if (ret)
-			goto out;
-		rem_left = true;
-	}
-
-	if (right.blocks) {
-		ret = modify_items(sb, &right, arg, type, true);
-		if (ret)
-			goto out;
-		rem_right = true;
-	}
-
-	ret = modify_items(sb, &outer, arg, type, false);
-
+	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
+		ret = scoutfs_item_delete(sb, &key, NULL);
+	else
+		ret = scoutfs_item_update(sb, &key, val, NULL);
 out:
-	if (ret) {
-		if (rem_right) {
-			err = modify_items(sb, &right, arg, type, false);
-			BUG_ON(err);
-		}
-		if (rem_left) {
-			err = modify_items(sb, &left, arg, type, false);
-			BUG_ON(err);
-		}
-	}
-
-	trace_printk("ret %d\n", ret);
 	return ret;
 }
 
 /*
- * Free extents whose blocks fall inside the specified logical block
- * range.
+ * In each iteration iblock is the logical block and i is the index into
+ * blknos array and the bit in the offline bitmap.  The iteration won't
+ * advance past the last logical block.
+ */
+#define for_each_block(i, iblock, last)					\
+	for (i = iblock & SCOUTFS_BLOCK_MAPPING_MASK;			\
+	     i < SCOUTFS_BLOCK_MAPPING_BLOCKS && iblock <= (last);	\
+	     i++, iblock++)
+
+/*
+ * Free blocks inside the specified logical block range.
  *
- * If 'offline' is given then blocks are freed but the extent items are
- * left behind and their _OFFLINE flag is set.
+ * If 'offline' is given then blocks are freed an offline mapping is
+ * left behind.
  *
  * This is the low level extent item manipulation code.  We hold and
  * release the transaction so the caller doesn't have to deal with
@@ -525,137 +601,119 @@ out:
 int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 				u64 len, bool offline)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	u8 last_bytes[MAX_KEY_BYTES];
-	u8 key_bytes[MAX_KEY_BYTES];
-	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
-	struct native_extent found;
-	struct native_extent first;
-	struct native_extent rng;
-	struct native_extent ext;
-	struct native_extent ofl;
-	struct native_extent fr;
-	bool rem_fr = false;
-	bool ins_ext = false;
-	bool holding = false;
+	struct scoutfs_block_mapping_key last_bmk;
+	struct scoutfs_block_mapping_key bmk;
+	struct block_mapping *map;
+	SCOUTFS_DECLARE_KVEC(val);
+	bool holding;
+	bool dirtied;
+	bool modified;
+	u64 blkno;
+	u64 last;
+	int bytes;
 	int ret = 0;
-	int err;
+	int i;
 
 	trace_printk("iblock %llu len %llu offline %u\n",
 		     iblock, len, offline);
 
-	memset(&ext, ~0, sizeof(ext));
-	init_extent_key(&last, last_bytes, &ext, ino, SCOUTFS_FILE_EXTENT_TYPE);
+	if (WARN_ON_ONCE(iblock + len < iblock))
+		return -EINVAL;
 
-	rng.blk_off = iblock;
-	rng.blocks = len;
-	rng.blkno = 0;
-	rng.flags = 0;
+	map = kmalloc(sizeof(struct block_mapping), GFP_NOFS);
+	if (!map)
+		return -ENOMEM;
 
-	while (rng.blocks) {
-		/* find the next extent that could include our first block */
-		first = rng;
-		first.blocks = 1;
-		init_extent_key(&key, key_bytes, &first, ino,
-				SCOUTFS_FILE_EXTENT_TYPE);
+	last = iblock + len - 1;
+	init_mapping_key(&last_key, &last_bmk, ino, last);
 
-		ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
+	while (iblock <= last) {
+		/* find the mapping that could include iblock */
+		init_mapping_key(&key, &bmk, ino, iblock);
+		scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
+
+		ret = scoutfs_item_next(sb, &key, &last_key, val, NULL);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		load_extent(&found, &key);
-		trace_printk("found "EXTF"\n", EXTA(&found));
-
-		/* XXX corruption: offline has phys == log */
-		if ((found.flags & SCOUTFS_FILE_EXTENT_OFFLINE) &&
-		    found.blkno != found.blk_off) {
-			ret = -EIO;
+		ret = decode_mapping(map, ret);
+		if (ret < 0)
 			break;
-		}
 
-		/* we're done if the found extent is past us */
-		if (found.blk_off >= rng.blk_off + rng.blocks) {
-			ret = 0;
-			break;
-		}
+		/* set iblock to the first in the next item inside last */
+		iblock = max(iblock, be64_to_cpu(bmk.base) <<
+				     SCOUTFS_BLOCK_MAPPING_SHIFT);
 
-		/* find the intersection */
-		ext.blk_off = max(rng.blk_off, found.blk_off);
-		ext.blocks = min(rng.blk_off + rng.blocks,
-				 found.blk_off + found.blocks) - ext.blk_off;
-		ext.blkno = found.blkno + (ext.blk_off - found.blk_off);
-		ext.flags = found.flags;
-
-		/* next search will be past the extent we truncate */
-		rng.blk_off = ext.blk_off + ext.blocks;
-		if (rng.blk_off < iblock + len)
-			rng.blocks = (iblock + len) - rng.blk_off;
-		else
-			rng.blocks = 0;
-
-		/* done if already offline */
-		if (offline && (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE))
-			continue;
-
-		ret = scoutfs_hold_trans(sb, SIC_TRUNC_BLOCK());
-		if (ret)
-			break;
-		holding = true;
-
-		/* free the old extent if it was allocated */
-		if (ext.blkno) {
-			fr = ext;
-			fr.blk_off = fr.blkno;
-			ret = insert_extent(sb, &fr, sbi->node_id,
-					    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
-			if (ret)
-				break;
-			rem_fr = true;
-		}
-
-		/* always remove the overlapping file extent */
-		ret = remove_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_TYPE);
-		if (ret)
-			break;
-		ins_ext = true;
-
-		/* maybe add new file extents with the offline flag set */
-		if (offline) {
-			ofl = ext;
-			ofl.blkno = ofl.blk_off;
-			ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
-			ret = insert_extent(sb, &ofl, ino,
-					    SCOUTFS_FILE_EXTENT_TYPE);
-			if (ret)
-				break;
-		}
-
-		rem_fr = false;
-		ins_ext = false;
-		scoutfs_release_trans(sb);
 		holding = false;
+		dirtied = false;
+		modified = false;
+		for_each_block(i, iblock, last) {
+
+			blkno = map->blknos[i];
+
+			/* don't need to do anything.. */
+			if (!blkno &&
+			    !!offline == !!test_bit(i, map->offline))
+				continue;
+
+			if (!holding) {
+				ret = scoutfs_hold_trans(sb, SIC_TRUNC_BLOCK());
+				if (ret)
+					break;
+				holding = true;
+			}
+
+			if (!dirtied) {
+				/* dirty item with full size encoded */
+				ret = scoutfs_item_update(sb, &key, val, NULL);
+				if (ret)
+					break;
+				dirtied = true;
+			}
+
+			/* free if allocated */
+			if (blkno) {
+				ret = set_blkno_free(sb, blkno);
+				if (ret)
+					break;
+
+				map->blknos[i] = 0;
+			}
+
+			if (offline && !test_bit(i, map->offline))
+				set_bit(i, map->offline);
+			else if (!offline && test_bit(i, map->offline))
+				clear_bit(i, map->offline);
+
+			modified = true;
+		}
+
+		if (modified) {
+			/* update how ever much of the item we finished */
+			bytes = encode_mapping(map);
+			if (bytes) {
+				scoutfs_kvec_init(val, map->encoded, bytes);
+				scoutfs_item_update_dirty(sb, &key, val);
+			} else {
+				scoutfs_item_delete_dirty(sb, &key);
+			}
+		}
+
+		if (holding) {
+			scoutfs_release_trans(sb);
+			holding = false;
+		}
+
+		if (ret)
+			break;
 	}
 
-	if (ret) {
-		if (ins_ext) {
-			err = insert_extent(sb, &ext, ino,
-					    SCOUTFS_FILE_EXTENT_TYPE);
-			BUG_ON(err);
-		}
-		if (rem_fr) {
-			err = remove_extent(sb, &fr, sbi->node_id,
-					    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
-			BUG_ON(err);
-		}
-	}
-
-	if (holding)
-		scoutfs_release_trans(sb);
-
+	kfree(map);
 	return ret;
 }
 
@@ -723,7 +781,6 @@ static struct task_cursor *get_cursor(struct data_info *datinf)
 		curs->pid = pid;
 		hlist_add_head(&curs->hnode, head);
 		curs->blkno = 0;
-		curs->blocks = 0;
 	}
 
 	list_move(&curs->list_head, &datinf->cursor_lru);
@@ -733,8 +790,6 @@ static struct task_cursor *get_cursor(struct data_info *datinf)
 
 static int bulk_alloc(struct super_block *sb)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct native_extent ext;
 	u64 *segnos = NULL;
 	int ret;
 	int i;
@@ -746,29 +801,7 @@ static int bulk_alloc(struct super_block *sb)
 	}
 
 	for (i = 0; segnos[i]; i++) {
-
-		/* merge or set this one */
-		if (i > 0 && (segnos[i] == segnos[i - 1] + 1)) {
-			ext.blocks += SCOUTFS_SEGMENT_BLOCKS;
-			trace_printk("merged segno [%u] %llu blocks %llu\n",
-					i, segnos[i], ext.blocks);
-		} else {
-			ext.blkno = segnos[i] << SCOUTFS_SEGMENT_BLOCK_SHIFT;
-			ext.blocks = SCOUTFS_SEGMENT_BLOCKS;
-			trace_printk("set extent segno [%u] %llu blkno %llu\n",
-					i, segnos[i], ext.blkno);
-		}
-
-		/* don't write if we merge with the next one */
-		if ((segnos[i] + 1) == segnos[i + 1])
-			continue;
-
-		trace_printk("inserting [%u] "EXTF"\n", i, EXTA(&ext));
-
-		ext.blk_off = ext.blkno;
-		ext.flags = 0;
-		ret = insert_extent(sb, &ext, sbi->node_id,
-				    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
+		ret = set_segno_free(sb, segnos[i]);
 		if (ret)
 			break;
 	}
@@ -783,196 +816,173 @@ out:
 }
 
 /*
- * Allocate a single block for the logical block offset in the file.
+ * Find the free bit item that contains the blkno and return the next blkno
+ * set starting with this blkno.
  *
- * We try to merge single block allocations into large extents by using
- * per-task cursors.  Each cursor tracks a block region that should be
- * searched for free extents.  If we don't have a cursor, or we find
- * free space outside of our cursor, then we look for the next large
- * free extent.
+ * Returns -ENOENT if there's no free blknos at or after the given blkno.
  */
-static int allocate_block(struct inode *inode, sector_t iblock, u64 *blkno,
-			  bool was_offline)
+static int find_free_blkno(struct super_block *sb, u64 blkno, u64 *blkno_ret)
 {
-	struct super_block *sb = inode->i_sb;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	DECLARE_DATA_INFO(sb, datinf);
-	u8 last_bytes[MAX_KEY_BYTES];
-	u8 key_bytes[MAX_KEY_BYTES];
-	struct scoutfs_key_buf last;
+	struct scoutfs_free_bits_key fbk;
+	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
-	struct native_extent last_ext;
-	struct native_extent found;
-	struct native_extent ext;
-	struct native_extent ofl;
-	struct native_extent fr;
-	struct task_cursor *curs;
-	bool alloced = false;
-	const u64 ino = scoutfs_ino(inode);
-	bool rem_ext = false;
-	bool ins_ofl = false;
-	u8 type;
-	int err;
+	SCOUTFS_DECLARE_KVEC(val);
+	int ret;
+	int bit;
+
+	init_free_key(&key, &fbk, sbi->node_id, blkno,
+		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
+	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+
+	ret = scoutfs_item_lookup_exact(sb, &key, val,
+					sizeof(struct scoutfs_free_bits), NULL);
+	if (ret < 0)
+		goto out;
+
+	bit = blkno & SCOUTFS_FREE_BITS_MASK;
+	bit = find_next_bit_le(frb.bits, SCOUTFS_FREE_BITS_BITS, bit);
+	if (bit >= SCOUTFS_FREE_BITS_BITS) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	*blkno_ret = (be64_to_cpu(fbk.base) << SCOUTFS_FREE_BITS_SHIFT) + bit;
+	ret = 0;
+out:
+	return ret;
+}
+
+/*
+ * Find a free segno to satisfy allocation by finding the first bit set
+ * in the first free segno item.
+ */
+static int find_free_segno(struct super_block *sb, u64 *segno)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_free_bits_key last_fbk;
+	struct scoutfs_free_bits_key fbk;
+	struct scoutfs_free_bits frb;
+	struct scoutfs_key_buf last_key;
+	struct scoutfs_key_buf key;
+	SCOUTFS_DECLARE_KVEC(val);
+	int bit;
 	int ret;
 
-	memset(&last_ext, ~0, sizeof(last_ext));
+	init_free_key(&key, &fbk, sbi->node_id, 0,
+		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
+	init_free_key(&last_key, &last_fbk, sbi->node_id, ~0,
+		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
+	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+
+	ret = scoutfs_item_next(sb, &key, &last_key, val, NULL);
+	if (ret < 0)
+		goto out;
+
+	bit = find_next_bit_le(frb.bits, SCOUTFS_FREE_BITS_BITS, 0);
+	/* XXX corruption, shouldn't see empty items */
+	if (bit >= SCOUTFS_FREE_BITS_BITS) {
+		ret = -EIO;
+		goto out;
+	}
+
+	*segno = (be64_to_cpu(fbk.base) << SCOUTFS_FREE_BITS_SHIFT) + bit;
+	ret = 0;
+out:
+	return ret;
+}
+
+/*
+ * Allocate a single block for the logical block offset in the file.
+ *
+ * We try to encourage contiguous allocation by having per-task cursors
+ * that track blocks inside segments.  Each new allocating task will get
+ * a new segment.  Lots of concurrent allocations can interleave at
+ * segment granularity.
+ */
+static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
+			    struct scoutfs_key_buf *map_key,
+			    unsigned map_ind, bool map_exists)
+{
+	DECLARE_DATA_INFO(sb, datinf);
+	struct task_cursor *curs;
+	SCOUTFS_DECLARE_KVEC(val);
+	int bytes;
+	u64 segno;
+	u64 blkno;
+	int ret;
 
 	down_write(&datinf->alloc_rwsem);
 
 	curs = get_cursor(datinf);
 
-	/* start from the cursor or look for the next large extent */
-reset_cursor:
-	if (curs->blocks) {
-		ext.blkno = curs->blkno;
-		ext.blocks = 0;
-		type = SCOUTFS_FREE_EXTENT_BLKNO_TYPE;
-	} else {
-		ext.blkno = datinf->next_large_blkno;
-		ext.blocks = LARGE_EXTENT_BLOCKS;
-		type = SCOUTFS_FREE_EXTENT_BLOCKS_TYPE;
-	}
-	ext.flags = 0;
+	trace_printk("got curs %p blkno %llu\n", curs, curs->blkno);
 
-retry:
-	trace_printk("searching %llu,%llu curs %p task %p pid %u %llu,%llu\n",
-		     ext.blkno, ext.blocks, curs, curs->task, curs->pid,
-		     curs->blkno, curs->blocks);
-
-	ext.blk_off = ext.blkno;
-	init_extent_key(&key, key_bytes, &ext, sbi->node_id, type);
-	init_extent_key(&last, last_bytes, &last_ext, sbi->node_id, type);
-
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
-	if (ret < 0) {
-		if (ret == -ENOENT) {
-			/* if the cursor's empty fall back to next large */
-	 		if (ext.blkno && ext.blocks == 0) {
-				curs->blkno = 0;
-				curs->blocks = 0;
-				goto reset_cursor;
-			}
-
-			/* wrap the search for large extents */
-			if (ext.blkno > LARGE_EXTENT_BLOCKS && ext.blocks) {
-				datinf->next_large_blkno = LARGE_EXTENT_BLOCKS;
-				ext.blkno = datinf->next_large_blkno;
-				goto retry;
-			}
-
-			/* ask the server for more extents */
-			if (ext.blocks && !alloced) {
-				ret = bulk_alloc(sb);
-				if (ret < 0)
-					goto out;
-				alloced = true;
-				goto retry;
-			}
-
-			/* finally look for any free block at all */
-			if (ext.blocks) {
-				ext.blkno = 0;
-				ext.blocks = 0;
-				type = SCOUTFS_FREE_EXTENT_BLKNO_TYPE;
-				goto retry;
-			}
-
-			/* after all that return -ENOSPC */
-			ret = -ENOSPC;
+	/* try to find the next blkno in our cursor if we have one */
+	if (curs->blkno) {
+		ret = find_free_blkno(sb, curs->blkno, &blkno);
+		if (ret < 0 && ret != -ENOENT)
+			goto out;
+		if (ret == 0) {
+			curs->blkno = blkno;
+			segno = 0;
+		} else {
+			curs->blkno = 0;
 		}
-		goto out;
 	}
 
-	load_extent(&found, &key);
-	trace_printk("found nei "EXTF"\n", EXTA(&found));
+	/* try to find segnos, asking the server for more */
+	while (curs->blkno == 0) {
+		ret = find_free_segno(sb, &segno);
+		if (ret < 0 && ret != -ENOENT)
+			goto out;
+		if (ret == 0) {
+			blkno = segno << SCOUTFS_SEGMENT_BLOCK_SHIFT;
+			curs->blkno = blkno;
+			break;
+		}
 
-	/* look for a new large extent if found is outside cursor */
-	if (curs->blocks &&
-	    (found.blkno + found.blocks <= curs->blkno ||
-	     found.blkno >= curs->blkno + curs->blocks)) {
-		curs->blkno = 0;
-		curs->blocks = 0;
-		goto reset_cursor;
-	}
-
-	/*
-	 * Set the cursor if:
-	 *  - we didn't already have one
-	 *  - it's large enough for a large extent with alignment padding
-	 *  - the sufficiently large free region is past next large
-	 */
-	if (!curs->blocks &&
-	    found.blocks >= (2 * LARGE_EXTENT_BLOCKS) &&
-	    (found.blkno + found.blocks - (2 * LARGE_EXTENT_BLOCKS) >=
-		datinf->next_large_blkno)) {
-
-		curs->blkno = ALIGN(max(found.blkno, datinf->next_large_blkno),
-				    LARGE_EXTENT_BLOCKS);
-		curs->blocks = LARGE_EXTENT_BLOCKS;
-		found.blkno = curs->blkno;
-		found.blocks = curs->blocks;
-
-		datinf->next_large_blkno = curs->blkno + LARGE_EXTENT_BLOCKS;
-	}
-
-	trace_printk("using %llu,%llu curs %llu,%llu\n",
-		     found.blkno, found.blocks, curs->blkno, curs->blocks);
-
-	/* remove old offline block if we're staging */
-	if (was_offline) {
-		ofl.blk_off = iblock;
-		ofl.blkno = iblock;
-		ofl.blocks = 1;
-		ofl.flags = SCOUTFS_FILE_EXTENT_OFFLINE;
-		ret = remove_extent(sb, &ofl, ino, SCOUTFS_FILE_EXTENT_TYPE);
+		ret = bulk_alloc(sb);
 		if (ret < 0)
 			goto out;
-		ins_ofl = true;
 	}
 
-	/* insert new file extent */
-	*blkno = found.blkno;
-	ext.blk_off = iblock;
-	ext.blkno = found.blkno;
-	ext.blocks = 1;
-	ext.flags = 0;
-	ret = insert_extent(sb, &ext, ino, SCOUTFS_FILE_EXTENT_TYPE);
-	if (ret < 0)
-		goto out;
-	rem_ext = true;
+	trace_printk("found free segno %llu blkno %llu\n", segno, blkno);
 
-	/* and remove free extents */
-	fr = ext;
-	fr.blk_off = ext.blkno;
-	ret = remove_extent(sb, &fr, sbi->node_id,
-			    SCOUTFS_FREE_EXTENT_BLKNO_TYPE);
+	/* ensure that we can copy in encoded without failing */
+	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
+	if (map_exists)
+		ret = scoutfs_item_update(sb, map_key, val, NULL);
+	else
+		ret = scoutfs_item_create(sb, map_key, val);
 	if (ret)
 		goto out;
 
-	/* advance cursor if we're using it */
-	if (curs->blocks) {
-		if (--curs->blocks == 0)
-			curs->blkno = 0;
-		else
-			curs->blkno++;
-	}
+	/* clear the free bit we found */
+	if (segno)
+		ret = clear_segno_free(sb, segno);
+	else
+		ret = clear_blkno_free(sb, blkno);
+	if (ret)
+		goto out;
+
+	/* update the mapping */
+	clear_bit(map_ind, map->offline);
+	map->blknos[map_ind] = blkno;
+
+	bytes = encode_mapping(map);
+	scoutfs_kvec_init(val, map->encoded, bytes);
+	scoutfs_item_update_dirty(sb, map_key, val);
+
+	/* set cursor to next block, clearing if we finish the segment */
+	curs->blkno++;
+	if ((curs->blkno & SCOUTFS_FREE_BITS_MASK) == 0)
+		curs->blkno = 0;
 
 	ret = 0;
 out:
-	if (ret) {
-		if (rem_ext) {
-			err = remove_extent(sb, &ext, ino,
-					    SCOUTFS_FILE_EXTENT_TYPE);
-			BUG_ON(err);
-		}
-		if (ins_ofl) {
-			err = insert_extent(sb, &ofl, ino,
-					    SCOUTFS_FILE_EXTENT_TYPE);
-			BUG_ON(err);
-		}
-	}
-
 	up_write(&datinf->alloc_rwsem);
+
 	trace_printk("ret %d\n", ret);
 	return ret;
 }
@@ -982,73 +992,67 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	DECLARE_DATA_INFO(sb, datinf);
-	u8 last_bytes[MAX_KEY_BYTES];
-	u8 key_bytes[MAX_KEY_BYTES];
-	struct scoutfs_key_buf last;
+	struct scoutfs_block_mapping_key bmk;
 	struct scoutfs_key_buf key;
-	struct native_extent ext;
-	bool was_offline = false;
-	u64 blkno;
-	u64 off;
+	struct block_mapping *map;
+	SCOUTFS_DECLARE_KVEC(val);
+	bool exists;
+	int ind;
 	int ret;
+	int i;
 
-	ext.blk_off = iblock;
-	ext.blocks = 1;
-	ext.blkno = 0;
-	ext.flags = 0;
-	init_extent_key(&key, key_bytes, &ext, scoutfs_ino(inode),
-			SCOUTFS_FILE_EXTENT_TYPE);
+	map = kmalloc(sizeof(struct block_mapping), GFP_NOFS);
+	if (!map)
+		return -ENOMEM;
 
-	memset(&ext, ~0, sizeof(ext));
-	init_extent_key(&last, last_bytes, &ext, scoutfs_ino(inode),
-			SCOUTFS_FILE_EXTENT_TYPE);
+	init_mapping_key(&key, &bmk, scoutfs_ino(inode), iblock);
+	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
 
-	/*
-	 * XXX think about how far this next can go, given locking and
-	 * item consistency.
-	 */
-	down_read(&datinf->alloc_rwsem);
-	ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
-	up_read(&datinf->alloc_rwsem);
+	/* find the mapping item that covers the logical block */
+	ret = scoutfs_item_lookup(sb, &key, val, NULL);
 	if (ret < 0) {
-		if (ret == -ENOENT)
-			memset(&ext, 0, sizeof(ext));
-		else
+		if (ret != -ENOENT)
 			goto out;
+		memset(map->blknos, 0, sizeof(map->blknos));
+		memset(map->offline, 0, sizeof(map->offline));
+		exists = false;
 	} else {
-		load_extent(&ext, &key);
-		trace_printk("found nei "EXTF"\n", EXTA(&ext));
+		ret = decode_mapping(map, ret);
+		if (ret < 0)
+			goto out;
+		exists = true;
 	}
 
-	/* use the extent if it intersects */
-	if (iblock >= ext.blk_off && iblock < (ext.blk_off + ext.blocks)) {
+	ind = iblock & SCOUTFS_BLOCK_MAPPING_MASK;
 
-		if (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE) {
-			/* non-stage can't write to offline */
-			if (!si->staging) {
-				ret = -EINVAL;
-				goto out;
-			}
-			was_offline = true;
-		} else {
-			/* found online extent */
-			off = iblock - ext.blk_off;
-			map_bh(bh, inode->i_sb, ext.blkno + off);
-			bh->b_size = min_t(u64, bh->b_size,
-				    (ext.blocks - off) << SCOUTFS_BLOCK_SHIFT);
-			clear_buffer_new(bh);
-		}
+	/* fail read and write if it's offline and we're not staging */
+	if (test_bit(ind, map->offline) && !si->staging) {
+		ret = -EINVAL;
+		goto out;
 	}
 
-	if (!buffer_mapped(bh) && create) {
-		ret = allocate_block(inode, iblock, &blkno, was_offline);
+	/* try to allocate if we're writing */
+	if (create && !map->blknos[ind]) {
+		/*
+		 * XXX can blow the transaction here.. need to back off
+		 * and try again if we've already done a bulk alloc in
+		 * our transaction.
+		 */
+		ret = find_alloc_block(sb, map, &key, ind, exists);
 		if (ret)
 			goto out;
+	}
 
-		map_bh(bh, inode->i_sb, blkno);
-		bh->b_size = SCOUTFS_BLOCK_SHIFT;
-		set_buffer_new(bh);
+	/* mark the bh mapped and set the size for as many contig as we see */
+	if (map->blknos[ind]) {
+		for (i = 1; ind + i < SCOUTFS_BLOCK_MAPPING_BLOCKS; i++) {
+			if (map->blknos[ind + i] != map->blknos[ind] + i)
+				break;
+		}
+
+		map_bh(bh, inode->i_sb, map->blknos[ind]);
+		bh->b_size = min_t(u64, bh->b_size, i << SCOUTFS_BLOCK_SHIFT);
+		clear_buffer_new(bh);
 	}
 
 	ret = 0;
@@ -1056,6 +1060,8 @@ out:
 	trace_printk("ino %llu iblock %llu create %d ret %d bnr %llu size %zu\n",
 		     scoutfs_ino(inode), (u64)iblock, create, ret,
 		     (u64)bh->b_blocknr, bh->b_size);
+
+	kfree(map);
 
 	return ret;
 }
@@ -1172,98 +1178,170 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 	return ret;
 }
 
+struct pending_fiemap {
+	u64 logical;
+	u64 phys;
+	u64 size;
+	u32 flags;
+};
+
 /*
- * Return the extents that intersect with the given byte range.  It doesn't
- * trim the returned extents to the byte range.
+ * The caller is iterating over mapped blocks.  We merge the current
+ * pending fiemap entry with the next block if we can.  If we can't
+ * merge then we fill the current entry and start on the next.  We also
+ * fill the pending mapping if the caller specifically tells us that
+ * this will be the last call.
+ *
+ * returns 0 to continue, 1 to stop, and -errno to stop with error.
+ */
+static int merge_or_fill(struct fiemap_extent_info *fieinfo,
+			 struct pending_fiemap *pend, u64 logical, u64 phys,
+			 bool offline, bool last)
+{
+	u32 flags = offline ? FIEMAP_EXTENT_UNKNOWN : 0;
+	int ret;
+
+	/* merge if we can, returning if we don't have to fill last */
+	if (pend->logical + pend->size == logical &&
+	    ((pend->phys == 0 && phys == 0) ||
+	     (pend->phys + pend->size == phys)) &&
+	    pend->flags == flags) {
+		pend->size += SCOUTFS_BLOCK_SIZE;
+		if (!last)
+			return 0;
+	}
+
+	if (pend->size) {
+		if (last)
+			pend->flags |= FIEMAP_EXTENT_LAST;
+
+		/* returns 1 to end, including if we passed in _LAST */
+		ret = fiemap_fill_next_extent(fieinfo, pend->logical,
+					      pend->phys, pend->size,
+					      pend->flags);
+		if (ret != 0)
+			return ret;
+	}
+
+	pend->logical = logical;
+	pend->phys = phys;
+	pend->size = SCOUTFS_BLOCK_SIZE;
+	pend->flags = flags;
+
+	return 0;
+}
+
+/*
+ * Iterate over non-zero block mapping items merging contiguous blocks and
+ * filling extent entries as we cross non-contiguous boundaries.  We set
+ * _LAST on the last extent and _UNKNOWN on offline extents.
  */
 int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 			u64 start, u64 len)
 {
 	struct super_block *sb = inode->i_sb;
-	const u8 type = SCOUTFS_FILE_EXTENT_TYPE;
 	const u64 ino = scoutfs_ino(inode);
-	u8 last_bytes[MAX_KEY_BYTES];
-	u8 key_bytes[MAX_KEY_BYTES];
-	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
-	struct native_extent ext;
 	struct scoutfs_lock *inode_lock = NULL;
-	u64 logical;
+	struct block_mapping *map;
+	struct pending_fiemap pend;
+	struct scoutfs_block_mapping_key last_bmk;
+	struct scoutfs_block_mapping_key bmk;
+	SCOUTFS_DECLARE_KVEC(val);
+	loff_t i_size;
+	bool offline;
 	u64 blk_off;
 	u64 final;
+	u64 logical;
 	u64 phys;
-	u64 size;
-	u32 flags;
 	int ret;
+	int i;
 
 	ret = fiemap_check_flags(fieinfo, FIEMAP_FLAG_SYNC);
 	if (ret)
 		return ret;
 
-	memset(&ext, ~0, sizeof(ext));
-	init_extent_key(&last, last_bytes, &ext, ino, type);
+	map = kmalloc(sizeof(struct block_mapping), GFP_NOFS);
+	if (!map)
+		return -ENOMEM;
 
-	blk_off = start >> SCOUTFS_BLOCK_SHIFT;
-	final = (start + len - 1) >> SCOUTFS_BLOCK_SHIFT;
-	size = 0;
-	flags = 0;
+	/* initialize to impossible to merge */
+	memset(&pend, 0, sizeof(pend));
 
 	/* XXX overkill? */
 	mutex_lock(&inode->i_mutex);
+
+	/* stop at i_size, we don't allocate outside i_size */
+	i_size = i_size_read(inode);
+	if (i_size == 0) {
+		ret = 0;
+		goto out;
+	}
+
+	blk_off = start >> SCOUTFS_BLOCK_SHIFT;
+	final = min_t(loff_t, i_size - 1, start + len - 1) >>
+		SCOUTFS_BLOCK_SHIFT;
+	init_mapping_key(&last_key, &last_bmk, ino, final);
 
 	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &inode_lock);
 	if (ret)
 		goto out;
 
-	for (;;) {
-		ext.blk_off = blk_off;
-		ext.blkno = 0;
-		ext.blocks = 1;
-		ext.flags = 0;
-		init_extent_key(&key, key_bytes, &ext, ino, type);
+	while (blk_off <= final) {
+		init_mapping_key(&key, &bmk, ino, blk_off);
+		scoutfs_kvec_init(val, &map->encoded, sizeof(map->encoded));
 
-		ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
+		ret = scoutfs_item_next(sb, &key, &last_key, val,
+					inode_lock->end);
 		if (ret < 0) {
-			if (ret != -ENOENT)
-				break;
-			flags |= FIEMAP_EXTENT_LAST;
-			ret = 0;
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
 		}
 
-		load_extent(&ext, &key);
-
-		if (ext.blk_off > final)
-			flags |= FIEMAP_EXTENT_LAST;
-
-		if (size) {
-			ret = fiemap_fill_next_extent(fieinfo, logical, phys,
-						      size, flags);
-			if (ret != 0) {
-				if (ret == 1)
-					ret = 0;
-				break;
-			}
-		}
-
-		if (flags & FIEMAP_EXTENT_LAST)
+		ret = decode_mapping(map, ret);
+		if (ret < 0)
 			break;
 
-		logical = ext.blk_off << SCOUTFS_BLOCK_SHIFT;
-		phys = ext.blkno << SCOUTFS_BLOCK_SHIFT;
-		size = ext.blocks << SCOUTFS_BLOCK_SHIFT;
-		flags = 0;
+		/* set blk_off to the first in the next item inside last */
+		blk_off = max(blk_off, be64_to_cpu(bmk.base) <<
+				       SCOUTFS_BLOCK_MAPPING_SHIFT);
 
-		if (ext.flags & SCOUTFS_FILE_EXTENT_OFFLINE) {
-			phys = 0;
-			flags = FIEMAP_EXTENT_UNKNOWN;
+		for_each_block(i, blk_off, final) {
+			offline = !!test_bit(i, map->offline);
+
+			/* nothing to do with sparse regions */
+			if (map->blknos[i] == 0 && !offline)
+				continue;
+
+			trace_printk("blk_off %llu i %u blkno %llu\n",
+					blk_off, i, map->blknos[i]);
+
+			logical = blk_off << SCOUTFS_BLOCK_SHIFT;
+			phys = map->blknos[i] << SCOUTFS_BLOCK_SHIFT;
+
+			ret = merge_or_fill(fieinfo, &pend, logical, phys,
+					    offline, false);
+			if (ret != 0)
+				break;
 		}
-
-		blk_off = ext.blk_off + ext.blocks;
+		if (ret != 0)
+			break;
 	}
 
 	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+
+	if (ret == 0) {
+		/* catch final last fill */
+		ret = merge_or_fill(fieinfo, &pend, 0, 0, false, true);
+	}
+	if (ret == 1)
+		ret = 0;
+
 out:
 	mutex_unlock(&inode->i_mutex);
+	kfree(map);
 
 	return ret;
 }
@@ -1302,8 +1380,6 @@ int scoutfs_data_setup(struct super_block *sb)
 
 	init_rwsem(&datinf->alloc_rwsem);
 	INIT_LIST_HEAD(&datinf->cursor_lru);
-	/* always search for large aligned extents */
-	datinf->next_large_blkno = LARGE_EXTENT_BLOCKS;
 
 	for (i = 0; i < CURSOR_HASH_HEADS; i++)
 		INIT_HLIST_HEAD(&datinf->cursor_hash[i]);
@@ -1339,4 +1415,121 @@ void scoutfs_data_destroy(struct super_block *sb)
 		destroy_cursors(datinf);
 		kfree(datinf);
 	}
+}
+
+/*
+ * Basic correctness tests of u64 and mapping encoding.
+ */
+int __init scoutfs_data_test(void)
+{
+	u8 encoded[SCOUTFS_ZIGZAG_MAX_BYTES];
+	struct block_mapping *input;
+	struct block_mapping *output;
+	u64 blkno;
+	u8 bits;
+	u64 prev;
+	u64 in;
+	u64 out;
+	int ret;
+	int len;
+	int b;
+	int i;
+
+	prev = 0;
+	for (i = 0; i < 10000; i++) {
+		get_random_bytes_arch(&bits, sizeof(bits));
+		get_random_bytes_arch(&in, sizeof(in));
+		in &= (1ULL << (bits % 64)) - 1;
+
+		len = zigzag_encode(encoded, prev, in);
+
+		ret = zigzag_decode(&out, prev, encoded, len);
+
+		if (ret <= 0 || ret > SCOUTFS_ZIGZAG_MAX_BYTES || in != out) {
+			printk("i %d prev %llu in %llu out %llu len %d ret %d\n",
+				i, prev, in, out, len, ret);
+
+			ret = -EINVAL;
+		}
+		if (ret < 0)
+			return ret;
+
+		prev = out;
+	}
+
+	input = kmalloc(sizeof(struct block_mapping), GFP_KERNEL);
+	output = kmalloc(sizeof(struct block_mapping), GFP_KERNEL);
+	if (!input || !output) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	for (i = 0; i < 1000; i++) {
+		prev = 0;
+		for (b = 0; b < SCOUTFS_BLOCK_MAPPING_BLOCKS; b++) {
+
+			if (b % (64 / 2) == 0)
+				get_random_bytes_arch(&in, sizeof(in));
+
+			clear_bit(b, input->offline);
+
+			switch(in & SCOUTFS_BLOCK_ENC_MASK) {
+			case SCOUTFS_BLOCK_ENC_INC:
+				blkno = prev + 1;
+				break;
+			case SCOUTFS_BLOCK_ENC_OFFLINE:
+				set_bit(b, input->offline);
+				blkno = 0;
+				break;
+			case SCOUTFS_BLOCK_ENC_ZERO:
+				blkno = 0;
+				break;
+			case SCOUTFS_BLOCK_ENC_DELTA:
+				get_random_bytes_arch(&bits, sizeof(bits));
+				get_random_bytes_arch(&blkno, sizeof(blkno));
+				blkno &= (1ULL << (bits % 64)) - 1;
+				break;
+			}
+
+			input->blknos[b] = blkno;
+
+			in >>= 2;
+			if (blkno)
+				prev = blkno;
+		}
+
+		len = encode_mapping(input);
+		if (len >= 1 && len < SCOUTFS_BLOCK_MAPPING_MAX_BYTES)
+			memcpy(output->encoded, input->encoded, len);
+		ret = decode_mapping(output, len);
+		if (ret) {
+			printk("map len %d decoding failed %d\n", len, ret);
+			ret = -EINVAL;
+			goto out;
+		}
+
+		for (b = 0; b < SCOUTFS_BLOCK_MAPPING_BLOCKS; b++) {
+			if (input->blknos[b] != output->blknos[b] ||
+			    !!test_bit(b, input->offline) !=
+			    !!test_bit(b, output->offline))
+				break;
+		}
+
+		if (b < SCOUTFS_BLOCK_MAPPING_BLOCKS) {
+			printk("map ind %u: in %llu %u, out %llu %u\n",
+			       b, input->blknos[b], 
+			       !!test_bit(b, input->offline),
+			       output->blknos[b],
+			       !!test_bit(b, output->offline));
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	ret = 0;
+out:
+	kfree(input);
+	kfree(output);
+
+	return ret;
 }

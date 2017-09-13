@@ -206,50 +206,40 @@ static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned name_len,
 }
 
 /*
- * Both insertion and removal modifications can dirty three extents
- * at most: insertion can delete two existing neighbours and create a
- * third new extent and removal can delete an existing extent and create
- * two new remaining extents.
- */
-static inline void __count_extents(struct scoutfs_item_count *cnt,
-				   unsigned nr_mod, unsigned sz)
-{
-	cnt->items += nr_mod * 3;
-	cnt->keys += (nr_mod * 3) * sz;
-}
-
-/*
- * write_begin can refill local free extents after a bulk alloc rpc,
- * alloc an block, delete an offline mapping, and insert the new allocated
- * mapping.
+ * write_begin can add local free segment items, modify another to
+ * alloc, add a free blkno item, and modify dirty the mapping.
  */
 static inline const struct scoutfs_item_count SIC_WRITE_BEGIN(void)
 {
 	struct scoutfs_item_count cnt = {0,};
-
-	BUILD_BUG_ON(sizeof(struct scoutfs_free_extent_blkno_key) !=
-		     sizeof(struct scoutfs_free_extent_blocks_key));
+	unsigned nr_free = SCOUTFS_BULK_ALLOC_COUNT + 1 + 1;
 
 	__count_dirty_inode(&cnt);
 
-	__count_extents(&cnt, 2 * (SCOUTFS_BULK_ALLOC_COUNT + 1),
-			sizeof(struct scoutfs_free_extent_blkno_key));
-	__count_extents(&cnt, 2, sizeof(struct scoutfs_file_extent_key));
+	cnt.items += 1 + nr_free;
+	cnt.keys += sizeof(struct scoutfs_block_mapping_key) +
+		    (nr_free * sizeof(struct scoutfs_free_bits_key));
+	cnt.vals += SCOUTFS_BLOCK_MAPPING_MAX_BYTES +
+		    (nr_free * sizeof(struct scoutfs_free_bits));
 
 	return cnt;
 }
 
 /*
- * Truncating a block can free an allocated block, delete an online
- * mapping, and create an offline mapping.
+ * Truncating a block mapping item's worth of blocks can modify both
+ * free blkno and free segno items per block.  Then the largest possible
+ * mapping item.
  */
 static inline const struct scoutfs_item_count SIC_TRUNC_BLOCK(void)
 {
 	struct scoutfs_item_count cnt = {0,};
+	unsigned nr_free = (2 * SCOUTFS_BLOCK_MAPPING_BLOCKS);
 
-	__count_extents(&cnt, 2 * 1,
-			sizeof(struct scoutfs_free_extent_blkno_key));
-	__count_extents(&cnt, 2, sizeof(struct scoutfs_file_extent_key));
+	cnt.items += 1 + nr_free;
+	cnt.keys += sizeof(struct scoutfs_block_mapping_key) +
+		    (nr_free * sizeof(struct scoutfs_free_bits_key));
+	cnt.vals += SCOUTFS_BLOCK_MAPPING_MAX_BYTES +
+		    (nr_free * sizeof(struct scoutfs_free_bits));
 
 	return cnt;
 }

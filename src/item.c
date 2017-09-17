@@ -1437,6 +1437,34 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
 }
 
 /*
+ * Copy the callers value into the dirty item and truncate its value if
+ * the existing value is longer.  The caller must have ensured that the
+ * item was dirty and had a large enough value.
+ */
+void scoutfs_item_update_dirty(struct super_block *sb,
+			       struct scoutfs_key_buf *key, struct kvec *val)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *item;
+	unsigned long flags;
+	signed delta;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	item = find_item(sb, &cac->items, key);
+
+	BUG_ON(!item || !(item->dirty & ITEM_DIRTY) ||
+	       scoutfs_kvec_length(val) > scoutfs_kvec_length(item->val));
+
+	delta = scoutfs_kvec_length(val) - scoutfs_kvec_length(item->val);
+	scoutfs_kvec_memcpy_truncate(item->val, val);
+	update_dirty_item_counts(sb, 0, 0, delta);
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+}
+
+/*
  * Return the first dirty node in the subtree starting at the given node.
  */
 static struct cached_item *first_dirty(struct rb_node *node)

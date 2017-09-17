@@ -307,6 +307,19 @@ static void update_dirty_parents(struct cached_item *item)
 	scoutfs_item_rb_propagate(rb_parent(&item->node), NULL);
 }
 
+static void update_dirty_item_counts(struct super_block *sb, signed items,
+				     signed keys, signed vals)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+
+	cac->nr_dirty_items += items;
+	cac->dirty_key_bytes += keys;
+	cac->dirty_val_bytes += vals;
+
+	scoutfs_trans_track_item(sb, items, keys, vals);
+}
+
 static void mark_item_dirty(struct super_block *sb, struct item_cache *cac,
 			    struct cached_item *item)
 {
@@ -320,11 +333,7 @@ static void mark_item_dirty(struct super_block *sb, struct item_cache *cac,
 	list_del_init(&item->entry);
 	cac->lru_nr--;
 
-	cac->nr_dirty_items++;
-	cac->dirty_key_bytes += item->key->key_len;
-	cac->dirty_val_bytes += scoutfs_kvec_length(item->val);
-
-	scoutfs_trans_track_item(sb, 1, item->key->key_len,
+	update_dirty_item_counts(sb, 1, item->key->key_len,
 				 scoutfs_kvec_length(item->val));
 
 	update_dirty_parents(item);
@@ -343,11 +352,7 @@ static void clear_item_dirty(struct super_block *sb, struct item_cache *cac,
 	list_add_tail(&item->entry, &cac->lru_list);
 	cac->lru_nr++;
 
-	cac->nr_dirty_items--;
-	cac->dirty_key_bytes -= item->key->key_len;
-	cac->dirty_val_bytes -= scoutfs_kvec_length(item->val);
-
-	scoutfs_trans_track_item(sb, -1, -item->key->key_len,
+	update_dirty_item_counts(sb, -1, -item->key->key_len,
 				 -scoutfs_kvec_length(item->val));
 
 	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||

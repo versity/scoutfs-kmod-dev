@@ -169,6 +169,36 @@ static inline unsigned int all_len_bytes(unsigned key_len, unsigned val_len)
 		len_bytes(key_len, val_len);
 }
 
+/* number of bytes needed to insert potentially max size child item */
+static inline unsigned int parent_min_free_bytes(void)
+{
+	return all_len_bytes(SCOUTFS_BTREE_MAX_KEY_LEN,
+			     sizeof(struct scoutfs_btree_ref));
+}
+
+/*
+ * The minimum number of bytes we allow in a block.  During descent to
+ * modify if we see a block with fewer used bytes then we'll try to
+ * merge items from neighbours.  If the neighbour also has less than the
+ * min bytes then the two blocks are merged.
+ *
+ * This is carefully calculated so that if two blocks are merged the
+ * resulting block will have at least parent min free bytes free so
+ * that it's not immediately split again.
+ *
+ * new_used = min_used + min_used - hdr
+ * new_used <= (bs - parent_min_free)
+ *
+ * min_used + min_used - hdr <= (bs - parent_min_free)
+ * 2 * min_used <= (bs - parent_min_free - hdr)
+ * min_used <= (bs - parent_min_free - hdr) / 2
+ */
+static inline unsigned int min_used_bytes(void)
+{
+	return (SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block) -
+		parent_min_free_bytes()) / 2;
+}
+
 /* total block bytes used by an existing item */
 static inline unsigned int all_item_bytes(struct scoutfs_btree_item *item)
 {
@@ -953,8 +983,7 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
 	int ret;
 
 	if (right->level)
-		all_bytes = all_len_bytes(SCOUTFS_BTREE_MAX_KEY_LEN,
-					  sizeof(struct scoutfs_btree_ref));
+		all_bytes = parent_min_free_bytes();
 	else
 		all_bytes = all_len_bytes(key_len, val_len);
 
@@ -1019,7 +1048,7 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 	int to_move;
 	int ret;
 
-	if (reclaimable_free(bt) <= SCOUTFS_BTREE_FREE_LIMIT)
+	if (used_total(bt) >= min_used_bytes())
 		return 0;
 
 	/* move items right into our block if we have a left sibling */
@@ -1035,10 +1064,10 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 	if (ret)
 		return ret;
 
-	if (used_total(sib) <= reclaimable_free(bt))
+	if (used_total(sib) < min_used_bytes())
 		to_move = used_total(sib);
 	else
-		to_move = reclaimable_free(bt) - SCOUTFS_BTREE_FREE_LIMIT;
+		to_move = min_used_bytes() - used_total(bt);
 
 	move_items(bt, sib, move_right, to_move);
 
@@ -1316,13 +1345,12 @@ restart:
 		 * than try and special case modifying the path to
 		 * reflect the tree changes.
 		 */
-		if (flags & BTW_INSERT)
+		ret = 0;
+		if (flags & (BTW_INSERT | BTW_DELETE))
 			ret = try_split(sb, root, key, key_len, val_len,
 				        parent, pos, bt);
-		else if ((flags & BTW_DELETE) && parent)
+		if (ret == 0 && (flags & BTW_DELETE) && parent)
 			ret = try_merge(sb, root, parent, pos, bt);
-		else
-			ret = 0;
 		if (ret > 0)
 			goto restart;
 		else if (ret < 0)

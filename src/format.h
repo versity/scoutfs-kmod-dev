@@ -65,11 +65,6 @@ struct scoutfs_block_header {
  * generous.
  */
 #define SCOUTFS_BTREE_MAX_HEIGHT 20
-
-/* btree blocks (beyond the first) need to be at least half full */
-#define SCOUTFS_BTREE_FREE_LIMIT \
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) / 2)
-
 #define SCOUTFS_BTREE_BITS 8
 
 /*

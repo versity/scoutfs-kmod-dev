@@ -24,6 +24,7 @@
 #include "trans.h"
 #include "xattr.h"
 #include "lock.h"
+#include "scoutfs_trace.h"
 
 /*
  * In the simple case an xattr is stored in a single item whose key and
@@ -271,8 +272,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	int sif;
 	int ret;
 
-	trace_printk("name_len %zu value %p size %zu flags 0x%x\n",
-		     name_len, value, size, flags);
+	trace_scoutfs_xattr_set(sb, name_len, value, size, flags);
 
 	if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN ||
 	    (value && size > SCOUTFS_XATTR_MAX_SIZE))

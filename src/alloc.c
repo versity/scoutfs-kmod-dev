@@ -21,6 +21,7 @@
 #include "cmp.h"
 #include "alloc.h"
 #include "counters.h"
+#include "scoutfs_trace.h"
 
 /*
  * scoutfs allocates segments using regions of an allocation bitmap
@@ -190,7 +191,7 @@ out:
 	}
 	up_write(&sal->rwsem);
 
-	trace_printk("segno %llu ret %d\n", *segno, ret);
+	trace_scoutfs_alloc_segno(sb, *segno, ret);
 	return ret;
 }
 
@@ -231,8 +232,7 @@ int scoutfs_alloc_free(struct super_block *sb, u64 segno)
 out:
 	up_write(&sal->rwsem);
 
-	trace_printk("freeing segno %llu ind %llu nr %d ret %d\n",
-		     segno, ind, nr, ret);
+	trace_scoutfs_alloc_free(sb, segno, ind, nr, ret);
 	return ret;
 }
 

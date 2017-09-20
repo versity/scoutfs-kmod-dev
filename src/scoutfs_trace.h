@@ -33,8 +33,38 @@
 #include "seg.h"
 #include "super.h"
 
+struct lock_info;
+
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
+
+DECLARE_EVENT_CLASS(scoutfs_lock_info_class,
+	TP_PROTO(struct super_block *sb, struct lock_info *linfo),
+
+	TP_ARGS(sb, linfo),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(struct lock_info *, linfo)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->linfo = linfo;
+	),
+
+	TP_printk(FSID_FMT" linfo %p", __entry->fsid, __entry->linfo)
+);
+
+DEFINE_EVENT(scoutfs_lock_info_class, init_lock_info,
+	TP_PROTO(struct super_block *sb, struct lock_info *linfo),
+	TP_ARGS(sb, linfo)
+);
+
+DEFINE_EVENT(scoutfs_lock_info_class, scoutfs_lock_destroy,
+	TP_PROTO(struct super_block *sb, struct lock_info *linfo),
+	TP_ARGS(sb, linfo)
+);
 
 TRACE_EVENT(scoutfs_xattr_set,
 	TP_PROTO(struct super_block *sb, size_t name_len, const void *value,

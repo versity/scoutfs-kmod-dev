@@ -715,8 +715,7 @@ static int init_lock_info(struct super_block *sb)
 
 	sbi->lock_info = linfo;
 
-	trace_printk("sb %p id %016llx allocated linfo %p held %p\n",
-		     sb, le64_to_cpu(sbi->super.id), linfo, linfo);
+	trace_init_lock_info(sb, linfo);
 out:
 	if (ret)
 		kfree(linfo);
@@ -744,8 +743,7 @@ void scoutfs_lock_destroy(struct super_block *sb)
 
 		sbi->lock_info = NULL;
 
-		trace_printk("sb %p id %016llx freeing linfo %p linfo %p\n",
-			     sb, le64_to_cpu(sbi->super.id), linfo, linfo);
+		trace_scoutfs_lock_destroy(sb, linfo);
 
 		kfree(linfo);
 	}

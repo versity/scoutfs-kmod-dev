@@ -410,13 +410,6 @@ static u8 bits_from_counts(struct scoutfs_btree_block *bt)
 }
 
 /*
- * Iterate through 0-based bit numbers set in 'bits' from least to
- * greatest.  It modifies 'bits' as it goes!
- */
-#define for_each_bit(i, bits) \
-	for (i = bits ? ffs(bits) : 0; i-- > 0; bits &= ~(1 < i))
-
-/*
  * Store the new bits and update the counts to match the difference from
  * the previously set bits.  Callers use this to keep item bits in sync
  * with the counts of bits in the block headers.
@@ -424,16 +417,17 @@ static u8 bits_from_counts(struct scoutfs_btree_block *bt)
 static void store_pos_bits(struct scoutfs_btree_block *bt, int pos, u8 bits)
 {
 	u8 diff = bits ^ pos_bits(bt, pos);
-	int b;
+	int i;
+	u8 b;
 
-	if (!diff)
-		return;
-
-	for_each_bit(b, diff) {
-		if (bits & (1 << b))
-			le16_add_cpu(&bt->bit_counts[b], 1);
-		else
-			le16_add_cpu(&bt->bit_counts[b], -1);
+	for (i = 0, b = 1; diff != 0; i++, b <<= 1) {
+		if (diff & b) {
+			if (bits & b)
+				le16_add_cpu(&bt->bit_counts[i], 1);
+			else
+				le16_add_cpu(&bt->bit_counts[i], -1);
+			diff ^= b;
+		}
 	}
 
 	bt->item_hdrs[pos].bits = bits;

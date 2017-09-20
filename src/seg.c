@@ -305,7 +305,7 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 	struct scoutfs_segment *seg;
 	unsigned long flags;
 
-	trace_printk("segno %llu\n", segno);
+	trace_scoutfs_seg_submit_read(sb, segno);
 
 	spin_lock_irqsave(&cac->lock, flags);
 	seg = find_seg(&cac->root, segno);
@@ -340,7 +340,7 @@ int scoutfs_seg_submit_write(struct super_block *sb,
 			     struct scoutfs_segment *seg,
 			     struct scoutfs_bio_completion *comp)
 {
-	trace_printk("submitting segno %llu\n", seg->segno);
+	trace_scoutfs_seg_submit_write(sb, seg->segno);
 
 	scoutfs_bio_submit_comp(sb, WRITE, seg->pages,
 				segno_to_blkno(seg->segno),

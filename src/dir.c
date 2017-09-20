@@ -30,6 +30,7 @@
 #include "kvec.h"
 #include "item.h"
 #include "lock.h"
+#include "scoutfs_trace.h"
 
 /*
  * Directory entries are stored in entries with offsets calculated from
@@ -1073,8 +1074,7 @@ static int add_next_linkref(struct super_block *sb, u64 ino,
 
 	/* next backref key is now in ent */
 	ret = scoutfs_item_next(sb, &key, &last, NULL, NULL);
-	trace_printk("ino %llu dir_ino %llu ret %d key_len %u\n",
-		      ino, dir_ino, ret, key.key_len);
+	trace_scoutfs_dir_add_next_linkref(sb, ino, dir_ino, ret, key.key_len);
 	if (ret < 0)
 		goto out;
 

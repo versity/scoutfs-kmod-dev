@@ -618,7 +618,7 @@ static void scoutfs_compact_func(struct work_struct *work)
 	free_cseg_list(sb, &results);
 
 	WARN_ON_ONCE(ret);
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_compact_func(sb, ret);
 }
 
 void scoutfs_compact_kick(struct super_block *sb)

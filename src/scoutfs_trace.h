@@ -36,6 +36,24 @@
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
 
+TRACE_EVENT(scoutfs_compact_func,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
 TRACE_EVENT(scoutfs_alloc_free,
 	TP_PROTO(struct super_block *sb, __u64 segno, __u64 index, int nr,
 		 int ret),

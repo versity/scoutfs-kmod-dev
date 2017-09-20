@@ -116,7 +116,7 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 
 	le64_add_cpu(&super->hdr.seq, 1);
 
-	trace_printk("super seq now %llu\n", le64_to_cpu(super->hdr.seq));
+	trace_scoutfs_advance_dirty_super(sb, le64_to_cpu(super->hdr.seq));
 }
 
 /*

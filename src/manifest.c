@@ -832,7 +832,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 			break;
 	}
 
-	trace_printk("level %d\n", level);
+	trace_scoutfs_manifest_next_compact(sb, level);
 
 	if (level < 0) {
 		ret = 0;

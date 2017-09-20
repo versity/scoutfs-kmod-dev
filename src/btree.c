@@ -410,6 +410,18 @@ static u8 bits_from_counts(struct scoutfs_btree_block *bt)
 }
 
 /*
+ * The bits set in a parent's ref item include the half bit for the
+ * child blkno so that we can search for blocks in a specific half of
+ * the ring.
+ */
+static u8 ref_item_bits(struct scoutfs_btree_ring *bring,
+			struct scoutfs_btree_block *child)
+{
+	return bits_from_counts(child) |
+	       half_bit(bring, le64_to_cpu(child->blkno));
+}
+
+/*
  * Store the new bits and update the counts to match the difference from
  * the previously set bits.  Callers use this to keep item bits in sync
  * with the counts of bits in the block headers.
@@ -432,7 +444,6 @@ static void store_pos_bits(struct scoutfs_btree_block *bt, int pos, u8 bits)
 
 	bt->item_hdrs[pos].bits = bits;
 }
-
 /*
  * The caller has descended through parents to a final block.  Each
  * block may have had item bits modified and counts updated but they
@@ -441,8 +452,9 @@ static void store_pos_bits(struct scoutfs_btree_block *bt, int pos, u8 bits)
  * bits to the union of all the bits down through the path to the final
  * block.
  */
-static void path_repair_reset(struct btree_path *path)
+static void path_repair_reset(struct super_block *sb, struct btree_path *path)
 {
+	struct scoutfs_btree_ring *bring = &SCOUTFS_SB(sb)->super.bring;
 	struct scoutfs_btree_block *parent;
 	struct scoutfs_btree_block *bt;
 	u8 bits;
@@ -451,7 +463,7 @@ static void path_repair_reset(struct btree_path *path)
 	bt = path_pop(path, &pos);
 
 	while ((parent = path_pop(path, &pos))) {
-		bits = bits_from_counts(bt);
+		bits = ref_item_bits(bring, bt);
 		store_pos_bits(parent, pos, bits);
 		bt = parent;
 	}
@@ -898,8 +910,7 @@ static int get_parent_ref_block(struct super_block *sb, int flags,
 
 	ret = get_ref_block(sb, flags, ref, bt_ret);
 	if (ret == 0) {
-		bits = bits_from_counts(*bt_ret) |
-		       half_bit(bring, le64_to_cpu(ref->blkno));
+		bits = ref_item_bits(bring, *bt_ret);
 		store_pos_bits(parent, pos, bits);
 	}
 
@@ -919,8 +930,7 @@ static void create_parent_item(struct scoutfs_btree_ring *bring,
 		.blkno = child->blkno,
 		.seq = child->seq,
 	};
-	u8 bits = bits_from_counts(child) |
-		  half_bit(bring, le64_to_cpu(ref.blkno));
+	u8 bits = ref_item_bits(bring, child);
 
 	create_item(parent, pos, bits, key, key_len, &ref, sizeof(ref));
 }
@@ -946,8 +956,7 @@ static void update_parent_bits(struct scoutfs_btree_ring *bring,
 			       struct scoutfs_btree_block *parent,
 			       unsigned pos, struct scoutfs_btree_block *child)
 {
-	u8 bits = bits_from_counts(child) |
-		  half_bit(bring, le64_to_cpu(child->blkno));
+	u8 bits = ref_item_bits(bring, child);
 
 	store_pos_bits(parent, pos, bits);
 }
@@ -1284,7 +1293,7 @@ static int btree_walk(struct super_block *sb, struct scoutfs_btree_root *root,
 		return -EINVAL;
 
 restart:
-	path_repair_reset(path);
+	path_repair_reset(sb, path);
 	put_btree_block(parent);
 	parent = NULL;
 	put_btree_block(bt);
@@ -1516,7 +1525,7 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_btree_root *root
 		put_btree_block(bt);
 	}
 
-	path_repair_reset(&path);
+	path_repair_reset(sb, &path);
 	return ret;
 }
 
@@ -1560,7 +1569,7 @@ int scoutfs_btree_update(struct super_block *sb, struct scoutfs_btree_root *root
 		put_btree_block(bt);
 	}
 
-	path_repair_reset(&path);
+	path_repair_reset(sb, &path);
 	return ret;
 }
 
@@ -1598,7 +1607,7 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_btree_root *root
 		put_btree_block(bt);
 	}
 
-	path_repair_reset(&path);
+	path_repair_reset(sb, &path);
 	return ret;
 }
 
@@ -1737,7 +1746,7 @@ int scoutfs_btree_dirty(struct super_block *sb, struct scoutfs_btree_root *root,
 		put_btree_block(bt);
 	}
 
-	path_repair_reset(&path);
+	path_repair_reset(sb, &path);
 	return ret;
 }
 
@@ -1815,7 +1824,7 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 		ret = btree_walk(sb, root, &path,
 				 BTW_DIRTY | BTW_BIT | BTW_DIRTY_OLD,
 				 NULL, 0, 0, bit, NULL, NULL, NULL);
-		path_repair_reset(&path);
+		path_repair_reset(sb, &path);
 		if (ret == -ENOENT) {
 			root = roots[next_root++];
 			continue;

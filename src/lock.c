@@ -27,6 +27,7 @@
 #include "dlmglue.h"
 #include "inode.h"
 #include "trans.h"
+#include "counters.h"
 
 #define LN_FMT "%u.%u.%u.%llu.%llu"
 #define LN_ARG(name) \
@@ -107,6 +108,7 @@ static void free_scoutfs_lock(struct scoutfs_lock *lock)
 	if (lock) {
 		linfo = SCOUTFS_SB(lock->sb)->lock_info;
 
+		scoutfs_inc_counter(lock->sb, lock_free);
 		ocfs2_lock_res_free(&lock->lockres);
 		scoutfs_key_free(lock->sb, lock->start);
 		scoutfs_key_free(lock->sb, lock->end);
@@ -294,6 +296,7 @@ search:
 		found->sequence = ++linfo->seq_cnt;
 		rb_link_node(&found->node, parent, node);
 		rb_insert_color(&found->node, &linfo->lock_tree);
+		scoutfs_inc_counter(sb, lock_alloc);
 	}
 	found->refcnt++;
 	if (test_bit(SCOUTFS_LOCK_RECLAIM, &found->flags)) {

@@ -31,10 +31,14 @@
 	EXPAND_COUNTER(data_invalidatepage)	\
 	EXPAND_COUNTER(data_writepage)		\
 	EXPAND_COUNTER(data_end_writeback_page)	\
+	EXPAND_COUNTER(item_alloc)		\
+	EXPAND_COUNTER(item_free)		\
 	EXPAND_COUNTER(item_create)		\
 	EXPAND_COUNTER(item_lookup_hit)		\
 	EXPAND_COUNTER(item_lookup_miss)	\
 	EXPAND_COUNTER(item_delete)		\
+	EXPAND_COUNTER(item_range_alloc)	\
+	EXPAND_COUNTER(item_range_free)		\
 	EXPAND_COUNTER(item_range_hit)		\
 	EXPAND_COUNTER(item_range_miss)		\
 	EXPAND_COUNTER(item_range_insert)	\
@@ -43,10 +47,12 @@
 	EXPAND_COUNTER(item_shrink_dirty_abort)	\
 	EXPAND_COUNTER(item_shrink_skip_inced)	\
 	EXPAND_COUNTER(item_shrink_range)	\
-	EXPAND_COUNTER(item_shrink)
+	EXPAND_COUNTER(item_shrink)		\
+	EXPAND_COUNTER(lock_alloc)		\
+	EXPAND_COUNTER(lock_free)
 
 #define FIRST_COUNTER alloc_alloc
-#define LAST_COUNTER item_shrink
+#define LAST_COUNTER lock_free
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

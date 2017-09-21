@@ -103,6 +103,7 @@ static u8 item_flags(struct cached_item *item)
 static void free_item(struct super_block *sb, struct cached_item *item)
 {
 	if (!IS_ERR_OR_NULL(item)) {
+		scoutfs_inc_counter(sb, item_free);
 		WARN_ON_ONCE(!list_empty(&item->entry));
 		WARN_ON_ONCE(!RB_EMPTY_NODE(&item->node));
 		scoutfs_key_free(sb, item->key);
@@ -132,6 +133,9 @@ static struct cached_item *alloc_item(struct super_block *sb,
 			item = NULL;
 		}
 	}
+
+	if (item)
+		scoutfs_inc_counter(sb, item_alloc);
 
 	return item;
 }
@@ -563,6 +567,7 @@ static bool check_range(struct super_block *sb, struct rb_root *root,
 static void free_range(struct super_block *sb, struct cached_range *rng)
 {
 	if (!IS_ERR_OR_NULL(rng)) {
+		scoutfs_inc_counter(sb, item_range_free);
 		scoutfs_key_free(sb, rng->start);
 		scoutfs_key_free(sb, rng->end);
 		kfree(rng);
@@ -1099,6 +1104,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 	if (WARN_ON_ONCE(scoutfs_key_compare(start, end) > 0))
 		return -EINVAL;
 
+	scoutfs_inc_counter(sb, item_range_alloc);
 	rng = kzalloc(sizeof(struct cached_range), GFP_NOFS);
 	if (rng) {
 	       rng->start = scoutfs_key_dup(sb, start);
@@ -1657,6 +1663,7 @@ int scoutfs_item_invalidate(struct super_block *sb,
 
 	/* XXX think about racing with trans write */
 
+	scoutfs_inc_counter(sb, item_range_alloc);
 	rng = kzalloc(sizeof(struct cached_range), GFP_NOFS);
 	if (rng) {
 	       rng->start = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);

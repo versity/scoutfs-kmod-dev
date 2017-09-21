@@ -94,7 +94,7 @@ static void scoutfs_i_callback(struct rcu_head *head)
 {
 	struct inode *inode = container_of(head, struct inode, i_rcu);
 
-	trace_printk("freeing inode %p\n", inode);
+	trace_scoutfs_i_callback(inode);
 	kmem_cache_free(scoutfs_inode_cachep, SCOUTFS_I(inode));
 }
 
@@ -554,9 +554,8 @@ static int update_index(struct super_block *sb, struct scoutfs_inode_info *si,
 	int ret;
 	int err;
 
-	trace_printk("ino %llu have %u now %llu.%u then %llu.%u \n",
-		     ino, si->have_item, now_major, now_minor, then_major,
-		     then_minor);
+	trace_scoutfs_inode_update_index(sb, ino, si->have_item, now_major,
+					 now_minor, then_major, then_minor);
 
 	if (si->have_item && now_major == then_major && now_minor == then_minor)
 		return 0;
@@ -715,7 +714,7 @@ void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr)
 {
 	struct free_ino_pool *pool = &SCOUTFS_SB(sb)->inode_sb_info->pool;
 
-	trace_printk("filling ino %llu nr %llu\n", ino, nr);
+	trace_scoutfs_inode_fill_pool(sb, ino, nr);
 
 	spin_lock(&pool->lock);
 
@@ -797,8 +796,9 @@ int scoutfs_alloc_ino(struct super_block *sb, u64 *ino)
 	spin_unlock(&pool->lock);
 
 out:
-	trace_printk("ret %d ino %llu pool ino %llu nr %llu req %u (racey)\n",
-		     ret, *ino, pool->ino, pool->nr, pool->in_flight);
+
+	trace_scoutfs_alloc_ino(sb, ret, *ino, pool->ino, pool->nr,
+				pool->in_flight);
 	return ret;
 }
 
@@ -913,7 +913,7 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	}
 
 	mode = le32_to_cpu(sinode.mode);
-	trace_delete_inode(sb, ino, mode);
+	trace_scoutfs_delete_inode(sb, ino, mode);
 
 	/* XXX this is obviously not done yet :) */
 	ret = scoutfs_hold_trans(sb, SIC_DIRTY_INODE());
@@ -958,8 +958,8 @@ out:
  */
 void scoutfs_evict_inode(struct inode *inode)
 {
-	trace_printk("ino %llu nlink %d bad %d\n",
-		     scoutfs_ino(inode), inode->i_nlink, is_bad_inode(inode));
+	trace_scoutfs_evict_inode(inode->i_sb, scoutfs_ino(inode),
+				  inode->i_nlink, is_bad_inode(inode));
 
 	if (is_bad_inode(inode))
 		goto clear;
@@ -976,8 +976,8 @@ int scoutfs_drop_inode(struct inode *inode)
 {
 	int ret = generic_drop_inode(inode);
 
-	trace_printk("ret %d nlink %d unhashed %d\n",
-		     ret, inode->i_nlink, inode_unhashed(inode));
+	trace_scoutfs_drop_inode(inode->i_sb, scoutfs_ino(inode),
+				 inode->i_nlink, inode_unhashed(inode));
 	return ret;
 }
 
@@ -1102,8 +1102,8 @@ int scoutfs_inode_walk_writeback(struct super_block *sb, bool write)
 			ret = filemap_fdatawrite(inode->i_mapping);
 		else
 			ret = filemap_fdatawait(inode->i_mapping);
-		trace_printk("ino %llu write %d ret %d\n",
-			     scoutfs_ino(inode), write, ret);
+		trace_scoutfs_inode_walk_writeback(sb, scoutfs_ino(inode),
+						   write, ret);
 		if (ret) {
 			iput(inode);
 			goto out;

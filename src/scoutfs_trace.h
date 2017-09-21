@@ -38,6 +38,178 @@ struct lock_info;
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
 
+TRACE_EVENT(scoutfs_i_callback,
+	TP_PROTO(struct inode *inode),
+
+	TP_ARGS(inode),
+
+	TP_STRUCT__entry(
+		__field(struct inode *, inode)
+	),
+
+	TP_fast_assign(
+		__entry->inode = inode;
+	),
+
+	/* don't print fsid as we may not have our sb private available */
+	TP_printk("freeing inode %p", __entry->inode)
+);
+
+TRACE_EVENT(scoutfs_inode_update_index,
+	TP_PROTO(struct super_block *sb, __u64 ino, unsigned int have_item,
+		 __u64 now_major, unsigned int now_minor, __u64 then_major,
+		 unsigned int then_minor),
+
+	TP_ARGS(sb, ino, have_item, now_major, now_minor, then_major,
+		then_minor),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(unsigned int, have_item)
+		__field(__u64, now_major)
+		__field(unsigned int, now_minor)
+		__field(__u64, then_major)
+		__field(unsigned int, then_minor)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->have_item = have_item;
+		__entry->now_major = now_major;
+		__entry->now_minor = now_minor;
+		__entry->then_major = then_major;
+		__entry->then_minor = then_minor;
+	),
+
+	TP_printk(FSID_FMT" ino %llu have %u now %llu.%u then %llu.%u",
+		  __entry->fsid, __entry->ino, __entry->have_item,
+		  __entry->now_major, __entry->now_minor, __entry->then_major,
+		  __entry->then_minor)
+);
+
+TRACE_EVENT(scoutfs_inode_fill_pool,
+	TP_PROTO(struct super_block *sb, __u64 ino, __u64 nr),
+
+	TP_ARGS(sb, ino, nr),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(__u64, nr)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->nr = nr;
+	),
+
+	TP_printk(FSID_FMT" filling ino %llu nr %llu",  __entry->fsid,
+		  __entry->ino, __entry->nr)
+);
+
+TRACE_EVENT(scoutfs_alloc_ino,
+	TP_PROTO(struct super_block *sb, int ret, __u64 ino, __u64 pool_ino,
+		 __u64 nr, unsigned int in_flight),
+
+	TP_ARGS(sb, ret, ino, pool_ino, nr, in_flight),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+		__field(__u64, ino)
+		__field(__u64, pool_ino)
+		__field(__u64, nr)
+		__field(unsigned int, in_flight)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+		__entry->ino = ino;
+		__entry->pool_ino = pool_ino;
+		__entry->nr = nr;
+		__entry->in_flight = in_flight;
+	),
+
+	TP_printk(FSID_FMT" ret %d ino %llu pool ino %llu nr %llu req %u "
+		  "(racey)", __entry->fsid, __entry->ret, __entry->ino,
+		  __entry->pool_ino, __entry->nr, __entry->in_flight)
+);
+
+TRACE_EVENT(scoutfs_evict_inode,
+	TP_PROTO(struct super_block *sb, __u64 ino, unsigned int nlink,
+		 unsigned int is_bad_ino),
+
+	TP_ARGS(sb, ino, nlink, is_bad_ino),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(unsigned int, nlink)
+		__field(unsigned int, is_bad_ino)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->nlink = nlink;
+		__entry->is_bad_ino = is_bad_ino;
+	),
+
+	TP_printk(FSID_FMT" ino %llu nlink %u bad %d", __entry->fsid,
+		  __entry->ino, __entry->nlink, __entry->is_bad_ino)
+);
+
+TRACE_EVENT(scoutfs_drop_inode,
+	TP_PROTO(struct super_block *sb, __u64 ino, unsigned int nlink,
+		 unsigned int unhashed),
+
+	TP_ARGS(sb, ino, nlink, unhashed),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(unsigned int, nlink)
+		__field(unsigned int, unhashed)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->nlink = nlink;
+		__entry->unhashed = unhashed;
+	),
+
+	TP_printk(FSID_FMT" ino %llu nlink %u unhashed %d", __entry->fsid,
+		  __entry->ino, __entry->nlink, __entry->unhashed)
+);
+
+TRACE_EVENT(scoutfs_inode_walk_writeback,
+	TP_PROTO(struct super_block *sb, __u64 ino, int write, int ret),
+
+	TP_ARGS(sb, ino, write, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(int, write)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->write = write;
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ino %llu write %d ret %d", __entry->fsid,
+		  __entry->ino, __entry->write, __entry->ret)
+);
+
 DECLARE_EVENT_CLASS(scoutfs_segment_class,
 	TP_PROTO(struct super_block *sb, __u64 segno),
 
@@ -351,7 +523,7 @@ TRACE_EVENT(scoutfs_orphan_inode,
 		  MINOR(__entry->dev), __entry->ino)
 );
 
-TRACE_EVENT(delete_inode,
+TRACE_EVENT(scoutfs_delete_inode,
 	TP_PROTO(struct super_block *sb, u64 ino, umode_t mode),
 
 	TP_ARGS(sb, ino, mode),

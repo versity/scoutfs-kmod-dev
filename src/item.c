@@ -1748,6 +1748,7 @@ static int item_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	struct cached_item *end;
 	unsigned long flags;
 	unsigned long nr;
+	int ret;
 
 	nr = sc->nr_to_scan;
 	if (nr == 0)
@@ -1848,7 +1849,9 @@ abort:
 	spin_unlock_irqrestore(&cac->lock, flags);
 
 out:
-	return min_t(unsigned long, cac->lru_nr, INT_MAX);
+	ret = min_t(unsigned long, cac->lru_nr, INT_MAX);
+	trace_scoutfs_item_shrink_exit(sb, sc->nr_to_scan, ret);
+	return ret;
 }
 
 static void *copy_key_with_len(void *data, struct scoutfs_key_buf *key)

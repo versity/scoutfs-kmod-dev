@@ -345,6 +345,7 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 	struct scoutfs_lock *tmp;
 	unsigned long flags;
 	unsigned long nr;
+	int ret;
 
 	nr = sc->nr_to_scan;
 	if (!nr)
@@ -368,7 +369,9 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 	spin_unlock_irqrestore(&linfo->lock, flags);
 
 out:
-	return min_t(unsigned long, linfo->lru_nr, INT_MAX);
+	ret = min_t(unsigned long, linfo->lru_nr, INT_MAX);
+	trace_scoutfs_lock_shrink_exit(linfo->sb, sc->nr_to_scan, ret);
+	return ret;
 }
 
 static void free_lock_tree(struct super_block *sb)

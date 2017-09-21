@@ -716,6 +716,7 @@ static int seg_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	unsigned long flags;
 	unsigned long nr;
 	LIST_HEAD(list);
+	int ret;
 
 	nr = sc->nr_to_scan;
 	if (!nr)
@@ -746,7 +747,9 @@ static int seg_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	}
 
 out:
-	return min_t(unsigned long, cac->lru_nr, INT_MAX);
+	ret = min_t(unsigned long, cac->lru_nr, INT_MAX);
+	trace_scoutfs_seg_shrink_exit(sb, sc->nr_to_scan, ret);
+	return ret;
 }
 
 int scoutfs_seg_setup(struct super_block *sb)

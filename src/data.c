@@ -383,8 +383,8 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 
 	ret = scoutfs_item_update(sb, &key, val, NULL);
 out:
-	trace_printk("segno %llu base %llu bit %u ret %d\n",
-		     segno, be64_to_cpu(fbk.base), bit, ret);
+	trace_scoutfs_data_set_segno_free(sb, segno, be64_to_cpu(fbk.base),
+					  bit, ret);
 	return ret;
 }
 
@@ -616,8 +616,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	int ret = 0;
 	int i;
 
-	trace_printk("iblock %llu len %llu offline %u\n",
-		     iblock, len, offline);
+	trace_scoutfs_data_truncate_items(sb, iblock, len, offline);
 
 	if (WARN_ON_ONCE(iblock + len < iblock))
 		return -EINVAL;
@@ -774,8 +773,7 @@ static struct task_cursor *get_cursor(struct data_info *datinf)
 	if (!curs) {
 		curs = list_last_entry(&datinf->cursor_lru,
 				       struct task_cursor, list_head);
-		trace_printk("resetting curs %p was task %p pid %u\n",
-				curs, task, pid);
+		trace_scoutfs_data_get_cursor(curs, task, pid);
 		hlist_del_init(&curs->hnode);
 		curs->task = task;
 		curs->pid = pid;
@@ -916,7 +914,7 @@ static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 
 	curs = get_cursor(datinf);
 
-	trace_printk("got curs %p blkno %llu\n", curs, curs->blkno);
+	trace_scoutfs_data_find_alloc_block_curs(sb, curs, curs->blkno);
 
 	/* try to find the next blkno in our cursor if we have one */
 	if (curs->blkno) {
@@ -947,7 +945,7 @@ static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 			goto out;
 	}
 
-	trace_printk("found free segno %llu blkno %llu\n", segno, blkno);
+	trace_scoutfs_data_find_alloc_block_found_seg(sb, segno, blkno);
 
 	/* ensure that we can copy in encoded without failing */
 	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
@@ -983,7 +981,7 @@ static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 out:
 	up_write(&datinf->alloc_rwsem);
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_data_find_alloc_block_ret(sb, ret);
 	return ret;
 }
 
@@ -1057,9 +1055,8 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 
 	ret = 0;
 out:
-	trace_printk("ino %llu iblock %llu create %d ret %d bnr %llu size %zu\n",
-		     scoutfs_ino(inode), (u64)iblock, create, ret,
-		     (u64)bh->b_blocknr, bh->b_size);
+	trace_scoutfs_get_block(sb, scoutfs_ino(inode), iblock, create,
+				ret, bh->b_blocknr, bh->b_size);
 
 	kfree(map);
 
@@ -1131,8 +1128,7 @@ static int scoutfs_write_begin(struct file *file,
 	struct super_block *sb = inode->i_sb;
 	int ret;
 
-	trace_printk("ino %llu pos %llu len %u\n",
-		     scoutfs_ino(inode), (u64)pos, len);
+	trace_scoutfs_write_begin(sb, scoutfs_ino(inode), (__u64)pos, len);
 
 	ret = scoutfs_hold_trans(sb, SIC_WRITE_BEGIN());
 	if (ret)
@@ -1161,8 +1157,8 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 	struct super_block *sb = inode->i_sb;
 	int ret;
 
-	trace_printk("ino %llu pgind %lu pos %llu len %u copied %d\n",
-		     scoutfs_ino(inode), page->index, (u64)pos, len, copied);
+	trace_scoutfs_write_end(sb, scoutfs_ino(inode), page->index, (u64)pos,
+				len, copied);
 
 	ret = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
 	if (ret > 0) {
@@ -1315,8 +1311,8 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 			if (map->blknos[i] == 0 && !offline)
 				continue;
 
-			trace_printk("blk_off %llu i %u blkno %llu\n",
-					blk_off, i, map->blknos[i]);
+			trace_scoutfs_data_fiemap(sb, blk_off, i,
+						  map->blknos[i]);
 
 			logical = blk_off << SCOUTFS_BLOCK_SHIFT;
 			phys = map->blknos[i] << SCOUTFS_BLOCK_SHIFT;

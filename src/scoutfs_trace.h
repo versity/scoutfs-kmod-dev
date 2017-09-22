@@ -40,6 +40,192 @@ struct lock_info;
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
 
+TRACE_EVENT(scoutfs_data_fiemap,
+	TP_PROTO(struct super_block *sb, __u64 off, int i, __u64 blkno),
+
+
+	TP_ARGS(sb, off, i, blkno),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, off)
+		__field(int, i)
+		__field(__u64, blkno)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->off = off;
+		__entry->i = i;
+		__entry->blkno = blkno;
+	),
+
+	TP_printk(FSID_FMT" blk_off %llu i %u blkno %llu", __entry->fsid,
+		  __entry->off, __entry->i, __entry->blkno)
+);
+
+TRACE_EVENT(scoutfs_get_block,
+	TP_PROTO(struct super_block *sb, __u64 ino, __u64 iblock,
+		 int create, int ret, __u64 blkno, size_t size),
+
+	TP_ARGS(sb, ino, iblock, create, ret, blkno, size),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(__u64, iblock)
+		__field(int, create)
+		__field(int, ret)
+		__field(__u64, blkno)
+		__field(size_t, size)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->iblock = iblock;
+		__entry->create = create;
+		__entry->ret = ret;
+		__entry->blkno = blkno;
+		__entry->size = size;
+	),
+
+	TP_printk(FSID_FMT" ino %llu iblock %llu create %d ret %d bnr %llu "
+		  "size %zu", __entry->fsid, __entry->ino, __entry->iblock,
+		  __entry->create, __entry->ret, __entry->blkno, __entry->size)
+);
+
+TRACE_EVENT(scoutfs_data_find_alloc_block_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_data_find_alloc_block_found_seg,
+	TP_PROTO(struct super_block *sb, __u64 segno, __u64 blkno),
+
+	TP_ARGS(sb, segno, blkno),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, segno)
+		__field(__u64, blkno)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->segno = segno;
+		__entry->blkno = blkno;
+	),
+
+	TP_printk(FSID_FMT" found free segno %llu blkno %llu", __entry->fsid,
+		  __entry->segno, __entry->blkno)
+);
+
+TRACE_EVENT(scoutfs_data_find_alloc_block_curs,
+	TP_PROTO(struct super_block *sb, void *curs, __u64 blkno),
+
+	TP_ARGS(sb, curs, blkno),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, curs)
+		__field(__u64, blkno)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->curs = curs;
+		__entry->blkno = blkno;
+	),
+
+	TP_printk(FSID_FMT" got curs %p blkno %llu", __entry->fsid,
+		  __entry->curs, __entry->blkno)
+);
+
+TRACE_EVENT(scoutfs_data_get_cursor,
+	TP_PROTO(void *curs, void *task, unsigned int pid),
+
+	TP_ARGS(curs, task, pid),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, curs)
+		__field(void *, task)
+		__field(unsigned int, pid)
+	),
+
+	TP_fast_assign(
+		__entry->curs = curs;
+		__entry->task = task;
+		__entry->pid = pid;
+	),
+
+	TP_printk("resetting curs %p was task %p pid %u", __entry->curs,
+		  __entry->task, __entry->pid)
+);
+
+TRACE_EVENT(scoutfs_data_truncate_items,
+	TP_PROTO(struct super_block *sb, __u64 iblock, __u64 len, int offline),
+
+	TP_ARGS(sb, iblock, len, offline),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, iblock)
+		__field(__u64, len)
+		__field(int, offline)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->iblock = iblock;
+		__entry->len = len;
+		__entry->offline = offline;
+	),
+
+	TP_printk(FSID_FMT" iblock %llu len %llu offline %u", __entry->fsid,
+		  __entry->iblock, __entry->len, __entry->offline)
+);
+
+TRACE_EVENT(scoutfs_data_set_segno_free,
+	TP_PROTO(struct super_block *sb, __u64 segno, __u64 base,
+		 unsigned int bit, int ret),
+
+	TP_ARGS(sb, segno, base, bit, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, segno)
+		__field(__u64, base)
+		__field(unsigned int, bit)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->segno = segno;
+		__entry->base = base;
+		__entry->bit = bit;
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" segno %llu base %llu bit %u ret %d", __entry->fsid,
+		  __entry->segno, __entry->base, __entry->bit, __entry->ret)
+);
+
 TRACE_EVENT(scoutfs_sync_fs,
 	TP_PROTO(struct super_block *sb, int wait),
 
@@ -649,47 +835,55 @@ TRACE_EVENT(scoutfs_alloc_segno,
 );
 
 TRACE_EVENT(scoutfs_write_begin,
-	TP_PROTO(u64 ino, loff_t pos, unsigned len),
+	TP_PROTO(struct super_block *sb, u64 ino, loff_t pos, unsigned len),
 
-	TP_ARGS(ino, pos, len),
+	TP_ARGS(sb, ino, pos, len),
 
 	TP_STRUCT__entry(
+		__field(__u64, fsid)
 		__field(__u64, inode)
 		__field(__u64, pos)
 		__field(__u32, len)
 	),
 
 	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
 		__entry->inode = ino;
 		__entry->pos = pos;
 		__entry->len = len;
 	),
 
-	TP_printk("ino %llu pos %llu len %u",
+	TP_printk(FSID_FMT" ino %llu pos %llu len %u", __entry->fsid,
 		  __entry->inode, __entry->pos, __entry->len)
 );
 
 TRACE_EVENT(scoutfs_write_end,
-	TP_PROTO(u64 ino, loff_t pos, unsigned len, unsigned copied),
+	TP_PROTO(struct super_block *sb, u64 ino, unsigned long idx, u64 pos,
+		 unsigned len, unsigned copied),
 
-	TP_ARGS(ino, pos, len, copied),
+	TP_ARGS(sb, ino, idx, pos, len, copied),
 
 	TP_STRUCT__entry(
-		__field(__u64, inode)
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(unsigned long, idx)
 		__field(__u64, pos)
 		__field(__u32, len)
 		__field(__u32, copied)
 	),
 
 	TP_fast_assign(
-		__entry->inode = ino;
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->idx = idx;
 		__entry->pos = pos;
 		__entry->len = len;
 		__entry->copied = copied;
 	),
 
-	TP_printk("ino %llu pos %llu len %u",
-		  __entry->inode, __entry->pos, __entry->len)
+	TP_printk(FSID_FMT" ino %llu pgind %lu pos %llu len %u copied %d",
+		  __entry->fsid, __entry->ino, __entry->idx, __entry->pos,
+		  __entry->len, __entry->copied)
 );
 
 TRACE_EVENT(scoutfs_dirty_inode,

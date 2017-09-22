@@ -40,6 +40,171 @@ struct lock_info;
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
 
+TRACE_EVENT(scoutfs_item_delete_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_item_dirty_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_item_update_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_item_next_same,
+	TP_PROTO(struct super_block *sb, unsigned int key_len),
+
+	TP_ARGS(sb, key_len),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(unsigned int, key_len)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->key_len = key_len;
+	),
+
+	TP_printk(FSID_FMT" key len %u", __entry->fsid, __entry->key_len)
+);
+
+TRACE_EVENT(scoutfs_item_next_same_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_item_next_same_min,
+	TP_PROTO(struct super_block *sb, int key_len, int len),
+
+	TP_ARGS(sb, key_len, len),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, key_len)
+		__field(int, len)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->key_len = key_len;
+		__entry->len = len;
+	),
+
+	TP_printk(FSID_FMT" key len %u min val len %d", __entry->fsid,
+		  __entry->key_len, __entry->len)
+);
+
+TRACE_EVENT(scoutfs_item_next_same_min_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_item_next_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_erase_item,
+	TP_PROTO(struct super_block *sb, void *item),
+
+	TP_ARGS(sb, item),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, item)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->item = item;
+	),
+
+	TP_printk(FSID_FMT" erasing item %p", __entry->fsid, __entry->item)
+);
+
 TRACE_EVENT(scoutfs_data_fiemap,
 	TP_PROTO(struct super_block *sb, __u64 off, int i, __u64 blkno),
 
@@ -1031,17 +1196,37 @@ DECLARE_EVENT_CLASS(scoutfs_key_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
         TP_ARGS(sb, key),
         TP_STRUCT__entry(
-                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
+ 		__field(__u64, fsid)
+               __dynamic_array(char, key, scoutfs_key_str(NULL, key))
         ),
         TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
 		scoutfs_key_str(__get_dynamic_array(key), key);
         ),
-        TP_printk("key %s", __get_str(key))
+	TP_printk(FSID_FMT" key %s", __entry->fsid, __get_str(key))
 );
 
 DEFINE_EVENT(scoutfs_key_class, scoutfs_item_lookup,
         TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
         TP_ARGS(sb, key)
+);
+
+TRACE_EVENT(scoutfs_item_lookup_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
 );
 
 DEFINE_EVENT(scoutfs_key_class, scoutfs_item_insertion,

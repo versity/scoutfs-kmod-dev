@@ -374,7 +374,7 @@ static void item_referenced(struct item_cache *cac, struct cached_item *item)
 static void erase_item(struct super_block *sb, struct item_cache *cac,
 		       struct cached_item *item)
 {
-	trace_printk("erasing item %p\n", item);
+	trace_scoutfs_erase_item(sb, item);
 
 	clear_item_dirty(sb, cac, item);
 	rb_erase_augmented(&item->node, &cac->items, &scoutfs_item_rb_cb);
@@ -755,7 +755,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_item_lookup_ret(sb, ret);
 	return ret;
 }
 
@@ -950,7 +950,7 @@ out:
 	scoutfs_key_free(sb, pos);
 	scoutfs_key_free(sb, range_end);
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_item_next_ret(sb, ret);
 	return ret;
 }
 
@@ -969,7 +969,7 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 	int key_len = key->key_len;
 	int ret;
 
-	trace_printk("key len %u min val len %d\n", key_len, len);
+	trace_scoutfs_item_next_same_min(sb, key_len, len);
 
 	if (WARN_ON_ONCE(!val || scoutfs_kvec_length(val) < len))
 		return -EINVAL;
@@ -978,7 +978,7 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 	if (ret >= 0 && (key->key_len != key_len || ret < len))
 		ret = -EIO;
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_item_next_same_min_ret(sb, ret);
 
 	return ret;
 }
@@ -994,13 +994,13 @@ int scoutfs_item_next_same(struct super_block *sb, struct scoutfs_key_buf *key,
 	int key_len = key->key_len;
 	int ret;
 
-	trace_printk("key len %u\n", key_len);
+	trace_scoutfs_item_next_same(sb, key_len);
 
 	ret = scoutfs_item_next(sb, key, last, val, end);
 	if (ret >= 0 && (key->key_len != key_len))
 		ret = -EIO;
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_item_next_same_ret(sb, ret);
 
 	return ret;
 }
@@ -1304,7 +1304,7 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_item_dirty_ret(sb, ret);
 	return ret;
 }
 
@@ -1357,7 +1357,7 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 out:
 	scoutfs_kvec_kfree(up_val);
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_item_update_ret(sb, ret);
 	return ret;
 }
 
@@ -1405,7 +1405,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 
 	scoutfs_kvec_kfree(del_val);
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_item_delete_ret(sb, ret);
 	return ret;
 }
 

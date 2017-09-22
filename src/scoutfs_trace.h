@@ -34,11 +34,161 @@
 #include "super.h"
 #include "ioctl.h"
 #include "count.h"
+#include "bio.h"
 
 struct lock_info;
 
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
+
+DECLARE_EVENT_CLASS(scoutfs_comp_class,
+	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
+
+	TP_ARGS(sb, comp),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(struct scoutfs_bio_completion *, comp)
+		__field(int, pending)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->comp = comp;
+		__entry->pending = atomic_read(&comp->pending);
+	),
+
+	TP_printk(FSID_FMT" comp %p pending before %d", __entry->fsid,
+		  __entry->comp, __entry->pending)
+);
+DEFINE_EVENT(scoutfs_comp_class, comp_end_io,
+	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
+	TP_ARGS(sb, comp)
+);
+DEFINE_EVENT(scoutfs_comp_class, scoutfs_bio_submit_comp,
+	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
+	TP_ARGS(sb, comp)
+);
+DEFINE_EVENT(scoutfs_comp_class, scoutfs_bio_wait_comp,
+	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
+	TP_ARGS(sb, comp)
+);
+
+TRACE_EVENT(scoutfs_bio_init_comp,
+	TP_PROTO(void *comp),
+
+	TP_ARGS(comp),
+
+	TP_STRUCT__entry(
+		__field(void *, comp)
+	),
+
+	TP_fast_assign(
+		__entry->comp = comp;
+	),
+
+	TP_printk("initing comp %p", __entry->comp)
+);
+
+TRACE_EVENT(scoutfs_bio_submit_added,
+	TP_PROTO(struct super_block *sb, void *page, void *bio),
+
+	TP_ARGS(sb, page, bio),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, page)
+		__field(void *, bio)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->page = page;
+		__entry->bio = bio;
+	),
+
+	TP_printk(FSID_FMT" added page %p to bio %p", __entry->fsid,
+		  __entry->page, __entry->bio)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_bio_class,
+	TP_PROTO(struct super_block *sb, void *bio, void *args, int in_flight),
+
+	TP_ARGS(sb, bio, args, in_flight),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, bio)
+		__field(void *, args)
+		__field(int, in_flight)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->bio = bio;
+		__entry->args = args;
+		__entry->in_flight = in_flight;
+	),
+
+	TP_printk(FSID_FMT" bio %p args %p in_flight %d", __entry->fsid,
+		  __entry->bio, __entry->args, __entry->in_flight)
+);
+
+DEFINE_EVENT(scoutfs_bio_class, scoutfs_bio_submit,
+	TP_PROTO(struct super_block *sb, void *bio, void *args, int in_flight),
+	TP_ARGS(sb, bio, args, in_flight)
+);
+
+DEFINE_EVENT(scoutfs_bio_class, scoutfs_bio_submit_partial,
+	TP_PROTO(struct super_block *sb, void *bio, void *args, int in_flight),
+	TP_ARGS(sb, bio, args, in_flight)
+);
+
+TRACE_EVENT(scoutfs_bio_end_io,
+	TP_PROTO(struct super_block *sb, void *bio, int size, int err),
+
+	TP_ARGS(sb, bio, size, err),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, bio)
+		__field(int, size)
+		__field(int, err)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->bio = bio;
+		__entry->size = size;
+		__entry->err = err;
+	),
+
+	TP_printk(FSID_FMT" bio %p size %u err %d", __entry->fsid,
+		  __entry->bio, __entry->size, __entry->err)
+);
+
+TRACE_EVENT(scoutfs_dec_end_io,
+	TP_PROTO(struct super_block *sb, void *args, int in_flight, int err),
+
+	TP_ARGS(sb, args, in_flight, err),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, args)
+		__field(int, in_flight)
+		__field(int, err)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->args = args;
+		__entry->in_flight = in_flight;
+		__entry->err = err;
+	),
+
+	TP_printk(FSID_FMT" args %p in_flight %d err %d", __entry->fsid,
+		  __entry->args, __entry->in_flight, __entry->err)
+);
 
 TRACE_EVENT(scoutfs_item_delete_ret,
 	TP_PROTO(struct super_block *sb, int ret),

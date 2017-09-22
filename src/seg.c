@@ -718,7 +718,7 @@ static int seg_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	LIST_HEAD(list);
 	int ret;
 
-	nr = sc->nr_to_scan;
+	nr = DIV_ROUND_UP(sc->nr_to_scan, SCOUTFS_SEGMENT_PAGES);
 	if (!nr)
 		goto out;
 
@@ -747,7 +747,8 @@ static int seg_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	}
 
 out:
-	ret = min_t(unsigned long, cac->lru_nr, INT_MAX);
+	ret = min_t(unsigned long, cac->lru_nr * SCOUTFS_SEGMENT_PAGES,
+		    INT_MAX);
 	trace_scoutfs_seg_shrink_exit(sb, sc->nr_to_scan, ret);
 	return ret;
 }

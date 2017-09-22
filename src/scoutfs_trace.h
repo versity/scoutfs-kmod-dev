@@ -33,11 +33,162 @@
 #include "seg.h"
 #include "super.h"
 #include "ioctl.h"
+#include "count.h"
 
 struct lock_info;
 
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
+
+TRACE_EVENT(scoutfs_sync_fs,
+	TP_PROTO(struct super_block *sb, int wait),
+
+	TP_ARGS(sb, wait),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, wait)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->wait = wait;
+	),
+
+	TP_printk(FSID_FMT" wait %d", __entry->fsid, __entry->wait)
+);
+
+TRACE_EVENT(scoutfs_trans_write_func,
+	TP_PROTO(struct super_block *sb, int dirty),
+
+	TP_ARGS(sb, dirty),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, dirty)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->dirty = dirty;
+	),
+
+	TP_printk(FSID_FMT" dirty %d", __entry->fsid, __entry->dirty)
+);
+
+TRACE_EVENT(scoutfs_release_trans,
+	TP_PROTO(struct super_block *sb, void *rsv, unsigned int rsv_holders,
+		 struct scoutfs_item_count *res,
+		 struct scoutfs_item_count *act, unsigned int tri_holders,
+		 unsigned int tri_writing, unsigned int tri_items,
+		 unsigned int tri_keys, unsigned int tri_vals),
+
+	TP_ARGS(sb, rsv, rsv_holders, res, act, tri_holders, tri_writing,
+		tri_items, tri_keys, tri_vals),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, rsv)
+		__field(unsigned int, rsv_holders)
+		__field(int, res_items)
+		__field(int, res_keys)
+		__field(int, res_vals)
+		__field(int, act_items)
+		__field(int, act_keys)
+		__field(int, act_vals)
+		__field(unsigned int, tri_holders)
+		__field(unsigned int, tri_writing)
+		__field(unsigned int, tri_items)
+		__field(unsigned int, tri_keys)
+		__field(unsigned int, tri_vals)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->rsv = rsv;
+		__entry->rsv_holders = rsv_holders;
+		__entry->res_items = res->items;
+		__entry->res_keys = res->keys;
+		__entry->res_vals = res->vals;
+		__entry->act_items = act->items;
+		__entry->act_keys = act->keys;
+		__entry->act_vals = act->vals;
+		__entry->tri_holders = tri_holders;
+		__entry->tri_writing = tri_writing;
+		__entry->tri_items = tri_items;
+		__entry->tri_keys = tri_keys;
+		__entry->tri_vals = tri_vals;
+	),
+
+	TP_printk(FSID_FMT" rsv %p holders %u reserved %u.%u.%u actual "
+		  "%d.%d.%d, trans holders %u writing %u reserved "
+		  "%u.%u.%u", __entry->fsid, __entry->rsv,
+		  __entry->rsv_holders, __entry->res_items, __entry->res_keys,
+		  __entry->res_vals, __entry->act_items, __entry->act_keys,
+		  __entry->act_vals, __entry->tri_holders, __entry->tri_writing,
+		  __entry->tri_items, __entry->tri_keys, __entry->tri_vals)
+);
+
+TRACE_EVENT(scoutfs_trans_acquired_hold,
+	TP_PROTO(struct super_block *sb, const struct scoutfs_item_count *cnt,
+		 void *rsv, unsigned int rsv_holders,
+		 struct scoutfs_item_count *res,
+		 struct scoutfs_item_count *act, unsigned int tri_holders,
+		 unsigned int tri_writing, unsigned int tri_items,
+		 unsigned int tri_keys, unsigned int tri_vals),
+
+	TP_ARGS(sb, cnt, rsv, rsv_holders, res, act, tri_holders, tri_writing,
+		tri_items, tri_keys, tri_vals),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, cnt_items)
+		__field(int, cnt_keys)
+		__field(int, cnt_vals)
+		__field(void *, rsv)
+		__field(unsigned int, rsv_holders)
+		__field(int, res_items)
+		__field(int, res_keys)
+		__field(int, res_vals)
+		__field(int, act_items)
+		__field(int, act_keys)
+		__field(int, act_vals)
+		__field(unsigned int, tri_holders)
+		__field(unsigned int, tri_writing)
+		__field(unsigned int, tri_items)
+		__field(unsigned int, tri_keys)
+		__field(unsigned int, tri_vals)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->cnt_items = cnt->items;
+		__entry->cnt_keys = cnt->keys;
+		__entry->cnt_vals = cnt->vals;
+		__entry->rsv = rsv;
+		__entry->rsv_holders = rsv_holders;
+		__entry->res_items = res->items;
+		__entry->res_keys = res->keys;
+		__entry->res_vals = res->vals;
+		__entry->act_items = act->items;
+		__entry->act_keys = act->keys;
+		__entry->act_vals = act->vals;
+		__entry->tri_holders = tri_holders;
+		__entry->tri_writing = tri_writing;
+		__entry->tri_items = tri_items;
+		__entry->tri_keys = tri_keys;
+		__entry->tri_vals = tri_vals;
+	),
+
+	TP_printk(FSID_FMT" cnt %u.%u.%u, rsv %p holders %u reserved %u.%u.%u "
+		  "actual %d.%d.%d, trans holders %u writing %u reserved "
+		  "%u.%u.%u", __entry->fsid, __entry->cnt_items,
+		  __entry->cnt_keys, __entry->cnt_vals, __entry->rsv,
+		  __entry->rsv_holders, __entry->res_items, __entry->res_keys,
+		  __entry->res_vals, __entry->act_items, __entry->act_keys,
+		  __entry->act_vals, __entry->tri_holders, __entry->tri_writing,
+		  __entry->tri_items, __entry->tri_keys, __entry->tri_vals)
+);
 
 TRACE_EVENT(scoutfs_ioc_release_ret,
 	TP_PROTO(struct super_block *sb, int ret),

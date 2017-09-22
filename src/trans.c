@@ -121,7 +121,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 	wait_event(sbi->trans_hold_wq, drained_holders(tri));
 
-	trace_printk("items dirty %d\n", scoutfs_item_has_dirty(sb));
+	trace_scoutfs_trans_write_func(sb, scoutfs_item_has_dirty(sb));
 
 	if (scoutfs_item_has_dirty(sb)) {
 		/*
@@ -222,7 +222,7 @@ int scoutfs_sync_fs(struct super_block *sb, int wait)
 	struct write_attempt attempt;
 	int ret;
 
-	trace_printk("wait %d\n", wait);
+	trace_scoutfs_sync_fs(sb, wait);
 
 	if (!wait) {
 		queue_trans_work(sbi);
@@ -294,13 +294,12 @@ static bool acquired_hold(struct super_block *sb,
 
 	spin_lock(&tri->lock);
 
-	trace_printk("cnt %u.%u.%u, rsv %p holders %u reserved %u.%u.%u actual %d.%d.%d, trans holders %u writing %u reserved %u.%u.%u\n",
-			cnt->items, cnt->keys, cnt->vals, rsv, rsv->holders,
-			rsv->reserved.items, rsv->reserved.keys,
-			rsv->reserved.vals, rsv->actual.items, rsv->actual.keys,
-			rsv->actual.vals, tri->holders, tri->writing,
-			tri->reserved_items, tri->reserved_keys,
-			tri->reserved_vals);
+	trace_scoutfs_trans_acquired_hold(sb, cnt, rsv, rsv->holders,
+					  &rsv->reserved, &rsv->actual,
+					  tri->holders, tri->writing,
+					  tri->reserved_items,
+					  tri->reserved_keys,
+					  tri->reserved_vals);
 
 	/* use a caller's existing reservation */
 	if (rsv->holders)
@@ -433,12 +432,10 @@ void scoutfs_release_trans(struct super_block *sb)
 
 	spin_lock(&tri->lock);
 
-	trace_printk("rsv %p holders %u reserved %u.%u.%u actual %d.%d.%d, trans holders %u writing %u reserved %u.%u.%u\n",
-			rsv, rsv->holders, rsv->reserved.items,
-			rsv->reserved.keys, rsv->reserved.vals,
-			rsv->actual.items, rsv->actual.keys, rsv->actual.vals,
-			tri->holders, tri->writing, tri->reserved_items,
-			tri->reserved_keys, tri->reserved_vals);
+	trace_scoutfs_release_trans(sb, rsv, rsv->holders, &rsv->reserved,
+				    &rsv->actual, tri->holders, tri->writing,
+				    tri->reserved_items, tri->reserved_keys,
+				    tri->reserved_vals);
 
 	BUG_ON(rsv->holders <= 0);
 	BUG_ON(tri->holders <= 0);

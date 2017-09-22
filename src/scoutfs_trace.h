@@ -32,11 +32,86 @@
 #include "lock.h"
 #include "seg.h"
 #include "super.h"
+#include "ioctl.h"
 
 struct lock_info;
 
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
+
+TRACE_EVENT(scoutfs_ioc_release_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_ioc_release,
+	TP_PROTO(struct super_block *sb, struct scoutfs_ioctl_release *args),
+
+	TP_ARGS(sb, args),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, block)
+		__field(__u64, count)
+		__field(__u64, vers)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->block = args->block;
+		__entry->count = args->count;
+		__entry->vers = args->data_version;
+	),
+
+	TP_printk(FSID_FMT" block %llu count %llu vers %llu", __entry->fsid,
+		  __entry->block, __entry->count, __entry->vers)
+);
+
+TRACE_EVENT(scoutfs_ioc_walk_inodes,
+	TP_PROTO(struct super_block *sb, struct scoutfs_ioctl_walk_inodes *walk),
+
+	TP_ARGS(sb, walk),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, index)
+		__field(__u64, first_major)
+		__field(__u32, first_minor)
+		__field(__u64, first_ino)
+		__field(__u64, last_major)
+		__field(__u32, last_minor)
+		__field(__u64, last_ino)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->index = walk->index;
+		__entry->first_major = walk->first.major;
+		__entry->first_minor = walk->first.minor;
+		__entry->first_ino = walk->first.ino;
+		__entry->last_major = walk->last.major;
+		__entry->last_minor = walk->last.minor;
+		__entry->last_ino = walk->last.ino;
+	),
+
+	TP_printk(FSID_FMT" index %u first %llu.%u.%llu last %llu.%u.%llu",
+		  __entry->fsid, __entry->index, __entry->first_major,
+		  __entry->first_minor, __entry->first_ino, __entry->last_major,
+		  __entry->last_minor, __entry->last_ino)
+);
 
 TRACE_EVENT(scoutfs_i_callback,
 	TP_PROTO(struct inode *inode),

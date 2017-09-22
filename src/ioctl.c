@@ -32,6 +32,7 @@
 #include "client.h"
 #include "lock.h"
 #include "manifest.h"
+#include "scoutfs_trace.h"
 
 /*
  * We make inode index items coherent by locking fixed size regions of
@@ -68,10 +69,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	if (copy_from_user(&walk, uwalk, sizeof(walk)))
 		return -EFAULT;
 
-	trace_printk("index %u first %llu.%u.%llu last %llu.%u.%llu\n",
-		     walk.index, walk.first.major, walk.first.minor,
-		     walk.first.ino, walk.last.major, walk.last.minor,
-		     walk.last.ino);
+	trace_scoutfs_ioc_walk_inodes(sb, &walk);
 
 	if (walk.index == SCOUTFS_IOC_WALK_INODES_SIZE)
 		type = SCOUTFS_INODE_INDEX_SIZE_TYPE;
@@ -340,8 +338,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
 		return -EFAULT;
 
-	trace_printk("block %llu count %llu vers %llu\n",
-		     args.block, args.count, args.data_version);
+	trace_scoutfs_ioc_release(sb, &args);
 
 	if (args.count == 0)
 		return 0;
@@ -383,7 +380,7 @@ out:
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 
-	trace_printk("ret %d\n", ret);
+	trace_scoutfs_ioc_release_ret(sb, ret);
 	return ret;
 }
 

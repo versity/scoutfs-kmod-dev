@@ -38,6 +38,7 @@
 
 #include "dlmglue.h"
 
+#ifdef TRACE_DLMGLUE
 #define mlog(mask, fmt, args...) trace_printk(fmt , ##args)
 #define mlog_errno(st) do {						\
 	int _st = (st);							\
@@ -45,11 +46,14 @@
 	    _st != AOP_TRUNCATED_PAGE && _st != -ENOSPC)		\
 		mlog(ML_ERROR, "status = %lld\n", (long long)_st);	\
 } while (0)
-
+#else
+#define mlog(mask, fmt, args...)
+#define mlog_errno(st)
+#endif
 #define mlog_bug_on_msg(cond, fmt, args...) do {			\
 	if (cond) {							\
-		mlog(ML_ERROR, "bug expression: " #cond "\n");		\
-		mlog(ML_ERROR, fmt, ##args);				\
+		printk(KERN_ERR "bug expression: " #cond "\n");	\
+		printk(KERN_ERR fmt, ##args);				\
 		BUG();							\
 	}								\
 } while (0)

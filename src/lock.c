@@ -173,7 +173,6 @@ static int ino_lock_downconvert(struct ocfs2_lock_res *lockres, int blocking)
 static struct ocfs2_lock_res_ops scoufs_ino_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
-	/* XXX: .post_unlock for lru */
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.flags			= LOCK_TYPE_REQUIRES_REFRESH,
 };
@@ -181,14 +180,12 @@ static struct ocfs2_lock_res_ops scoufs_ino_lops = {
 static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
-	/* XXX: .post_unlock for lru */
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.flags			= 0,
 };
 
 static struct ocfs2_lock_res_ops scoutfs_global_lops = {
 	.get_osb 		= get_ino_lock_osb,
-	/* XXX: .post_unlock for lru */
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.flags			= 0,
 };

@@ -1844,7 +1844,6 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 
 	for_each_dirty_bh(bti, bh, tmp) {
 		lock_buffer(bh);
-		set_buffer_dirty(bh);
 		set_buffer_mapped(bh);
 		bh->b_end_io = end_buffer_write_sync;
 		get_bh(bh);

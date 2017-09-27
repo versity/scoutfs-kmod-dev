@@ -1682,6 +1682,41 @@ DEFINE_EVENT(scoutfs_shrink_exit_class, scoutfs_item_shrink_exit,
         TP_ARGS(sb, nr_to_scan, ret)
 );
 
+TRACE_EVENT(scoutfs_item_shrink_around,
+        TP_PROTO(struct super_block *sb,
+		 struct scoutfs_key_buf *rng_start,
+		 struct scoutfs_key_buf *rng_end, struct scoutfs_key_buf *item,
+		 struct scoutfs_key_buf *prev, struct scoutfs_key_buf *first,
+		 struct scoutfs_key_buf *last, struct scoutfs_key_buf *next),
+        TP_ARGS(sb, rng_start, rng_end, item, prev, first, last, next),
+        TP_STRUCT__entry(
+		__field(void *, sb)
+                __dynamic_array(char, rng_start,
+				scoutfs_key_str(NULL, rng_start))
+                __dynamic_array(char, rng_end,
+				scoutfs_key_str(NULL, rng_end))
+                __dynamic_array(char, item, scoutfs_key_str(NULL, item))
+                __dynamic_array(char, prev, scoutfs_key_str(NULL, prev))
+                __dynamic_array(char, first, scoutfs_key_str(NULL, first))
+                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
+                __dynamic_array(char, next, scoutfs_key_str(NULL, next))
+        ),
+        TP_fast_assign(
+		__entry->sb = sb;
+		scoutfs_key_str(__get_dynamic_array(rng_start), rng_start);
+		scoutfs_key_str(__get_dynamic_array(rng_end), rng_end);
+		scoutfs_key_str(__get_dynamic_array(item), item);
+		scoutfs_key_str(__get_dynamic_array(prev), prev);
+		scoutfs_key_str(__get_dynamic_array(first), first);
+		scoutfs_key_str(__get_dynamic_array(last), last);
+		scoutfs_key_str(__get_dynamic_array(next), next);
+        ),
+        TP_printk("sb %p rng_start %s rng_end %s item %s prev %s first %s last %s next %s",
+		  __entry->sb, __get_str(rng_start), __get_str(rng_end),
+		  __get_str(item), __get_str(prev), __get_str(first),
+		  __get_str(last), __get_str(next))
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

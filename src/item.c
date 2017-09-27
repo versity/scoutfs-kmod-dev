@@ -371,6 +371,19 @@ static void item_referenced(struct item_cache *cac, struct cached_item *item)
 		list_move_tail(&item->entry, &cac->lru_list);
 }
 
+/* remove the item from its tracking data structures */
+static void unlink_item(struct super_block *sb, struct item_cache *cac,
+		        struct cached_item *item)
+{
+	clear_item_dirty(sb, cac, item);
+	rb_erase_augmented(&item->node, &cac->items, &scoutfs_item_rb_cb);
+	RB_CLEAR_NODE(&item->node);
+	if (!list_empty(&item->entry)) {
+		list_del_init(&item->entry);
+		cac->lru_nr--;
+	}
+}
+
 /*
  * Safely erase an item from the tree.  Make sure to remove its dirty
  * accounting, use the augmented erase, and free it.
@@ -380,13 +393,7 @@ static void erase_item(struct super_block *sb, struct item_cache *cac,
 {
 	trace_scoutfs_erase_item(sb, item);
 
-	clear_item_dirty(sb, cac, item);
-	rb_erase_augmented(&item->node, &cac->items, &scoutfs_item_rb_cb);
-	RB_CLEAR_NODE(&item->node);
-	if (!list_empty(&item->entry)) {
-		list_del_init(&item->entry);
-		cac->lru_nr--;
-	}
+	unlink_item(sb, cac, item);
 	free_item(sb, item);
 }
 
@@ -1714,34 +1721,213 @@ static struct cached_item *rb_next_item(struct cached_item *item)
 	return NULL;
 }
 
+static struct cached_item *rb_prev_item(struct cached_item *item)
+{
+	struct rb_node *node;
+
+	if (item && (node = rb_prev(&item->node)))
+		return container_of(node, struct cached_item, node);
+
+	return NULL;
+}
+
 /*
- * Shrink the item cache.
+ * Find the bounds of an item cache shrinking operation.  Starting from
+ * an item, walk through either next items to the right or prev items to
+ * the left.  Record items that are valid final shrinking points because
+ * using their key for a new range end doesn't cross the remaining
+ * existing item.  We stop if we check enough items, hit a dirty item,
+ * or run out of items in the range.
+ *
+ * We only can't use an item as a new range end point if moving its key
+ * crosses the next item in the cache.  This only happens when smaller
+ * items share a prefix with the next larger item.  This only happens
+ * for item populations with names (dirents, xattrs) that share
+ * prefixes.  We really don't want to be unable to reclaim so we
+ * aggressively try to walk past all of them.
+ */
+#define BOUNDARY_MIN 32
+#define BOUNDARY_MAX 300
+static struct cached_item *shrink_boundary(struct super_block *sb,
+					   struct cached_item *item,
+					   struct cached_item **next_ret,
+					   struct scoutfs_key_buf *end,
+					   bool right)
+{
+	struct cached_item *found = NULL;
+	struct cached_item *next;
+	bool cmp;
+	int i;
+
+	*next_ret = NULL;
+
+	for (i = 0; i < BOUNDARY_MAX; i++) {
+		if (right)
+			next = rb_next_item(item);
+		else
+			next = rb_prev_item(item);
+
+		if (next) {
+			if (right)
+				cmp = scoutfs_key_compare(next->key, end) > 0;
+			else
+				cmp = scoutfs_key_compare(next->key, end) < 0;
+		} else {
+			cmp = true;
+		}
+		if (cmp) {
+			scoutfs_inc_counter(sb, item_shrink_range_end);
+			found = item;
+			*next_ret = NULL;
+			break;
+		}
+
+		if (right) {
+			scoutfs_key_inc_cur_len(item->key);
+			cmp = scoutfs_key_compare(item->key, next->key) <= 0;
+			scoutfs_key_dec_cur_len(item->key);
+		} else {
+			scoutfs_key_dec_cur_len(item->key);
+			cmp = scoutfs_key_compare(item->key, next->key) >= 0;
+			scoutfs_key_inc_cur_len(item->key);
+		}
+		if (cmp) {
+			found = item;
+			*next_ret = next;
+			if (i >= BOUNDARY_MIN)
+				break;
+		}
+
+		if (next->dirty & ITEM_DIRTY) {
+			scoutfs_inc_counter(sb, item_shrink_next_dirty);
+			break;
+		}
+
+		item = next;
+	}
+
+	return found;
+}
+
+/*
+ * The caller found an item in the lru and the range it falls within.
+ * This frees items around the item.  After finding the boundaries we
+ * have to either update the ranges if items remain or free the item.
+ *
+ * We're in the context of a shrinker so we can't allocate.  If we
+ * remove items from the middle of a range we use the memory from some
+ * removed items to store the new split range.
+ */
+static int shrink_around(struct super_block *sb, struct cached_range *rng,
+			 struct cached_item *item)
+{
+	struct item_cache *cac = SCOUTFS_SB(sb)->item_cache;
+	struct scoutfs_key_buf *rng_end = NULL;
+	struct scoutfs_key_buf *key;
+	struct cached_range *new_rng;
+	struct cached_item *first;
+	struct cached_item *last;
+	struct cached_item *prev;
+	struct cached_item *next;
+	int nr = 0;
+
+	/* we're re-using item memory as ranges :P */
+	BUILD_BUG_ON(sizeof(struct cached_item) < sizeof(struct cached_range));
+
+	first = shrink_boundary(sb, item, &prev, rng->start, false);
+	last = shrink_boundary(sb, item, &next, rng->end, true);
+
+	trace_scoutfs_item_shrink_around(sb, rng->start, rng->end, item->key,
+					 prev ? prev->key : NULL,
+					 first ? first->key : NULL,
+					 last ? last->key : NULL,
+					 next ? next->key : NULL);
+
+	/* can't shrink if we can't use neighbours */
+	if (!first || !last) {
+		scoutfs_inc_counter(sb, item_shrink_alone);
+		return 0;
+	}
+
+	/* can't split if we don't have an item to use for the range */
+	if (next && prev && (first == last)) {
+		scoutfs_inc_counter(sb, item_shrink_small_split);
+		return 0;
+	}
+
+	/* set end of remaining existing range, save old for split or freeing */
+	if (prev) {
+		rng_end = rng->end;
+		rng->end = first->key;
+		first->key = NULL;
+		scoutfs_key_dec_cur_len(rng->end);
+	}
+
+	/* set start of remaining existing range */
+	if (next && !prev) {
+		scoutfs_key_free(sb, rng->start);
+		rng->start = last->key;
+		last->key = NULL;
+		scoutfs_key_inc_cur_len(rng->start);
+	}
+
+	/* add new range, stealing existing end */
+	if (next && prev) {
+		item = last;
+		last = rb_prev_item(last);
+
+		unlink_item(sb, cac, item);
+		key = item->key;
+		scoutfs_kvec_kfree(item->val);
+		nr++;
+
+		new_rng = (void *)item;
+		item = NULL;
+		memset(new_rng, 0, sizeof(struct cached_range));
+
+		new_rng->end = rng_end;
+		rng_end = NULL;
+		new_rng->start = key;
+		scoutfs_key_inc_cur_len(new_rng->start);
+		insert_range(sb, &cac->ranges, new_rng);
+
+		scoutfs_inc_counter(sb, item_shrink_split_range);
+	}
+
+	/* totally emptied the range */
+	if (!prev && !next) {
+		rb_erase(&rng->node, &cac->ranges);
+		free_range(sb, rng);
+	}
+
+	/* and finally shrink all the surrounding items */
+	for (item = first;
+	     item && (next = item == last ? NULL : rb_next_item(item), 1);
+	     item = next) {
+		if (item->key)
+			trace_scoutfs_item_shrink(sb, item->key);
+		scoutfs_inc_counter(sb, item_shrink);
+		erase_item(sb, cac, item);
+		nr++;
+	}
+
+	scoutfs_key_free(sb, rng_end);
+
+	return nr;
+}
+
+/*
+ * Shrink the item cache. 
  *
  * Unfortunately this is complicated by the rbtree of ranges that track
  * the validity of the cache.  If we free items we have to make sure
  * they're not covered by ranges or else they'd be considered a valid
- * negative cache hit.  We don't want to allocate more memory for new
- * range entries that would be required to poke holes int he cached
- * range.
+ * negative cache hit.  We aggressively try to free items because if we
+ * have a structural pattern of keys that we can't free then those build
+ * up and fill memory.
  *
- * So instead of just freeing the oldest item we shrink the range that
- * contains the oldest item.  We bias towards freeing the lesser side of
- * the range.
- *
- * Instead of allocating a new range start key we use the key of the
- * item we're removing.  We have to increment it past the removed key
- * value.  That increment can move it past the next key in the range if
- * the next key is of higher precision.  This will be rare and can't go
- * on indefinitely so we keep searching until we can inc a key and not
- * extend past the next item.  Eventually we have a range of items to
- * free.
- *
- * During all of this, we chose to abort if we see dirty items.  They
- * won't be dirty forever and the mm can call back in.
- *
- * We can also hit items in the lru which aren't covered by ranges.  We
- * just free them straight away.  And finally if we're completely out of
- * items we walk and free the ranges.
+ * We can also hit items in the lru which aren't covered by ranges, we
+ * free those immediately.
  */
 static int item_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 {
@@ -1750,9 +1936,7 @@ static int item_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	struct super_block *sb = cac->sb;
 	struct cached_range *rng;
 	struct cached_item *item;
-	struct cached_item *next;
-	struct cached_item *begin;
-	struct cached_item *end;
+	struct cached_item *first_moved = NULL;
 	unsigned long flags;
 	unsigned long nr;
 	int ret;
@@ -1763,24 +1947,9 @@ static int item_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 
 	spin_lock_irqsave(&cac->lock, flags);
 
-	while (nr > 0) {
-		item = list_first_entry_or_null(&cac->lru_list,
-						struct cached_item, entry);
-
-		/* no lru items, if no items at all then free ranges */
-		if (!item) {
-			if (!RB_EMPTY_ROOT(&cac->items)) {
-				scoutfs_inc_counter(sb, item_shrink_dirty_abort);
-				goto abort;
-			}
-			rng = rb_first_rng(&cac->ranges);
-			if (!rng)
-				break;
-			scoutfs_inc_counter(sb, item_shrink_no_items);
-			begin = NULL;
-			end = NULL;
-			goto free;
-		}
+	while (nr &&
+	       (item = list_first_entry_or_null(&cac->lru_list,
+						struct cached_item, entry))) {
 
 		/* can't have dirty items on the lru */
 		BUG_ON(item->dirty & ITEM_DIRTY);
@@ -1788,71 +1957,33 @@ static int item_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 		/* if we're not in a range just shrink the item */
 		rng = walk_ranges(&cac->ranges, item->key, NULL, NULL);
 		if (!rng) {
-			begin = item;
-			end = item;
 			scoutfs_inc_counter(sb, item_shrink_outside);
-			goto free;
-		}
-
-		/* find the string of items to free, ending with range start */
-		item = next_item(&cac->items, rng->start);
-		begin = item;
-		end = item;
-
-		while (item) {
-			/* can't if it's dirty :( */
-			if (item->dirty & ITEM_DIRTY) {
-				scoutfs_inc_counter(sb, item_shrink_dirty_abort);
-				goto abort;
-			}
-
-			/* we're going to free this item now */
-			end = item;
-
-			/* free items and range if we exhausted the range */
-			next = rb_next_item(item);
-			if (!next || scoutfs_key_compare(next->key, rng->end) > 0)
-				break;
-
-			/* truncate range using after our key as start, if safe */
-			scoutfs_key_inc_cur_len(item->key);
-			if (scoutfs_key_compare(item->key, next->key) <= 0) {
-				trace_scoutfs_item_shrink(sb, item->key);
-				scoutfs_key_free(sb, rng->start);
-				rng->start = item->key;
-				item->key = NULL;
-				rng = NULL;
-				break;
-			}
-			scoutfs_key_dec_cur_len(item->key);
-
-			/* keep searching for valid range start key */
-			scoutfs_inc_counter(sb, item_shrink_skip_inced);
-			item = next;
-		}
-
-free:
-		if (rng) {
-			trace_scoutfs_item_shrink_range(sb, rng->start, rng->end);
-			scoutfs_inc_counter(sb, item_shrink_range);
-			rb_erase(&rng->node, &cac->ranges);
-			free_range(sb, rng);
-		}
-
-		/* free items from begin to end */
-		for (item = begin;
-		     item && (next = item == end ? NULL : rb_next_item(item), 1);
-		     item = next) {
-			if (item->key)
-				trace_scoutfs_item_shrink(sb, item->key);
-			scoutfs_inc_counter(sb, item_shrink);
 			erase_item(sb, cac, item);
+			nr--;
+			continue;
 		}
 
-		nr--;
+		ret = shrink_around(sb, rng, item);
+		if (ret == 0) {
+			if (first_moved && first_moved == item)
+				break;
+			else if (!first_moved)
+				first_moved = item;
+			list_move_tail(&item->entry, &cac->lru_list);
+			continue;
+		}
+
+		nr -= min_t(unsigned long, nr, ret);
 	}
 
-abort:
+	/* always try to free empty ranges */
+	while (RB_EMPTY_ROOT(&cac->items) &&
+	       (rng = rb_first_rng(&cac->ranges))) {
+		scoutfs_inc_counter(sb, item_shrink_empty_range);
+		rb_erase(&rng->node, &cac->ranges);
+		free_range(sb, rng);
+	}
+
 	spin_unlock_irqrestore(&cac->lock, flags);
 
 out:

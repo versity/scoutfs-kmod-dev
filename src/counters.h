@@ -42,11 +42,13 @@
 	EXPAND_COUNTER(item_range_hit)		\
 	EXPAND_COUNTER(item_range_miss)		\
 	EXPAND_COUNTER(item_range_insert)	\
-	EXPAND_COUNTER(item_shrink_no_items)	\
+	EXPAND_COUNTER(item_shrink_alone)	\
+	EXPAND_COUNTER(item_shrink_empty_range)	\
+	EXPAND_COUNTER(item_shrink_next_dirty)	\
 	EXPAND_COUNTER(item_shrink_outside)	\
-	EXPAND_COUNTER(item_shrink_dirty_abort)	\
-	EXPAND_COUNTER(item_shrink_skip_inced)	\
-	EXPAND_COUNTER(item_shrink_range)	\
+	EXPAND_COUNTER(item_shrink_range_end)	\
+	EXPAND_COUNTER(item_shrink_split_range)	\
+	EXPAND_COUNTER(item_shrink_small_split)	\
 	EXPAND_COUNTER(item_shrink)		\
 	EXPAND_COUNTER(lock_alloc)		\
 	EXPAND_COUNTER(lock_free)

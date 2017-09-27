@@ -789,7 +789,7 @@ static struct task_cursor *get_cursor(struct data_info *datinf)
 static int bulk_alloc(struct super_block *sb)
 {
 	u64 *segnos = NULL;
-	int ret;
+	int ret = 0;
 	int i;
 
 	segnos = scoutfs_client_bulk_alloc(sb);

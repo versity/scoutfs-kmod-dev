@@ -351,6 +351,7 @@ static void init_free_key(struct scoutfs_key_buf *key,
 static int set_segno_free(struct super_block *sb, u64 segno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits_key fbk = {0,};
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
@@ -363,7 +364,7 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 	ret = scoutfs_item_lookup_exact(sb, &key, val,
 					sizeof(struct scoutfs_free_bits),
-					NULL);
+					lock);
 	if (ret && ret != -ENOENT)
 		goto out;
 
@@ -381,7 +382,7 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 		goto out;
 	}
 
-	ret = scoutfs_item_update(sb, &key, val, NULL);
+	ret = scoutfs_item_update(sb, &key, val, lock->end);
 out:
 	trace_scoutfs_data_set_segno_free(sb, segno, be64_to_cpu(fbk.base),
 					  bit, ret);
@@ -427,6 +428,7 @@ static int create_blkno_free(struct super_block *sb, u64 blkno,
 static int clear_segno_free(struct super_block *sb, u64 segno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits_key b_fbk;
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
@@ -442,7 +444,7 @@ static int clear_segno_free(struct super_block *sb, u64 segno)
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 	ret = scoutfs_item_lookup_exact(sb, &key, val,
 					sizeof(struct scoutfs_free_bits),
-					NULL);
+					lock);
 	if (ret) {
 		/* XXX corruption, caller saw item.. should still exist */
 		if (ret == -ENOENT)
@@ -464,9 +466,9 @@ static int clear_segno_free(struct super_block *sb, u64 segno)
 		goto out;
 
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
-		ret = scoutfs_item_delete(sb, &key, NULL);
+		ret = scoutfs_item_delete(sb, &key, lock->end);
 	else
-		ret = scoutfs_item_update(sb, &key, val, NULL);
+		ret = scoutfs_item_update(sb, &key, val, lock->end);
 	if (ret)
 		scoutfs_item_delete_dirty(sb, &b_key);
 out:
@@ -481,6 +483,7 @@ out:
 static int set_blkno_free(struct super_block *sb, u64 blkno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
@@ -495,7 +498,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 	ret = scoutfs_item_lookup_exact(sb, &key, val,
 					sizeof(struct scoutfs_free_bits),
-					NULL);
+					lock);
 	if (ret && ret != -ENOENT)
 		goto out;
 
@@ -514,12 +517,12 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	}
 
 	if (!bitmap_full((long *)frb.bits, SCOUTFS_FREE_BITS_BITS)) {
-		ret = scoutfs_item_update(sb, &key, val, NULL);
+		ret = scoutfs_item_update(sb, &key, val, lock->end);
 		goto out;
 	}
 
 	/* dirty so we can safely delete if set segno fails */
-	ret = scoutfs_item_dirty(sb, &key, NULL);
+	ret = scoutfs_item_dirty(sb, &key, lock->end);
 	if (ret)
 		goto out;
 
@@ -542,6 +545,7 @@ out:
 static int clear_blkno_free(struct super_block *sb, u64 blkno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
@@ -555,7 +559,7 @@ static int clear_blkno_free(struct super_block *sb, u64 blkno)
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 	ret = scoutfs_item_lookup_exact(sb, &key, val,
 					sizeof(struct scoutfs_free_bits),
-					NULL);
+					lock);
 	if (ret) {
 		/* XXX corruption, bits should have existed */
 		if (ret == -ENOENT)
@@ -571,9 +575,9 @@ static int clear_blkno_free(struct super_block *sb, u64 blkno)
 	}
 
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
-		ret = scoutfs_item_delete(sb, &key, NULL);
+		ret = scoutfs_item_delete(sb, &key, lock->end);
 	else
-		ret = scoutfs_item_update(sb, &key, val, NULL);
+		ret = scoutfs_item_update(sb, &key, val, lock->end);
 out:
 	return ret;
 }
@@ -824,6 +828,7 @@ out:
 static int find_free_blkno(struct super_block *sb, u64 blkno, u64 *blkno_ret)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
@@ -836,7 +841,7 @@ static int find_free_blkno(struct super_block *sb, u64 blkno, u64 *blkno_ret)
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 
 	ret = scoutfs_item_lookup_exact(sb, &key, val,
-					sizeof(struct scoutfs_free_bits), NULL);
+					sizeof(struct scoutfs_free_bits), lock);
 	if (ret < 0)
 		goto out;
 
@@ -860,6 +865,7 @@ out:
 static int find_free_segno(struct super_block *sb, u64 *segno)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits_key last_fbk;
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
@@ -875,7 +881,7 @@ static int find_free_segno(struct super_block *sb, u64 *segno)
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 
-	ret = scoutfs_item_next(sb, &key, &last_key, val, NULL);
+	ret = scoutfs_item_next(sb, &key, &last_key, val, lock->end);
 	if (ret < 0)
 		goto out;
 

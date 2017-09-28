@@ -17,7 +17,8 @@ SCOUTFS_GIT_DESCRIBE := \
 		echo not-in-a-git-repository)
 
 SCOUTFS_ARGS := SCOUTFS_GIT_DESCRIBE=$(SCOUTFS_GIT_DESCRIBE) \
-		CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src
+		CONFIG_SCOUTFS_FS=m -C $(SK_KSRC) M=$(CURDIR)/src \
+		EXTRA_CFLAGS=-Werror
 
 all: module
 

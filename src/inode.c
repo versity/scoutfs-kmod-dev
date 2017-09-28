@@ -1009,7 +1009,7 @@ int scoutfs_scan_orphans(struct super_block *sb)
 	init_orphan_key(&last, &last_okey, sbi->node_id, ~0ULL);
 
 	while (1) {
-		ret = scoutfs_item_next_same(sb, &key, &last, NULL, lock->end);
+		ret = scoutfs_item_next_same(sb, &key, &last, NULL, lock);
 		if (ret == -ENOENT) /* No more orphan items */
 			break;
 		if (ret < 0)

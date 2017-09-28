@@ -911,7 +911,7 @@ static struct cached_item *item_for_next(struct rb_root *root,
  */
 int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		      struct scoutfs_key_buf *last, struct kvec *val,
-		      struct scoutfs_key_buf *end)
+		      struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
@@ -923,12 +923,17 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 	int ret;
 
 	/* use the end key as the last key if it's closer to reduce compares */
-	if (end && scoutfs_key_compare(end, last) < 0)
-		last = end;
+	if (scoutfs_key_compare(lock->end, last) < 0)
+		last = lock->end;
 
 	/* convenience to avoid searching if caller iterates past their last */
 	if (scoutfs_key_compare(key, last) > 0) {
 		ret = -ENOENT;
+		goto out;
+	}
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, READ))) {
+		ret = -EINVAL;
 		goto out;
 	}
 
@@ -948,13 +953,14 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		cached = check_range(sb, &cac->ranges, pos, range_end);
 
 		trace_scoutfs_item_next_range_check(sb, !!cached, key,
-						    pos, last, end, range_end);
+						    pos, last, lock->end,
+						    range_end);
 
 		if (!cached) {
 			/* populate missing cached range starting at pos */
 			spin_unlock_irqrestore(&cac->lock, flags);
 
-			ret = scoutfs_manifest_read_items(sb, pos, end);
+			ret = scoutfs_manifest_read_items(sb, pos, lock->end);
 
 			spin_lock_irqsave(&cac->lock, flags);
 			if (ret)
@@ -1008,7 +1014,7 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 			       struct scoutfs_key_buf *key,
 			       struct scoutfs_key_buf *last,
 			       struct kvec *val, int len,
-			       struct scoutfs_key_buf *end)
+			       struct scoutfs_lock *lock)
 {
 	int key_len = key->key_len;
 	int ret;
@@ -1018,7 +1024,7 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 	if (WARN_ON_ONCE(!val || scoutfs_kvec_length(val) < len))
 		return -EINVAL;
 
-	ret = scoutfs_item_next(sb, key, last, val, end);
+	ret = scoutfs_item_next(sb, key, last, val, lock);
 	if (ret >= 0 && (key->key_len != key_len || ret < len))
 		ret = -EIO;
 
@@ -1033,14 +1039,14 @@ int scoutfs_item_next_same_min(struct super_block *sb,
  */
 int scoutfs_item_next_same(struct super_block *sb, struct scoutfs_key_buf *key,
 			   struct scoutfs_key_buf *last, struct kvec *val,
-			   struct scoutfs_key_buf *end)
+			   struct scoutfs_lock *lock)
 {
 	int key_len = key->key_len;
 	int ret;
 
 	trace_scoutfs_item_next_same(sb, key_len);
 
-	ret = scoutfs_item_next(sb, key, last, val, end);
+	ret = scoutfs_item_next(sb, key, last, val, lock);
 	if (ret >= 0 && (key->key_len != key_len))
 		ret = -EIO;
 

@@ -638,7 +638,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		init_mapping_key(&key, &bmk, ino, iblock);
 		scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
 
-		ret = scoutfs_item_next(sb, &key, &last_key, val, lock->end);
+		ret = scoutfs_item_next(sb, &key, &last_key, val, lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -881,7 +881,7 @@ static int find_free_segno(struct super_block *sb, u64 *segno)
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 
-	ret = scoutfs_item_next(sb, &key, &last_key, val, lock->end);
+	ret = scoutfs_item_next(sb, &key, &last_key, val, lock);
 	if (ret < 0)
 		goto out;
 
@@ -1296,8 +1296,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		init_mapping_key(&key, &bmk, ino, blk_off);
 		scoutfs_kvec_init(val, &map->encoded, sizeof(map->encoded));
 
-		ret = scoutfs_item_next(sb, &key, &last_key, val,
-					inode_lock->end);
+		ret = scoutfs_item_next(sb, &key, &last_key, val, inode_lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;

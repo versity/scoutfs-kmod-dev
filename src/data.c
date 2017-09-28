@@ -599,7 +599,8 @@ out:
  * partial progress.
  */
 int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
-				u64 len, bool offline)
+				u64 len, bool offline,
+				struct scoutfs_lock *lock)
 {
 	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
@@ -633,7 +634,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 		init_mapping_key(&key, &bmk, ino, iblock);
 		scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
 
-		ret = scoutfs_item_next(sb, &key, &last_key, val, NULL);
+		ret = scoutfs_item_next(sb, &key, &last_key, val, lock->end);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -669,7 +670,8 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 
 			if (!dirtied) {
 				/* dirty item with full size encoded */
-				ret = scoutfs_item_update(sb, &key, val, NULL);
+				ret = scoutfs_item_update(sb, &key, val,
+							  lock->end);
 				if (ret)
 					break;
 				dirtied = true;

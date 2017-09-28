@@ -331,6 +331,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_ioctl_release args;
+	struct scoutfs_lock *lock = NULL;
 	loff_t start;
 	loff_t end_inc;
 	int ret;
@@ -351,6 +352,11 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 		return ret;
 
 	mutex_lock(&inode->i_mutex);
+
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &lock);
+	if (ret)
+		goto out;
 
 	if (!S_ISREG(inode->i_mode)) {
 		ret = -EINVAL;
@@ -375,8 +381,9 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	truncate_inode_pages_range(&inode->i_data, start, end_inc);
 
 	ret = scoutfs_data_truncate_items(sb, scoutfs_ino(inode), args.block,
-					  args.count, true);
+					  args.count, true, lock);
 out:
+	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 

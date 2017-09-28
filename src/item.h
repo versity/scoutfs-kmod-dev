@@ -13,10 +13,10 @@ struct scoutfs_segment;
 struct scoutfs_key_buf;
 
 int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
-			struct kvec *val, struct scoutfs_key_buf *end);
+			struct kvec *val, struct scoutfs_lock *lock);
 int scoutfs_item_lookup_exact(struct super_block *sb,
 			      struct scoutfs_key_buf *key, struct kvec *val,
-			      int size, struct scoutfs_key_buf *end);
+			      int size, struct scoutfs_lock *lock);
 int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		      struct scoutfs_key_buf *last, struct kvec *val,
 		      struct scoutfs_key_buf *end);

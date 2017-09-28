@@ -731,6 +731,35 @@ restart:
 }
 
 /*
+ * Return true if the lock protects the use of the key.  Some locks not
+ * intended for item use don't have a key range and we wan't to safely
+ * detect that.  We use the block 'rw' constants just because they're
+ * convenient.  The level test is racey but it's a char.. how racy can
+ * it be? :).
+ */
+static bool lock_coverage(struct scoutfs_lock *lock,
+			  struct scoutfs_key_buf *key, int rw)
+{
+	bool writing = rw & WRITE;
+	signed char level;
+
+	if (rw & ~WRITE)
+		return false;
+
+	if (!lock || !lock->start || !lock->end)
+		return false;
+
+	level = ACCESS_ONCE(lock->lockres.l_level);
+
+	if ((writing && level != DLM_LOCK_EX) ||
+	    (!writing && level != DLM_LOCK_EX && level != DLM_LOCK_PR))
+		return false;
+
+	return scoutfs_key_compare_ranges(key, key,
+					  lock->start, lock->end) == 0;
+}
+
+/*
  * Find an item with the given key and copy its value into the caller's
  * value vector.  The amount of bytes copied is returned which can be 0
  * or truncated if the caller's buffer isn't big enough.
@@ -739,13 +768,16 @@ restart:
  * and inserted into the cache.
  */
 int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
-			struct kvec *val, struct scoutfs_key_buf *end)
+			struct kvec *val, struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, READ)))
+		return -EINVAL;
 
 	trace_scoutfs_item_lookup(sb, key);
 
@@ -765,7 +797,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
 
 	trace_scoutfs_item_lookup_ret(sb, ret);
 	return ret;
@@ -786,11 +818,11 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
  */
 int scoutfs_item_lookup_exact(struct super_block *sb,
 			      struct scoutfs_key_buf *key, struct kvec *val,
-			      int size, struct scoutfs_key_buf *end)
+			      int size, struct scoutfs_lock *lock)
 {
 	int ret;
 
-	ret = scoutfs_item_lookup(sb, key, val, end);
+	ret = scoutfs_item_lookup(sb, key, val, lock);
 	if (ret == size)
 		ret = 0;
 	else if (ret >= 0)

@@ -23,7 +23,9 @@ struct btree_info;
 struct scoutfs_sb_info {
 	struct super_block *sb;
 
+	/* assigned once at the start of each mount, read-only */
 	u64 node_id;
+	struct scoutfs_lock *node_id_lock;
 
 	struct scoutfs_super_block super;
 

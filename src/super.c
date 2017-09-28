@@ -290,6 +290,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	 */
 	ret = scoutfs_server_setup(sb) ?:
 	      scoutfs_client_setup(sb);
+	      scoutfs_lock_node_id(sb, DLM_LOCK_EX, 0, sbi->node_id,
+				   &sbi->node_id_lock);
 	if (ret)
 		goto out;
 
@@ -313,8 +315,11 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 //	scoutfs_scan_orphans(sb);
 	ret = 0;
 out:
-	if (ret)
-	      scoutfs_server_destroy(sb);
+	if (ret) {
+		scoutfs_server_destroy(sb);
+		scoutfs_unlock(sb, sbi->node_id_lock, DLM_LOCK_EX);
+		sbi->node_id_lock = NULL;
+	}
 	return ret;
 }
 
@@ -342,6 +347,9 @@ static void scoutfs_kill_sb(struct super_block *sb)
 	kill_block_super(sb);
 
 	if (sbi) {
+		scoutfs_unlock(sb, sbi->node_id_lock, DLM_LOCK_EX);
+		sbi->node_id_lock = NULL;
+
 		scoutfs_lock_destroy(sb);
 		scoutfs_client_destroy(sb);
 		scoutfs_server_destroy(sb);

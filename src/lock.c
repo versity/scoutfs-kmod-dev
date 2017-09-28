@@ -190,6 +190,13 @@ static struct ocfs2_lock_res_ops scoutfs_global_lops = {
 	.flags			= 0,
 };
 
+static struct ocfs2_lock_res_ops scoutfs_node_id_lops = {
+	.get_osb		= get_ino_lock_osb,
+	/* XXX: .check_downconvert that queries the item cache for dirty items */
+	.downconvert_worker 	= ino_lock_downconvert,
+	.flags			= 0,
+};
+
 static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 					       struct scoutfs_lock_name *lock_name,
 					       struct ocfs2_lock_res_ops *type,
@@ -669,6 +676,48 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 
 	return lock_name_keys(sb, mode, 0, &lock_name,
 			      &scoufs_ino_index_lops, &start, &end, ret_lock);
+}
+
+/*
+ * The node_id lock protects a mount's private persistent items in the
+ * node_id zone.  It's held for the duration of the mount.  It lets the
+ * mount modify the node_id items at will and signals to other mounts
+ * that we're still alive and our node_id items shouldn't be reclaimed.
+ *
+ * Being held for the entire mount prevents other nodes from reclaiming
+ * our items, like free blocks, when it would make sense for them to be
+ * able to.  Maybe we have a bunch free and they're trying to allocate
+ * and are getting ENOSPC.
+ */
+int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
+			 u64 node_id, struct scoutfs_lock **lock)
+{
+	struct scoutfs_lock_name lock_name;
+	struct scoutfs_orphan_key start_okey;
+	struct scoutfs_orphan_key end_okey;
+	struct scoutfs_key_buf start;
+	struct scoutfs_key_buf end;
+
+	lock_name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
+	lock_name.zone = SCOUTFS_NODE_ZONE;
+	lock_name.type = 0;
+	lock_name.first = cpu_to_le64(node_id);
+	lock_name.second = 0;
+
+	start_okey.zone = SCOUTFS_NODE_ZONE;
+	start_okey.node_id = cpu_to_be64(node_id);
+	start_okey.type = 0;
+	start_okey.ino = 0;
+	scoutfs_key_init(&start, &start_okey, sizeof(start_okey));
+
+	end_okey.zone = SCOUTFS_NODE_ZONE;
+	end_okey.node_id = cpu_to_be64(node_id);
+	end_okey.type = ~0;
+	end_okey.ino = cpu_to_be64(~0ULL);
+	scoutfs_key_init(&end, &end_okey, sizeof(end_okey));
+
+	return lock_name_keys(sb, mode, flags, &lock_name,
+			      &scoutfs_node_id_lops, &start, &end, lock);
 }
 
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,

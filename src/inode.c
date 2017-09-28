@@ -865,13 +865,14 @@ static void init_orphan_key(struct scoutfs_key_buf *key,
 static int remove_orphan_item(struct super_block *sb, u64 ino)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_orphan_key okey;
 	struct scoutfs_key_buf key;
 	int ret;
 
 	init_orphan_key(&key, &okey, sbi->node_id, ino);
 
-	ret = scoutfs_item_delete(sb, &key, NULL);
+	ret = scoutfs_item_delete(sb, &key, lock->end);
 	if (ret == -ENOENT)
 		ret = 0;
 
@@ -994,6 +995,7 @@ int scoutfs_drop_inode(struct inode *inode)
 int scoutfs_scan_orphans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_orphan_key okey;
 	struct scoutfs_orphan_key last_okey;
 	struct scoutfs_key_buf key;
@@ -1007,7 +1009,7 @@ int scoutfs_scan_orphans(struct super_block *sb)
 	init_orphan_key(&last, &last_okey, sbi->node_id, ~0ULL);
 
 	while (1) {
-		ret = scoutfs_item_next_same(sb, &key, &last, NULL, NULL);
+		ret = scoutfs_item_next_same(sb, &key, &last, NULL, lock->end);
 		if (ret == -ENOENT) /* No more orphan items */
 			break;
 		if (ret < 0)

@@ -498,7 +498,7 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
  *
  * XXX this will have to do something about variable length inodes
  */
-int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end)
+int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_lock *lock)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_inode_key ikey;
@@ -510,7 +510,7 @@ int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_key_buf *end)
 
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 
-	ret = scoutfs_item_dirty(sb, &key, end);
+	ret = scoutfs_item_dirty(sb, &key, lock);
 	if (!ret)
 		trace_scoutfs_dirty_inode(inode);
 	return ret;

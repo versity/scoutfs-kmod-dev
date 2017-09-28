@@ -1329,13 +1329,16 @@ void scoutfs_item_free_batch(struct super_block *sb, struct list_head *list)
  * if it wasn't cached.  -ENOENT is returned if the item doesn't exist.
  */
 int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
-		       struct scoutfs_key_buf *end)
+		       struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item;
 	unsigned long flags;
 	int ret;
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+		return -EINVAL;
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
@@ -1353,7 +1356,7 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
 
 	trace_scoutfs_item_dirty_ret(sb, ret);
 	return ret;

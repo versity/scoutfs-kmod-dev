@@ -321,7 +321,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 
 	down_write(&si->xattr_rwsem);
 
-	ret = scoutfs_dirty_inode_item(inode, lck->end) ?:
+	ret = scoutfs_dirty_inode_item(inode, lck) ?:
 	      scoutfs_item_set_batch(sb, &list, key, last, sif, lck->end);
 	if (ret == 0) {
 		/* XXX do these want i_mutex or anything? */

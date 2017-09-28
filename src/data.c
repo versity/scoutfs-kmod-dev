@@ -522,7 +522,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	}
 
 	/* dirty so we can safely delete if set segno fails */
-	ret = scoutfs_item_dirty(sb, &key, lock->end);
+	ret = scoutfs_item_dirty(sb, &key, lock);
 	if (ret)
 		goto out;
 

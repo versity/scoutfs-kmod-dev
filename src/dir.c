@@ -509,9 +509,9 @@ static int del_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 		goto out;
 	}
 
-	ret = scoutfs_item_dirty(sb, ent_key, dir_lock->end) ?:
-	      scoutfs_item_dirty(sb, &rdir_key, dir_lock->end) ?:
-	      scoutfs_item_dirty(sb, lb_key, inode_lock->end);
+	ret = scoutfs_item_dirty(sb, ent_key, dir_lock) ?:
+	      scoutfs_item_dirty(sb, &rdir_key, dir_lock) ?:
+	      scoutfs_item_dirty(sb, lb_key, inode_lock);
 	if (ret)
 		goto out;
 
@@ -578,7 +578,7 @@ static struct inode *lock_hold_create(struct inode *dir, struct dentry *dentry,
 		goto out;
 	}
 
-	ret = scoutfs_dirty_inode_item(dir, (*dir_lock)->end);
+	ret = scoutfs_dirty_inode_item(dir, *dir_lock);
 out:
 	if (ret)
 		scoutfs_release_trans(sb);
@@ -694,7 +694,7 @@ static int scoutfs_link(struct dentry *old_dentry,
 	if (ret)
 		goto out_unlock;
 
-	ret = scoutfs_dirty_inode_item(dir, dir_lock->end);
+	ret = scoutfs_dirty_inode_item(dir, dir_lock);
 	if (ret)
 		goto out;
 
@@ -1397,12 +1397,12 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	new_pos = SCOUTFS_I(new_dir)->next_readdir_pos++;
 
 	/* dirty the inodes so that updating doesn't fail */
-	ret = scoutfs_dirty_inode_item(old_dir, old_dir_lock->end) ?:
-	      scoutfs_dirty_inode_item(old_inode, old_inode_lock->end) ?:
+	ret = scoutfs_dirty_inode_item(old_dir, old_dir_lock) ?:
+	      scoutfs_dirty_inode_item(old_inode, old_inode_lock) ?:
 	      (old_dir != new_dir ?
-		scoutfs_dirty_inode_item(new_dir, new_dir_lock->end) : 0) ?:
+		scoutfs_dirty_inode_item(new_dir, new_dir_lock) : 0) ?:
 	      (new_inode ?
-		scoutfs_dirty_inode_item(new_inode, new_inode_lock->end) : 0);
+		scoutfs_dirty_inode_item(new_inode, new_inode_lock) : 0);
 	if (ret)
 		goto out;
 

@@ -1042,6 +1042,9 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino,
  *
  * Returns 0 if we added an entry, -ENOENT if we didn't, and -errno for
  * search errors.
+ *
+ * Callers are comfortable with the race inherent to incrementally
+ * building up a path with individual locked backref item lookups.
  */
 static int add_next_linkref(struct super_block *sb, u64 ino,
 			    u64 dir_ino, char *name, unsigned int name_len,
@@ -1049,6 +1052,7 @@ static int add_next_linkref(struct super_block *sb, u64 ino,
 {
 	struct scoutfs_link_backref_key last_lbkey;
 	struct scoutfs_link_backref_entry *ent;
+	struct scoutfs_lock *lock = NULL;
 	struct scoutfs_key_buf last;
 	struct scoutfs_key_buf key;
 	int len;
@@ -1072,11 +1076,17 @@ static int add_next_linkref(struct super_block *sb, u64 ino,
 	init_link_backref_key(&last, &last_lbkey, ino, U64_MAX, NULL, 0);
 
 	/* next backref key is now in ent */
-	ret = scoutfs_item_next(sb, &key, &last, NULL, NULL);
+	ret = scoutfs_lock_ino(sb, DLM_LOCK_PR, 0, ino, &lock);
+	if (ret)
+		goto out;
+
+	ret = scoutfs_item_next(sb, &key, &last, NULL, lock->end);
+	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+	lock = NULL;
+
 	trace_scoutfs_dir_add_next_linkref(sb, ino, dir_ino, ret, key.key_len);
 	if (ret < 0)
 		goto out;
-
 
 	len = (int)key.key_len - sizeof(struct scoutfs_link_backref_key);
 	/* XXX corruption */
@@ -1237,6 +1247,10 @@ out:
  *
  * Compare this to lock_rename()'s use of d_ancestor() and what it's
  * caller does with the returned ancestor.
+ *
+ * The caller only holds the global rename cluster lock.
+ * item_d_ancestor is going to walk backref paths and acquire and
+ * release locks for each target inode in the path.
  */
 static int verify_ancestors(struct super_block *sb, u64 p1, u64 p2,
 			    u64 old_ino, u64 new_ino)

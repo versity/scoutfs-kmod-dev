@@ -18,6 +18,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/sched.h>
+#include <linux/list_sort.h>
 
 #include "format.h"
 #include "super.h"
@@ -32,11 +33,18 @@
 #include "kvec.h"
 #include "item.h"
 #include "client.h"
+#include "cmp.h"
 
 /*
  * XXX
  *  - worry about i_ino trunctation, not sure if we do anything
  *  - use inode item value lengths for forward/back compat
+ */
+
+/*
+ * XXX before committing:
+ *  - describe all this better
+ *  - describe data locking size problems
  */
 
 struct free_ino_pool {
@@ -201,14 +209,16 @@ static void set_item_info(struct scoutfs_inode_info *si,
 {
 	BUG_ON(!mutex_is_locked(&si->item_mutex));
 
+	memset(si->item_majors, 0, sizeof(si->item_majors));
+	memset(si->item_minors, 0, sizeof(si->item_minors));
+
 	si->have_item = true;
-	si->item_size = le64_to_cpu(sinode->size);
-	si->item_ctime.tv_sec = le64_to_cpu(sinode->ctime.sec);
-	si->item_ctime.tv_nsec = le32_to_cpu(sinode->ctime.nsec);
-	si->item_mtime.tv_sec = le64_to_cpu(sinode->mtime.sec);
-	si->item_mtime.tv_nsec = le32_to_cpu(sinode->mtime.nsec);
-	si->item_meta_seq = le64_to_cpu(sinode->meta_seq);
-	si->item_data_seq = le64_to_cpu(sinode->data_seq);
+	si->item_majors[SCOUTFS_INODE_INDEX_SIZE_TYPE] =
+		le64_to_cpu(sinode->size);
+	si->item_majors[SCOUTFS_INODE_INDEX_META_SEQ_TYPE] =
+		le64_to_cpu(sinode->meta_seq);
+	si->item_majors[SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE] =
+		le64_to_cpu(sinode->data_seq);
 }
 
 static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
@@ -517,72 +527,170 @@ int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_lock *lock)
 	return ret;
 }
 
+struct index_lock {
+	struct list_head head;
+	struct scoutfs_lock *lock;
+	u8 type;
+	u64 major;
+	u32 minor;
+	u64 ino;
+};
+
+static bool will_del_index(struct scoutfs_inode_info *si,
+			   u8 type, u64 major, u32 minor)
+{
+	return si && si->have_item &&
+	       (si->item_majors[type] != major ||
+		si->item_minors[type] != minor);
+}
+
+static bool will_ins_index(struct scoutfs_inode_info *si,
+			   u8 type, u64 major, u32 minor)
+{
+	return !si || !si->have_item ||
+	       (si->item_majors[type] != major ||
+		si->item_minors[type] != minor);
+}
+
+static bool inode_has_index(umode_t mode, u8 type)
+{
+	switch(type) {
+		case SCOUTFS_INODE_INDEX_SIZE_TYPE:
+		case SCOUTFS_INODE_INDEX_META_SEQ_TYPE:
+			return true;
+		case SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE:
+			return S_ISREG(mode);
+		default:
+			return WARN_ON_ONCE(false);
+	}
+}
+
+static int cmp_index_lock(void *priv, struct list_head *A, struct list_head *B)
+{
+	struct index_lock *a = list_entry(A, struct index_lock, head);
+	struct index_lock *b = list_entry(B, struct index_lock, head);
+
+	return ((int)a->type - (int)b->type) ?:
+	       scoutfs_cmp_u64s(a->major, b->major) ?:
+	       scoutfs_cmp_u64s(a->minor, b->minor) ?:
+	       scoutfs_cmp_u64s(a->ino, b->ino);
+}
+
 /*
- * Make sure inode index items are kept in sync with the fields that are
- * set in the inode items.  This must be called any time the contents of
- * the inode items are updated.
- *
- * This is effectively a RMW on the inode fields so the caller needs to
- * lock the inode so that it's the only one working with the index items
- * for a given set of fields in the inode.
- *
- * But it doesn't need to lock the index item keys.  By locking the
- * inode we've ensured that we can safely log deletion and insertion
- * items in our log.  The indexes are eventually consistent so we don't
- * need to wrap them locks.
- *
- * XXX this needs more supporting work from the rest of the
- * infrastructure:
- *
- * - Deleting and creating the items needs to forcefully set those dirty
- * items in the cache without first trying to read them from segments.
- * - the reading ioctl needs to forcefully invalidate the index items
- * as it walks.
- * - maybe the reading ioctl needs to verify fields with inodes?
- * - final inode deletion needs to invalidate the index items for
- * each inode as it deletes items based on the locked inode fields.
- * - make sure deletion items safely vanish w/o finding existing item
- * - ... error handling :(
+ * Find the lock that covers the given index item.  Returns NULL if
+ * there isn't a lock that covers the item.  We know that the list is
+ * sorted at this point so we can stop once our search value is less
+ * than a list entry.
  */
-static int update_index(struct super_block *sb, struct scoutfs_inode_info *si,
-			u64 ino, u8 type, u64 now_major, u32 now_minor,
-			u64 then_major, u32 then_minor)
+static struct scoutfs_lock *find_index_lock(struct list_head *lock_list,
+					    u8 type, u64 major, u32 minor,
+					    u64 ino)
+{
+	struct index_lock *ind_lock;
+	struct index_lock needle;
+	int cmp;
+
+	scoutfs_lock_clamp_inode_index(type, &major, &minor, &ino);
+	needle.type = type;
+	needle.major = major;
+	needle.minor = minor;
+	needle.ino = ino;
+
+	list_for_each_entry(ind_lock, lock_list, head) {
+		cmp = cmp_index_lock(NULL, &needle.head, &ind_lock->head);
+		if (cmp == 0)
+			return ind_lock->lock;
+		if (cmp < 0)
+			break;
+	}
+
+	return NULL;
+}
+
+/*
+ * The inode info reflects the current inode index items.  Create or delete
+ * index items to bring the index in line with the caller's item.  The list
+ * should contain locks that cover any item modifications that are made.
+ */
+static int update_index_items(struct super_block *sb,
+			      struct scoutfs_inode_info *si, u64 ino, u8 type,
+			      u64 major, u32 minor,
+			      struct list_head *lock_list)
 {
 	struct scoutfs_inode_index_key ins_ikey;
 	struct scoutfs_inode_index_key del_ikey;
+	struct scoutfs_lock *ins_lock;
+	struct scoutfs_lock *del_lock;
 	struct scoutfs_key_buf ins;
 	struct scoutfs_key_buf del;
 	int ret;
 	int err;
 
-	trace_scoutfs_inode_update_index(sb, ino, si->have_item, now_major,
-					 now_minor, then_major, then_minor);
-
-	if (si->have_item && now_major == then_major && now_minor == then_minor)
+	if (!will_ins_index(si, type, major, minor))
 		return 0;
+
+	trace_scoutfs_create_index_item(sb, type, major, minor, ino);
 
 	ins_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
 	ins_ikey.type = type;
-	ins_ikey.major = cpu_to_be64(now_major);
-	ins_ikey.minor = cpu_to_be32(now_minor);
+	ins_ikey.major = cpu_to_be64(major);
+	ins_ikey.minor = cpu_to_be32(minor);
 	ins_ikey.ino = cpu_to_be64(ino);
 	scoutfs_key_init(&ins, &ins_ikey, sizeof(ins_ikey));
 
+	ins_lock = find_index_lock(lock_list, type, major, minor, ino);
 	ret = scoutfs_item_create(sb, &ins, NULL);
-	if (ret || !si->have_item)
+	if (ret || !will_del_index(si, type, major, minor))
 		return ret;
+
+	trace_scoutfs_delete_index_item(sb, type, major, minor, ino);
 
 	del_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
 	del_ikey.type = type;
-	del_ikey.major = cpu_to_be64(then_major);
-	del_ikey.minor = cpu_to_be32(then_minor);
+	del_ikey.major = cpu_to_be64(si->item_majors[type]);
+	del_ikey.minor = cpu_to_be32(si->item_minors[type]);
 	del_ikey.ino = cpu_to_be64(ino);
 	scoutfs_key_init(&del, &del_ikey, sizeof(del_ikey));
 
-	ret = scoutfs_item_delete(sb, &del, NULL);
+	del_lock = find_index_lock(lock_list, type, si->item_majors[type],
+				   si->item_minors[type], ino);
+	ret = scoutfs_item_delete(sb, &del, del_lock->end);
 	if (ret) {
-		err = scoutfs_item_delete(sb, &ins, NULL);
+		err = scoutfs_item_delete(sb, &ins, ins_lock->end);
 		BUG_ON(err);
+	}
+
+	return ret;
+}
+
+static int update_indices(struct super_block *sb,
+			  struct scoutfs_inode_info *si, u64 ino, umode_t mode,
+			  struct scoutfs_inode *sinode,
+			  struct list_head *lock_list)
+{
+	struct index_update {
+		u8 type;
+		u64 major;
+		u32 minor;
+	} *upd, upds[] = {
+		{ SCOUTFS_INODE_INDEX_SIZE_TYPE,
+			le64_to_cpu(sinode->size), 0 },
+		{ SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
+			le64_to_cpu(sinode->meta_seq), 0 },
+		{ SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
+			le64_to_cpu(sinode->data_seq), 0 },
+	};
+	int ret;
+	int i;
+
+	for (i = 0, upd = upds; i < ARRAY_SIZE(upds); i++, upd++) {
+		if (!inode_has_index(mode, upd->type))
+			continue;
+
+		ret = update_index_items(sb, si, ino, upd->type, upd->major,
+					 upd->minor, lock_list);
+		if (ret)
+			break;
 	}
 
 	return ret;
@@ -594,10 +702,15 @@ static int update_index(struct super_block *sb, struct scoutfs_inode_info *si,
  * dirty vfs inodes.
  *
  * The caller makes sure that the item is dirty and pinned so they don't
- * have to deal with errors and unwinding after they've modified the
- * vfs inode and get here.
+ * have to deal with errors and unwinding after they've modified the vfs
+ * inode and get here.
+ *
+ * Index items that track inode fields are updated here as we update the
+ * inode item.  The caller must have acquired locks on all the index
+ * items that might change.
  */
-void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock)
+void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
+			       struct list_head *lock_list)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
@@ -617,16 +730,7 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock)
 	/* only race with other inode field stores once */
 	store_inode(&sinode, inode);
 
-	ret = update_index(sb, si, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
-			   le64_to_cpu(sinode.size), 0, si->item_size, 0) ?:
-	      update_index(sb, si, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
-			   le64_to_cpu(sinode.meta_seq), 0,
-			   si->item_meta_seq, 0);
-	if (ret == 0 && S_ISREG(inode->i_mode))
-		ret = update_index(sb, si, ino,
-				   SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
-				   le64_to_cpu(sinode.data_seq), 0,
-				   si->item_data_seq, 0);
+	ret = update_indices(sb, si, ino, inode->i_mode, &sinode, lock_list);
 	BUG_ON(ret);
 
 	scoutfs_inode_init_key(&key, &ikey, ino);
@@ -644,12 +748,251 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock)
 	mutex_unlock(&si->item_mutex);
 }
 
+/*
+ * We map the item to coarse locks here.  This reduces the number of
+ * locks we track and means that when we later try to find the lock that
+ * covers an item we can deal with the item update changing a little
+ * (seq, size) while still being covered.  It does mean we have to share
+ * some logic with lock naming.
+ */
+static int add_index_lock(struct list_head *list, u64 ino, u8 type, u64 major,
+			  u32 minor)
+{
+	struct index_lock *ind_lock;
+
+	scoutfs_lock_clamp_inode_index(type, &major, &minor, &ino);
+
+	list_for_each_entry(ind_lock, list, head) {
+		if (ind_lock->type == type && ind_lock->major == major &&
+		    ind_lock->minor == minor && ind_lock->ino == ino) {
+			return 0;
+		}
+	}
+
+	ind_lock = kzalloc(sizeof(struct index_lock), GFP_NOFS);
+	if (!ind_lock)
+		return -ENOMEM;
+
+	ind_lock->type = type;
+	ind_lock->major = major;
+	ind_lock->minor = minor;
+	ind_lock->ino = ino;
+	list_add(&ind_lock->head, list);
+
+	return 0;
+}
+
+static int prepare_index_items(struct scoutfs_inode_info *si,
+			       struct list_head *list, u64 ino, umode_t mode,
+			       u8 type, u64 major, u32 minor)
+{
+	int ret;
+
+	if (will_ins_index(si, type, major, minor)) {
+		ret = add_index_lock(list, ino, type, major, minor);
+		if (ret)
+			return ret;
+	}
+
+	if (will_del_index(si, type, major, minor)) {
+		ret = add_index_lock(list, ino, type, si->item_majors[type],
+				     si->item_minors[type]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+/*
+ * Return the data seq that we expect to see in the updated inode.  The
+ * caller tells us if they know they're going to update it.  If the
+ * inode doesn't exist it'll also get the current data_seq.
+ */
+static u64 upd_data_seq(struct scoutfs_sb_info *sbi,
+			struct scoutfs_inode_info *si, bool set_data_seq)
+{
+	if (!si || !si->have_item || set_data_seq)
+		return sbi->trans_seq;
+
+	return si->item_majors[SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE];
+}
+
+/*
+ * Prepare locks that will cover the inode index items that will be
+ * modified when this inode's item is updated during the upcoming
+ * transaction.
+ *
+ * To lock the index items that will be created we need to predict the
+ * new indexed values.  We assume that the meta seq will always be set
+ * to the current seq.  This will usually be a nop in a running
+ * transaction.  The caller tells us what the size will be and whether
+ * data_seq will also be set to the current transaction.
+ */
+static int prepare_indices(struct super_block *sb, struct list_head *list,
+			   struct scoutfs_inode_info *si, u64 ino,
+			   umode_t mode, u64 new_size, bool set_data_seq)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct index_update {
+		u8 type;
+		u64 major;
+		u32 minor;
+	} *upd, upds[] = {
+		{ SCOUTFS_INODE_INDEX_SIZE_TYPE, new_size, 0},
+		{ SCOUTFS_INODE_INDEX_META_SEQ_TYPE, sbi->trans_seq, 0},
+		{ SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
+			upd_data_seq(sbi, si, set_data_seq), 0},
+	};
+	int ret;
+	int i;
+
+	for (i = 0, upd = upds; i < ARRAY_SIZE(upds); i++, upd++) {
+		if (!inode_has_index(mode, upd->type))
+			continue;
+
+		ret = prepare_index_items(si, list, ino, mode,
+					  upd->type, upd->major, upd->minor);
+		if (ret)
+			break;
+	}
+
+	return ret;
+}
+
+int scoutfs_inode_index_prepare(struct super_block *sb, struct list_head *list,
+			        struct inode *inode, u64 new_size,
+				bool set_data_seq)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	return prepare_indices(sb, list, si, scoutfs_ino(inode),
+			       inode->i_mode, new_size, set_data_seq);
+}
+
+/*
+ * This is used to initially create the index items for a newly created
+ * inode.  We don't have a populated vfs inode yet.  The existing
+ * indexed values don't matter because it's 'have_item' is false.  It
+ * will try to create all the appropriate index items.
+ */
+int scoutfs_inode_index_prepare_ino(struct super_block *sb,
+				    struct list_head *list, u64 ino,
+				    umode_t mode, u64 new_size)
+{
+	return prepare_indices(sb, list, NULL, ino, mode, new_size, true);
+}
+
+/*
+ * Prepare the locks needed to delete all the index items associated
+ * with the inode.  We know the items have to exist and can skip straight
+ * to adding locks for each of them.
+ */
+static int prepare_index_deletion(struct super_block *sb,
+				  struct list_head *list, u64 ino,
+				  umode_t mode, struct scoutfs_inode *sinode)
+{
+	struct index_item {
+		u8 type;
+		u64 major;
+		u32 minor;
+	} *ind, inds[] = {
+		{ SCOUTFS_INODE_INDEX_SIZE_TYPE,
+			le64_to_cpu(sinode->size), 0 },
+		{ SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
+			le64_to_cpu(sinode->meta_seq), 0 },
+		{ SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
+			le64_to_cpu(sinode->data_seq), 0 },
+	};
+	int ret;
+	int i;
+
+	for (i = 0, ind = inds; i < ARRAY_SIZE(inds); i++, ind++) {
+		if (!inode_has_index(mode, ind->type))
+			continue;
+
+		ret = add_index_lock(list, ino, ind->type,  ind->major,
+				     ind->minor);
+		if (ret)
+			break;
+	}
+
+	return ret;
+}
+
+/*
+ * Sample the transaction sequence before we start checking it to see if
+ * indexed meta seq and data seq items will change.
+ */
+int scoutfs_inode_index_start(struct super_block *sb, u64 *seq)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	/* XXX this feels racey in a bad way :) */
+	*seq = sbi->trans_seq;
+	return 0;
+}
+
+/*
+ * Acquire the prepared index locks and hold the transaction.  If the
+ * sequence number changes as we enter the transaction then we need to
+ * retry so that we can use the new seq to prepare locks.
+ *
+ * Returns > 0 if the seq changed and the locks should be retried.
+ */
+int scoutfs_inode_index_lock_hold(struct super_block *sb,
+				  struct list_head *list, u64 seq,
+				  const struct scoutfs_item_count cnt)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct index_lock *ind_lock;
+	int ret = 0;
+
+	list_sort(NULL, list, cmp_index_lock);
+
+	list_for_each_entry(ind_lock, list, head) {
+		ret = scoutfs_lock_inode_index(sb, DLM_LOCK_EX, ind_lock->type,
+					       ind_lock->major, ind_lock->ino,
+					       &ind_lock->lock);
+		if (ret)
+			goto out;
+	}
+
+	ret = scoutfs_hold_trans(sb, cnt);
+	if (ret == 0 && seq != sbi->trans_seq) {
+		scoutfs_release_trans(sb);
+		ret = 1;
+	}
+
+out:
+	if (ret)
+		scoutfs_inode_index_unlock(sb, list);
+
+	return ret;
+}
+
+/*
+ * Unlocks and frees all the locks on the list.
+ */
+void scoutfs_inode_index_unlock(struct super_block *sb, struct list_head *list)
+{
+	struct index_lock *ind_lock;
+	struct index_lock *tmp;
+
+	list_for_each_entry_safe(ind_lock, tmp, list, head) {
+		scoutfs_unlock(sb, ind_lock->lock, DLM_LOCK_EX);
+		list_del_init(&ind_lock->head);
+		kfree(ind_lock);
+	}
+}
+
 /* this is called on final inode cleanup so enoent is fine */
 static int remove_index(struct super_block *sb, u64 ino, u8 type, u64 major,
-			u32 minor)
+			u32 minor, struct list_head *ind_locks)
 {
 	struct scoutfs_inode_index_key ikey;
 	struct scoutfs_key_buf key;
+	struct scoutfs_lock *lock;
 	int ret;
 
 	ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
@@ -659,8 +1002,8 @@ static int remove_index(struct super_block *sb, u64 ino, u8 type, u64 major,
 	ikey.ino = cpu_to_be64(ino);
 	scoutfs_key_init(&key, &ikey, sizeof(ikey));
 
-	/* XXX would be deletion under CW that doesn't need to read */
-	ret = scoutfs_item_delete(sb, &key, NULL);
+	lock = find_index_lock(ind_locks, type, major, minor, ino);
+	ret = scoutfs_item_delete(sb, &key, lock->end);
 	if (ret == -ENOENT)
 		ret = 0;
 	return ret;
@@ -676,18 +1019,19 @@ static int remove_index(struct super_block *sb, u64 ino, u8 type, u64 major,
  * the time they get to it, including being deleted.
  */
 static int remove_index_items(struct super_block *sb, u64 ino,
-			      struct scoutfs_inode *sinode)
+			      struct scoutfs_inode *sinode,
+			      struct list_head *ind_locks)
 {
 	umode_t mode = le32_to_cpu(sinode->mode);
 	int ret;
 
 	ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
-			   le64_to_cpu(sinode->size), 0) ?:
+			   le64_to_cpu(sinode->size), 0, ind_locks) ?:
 	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
-			   le64_to_cpu(sinode->meta_seq), 0);
+			   le64_to_cpu(sinode->meta_seq), 0, ind_locks);
 	if (ret == 0 && S_ISREG(mode))
 		ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
-				   le64_to_cpu(sinode->data_seq), 0);
+				   le64_to_cpu(sinode->data_seq), 0, ind_locks);
 	return ret;
 }
 
@@ -825,12 +1169,13 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	ci = SCOUTFS_I(inode);
 	ci->ino = ino;
-	ci->meta_seq = 0;
-	ci->data_seq = 0;
 	ci->data_version = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->have_item = false;
 	atomic64_set(&ci->last_refreshed, scoutfs_lock_refresh_gen(lock));
+
+	scoutfs_inode_set_meta_seq(inode);
+	scoutfs_inode_set_data_seq(inode);
 
 	inode->i_ino = ino; /* XXX overflow */
 	inode_init_owner(inode, dir, mode);
@@ -890,41 +1235,56 @@ static int remove_orphan_item(struct super_block *sb, u64 ino)
  */
 static int delete_inode_items(struct super_block *sb, u64 ino)
 {
+	struct scoutfs_lock *lock = NULL;
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
 	struct scoutfs_key_buf key;
 	SCOUTFS_DECLARE_KVEC(val);
+	LIST_HEAD(ind_locks);
 	bool release = false;
 	umode_t mode;
+	u64 ind_seq;
 	int ret;
+
+	ret = scoutfs_lock_ino(sb, DLM_LOCK_EX, 0, ino, &lock);
+	if (ret)
+		return ret;
 
 	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), NULL);
+	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), lock);
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;
-		return ret;
+		goto out;
 	}
 
 	/* XXX corruption, inode probably won't be freed without repair */
 	if (le32_to_cpu(sinode.nlink)) {
 		scoutfs_warn(sb, "Dangling orphan item for inode %llu.", ino);
-		return -EIO;
+		ret = -EIO;
+		goto out;
 	}
 
 	mode = le32_to_cpu(sinode.mode);
 	trace_scoutfs_delete_inode(sb, ino, mode);
 
-	/* XXX this is obviously not done yet :) */
-	ret = scoutfs_hold_trans(sb, SIC_DIRTY_INODE());
+	/* XXX the trans reservation count is obviously bonkers :) */
+retry:
+	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
+	      prepare_index_deletion(sb, &ind_locks, ino, mode, &sinode) ?:
+	      scoutfs_inode_index_lock_hold(sb, &ind_locks, ind_seq,
+					    SIC_DIRTY_INODE());
+	if (ret > 0)
+		goto retry;
 	if (ret)
 		goto out;
+
 	release = true;
 
 	/* first remove index items to try to avoid indexing partial deletion */
-	ret = remove_index_items(sb, ino, &sinode);
+	ret = remove_index_items(sb, ino, &sinode, &ind_locks);
 	if (ret)
 		goto out;
 
@@ -941,7 +1301,7 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 		goto out;
 
 #endif
-	ret = scoutfs_item_delete(sb, &key, NULL);
+	ret = scoutfs_item_delete(sb, &key, lock->end);
 	if (ret)
 		goto out;
 
@@ -949,6 +1309,8 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 out:
 	if (release)
 		scoutfs_release_trans(sb);
+	scoutfs_inode_index_unlock(sb, &ind_locks);
+	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 	return ret;
 }
 

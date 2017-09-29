@@ -1133,6 +1133,12 @@ static int scoutfs_writepages(struct address_space *mapping,
 	return mpage_writepages(mapping, wbc, scoutfs_get_block);
 }
 
+/* fsdata allocated in write_begin and freed in write_end */
+struct write_begin_data {
+	struct list_head ind_locks;
+	struct scoutfs_lock *lock;
+};
+
 static int scoutfs_write_begin(struct file *file,
 			       struct address_space *mapping, loff_t pos,
 			       unsigned len, unsigned flags,
@@ -1141,30 +1147,60 @@ static int scoutfs_write_begin(struct file *file,
 	struct inode *inode = mapping->host;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_lock *lock;
+	struct write_begin_data *wbd;
+	u64 new_size;
+	u64 ind_seq;
 	int ret;
 
 	trace_scoutfs_write_begin(sb, scoutfs_ino(inode), (__u64)pos, len);
 
-	lock = scoutfs_per_task_get(&si->pt_data_lock);
-	if (WARN_ON_ONCE(!lock))
-		return -EINVAL;
+	wbd = kmalloc(sizeof(struct write_begin_data), GFP_NOFS);
+	if (!wbd)
+		return -ENOMEM;
 
-	ret = scoutfs_hold_trans(sb, SIC_WRITE_BEGIN());
-	if (ret)
+	INIT_LIST_HEAD(&wbd->ind_locks);
+	*fsdata = wbd;
+
+	wbd->lock = scoutfs_per_task_get(&si->pt_data_lock);
+	if (WARN_ON_ONCE(!wbd->lock)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/*
+	 * Lock a size update item assuming we perform the full write.
+	 * If If the write is inside i_size then we don't lock and
+	 * nothing will be updated.  Lock granularity is larger than
+	 * pages so any size update in this call will be covered by the
+	 * lock.  If there's an error and we don't change i_size then
+	 * the item update won't happen and the lock will be unused.
+	 */
+	new_size = max(pos + len, i_size_read(inode));
+	do {
+		ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
+		      scoutfs_inode_index_prepare(sb, &wbd->ind_locks, inode,
+						  new_size, true) ?:
+		      scoutfs_inode_index_lock_hold(sb, &wbd->ind_locks,
+						    ind_seq, SIC_WRITE_BEGIN());
+	} while (ret > 0);
+	if (ret < 0)
 		goto out;
 
 	/* can't re-enter fs, have trans */
 	flags |= AOP_FLAG_NOFS;
 
 	/* generic write_end updates i_size and calls dirty_inode */
-	ret = scoutfs_dirty_inode_item(inode, lock);
+	ret = scoutfs_dirty_inode_item(inode, wbd->lock);
 	if (ret == 0)
 		ret = block_write_begin(mapping, pos, len, flags, pagep,
 					scoutfs_get_block);
 	if (ret)
 		scoutfs_release_trans(sb);
 out:
+	if (ret) {
+		scoutfs_inode_index_unlock(sb, &wbd->ind_locks);
+		kfree(wbd);
+	}
         return ret;
 }
 
@@ -1175,14 +1211,11 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 	struct inode *inode = mapping->host;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_lock *lock;
+	struct write_begin_data *wbd = fsdata;
 	int ret;
 
 	trace_scoutfs_write_end(sb, scoutfs_ino(inode), page->index, (u64)pos,
 				len, copied);
-
-	/* always call write_end, update_inode will bark if there's no lock */
-	lock = scoutfs_per_task_get(&si->pt_data_lock);
 
 	ret = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
 	if (ret > 0) {
@@ -1190,11 +1223,13 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 			scoutfs_inode_set_data_seq(inode);
 			scoutfs_inode_inc_data_version(inode);
 		}
-		/* XXX kind of a big hammer, inode life cycle needs work */
-		scoutfs_update_inode_item(inode, lock);
+
+		scoutfs_update_inode_item(inode, wbd->lock, &wbd->ind_locks);
 		scoutfs_inode_queue_writeback(inode);
 	}
 	scoutfs_release_trans(sb);
+	scoutfs_inode_index_unlock(sb, &wbd->ind_locks);
+	kfree(wbd);
 	return ret;
 }
 

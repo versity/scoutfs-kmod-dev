@@ -782,38 +782,43 @@ TRACE_EVENT(scoutfs_i_callback,
 	TP_printk("freeing inode %p", __entry->inode)
 );
 
-TRACE_EVENT(scoutfs_inode_update_index,
-	TP_PROTO(struct super_block *sb, __u64 ino, unsigned int have_item,
-		 __u64 now_major, unsigned int now_minor, __u64 then_major,
-		 unsigned int then_minor),
+DECLARE_EVENT_CLASS(scoutfs_index_item_class,
+	TP_PROTO(struct super_block *sb, __u8 type, __u64 major, __u32 minor,
+		 __u64 ino),
 
-	TP_ARGS(sb, ino, have_item, now_major, now_minor, then_major,
-		then_minor),
+	TP_ARGS(sb, type, major, minor, ino),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
+		__field(__u8, type)
+		__field(__u64, major)
+		__field(__u32, minor)
 		__field(__u64, ino)
-		__field(unsigned int, have_item)
-		__field(__u64, now_major)
-		__field(unsigned int, now_minor)
-		__field(__u64, then_major)
-		__field(unsigned int, then_minor)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
+		__entry->type = type;
+		__entry->major = major;
+		__entry->minor = minor;
 		__entry->ino = ino;
-		__entry->have_item = have_item;
-		__entry->now_major = now_major;
-		__entry->now_minor = now_minor;
-		__entry->then_major = then_major;
-		__entry->then_minor = then_minor;
 	),
 
-	TP_printk(FSID_FMT" ino %llu have %u now %llu.%u then %llu.%u",
-		  __entry->fsid, __entry->ino, __entry->have_item,
-		  __entry->now_major, __entry->now_minor, __entry->then_major,
-		  __entry->then_minor)
+	TP_printk("fsid "FSID_FMT" type %u major %llu minor %u ino %llu",
+		  __entry->fsid, __entry->type, __entry->major, __entry->minor,
+		  __entry->ino)
+);
+
+DEFINE_EVENT(scoutfs_index_item_class, scoutfs_create_index_item,
+	TP_PROTO(struct super_block *sb, __u8 type, __u64 major, __u32 minor,
+		 __u64 ino),
+	TP_ARGS(sb, type, major, minor, ino)
+);
+
+DEFINE_EVENT(scoutfs_index_item_class, scoutfs_delete_index_item,
+	TP_PROTO(struct super_block *sb, __u8 type, __u64 major, __u32 minor,
+		 __u64 ino),
+	TP_ARGS(sb, type, major, minor, ino)
 );
 
 TRACE_EVENT(scoutfs_inode_fill_pool,

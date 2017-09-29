@@ -613,6 +613,42 @@ int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
 }
 
 /*
+ * Set the caller's major, minor, and ino to the start of lock that
+ * covers the incoming index item.  This can be used to discover when
+ * multiple items map to the same lock.
+ */
+void scoutfs_lock_clamp_inode_index(u8 type, u64 *major, u32 *minor, u64 *ino)
+{
+	u64 major_mask;
+	u64 ino_mask;
+	int bit;
+
+	switch(type) {
+	case SCOUTFS_INODE_INDEX_SIZE_TYPE:
+		major_mask = 0;
+		if (*major) {
+			bit = fls64(*major);
+			if (bit > 4)
+				major_mask = (1 << (bit - 4)) - 1;
+		}
+		ino_mask = (1 << 12) - 1;
+		break;
+
+	case SCOUTFS_INODE_INDEX_META_SEQ_TYPE:
+	case SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE:
+		major_mask = SCOUTFS_LOCK_SEQ_GROUP_MASK;
+		ino_mask = ~0ULL;
+		break;
+	default:
+		BUG();
+	}
+
+	*major &= ~major_mask;
+	*minor = 0;
+	*ino &= ~ino_mask;
+}
+
+/*
  * map inode index items to locks.  The idea is to not have to
  * constantly get locks over a reasonable distribution of items, but
  * also not have an insane amount of items covered by locks.  time and
@@ -647,7 +683,7 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 
 	case SCOUTFS_INODE_INDEX_META_SEQ_TYPE:
 	case SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE:
-		major_mask = (1 << 10) - 1;
+		major_mask = SCOUTFS_LOCK_SEQ_GROUP_MASK;
 		ino_mask = ~0ULL;
 		break;
 	default:

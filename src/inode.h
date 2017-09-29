@@ -4,6 +4,7 @@
 #include "key.h"
 #include "lock.h"
 #include "per_task.h"
+#include "count.h"
 
 struct scoutfs_lock;
 
@@ -23,11 +24,8 @@ struct scoutfs_inode_info {
 	 */
 	struct mutex item_mutex;
 	bool have_item;
-	u64 item_size;
-	struct timespec item_ctime;
-	struct timespec item_mtime;
-	u64 item_meta_seq;
-	u64 item_data_seq;
+	u64 item_majors[SCOUTFS_INODE_INDEX_NR];
+	u32 item_minors[SCOUTFS_INODE_INDEX_NR];
 
 	/* updated at on each new lock acquisition */
 	atomic64_t last_refreshed;
@@ -63,13 +61,29 @@ int scoutfs_orphan_inode(struct inode *inode);
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
 struct inode *scoutfs_ilookup(struct super_block *sb, u64 ino);
+
+int scoutfs_inode_index_start(struct super_block *sb, u64 *seq);
+int scoutfs_inode_index_prepare(struct super_block *sb, struct list_head *list,
+			        struct inode *inode, u64 new_size,
+				bool set_data_seq);
+int scoutfs_inode_index_prepare_ino(struct super_block *sb,
+				    struct list_head *list, u64 ino,
+				    umode_t mode, u64 new_size);
+int scoutfs_inode_index_lock_hold(struct super_block *sb,
+				  struct list_head *list, u64 seq,
+				  const struct scoutfs_item_count cnt);
+void scoutfs_inode_index_unlock(struct super_block *sb, struct list_head *list);
+
 int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_lock *lock);
-void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock);
+void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
+			       struct list_head *ind_locks);
+
 void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr);
 int scoutfs_alloc_ino(struct super_block *sb, u64 *ino);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev, u64 ino,
 				struct scoutfs_lock *lock);
+
 void scoutfs_inode_set_meta_seq(struct inode *inode);
 void scoutfs_inode_set_data_seq(struct inode *inode);
 void scoutfs_inode_inc_data_version(struct inode *inode);

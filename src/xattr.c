@@ -264,10 +264,12 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct scoutfs_xattr_val_header vh;
 	size_t name_len = strlen(name);
 	SCOUTFS_DECLARE_KVEC(val);
-	struct scoutfs_lock *lck;
+	struct scoutfs_lock *lck = NULL;
 	unsigned int bytes;
 	unsigned int off;
+	LIST_HEAD(ind_locks);
 	LIST_HEAD(list);
+	u64 ind_seq;
 	u8 part;
 	int sif;
 	int ret;
@@ -299,7 +301,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 
 			ret = scoutfs_item_add_batch(sb, &list, key, val);
 			if (ret)
-				goto unlock;
+				goto out;
 		}
 	}
 
@@ -315,11 +317,18 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	else
 		sif = 0;
 
-	ret = scoutfs_hold_trans(sb, SIC_XATTR_SET(name_len, size));
+	down_write(&si->xattr_rwsem);
+
+retry:
+	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
+	      scoutfs_inode_index_prepare(sb, &ind_locks, inode,
+					  i_size_read(inode), false) ?:
+	      scoutfs_inode_index_lock_hold(sb, &ind_locks, ind_seq,
+					    SIC_XATTR_SET(name_len, size));
+	if (ret > 0)
+		goto retry;
 	if (ret)
 		goto unlock;
-
-	down_write(&si->xattr_rwsem);
 
 	ret = scoutfs_dirty_inode_item(inode, lck) ?:
 	      scoutfs_item_set_batch(sb, &list, key, last, sif, lck->end);
@@ -327,16 +336,17 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		/* XXX do these want i_mutex or anything? */
 		inode_inc_iversion(inode);
 		inode->i_ctime = CURRENT_TIME;
-		scoutfs_update_inode_item(inode, lck);
+		scoutfs_update_inode_item(inode, lck, &ind_locks);
 	}
 
-	up_write(&si->xattr_rwsem);
 	scoutfs_release_trans(sb);
 
 unlock:
-	scoutfs_unlock(sb, lck, DLM_LOCK_EX);
+	up_write(&si->xattr_rwsem);
 
 out:
+	scoutfs_inode_index_unlock(sb, &ind_locks);
+	scoutfs_unlock(sb, lck, DLM_LOCK_EX);
 	scoutfs_item_free_batch(sb, &list);
 	scoutfs_key_free(sb, key);
 	scoutfs_key_free(sb, last);

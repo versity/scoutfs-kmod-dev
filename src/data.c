@@ -908,7 +908,8 @@ out:
  */
 static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 			    struct scoutfs_key_buf *map_key,
-			    unsigned map_ind, bool map_exists)
+			    unsigned map_ind, bool map_exists,
+			    struct scoutfs_lock *data_lock)
 {
 	DECLARE_DATA_INFO(sb, datinf);
 	struct task_cursor *curs;
@@ -958,7 +959,7 @@ static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 	/* ensure that we can copy in encoded without failing */
 	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
 	if (map_exists)
-		ret = scoutfs_item_update(sb, map_key, val, NULL);
+		ret = scoutfs_item_update(sb, map_key, val, data_lock->end);
 	else
 		ret = scoutfs_item_create(sb, map_key, val);
 	if (ret)
@@ -1000,12 +1001,17 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_block_mapping_key bmk;
 	struct scoutfs_key_buf key;
+	struct scoutfs_lock *lock;
 	struct block_mapping *map;
 	SCOUTFS_DECLARE_KVEC(val);
 	bool exists;
 	int ind;
 	int ret;
 	int i;
+
+	lock = scoutfs_per_task_get(&si->pt_data_lock);
+	if (WARN_ON_ONCE(!lock))
+		return -EINVAL;
 
 	map = kmalloc(sizeof(struct block_mapping), GFP_NOFS);
 	if (!map)
@@ -1015,7 +1021,7 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
 
 	/* find the mapping item that covers the logical block */
-	ret = scoutfs_item_lookup(sb, &key, val, NULL);
+	ret = scoutfs_item_lookup(sb, &key, val, lock);
 	if (ret < 0) {
 		if (ret != -ENOENT)
 			goto out;
@@ -1044,7 +1050,7 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 		 * and try again if we've already done a bulk alloc in
 		 * our transaction.
 		 */
-		ret = find_alloc_block(sb, map, &key, ind, exists);
+		ret = find_alloc_block(sb, map, &key, ind, exists, lock);
 		if (ret)
 			goto out;
 	}
@@ -1133,10 +1139,16 @@ static int scoutfs_write_begin(struct file *file,
 			       struct page **pagep, void **fsdata)
 {
 	struct inode *inode = mapping->host;
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *lock;
 	int ret;
 
 	trace_scoutfs_write_begin(sb, scoutfs_ino(inode), (__u64)pos, len);
+
+	lock = scoutfs_per_task_get(&si->pt_data_lock);
+	if (WARN_ON_ONCE(!lock))
+		return -EINVAL;
 
 	ret = scoutfs_hold_trans(sb, SIC_WRITE_BEGIN());
 	if (ret)
@@ -1146,7 +1158,7 @@ static int scoutfs_write_begin(struct file *file,
 	flags |= AOP_FLAG_NOFS;
 
 	/* generic write_end updates i_size and calls dirty_inode */
-	ret = scoutfs_dirty_inode_item(inode, NULL);
+	ret = scoutfs_dirty_inode_item(inode, lock);
 	if (ret == 0)
 		ret = block_write_begin(mapping, pos, len, flags, pagep,
 					scoutfs_get_block);
@@ -1163,10 +1175,14 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 	struct inode *inode = mapping->host;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *lock;
 	int ret;
 
 	trace_scoutfs_write_end(sb, scoutfs_ino(inode), page->index, (u64)pos,
 				len, copied);
+
+	/* always call write_end, update_inode will bark if there's no lock */
+	lock = scoutfs_per_task_get(&si->pt_data_lock);
 
 	ret = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
 	if (ret > 0) {
@@ -1175,7 +1191,7 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 			scoutfs_inode_inc_data_version(inode);
 		}
 		/* XXX kind of a big hammer, inode life cycle needs work */
-		scoutfs_update_inode_item(inode, NULL);
+		scoutfs_update_inode_item(inode, lock);
 		scoutfs_inode_queue_writeback(inode);
 	}
 	scoutfs_release_trans(sb);

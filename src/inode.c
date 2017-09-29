@@ -73,6 +73,7 @@ static void scoutfs_inode_ctor(void *obj)
 	mutex_init(&ci->item_mutex);
 	seqcount_init(&ci->seqcount);
 	ci->staging = false;
+	scoutfs_per_task_init(&ci->pt_data_lock);
 	init_rwsem(&ci->xattr_rwsem);
 	RB_CLEAR_NODE(&ci->writeback_node);
 

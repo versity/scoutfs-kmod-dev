@@ -3,6 +3,7 @@
 
 #include "key.h"
 #include "lock.h"
+#include "per_task.h"
 
 struct scoutfs_lock;
 
@@ -34,6 +35,7 @@ struct scoutfs_inode_info {
 	/* initialized once for slab object */
 	seqcount_t seqcount;
 	bool staging;			/* holder of i_mutex is staging */
+	struct scoutfs_per_task pt_data_lock;
 	struct rw_semaphore xattr_rwsem;
 	struct rb_node writeback_node;
 

@@ -26,6 +26,8 @@
 #include "item.h"
 #include "lock.h"
 #include "file.h"
+#include "inode.h"
+#include "per_task.h"
 
 /* TODO: Direct I/O, AIO */
 ssize_t scoutfs_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
@@ -33,14 +35,18 @@ ssize_t scoutfs_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *inode_lock = NULL;
+	SCOUTFS_DECLARE_PER_TASK_ENTRY(pt_ent);
 	int ret;
 
 	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
 				 inode, &inode_lock);
 	if (ret == 0) {
+		scoutfs_per_task_add(&si->pt_data_lock, &pt_ent, inode_lock);
 		ret = generic_file_aio_read(iocb, iov, nr_segs, pos);
+		scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
 		scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
 	}
 
@@ -52,8 +58,10 @@ ssize_t scoutfs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *inode_lock = NULL;
+	SCOUTFS_DECLARE_PER_TASK_ENTRY(pt_ent);
 	int ret;
 
 	if (iocb->ki_left == 0) /* Does this even happen? */
@@ -65,10 +73,13 @@ ssize_t scoutfs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	if (ret)
 		goto out;
 
+	scoutfs_per_task_add(&si->pt_data_lock, &pt_ent, inode_lock);
+
 	/* XXX: remove SUID bit */
 
 	ret = __generic_file_aio_write(iocb, iov, nr_segs, &iocb->ki_pos);
 
+	scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
 	scoutfs_unlock(sb, inode_lock, DLM_LOCK_EX);
 out:
 	mutex_unlock(&inode->i_mutex);

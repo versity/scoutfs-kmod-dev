@@ -596,7 +596,7 @@ static int update_index(struct super_block *sb, struct scoutfs_inode_info *si,
  * have to deal with errors and unwinding after they've modified the
  * vfs inode and get here.
  */
-void scoutfs_update_inode_item(struct inode *inode)
+void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
@@ -631,7 +631,7 @@ void scoutfs_update_inode_item(struct inode *inode)
 	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	err = scoutfs_item_update(sb, &key, val, NULL);
+	err = scoutfs_item_update(sb, &key, val, lock->end);
 	if (err) {
 		scoutfs_err(sb, "inode %llu update err %d", ino, err);
 		BUG_ON(err);

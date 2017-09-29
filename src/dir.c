@@ -634,8 +634,8 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 		inc_nlink(dir);
 	}
 
-	scoutfs_update_inode_item(inode);
-	scoutfs_update_inode_item(dir);
+	scoutfs_update_inode_item(inode, inode_lock);
+	scoutfs_update_inode_item(dir, dir_lock);
 
 	insert_inode_hash(inode);
 	d_instantiate(dentry, inode);
@@ -712,8 +712,8 @@ static int scoutfs_link(struct dentry *old_dentry,
 	inode->i_ctime = dir->i_mtime;
 	inc_nlink(inode);
 
-	scoutfs_update_inode_item(inode);
-	scoutfs_update_inode_item(dir);
+	scoutfs_update_inode_item(inode, inode_lock);
+	scoutfs_update_inode_item(dir, dir_lock);
 
 	atomic_inc(&inode->i_count);
 	d_instantiate(dentry, inode);
@@ -792,8 +792,8 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		drop_nlink(dir);
 		drop_nlink(inode);
 	}
-	scoutfs_update_inode_item(inode);
-	scoutfs_update_inode_item(dir);
+	scoutfs_update_inode_item(inode, inode_lock);
+	scoutfs_update_inode_item(dir, dir_lock);
 
 out:
 	scoutfs_release_trans(sb);
@@ -1000,8 +1000,8 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	inode->i_ctime = dir->i_mtime;
 	i_size_write(inode, name_len);
 
-	scoutfs_update_inode_item(inode);
-	scoutfs_update_inode_item(dir);
+	scoutfs_update_inode_item(inode, inode_lock);
+	scoutfs_update_inode_item(dir, dir_lock);
 
 	insert_inode_hash(inode);
 	/* XXX need to set i_op/fop before here for sec callbacks */
@@ -1477,12 +1477,12 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	if (new_inode)
 		old_inode->i_ctime = now;
 
-	scoutfs_update_inode_item(old_dir);
-	scoutfs_update_inode_item(old_inode);
+	scoutfs_update_inode_item(old_dir, old_dir_lock);
+	scoutfs_update_inode_item(old_inode, old_inode_lock);
 	if (new_dir != old_dir)
-		scoutfs_update_inode_item(new_dir);
+		scoutfs_update_inode_item(new_dir, new_dir_lock);
 	if (new_inode)
-		scoutfs_update_inode_item(new_inode);
+		scoutfs_update_inode_item(new_inode, new_inode_lock);
 
 	ret = 0;
 out:

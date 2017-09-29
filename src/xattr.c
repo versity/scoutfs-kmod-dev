@@ -327,7 +327,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		/* XXX do these want i_mutex or anything? */
 		inode_inc_iversion(inode);
 		inode->i_ctime = CURRENT_TIME;
-		scoutfs_update_inode_item(inode);
+		scoutfs_update_inode_item(inode, lck);
 	}
 
 	up_write(&si->xattr_rwsem);

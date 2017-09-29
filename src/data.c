@@ -1175,7 +1175,7 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 			scoutfs_inode_inc_data_version(inode);
 		}
 		/* XXX kind of a big hammer, inode life cycle needs work */
-		scoutfs_update_inode_item(inode);
+		scoutfs_update_inode_item(inode, NULL);
 		scoutfs_inode_queue_writeback(inode);
 	}
 	scoutfs_release_trans(sb);

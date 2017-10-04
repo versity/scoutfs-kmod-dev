@@ -421,9 +421,12 @@ out:
 static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 {
 	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
 	struct address_space *mapping = inode->i_mapping;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+	SCOUTFS_DECLARE_PER_TASK_ENTRY(pt_ent);
 	struct scoutfs_ioctl_stage args;
+	struct scoutfs_lock *lock = NULL;
 	struct kiocb kiocb;
 	struct iovec iov;
 	size_t written;
@@ -459,6 +462,13 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 
 	mutex_lock(&inode->i_mutex);
 
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &lock);
+	if (ret)
+		goto out;
+
+	scoutfs_per_task_add(&si->pt_data_lock, &pt_ent, lock);
+
 	isize = i_size_read(inode);
 
 	if (!S_ISREG(inode->i_mode) ||
@@ -492,6 +502,8 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 	si->staging = false;
 	current->backing_dev_info = NULL;
 out:
+	scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
+	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 

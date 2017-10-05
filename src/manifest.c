@@ -535,11 +535,13 @@ out:
  * The caller found a hole in the item cache that they'd like populated.
  *
  * We search the manifest for all the segments we'll need to iterate
- * from the key to the end key.  If the end key is null then we'll read
- * as many items as the intersecting segments contain.
+ * from the key to the end key, the last key we're allowed to insert
+ * into the cache.
  *
  * If next_key is provided then the segments are only walked to find the
  * next key after the search key.  If none is found -ENOENT is returned.
+ * There's no limit on the next_key we can return, the caller has
+ * to deal with that.
  *
  * As we insert the batch of items we give the item cache the range of
  * keys that contain these items.  This lets the cache return negative
@@ -584,6 +586,9 @@ static int read_items(struct super_block *sb, struct scoutfs_key_buf *key,
 	int err;
 	int cmp;
 
+	if (WARN_ON_ONCE(!end && !next_key))
+		return -EINVAL;
+
 	if (end) {
 		scoutfs_key_clone(&seg_end, end);
 	} else {
@@ -592,7 +597,6 @@ static int read_items(struct super_block *sb, struct scoutfs_key_buf *key,
 	}
 
 	trace_scoutfs_read_items(sb, key, &seg_end);
-
 
 	/*
 	 * Ask the manifest server which manifest root to read from.  Lock

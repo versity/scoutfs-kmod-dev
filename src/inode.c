@@ -654,9 +654,9 @@ static int update_index_items(struct super_block *sb,
 
 	del_lock = find_index_lock(lock_list, type, si->item_majors[type],
 				   si->item_minors[type], ino);
-	ret = scoutfs_item_delete(sb, &del, del_lock->end);
+	ret = scoutfs_item_delete(sb, &del, del_lock);
 	if (ret) {
-		err = scoutfs_item_delete(sb, &ins, ins_lock->end);
+		err = scoutfs_item_delete(sb, &ins, ins_lock);
 		BUG_ON(err);
 	}
 
@@ -1003,7 +1003,7 @@ static int remove_index(struct super_block *sb, u64 ino, u8 type, u64 major,
 	scoutfs_key_init(&key, &ikey, sizeof(ikey));
 
 	lock = find_index_lock(ind_locks, type, major, minor, ino);
-	ret = scoutfs_item_delete(sb, &key, lock->end);
+	ret = scoutfs_item_delete(sb, &key, lock);
 	if (ret == -ENOENT)
 		ret = 0;
 	return ret;
@@ -1218,7 +1218,7 @@ static int remove_orphan_item(struct super_block *sb, u64 ino)
 
 	init_orphan_key(&key, &okey, sbi->node_id, ino);
 
-	ret = scoutfs_item_delete(sb, &key, lock->end);
+	ret = scoutfs_item_delete(sb, &key, lock);
 	if (ret == -ENOENT)
 		ret = 0;
 
@@ -1301,7 +1301,7 @@ retry:
 		goto out;
 
 #endif
-	ret = scoutfs_item_delete(sb, &key, lock->end);
+	ret = scoutfs_item_delete(sb, &key, lock);
 	if (ret)
 		goto out;
 

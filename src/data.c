@@ -467,7 +467,7 @@ static int clear_segno_free(struct super_block *sb, u64 segno)
 		goto out;
 
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
-		ret = scoutfs_item_delete(sb, &key, lock->end);
+		ret = scoutfs_item_delete(sb, &key, lock);
 	else
 		ret = scoutfs_item_update(sb, &key, val, lock);
 	if (ret)
@@ -576,7 +576,7 @@ static int clear_blkno_free(struct super_block *sb, u64 blkno)
 	}
 
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
-		ret = scoutfs_item_delete(sb, &key, lock->end);
+		ret = scoutfs_item_delete(sb, &key, lock);
 	else
 		ret = scoutfs_item_update(sb, &key, val, lock);
 out:

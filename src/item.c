@@ -1444,7 +1444,7 @@ out:
  * deletion items for items that didn't exist in the first place.
  */
 int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
-			struct scoutfs_key_buf *end)
+			struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
@@ -1452,6 +1452,9 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 	SCOUTFS_DECLARE_KVEC(del_val);
 	unsigned long flags;
 	int ret;
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+		return -EINVAL;
 
 	scoutfs_kvec_init_null(del_val);
 
@@ -1471,7 +1474,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
 
 	scoutfs_kvec_kfree(del_val);
 

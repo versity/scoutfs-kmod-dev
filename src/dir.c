@@ -904,7 +904,7 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 			ret = scoutfs_item_lookup_exact(sb, &key, val, bytes,
 							lock);
 		else if (op == SYM_DELETE)
-			ret = scoutfs_item_delete(sb, &key, lock->end);
+			ret = scoutfs_item_delete(sb, &key, lock);
 		if (ret)
 			break;
 

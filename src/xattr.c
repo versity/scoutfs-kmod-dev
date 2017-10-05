@@ -491,7 +491,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 			break;
 		}
 
-		ret = scoutfs_item_delete(sb, key, lck->end);
+		ret = scoutfs_item_delete(sb, key, lck);
 		if (ret)
 			break;
 

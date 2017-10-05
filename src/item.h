@@ -29,7 +29,7 @@ int scoutfs_item_next_same(struct super_block *sb, struct scoutfs_key_buf *key,
 			   struct scoutfs_key_buf *last, struct kvec *val,
 			   struct scoutfs_lock *lock);
 int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
-		        struct kvec *val);
+		        struct kvec *val, struct scoutfs_lock *lock);
 int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
 		       struct scoutfs_lock *lock);
 int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,

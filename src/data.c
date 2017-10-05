@@ -373,7 +373,7 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 	if (ret == -ENOENT) {
 		memset(&frb, 0, sizeof(frb));
 		set_bit_le(bit, &frb);
-		ret = scoutfs_item_create(sb, &key, val);
+		ret = scoutfs_item_create(sb, &key, val, lock);
 		goto out;
 	}
 
@@ -399,6 +399,7 @@ static int create_blkno_free(struct super_block *sb, u64 blkno,
 			     struct scoutfs_free_bits_key *fbk)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits frb;
 	SCOUTFS_DECLARE_KVEC(val);
 	int bit;
@@ -411,7 +412,7 @@ static int create_blkno_free(struct super_block *sb, u64 blkno,
 	memset(&frb, 0xff, sizeof(frb));
 	clear_bit_le(bit, frb.bits);
 
-	return scoutfs_item_create(sb, key, val);
+	return scoutfs_item_create(sb, key, val, lock);
 }
 
 /*
@@ -507,7 +508,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	if (ret == -ENOENT) {
 		memset(&frb, 0, sizeof(frb));
 		set_bit_le(bit, &frb);
-		ret = scoutfs_item_create(sb, &key, val);
+		ret = scoutfs_item_create(sb, &key, val, lock);
 		goto out;
 	}
 
@@ -961,7 +962,7 @@ static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 	if (map_exists)
 		ret = scoutfs_item_update(sb, map_key, val, data_lock->end);
 	else
-		ret = scoutfs_item_create(sb, map_key, val);
+		ret = scoutfs_item_create(sb, map_key, val, data_lock);
 	if (ret)
 		goto out;
 

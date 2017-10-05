@@ -639,7 +639,7 @@ static int update_index_items(struct super_block *sb,
 	scoutfs_key_init(&ins, &ins_ikey, sizeof(ins_ikey));
 
 	ins_lock = find_index_lock(lock_list, type, major, minor, ino);
-	ret = scoutfs_item_create(sb, &ins, NULL);
+	ret = scoutfs_item_create(sb, &ins, NULL, ins_lock);
 	if (ret || !will_del_index(si, type, major, minor))
 		return ret;
 
@@ -1188,7 +1188,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_create(sb, &key, val);
+	ret = scoutfs_item_create(sb, &key, val, lock);
 	if (ret) {
 		iput(inode);
 		return ERR_PTR(ret);
@@ -1394,6 +1394,7 @@ int scoutfs_orphan_inode(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_orphan_key okey;
 	struct scoutfs_key_buf key;
 	int ret;
@@ -1402,7 +1403,7 @@ int scoutfs_orphan_inode(struct inode *inode)
 
 	init_orphan_key(&key, &okey, sbi->node_id, scoutfs_ino(inode));
 
-	ret = scoutfs_item_create(sb, &key, NULL);
+	ret = scoutfs_item_create(sb, &key, NULL, lock);
 
 	return ret;
 }

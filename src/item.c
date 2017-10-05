@@ -1062,7 +1062,7 @@ int scoutfs_item_next_same(struct super_block *sb, struct scoutfs_key_buf *key,
  * XXX but it doesn't read.. is that weird?  Seems weird.
  */
 int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
-		        struct kvec *val)
+		        struct kvec *val, struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
@@ -1077,13 +1077,26 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 	if (!item)
 		return -ENOMEM;
 
-	spin_lock_irqsave(&cac->lock, flags);
-	ret = insert_item(sb, cac, item, false, false);
-	if (!ret) {
-		scoutfs_inc_counter(sb, item_create);
-		mark_item_dirty(sb, cac, item);
-	}
-	spin_unlock_irqrestore(&cac->lock, flags);
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+		return -EINVAL;
+
+	do {
+		spin_lock_irqsave(&cac->lock, flags);
+
+		if (!check_range(sb, &cac->ranges, key, NULL)) {
+			ret = -ENODATA;
+		} else {
+			ret = insert_item(sb, cac, item, false, false);
+			if (!ret) {
+				scoutfs_inc_counter(sb, item_create);
+				mark_item_dirty(sb, cac, item);
+			}
+		}
+
+		spin_unlock_irqrestore(&cac->lock, flags);
+
+	} while (ret == -ENODATA &&
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
 
 	if (ret)
 		free_item(sb, item);

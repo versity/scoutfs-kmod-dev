@@ -439,7 +439,7 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 
 	scoutfs_kvec_init(val, &dent, sizeof(dent));
 
-	ret = scoutfs_item_create(sb, ent_key, val);
+	ret = scoutfs_item_create(sb, ent_key, val, dir_lock);
 	if (ret)
 		goto out;
 	del_ent = true;
@@ -448,7 +448,7 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 	init_readdir_key(&rdir_key, &rkey, dir_ino, pos);
 	scoutfs_kvec_init(val, &dent, sizeof(dent), (char *)name, name_len);
 
-	ret = scoutfs_item_create(sb, &rdir_key, val);
+	ret = scoutfs_item_create(sb, &rdir_key, val, dir_lock);
 	if (ret)
 		goto out;
 	del_rdir = true;
@@ -460,7 +460,7 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 		goto out;
 	}
 
-	ret = scoutfs_item_create(sb, lb_key, NULL);
+	ret = scoutfs_item_create(sb, lb_key, NULL, inode_lock);
 out:
 	if (ret < 0) {
 		if (del_ent)
@@ -899,7 +899,7 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 		scoutfs_kvec_init(val, (void *)target, bytes);
 
 		if (op == SYM_CREATE)
-			ret = scoutfs_item_create(sb, &key, val);
+			ret = scoutfs_item_create(sb, &key, val, lock);
 		else if (op == SYM_LOOKUP)
 			ret = scoutfs_item_lookup_exact(sb, &key, val, bytes,
 							lock);

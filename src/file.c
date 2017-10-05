@@ -73,15 +73,18 @@ ssize_t scoutfs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	if (ret)
 		goto out;
 
+	ret = scoutfs_complete_truncate(inode, inode_lock);
+	if (ret)
+		goto out;
+
 	scoutfs_per_task_add(&si->pt_data_lock, &pt_ent, inode_lock);
 
 	/* XXX: remove SUID bit */
 
 	ret = __generic_file_aio_write(iocb, iov, nr_segs, &iocb->ki_pos);
-
+out:
 	scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
 	scoutfs_unlock(sb, inode_lock, DLM_LOCK_EX);
-out:
 	mutex_unlock(&inode->i_mutex);
 
 	if (ret > 0 || ret == -EIOCBQUEUED) {

@@ -152,6 +152,7 @@ void scoutfs_destroy_inode(struct inode *inode)
 
 static const struct inode_operations scoutfs_file_iops = {
 	.getattr	= scoutfs_getattr,
+	.setattr	= scoutfs_setattr,
 	.setxattr	= scoutfs_setxattr,
 	.getxattr	= scoutfs_getxattr,
 	.listxattr	= scoutfs_listxattr,
@@ -161,6 +162,7 @@ static const struct inode_operations scoutfs_file_iops = {
 
 static const struct inode_operations scoutfs_special_iops = {
 	.getattr	= scoutfs_getattr,
+	.setattr	= scoutfs_setattr,
 	.setxattr	= scoutfs_setxattr,
 	.getxattr	= scoutfs_getxattr,
 	.listxattr	= scoutfs_listxattr,
@@ -242,6 +244,8 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	ci->data_version = le64_to_cpu(cinode->data_version);
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
 
+	ci->flags = le32_to_cpu(cinode->flags);
+
 	set_item_info(ci, cinode);
 }
 
@@ -322,6 +326,138 @@ int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 		generic_fillattr(inode, stat);
 		scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 	}
+	return ret;
+}
+
+static int set_inode_size(struct inode *inode, struct scoutfs_lock *lock,
+			  u64 new_size, bool truncate)
+{
+	struct scoutfs_inode_info *ci = SCOUTFS_I(inode);
+	struct super_block *sb = inode->i_sb;
+	LIST_HEAD(ind_locks);
+	int ret;
+
+	if (!S_ISREG(inode->i_mode))
+		return 0;
+
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, new_size, true,
+					    SIC_DIRTY_INODE());
+	if (ret)
+		return ret;
+
+	truncate_setsize(inode, new_size);
+	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
+	if (truncate)
+		ci->flags |= SCOUTFS_INO_FLAG_TRUNCATE;
+	scoutfs_inode_set_data_seq(inode);
+	scoutfs_update_inode_item(inode, lock, &ind_locks);
+
+	scoutfs_release_trans(sb);
+	scoutfs_inode_index_unlock(sb, &ind_locks);
+
+	return ret;
+}
+
+static int clear_truncate_flag(struct inode *inode, struct scoutfs_lock *lock)
+{
+	struct scoutfs_inode_info *ci = SCOUTFS_I(inode);
+	struct super_block *sb = inode->i_sb;
+	LIST_HEAD(ind_locks);
+	int ret;
+
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks,
+					    i_size_read(inode), false,
+					    SIC_DIRTY_INODE());
+	if (ret)
+		return ret;
+
+	ci->flags &= ~SCOUTFS_INO_FLAG_TRUNCATE;
+	scoutfs_update_inode_item(inode, lock, &ind_locks);
+
+	scoutfs_release_trans(sb);
+	scoutfs_inode_index_unlock(sb, &ind_locks);
+
+	return ret;
+}
+
+int scoutfs_complete_truncate(struct inode *inode, struct scoutfs_lock *lock)
+{
+	struct scoutfs_inode_info *ci = SCOUTFS_I(inode);
+	u64 start;
+	int ret, err;
+
+	trace_scoutfs_complete_truncate(inode, ci->flags);
+
+	if (!(ci->flags & SCOUTFS_INO_FLAG_TRUNCATE))
+		return 0;
+
+	start = (i_size_read(inode) + SCOUTFS_BLOCK_SIZE - 1) >> SCOUTFS_BLOCK_SHIFT;
+	ret = scoutfs_data_truncate_items(inode->i_sb, scoutfs_ino(inode),
+					  start, ~0ULL, false, lock);
+	err = clear_truncate_flag(inode, lock);
+
+	return ret ? ret : err;
+}
+
+int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
+{
+	struct inode *inode = dentry->d_inode;
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *lock = NULL;
+	LIST_HEAD(ind_locks);
+	bool truncate = false;
+	u64 attr_size;
+	int ret;
+
+	trace_scoutfs_setattr(dentry, attr);
+
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &lock);
+	if (ret)
+		return ret;
+
+	ret = inode_change_ok(inode, attr);
+	if (ret)
+		goto out;
+
+	attr_size = (attr->ia_valid & ATTR_SIZE) ? attr->ia_size :
+		i_size_read(inode);
+
+	if (S_ISREG(inode->i_mode) && attr->ia_valid & ATTR_SIZE) {
+		/*
+		 * Complete any truncates that may have failed while
+		 * in progress
+		 */
+		ret = scoutfs_complete_truncate(inode, lock);
+		if (ret)
+			goto out;
+
+		truncate = i_size_read(inode) > attr_size;
+
+		ret = set_inode_size(inode, lock, attr_size, truncate);
+		if (ret)
+			goto out;
+
+		if (truncate) {
+			ret = scoutfs_complete_truncate(inode, lock);
+			if (ret)
+				goto out;
+		}
+	}
+
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks,
+					    i_size_read(inode), false,
+					    SIC_DIRTY_INODE());
+	if (ret)
+		goto out;
+
+	setattr_copy(inode, attr);
+	scoutfs_update_inode_item(inode, lock, &ind_locks);
+
+	scoutfs_release_trans(sb);
+	scoutfs_inode_index_unlock(sb, &ind_locks);
+out:
+	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 	return ret;
 }
 
@@ -486,6 +622,7 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->data_seq = cpu_to_le64(scoutfs_inode_data_seq(inode));
 	cinode->data_version = cpu_to_le64(scoutfs_inode_data_version(inode));
 	cinode->next_readdir_pos = cpu_to_le64(ci->next_readdir_pos);
+	cinode->flags = cpu_to_le32(ci->flags);
 }
 
 /*
@@ -970,6 +1107,24 @@ out:
 	return ret;
 }
 
+int scoutfs_inode_index_lock_hold(struct inode *inode, struct list_head *list,
+				  u64 size, bool set_data_seq,
+				  const struct scoutfs_item_count cnt)
+{
+	struct super_block *sb = inode->i_sb;
+	int ret;
+	u64 seq;
+
+	do {
+		ret = scoutfs_inode_index_start(sb, &seq) ?:
+		      scoutfs_inode_index_prepare(sb, list, inode, size,
+						  set_data_seq) ?:
+		      scoutfs_inode_index_try_lock_hold(sb, list, seq, cnt);
+	} while (ret > 0);
+
+	return ret;
+}
+
 /*
  * Unlocks and frees all the locks on the list.
  */
@@ -1172,6 +1327,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->have_item = false;
 	atomic64_set(&ci->last_refreshed, scoutfs_lock_refresh_gen(lock));
+	ci->flags = 0;
 
 	scoutfs_inode_set_meta_seq(inode);
 	scoutfs_inode_set_data_seq(inode);

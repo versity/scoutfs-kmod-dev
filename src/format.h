@@ -483,10 +483,13 @@ struct scoutfs_inode {
 	__le32 gid;
 	__le32 mode;
 	__le32 rdev;
+	__le32 flags;
 	struct scoutfs_timespec atime;
 	struct scoutfs_timespec ctime;
 	struct scoutfs_timespec mtime;
 } __packed;
+
+#define SCOUTFS_INO_FLAG_TRUNCATE 0x1
 
 #define SCOUTFS_ROOT_INO 1
 

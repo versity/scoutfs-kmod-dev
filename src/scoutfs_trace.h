@@ -41,6 +41,63 @@ struct lock_info;
 #define FSID_ARG(sb)	le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid)
 #define FSID_FMT	"%llx"
 
+TRACE_EVENT(scoutfs_setattr,
+	TP_PROTO(struct dentry *dentry, struct iattr *attr),
+
+	TP_ARGS(dentry, attr),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(unsigned int, d_len)
+		__string(d_name, dentry->d_name.name)
+		__field(__u64, i_size)
+		__field(__u64, ia_size)
+		__field(unsigned int, ia_valid)
+		__field(int, size_change)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(dentry->d_inode->i_sb);
+		__entry->ino = scoutfs_ino(dentry->d_inode);
+		__entry->d_len = dentry->d_name.len;
+		__assign_str(d_name, dentry->d_name.name);
+		__entry->ia_valid = attr->ia_valid;
+		__entry->size_change = !!(attr->ia_valid & ATTR_SIZE);
+		__entry->ia_size = attr->ia_size;
+		__entry->i_size = i_size_read(dentry->d_inode);
+	),
+
+	TP_printk(FSID_FMT" %s ino %llu ia_valid 0x%x size change %d ia_size "
+		  "%llu i_size %llu", __entry->fsid, __get_str(d_name),
+		  __entry->ino, __entry->ia_valid, __entry->size_change,
+		  __entry->ia_size, __entry->i_size)
+);
+
+TRACE_EVENT(scoutfs_complete_truncate,
+	TP_PROTO(struct inode *inode, __u32 flags),
+
+	TP_ARGS(inode, flags),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(__u64, i_size)
+		__field(__u32, flags)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(inode->i_sb);
+		__entry->ino = scoutfs_ino(inode);
+		__entry->i_size = i_size_read(inode);
+		__entry->flags = flags;
+	),
+
+	TP_printk(FSID_FMT" ino %llu i_size %llu flags 0x%x",
+		  __entry->fsid, __entry->ino, __entry->i_size,
+		  __entry->flags)
+);
+
 DECLARE_EVENT_CLASS(scoutfs_comp_class,
 	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
 

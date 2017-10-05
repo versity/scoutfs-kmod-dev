@@ -15,6 +15,7 @@ struct scoutfs_inode_info {
 	u64 meta_seq;
 	u64 data_seq;
 	u64 data_version;
+	u32 flags;
 
 	/*
 	 * The in-memory item info caches the current index item values
@@ -36,7 +37,6 @@ struct scoutfs_inode_info {
 	struct scoutfs_per_task pt_data_lock;
 	struct rw_semaphore xattr_rwsem;
 	struct rb_node writeback_node;
-
 	struct inode inode;
 };
 
@@ -72,6 +72,9 @@ int scoutfs_inode_index_prepare_ino(struct super_block *sb,
 int scoutfs_inode_index_try_lock_hold(struct super_block *sb,
 				      struct list_head *list, u64 seq,
 				      const struct scoutfs_item_count cnt);
+int scoutfs_inode_index_lock_hold(struct inode *inode, struct list_head *list,
+				  u64 size, bool set_data_seq,
+				  const struct scoutfs_item_count cnt);
 void scoutfs_inode_index_unlock(struct super_block *sb, struct list_head *list);
 
 int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_lock *lock);
@@ -90,11 +93,13 @@ void scoutfs_inode_inc_data_version(struct inode *inode);
 u64 scoutfs_inode_meta_seq(struct inode *inode);
 u64 scoutfs_inode_data_seq(struct inode *inode);
 u64 scoutfs_inode_data_version(struct inode *inode);
+int scoutfs_complete_truncate(struct inode *inode, struct scoutfs_lock *lock);
 
 int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
 			  int flags);
 int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 		    struct kstat *stat);
+int scoutfs_setattr(struct dentry *dentry, struct iattr *attr);
 
 int scoutfs_scan_orphans(struct super_block *sb);
 

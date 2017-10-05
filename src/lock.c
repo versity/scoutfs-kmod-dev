@@ -242,11 +242,11 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 static int cmp_lock_names(struct scoutfs_lock_name *a,
 			  struct scoutfs_lock_name *b)
 {
-	return (int)a->scope - (int)b->scope ?:
-	       (int)a->zone - (int)b->zone ?:
-	       (int)a->type - (int)b->type ?:
+	return ((int)a->scope - (int)b->scope) ?:
+	       ((int)a->zone - (int)b->zone) ?:
+	       ((int)a->type - (int)b->type) ?:
 	       scoutfs_cmp_u64s(le64_to_cpu(a->first), le64_to_cpu(b->first)) ?:
-	       scoutfs_cmp_u64s(le64_to_cpu(b->second), le64_to_cpu(b->second));
+	       scoutfs_cmp_u64s(le64_to_cpu(a->second), le64_to_cpu(b->second));
 }
 
 static struct scoutfs_lock *find_alloc_scoutfs_lock(struct super_block *sb,

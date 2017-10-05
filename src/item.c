@@ -1211,7 +1211,7 @@ out:
 int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 			   struct scoutfs_key_buf *first,
 			   struct scoutfs_key_buf *last, int sif,
-			   struct scoutfs_key_buf *end)
+			   struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
@@ -1235,7 +1235,8 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	trace_scoutfs_item_set_batch(sb, first, last);
 
 	if (WARN_ON_ONCE(scoutfs_key_compare(first, last) > 0) ||
-	    WARN_ON_ONCE(scoutfs_key_compare(end, last) < 0))
+	    WARN_ON_ONCE(!lock_coverage(lock, first, WRITE)) ||
+	    WARN_ON_ONCE(!lock_coverage(lock, last, WRITE)))
 		return -EINVAL;
 
 	range_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
@@ -1256,7 +1257,7 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 		}
 
 		spin_unlock_irqrestore(&cac->lock, flags);
-		ret = scoutfs_manifest_read_items(sb, range_end, end);
+		ret = scoutfs_manifest_read_items(sb, range_end, lock->end);
 		spin_lock_irqsave(&cac->lock, flags);
 
 		if (ret)

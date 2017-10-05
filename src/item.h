@@ -49,7 +49,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 			   struct scoutfs_key_buf *first,
 			   struct scoutfs_key_buf *last, int sif,
-			   struct scoutfs_key_buf *end);
+			   struct scoutfs_lock *lock);
 void scoutfs_item_free_batch(struct super_block *sb, struct list_head *list);
 
 bool scoutfs_item_has_dirty(struct super_block *sb);

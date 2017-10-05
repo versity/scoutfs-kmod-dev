@@ -331,7 +331,7 @@ retry:
 		goto unlock;
 
 	ret = scoutfs_dirty_inode_item(inode, lck) ?:
-	      scoutfs_item_set_batch(sb, &list, key, last, sif, lck->end);
+	      scoutfs_item_set_batch(sb, &list, key, last, sif, lck);
 	if (ret == 0) {
 		/* XXX do these want i_mutex or anything? */
 		inode_inc_iversion(inode);

@@ -382,7 +382,7 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 		goto out;
 	}
 
-	ret = scoutfs_item_update(sb, &key, val, lock->end);
+	ret = scoutfs_item_update(sb, &key, val, lock);
 out:
 	trace_scoutfs_data_set_segno_free(sb, segno, be64_to_cpu(fbk.base),
 					  bit, ret);
@@ -469,7 +469,7 @@ static int clear_segno_free(struct super_block *sb, u64 segno)
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
 		ret = scoutfs_item_delete(sb, &key, lock->end);
 	else
-		ret = scoutfs_item_update(sb, &key, val, lock->end);
+		ret = scoutfs_item_update(sb, &key, val, lock);
 	if (ret)
 		scoutfs_item_delete_dirty(sb, &b_key);
 out:
@@ -518,7 +518,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	}
 
 	if (!bitmap_full((long *)frb.bits, SCOUTFS_FREE_BITS_BITS)) {
-		ret = scoutfs_item_update(sb, &key, val, lock->end);
+		ret = scoutfs_item_update(sb, &key, val, lock);
 		goto out;
 	}
 
@@ -578,7 +578,7 @@ static int clear_blkno_free(struct super_block *sb, u64 blkno)
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
 		ret = scoutfs_item_delete(sb, &key, lock->end);
 	else
-		ret = scoutfs_item_update(sb, &key, val, lock->end);
+		ret = scoutfs_item_update(sb, &key, val, lock);
 out:
 	return ret;
 }
@@ -675,8 +675,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 
 			if (!dirtied) {
 				/* dirty item with full size encoded */
-				ret = scoutfs_item_update(sb, &key, val,
-							  lock->end);
+				ret = scoutfs_item_update(sb, &key, val, lock);
 				if (ret)
 					break;
 				dirtied = true;
@@ -960,7 +959,7 @@ static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 	/* ensure that we can copy in encoded without failing */
 	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
 	if (map_exists)
-		ret = scoutfs_item_update(sb, map_key, val, data_lock->end);
+		ret = scoutfs_item_update(sb, map_key, val, data_lock);
 	else
 		ret = scoutfs_item_create(sb, map_key, val, data_lock);
 	if (ret)

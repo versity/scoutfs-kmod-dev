@@ -1382,7 +1382,7 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
  * Returns -ENOENT if the item doesn't exist.
  */
 int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
-			struct kvec *val, struct scoutfs_key_buf *end)
+			struct kvec *val, struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
@@ -1392,6 +1392,9 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 	int ret;
 
 	if (invalid_key_val(key, val))
+		return -EINVAL;
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
 		return -EINVAL;
 
 	if (val) {
@@ -1420,7 +1423,7 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
 out:
 	scoutfs_kvec_kfree(up_val);
 

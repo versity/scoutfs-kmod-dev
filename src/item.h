@@ -33,7 +33,7 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
 		       struct scoutfs_lock *lock);
 int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
-			struct kvec *val, struct scoutfs_key_buf *end);
+			struct kvec *val, struct scoutfs_lock *lock);
 void scoutfs_item_delete_dirty(struct super_block *sb,
 			       struct scoutfs_key_buf *key);
 void scoutfs_item_update_dirty(struct super_block *sb,

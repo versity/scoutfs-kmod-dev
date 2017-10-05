@@ -736,7 +736,7 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
 	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	err = scoutfs_item_update(sb, &key, val, lock->end);
+	err = scoutfs_item_update(sb, &key, val, lock);
 	if (err) {
 		scoutfs_err(sb, "inode %llu update err %d", ino, err);
 		BUG_ON(err);

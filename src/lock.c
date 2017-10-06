@@ -826,8 +826,17 @@ void scoutfs_lock_destroy(struct super_block *sb)
 		 */
 		free_lock_tree(sb);
 
-		if (linfo->dlmglue_online)
+		if (linfo->dlmglue_online) {
+			/*
+			 * fs/dlm has a harmless but unannotated
+			 * inversion between their connection and socket
+			 * locking that triggers during shutdown and
+			 * disables lockdep.
+			 */
+			lockdep_off();
 			ocfs2_dlm_shutdown(&linfo->dlmglue, 0);
+			lockdep_on();
+		}
 
 		sbi->lock_info = NULL;
 

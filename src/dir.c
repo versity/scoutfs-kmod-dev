@@ -1540,7 +1540,10 @@ retry:
 			drop_nlink(new_dir);
 			drop_nlink(new_inode);
 		}
-	} else if (S_ISDIR(old_inode->i_mode) && (old_dir != new_dir)) {
+
+	}
+
+	if (S_ISDIR(old_inode->i_mode) && (old_dir != new_dir)) {
 		drop_nlink(old_dir);
 		inc_nlink(new_dir);
 	}

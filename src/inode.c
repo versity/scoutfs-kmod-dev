@@ -66,8 +66,6 @@ struct inode_sb_info {
 	struct inode_sb_info *name = SCOUTFS_SB(sb)->inode_sb_info
 
 static struct kmem_cache *scoutfs_inode_cachep;
-static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
-			   struct kstat *stat);
 
 /*
  * This is called once before all the allocations and frees of a inode
@@ -162,6 +160,7 @@ static const struct inode_operations scoutfs_file_iops = {
 };
 
 static const struct inode_operations scoutfs_special_iops = {
+	.getattr	= scoutfs_getattr,
 	.setxattr	= scoutfs_setxattr,
 	.getxattr	= scoutfs_getxattr,
 	.listxattr	= scoutfs_listxattr,
@@ -309,8 +308,8 @@ void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
 	scoutfs_key_init(key, ikey, sizeof(struct scoutfs_inode_key));
 }
 
-static int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
-			   struct kstat *stat)
+int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
+		    struct kstat *stat)
 {
 	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;

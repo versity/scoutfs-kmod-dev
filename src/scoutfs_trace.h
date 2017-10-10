@@ -493,26 +493,26 @@ TRACE_EVENT(scoutfs_data_get_cursor,
 );
 
 TRACE_EVENT(scoutfs_data_truncate_items,
-	TP_PROTO(struct super_block *sb, __u64 iblock, __u64 len, int offline),
+	TP_PROTO(struct super_block *sb, __u64 iblock, __u64 last, int offline),
 
-	TP_ARGS(sb, iblock, len, offline),
+	TP_ARGS(sb, iblock, last, offline),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(__u64, iblock)
-		__field(__u64, len)
+		__field(__u64, last)
 		__field(int, offline)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->iblock = iblock;
-		__entry->len = len;
+		__entry->last = last;
 		__entry->offline = offline;
 	),
 
-	TP_printk(FSID_FMT" iblock %llu len %llu offline %u", __entry->fsid,
-		  __entry->iblock, __entry->len, __entry->offline)
+	TP_printk(FSID_FMT" iblock %llu last %llu offline %u", __entry->fsid,
+		  __entry->iblock, __entry->last, __entry->offline)
 );
 
 TRACE_EVENT(scoutfs_data_set_segno_free,

@@ -594,7 +594,8 @@ out:
 	     i++, iblock++)
 
 /*
- * Free blocks inside the specified logical block range.
+ * Free blocks inside the logical block range from 'iblock' to 'last',
+ * inclusive.
  *
  * If 'offline' is given then blocks are freed an offline mapping is
  * left behind.
@@ -604,7 +605,7 @@ out:
  * partial progress.
  */
 int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
-				u64 len, bool offline,
+				u64 last, bool offline,
 				struct scoutfs_lock *lock)
 {
 	struct scoutfs_key_buf last_key;
@@ -617,21 +618,19 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 	bool dirtied;
 	bool modified;
 	u64 blkno;
-	u64 last;
 	int bytes;
 	int ret = 0;
 	int i;
 
-	trace_scoutfs_data_truncate_items(sb, iblock, len, offline);
+	trace_scoutfs_data_truncate_items(sb, iblock, last, offline);
 
-	if (WARN_ON_ONCE(iblock + len < iblock))
+	if (WARN_ON_ONCE(last < iblock))
 		return -EINVAL;
 
 	map = kmalloc(sizeof(struct block_mapping), GFP_NOFS);
 	if (!map)
 		return -ENOMEM;
 
-	last = iblock + len - 1;
 	init_mapping_key(&last_key, &last_bmk, ino, last);
 
 	while (iblock <= last) {

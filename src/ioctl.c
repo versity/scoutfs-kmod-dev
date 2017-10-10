@@ -381,7 +381,8 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	truncate_inode_pages_range(&inode->i_data, start, end_inc);
 
 	ret = scoutfs_data_truncate_items(sb, scoutfs_ino(inode), args.block,
-					  args.count, true, lock);
+					  args.block + args.count - 1, true,
+					  lock);
 out:
 	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 	mutex_unlock(&inode->i_mutex);

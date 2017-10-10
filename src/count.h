@@ -183,24 +183,27 @@ static inline const struct scoutfs_item_count SIC_RENAME(unsigned old_len,
 }
 
 /*
- * Setting an xattr can create a full set of items for an xattr with a
- * max name and length.  Any existing items will be dirtied rather than
- * deleted so we won't have more items than a max xattr's worth.
+ * Setting an xattr results in a dirty set of items with values for the
+ * size of the xattr.  Any previously existing items from a larger xattr
+ * are deleted which dirties their key but removes their value.  We
+ * don't know the size of a possibly existing xattr so we assume max
+ * parts.
  */
 static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned name_len,
 							    unsigned size)
 {
 	struct scoutfs_item_count cnt = {0,};
-	unsigned parts = DIV_ROUND_UP(size, SCOUTFS_XATTR_PART_SIZE);
+	unsigned val_parts = DIV_ROUND_UP(size, SCOUTFS_XATTR_PART_SIZE);
 
 	__count_dirty_inode(&cnt);
 
-	cnt.items += parts;
-	cnt.keys += parts * (offsetof(struct scoutfs_xattr_key,
-					name[name_len]) +
-			       sizeof(struct scoutfs_xattr_key_footer));
-	cnt.vals += parts * (sizeof(struct scoutfs_xattr_val_header) +
-			       SCOUTFS_XATTR_PART_SIZE);
+	cnt.items += SCOUTFS_XATTR_MAX_PARTS;
+	cnt.keys += SCOUTFS_XATTR_MAX_PARTS *
+		    (offsetof(struct scoutfs_xattr_key, name[name_len]) +
+		     sizeof(struct scoutfs_xattr_key_footer));
+	cnt.vals += val_parts *
+		    (sizeof(struct scoutfs_xattr_val_header) +
+		     SCOUTFS_XATTR_PART_SIZE);
 
 	return cnt;
 }

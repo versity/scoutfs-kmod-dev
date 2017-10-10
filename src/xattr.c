@@ -252,7 +252,6 @@ out:
  * another.
  */
 static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
-
 			     const void *value, size_t size, int flags)
 
 {

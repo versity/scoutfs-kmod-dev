@@ -184,6 +184,13 @@ int scoutfs_read_supers(struct super_block *sb,
 			continue;
 		}
 
+		if (super->format_hash != cpu_to_le64(SCOUTFS_FORMAT_HASH)) {
+			scoutfs_warn(sb, "super block %u has invalid format hash 0x%llx, expected 0x%llx",
+				     i, le64_to_cpu(super->format_hash),
+				     SCOUTFS_FORMAT_HASH);
+			continue;
+		}
+
 		if (found < 0 || (le64_to_cpu(super->hdr.seq) > seq)) {
 			*local = *super;
 			seq = le64_to_cpu((*local).hdr.seq);

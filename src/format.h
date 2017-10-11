@@ -430,6 +430,7 @@ struct scoutfs_inet_addr {
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
+	__le64 format_hash;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
 	__le64 next_ino;
 	__le64 next_seq;

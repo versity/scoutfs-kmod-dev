@@ -77,4 +77,7 @@ int scoutfs_read_supers(struct super_block *sb,
 void scoutfs_advance_dirty_super(struct super_block *sb);
 int scoutfs_write_dirty_super(struct super_block *sb);
 
+/* to keep this out of the ioctl.h public interface definition */
+long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+
 #endif

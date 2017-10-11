@@ -1,8 +1,6 @@
 #ifndef _SCOUTFS_IOCTL_H_
 #define _SCOUTFS_IOCTL_H_
 
-long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
-
 /* XXX I have no idea how these are chosen. */
 #define SCOUTFS_IOCTL_MAGIC 's'
 

@@ -251,9 +251,11 @@ static int client_connect(struct client_info *client)
 {
 	struct super_block *sb = client->sb;
 	struct scoutfs_super_block super;
+	struct scoutfs_net_greeting greet;
 	struct sockaddr_in *sin;
 	struct socket *sock = NULL;
 	struct timeval tv;
+	struct kvec kv;
 	int retries;
 	int addrlen;
 	int optval;
@@ -322,6 +324,34 @@ static int client_connect(struct client_info *client)
 				     sizeof(struct sockaddr_in), 0);
 		if (ret)
 			continue;
+
+		greet.fsid = super.id;
+		greet.format_hash = super.format_hash;
+		kv.iov_base = &greet;
+		kv.iov_len = sizeof(greet);
+		ret = scoutfs_sock_sendmsg(sock, &kv, 1);
+		if (ret)
+			continue;
+
+		ret = scoutfs_sock_recvmsg(sock, &greet, sizeof(greet));
+		if (ret)
+			continue;
+
+		if (greet.fsid != super.id) {
+			scoutfs_warn(sb, "server "SIN_FMT" has fsid 0x%llx, expected 0x%llx",
+				     SIN_ARG(&client->peername),
+				     le64_to_cpu(greet.fsid),
+				     le64_to_cpu(super.id));
+			continue;
+		}
+
+		if (greet.format_hash != super.format_hash) {
+			scoutfs_warn(sb, "server "SIN_FMT" has format hash 0x%llx, expected 0x%llx",
+				     SIN_ARG(&client->peername),
+				     le64_to_cpu(greet.format_hash),
+				     le64_to_cpu(super.format_hash));
+			continue;
+		}
 
 		/* but use a keepalive timeout instead of send timeout */
 		tv.tv_sec = 0;

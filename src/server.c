@@ -765,11 +765,16 @@ static void scoutfs_server_recv_func(struct work_struct *work)
 						      recv_work);
 	struct server_info *server = conn->server;
 	struct super_block *sb = server->sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
 	struct socket *sock = conn->sock;
 	struct workqueue_struct *req_wq;
+	struct scoutfs_net_greeting greet;
 	struct scoutfs_net_header nh;
 	struct server_request *req;
+	bool passed_greeting;
 	unsigned data_len;
+	struct kvec kv;
 	int ret;
 
 	req_wq = alloc_workqueue("scoutfs_server_requests",
@@ -779,11 +784,43 @@ static void scoutfs_server_recv_func(struct work_struct *work)
 		goto out;
 	}
 
-	for (;;) {
+	/* first bounce the greeting */
+	ret = scoutfs_sock_recvmsg(sock, &greet, sizeof(greet));
+	if (ret)
+		goto out;
 
+	/* we'll close conn after failed greeting to let client see ours */
+	passed_greeting = false;
+
+	if (greet.fsid != super->id) {
+		scoutfs_warn(sb, "client "SIN_FMT" has fsid 0x%llx, expected 0x%llx",
+			     SIN_ARG(&conn->peername),
+			     le64_to_cpu(greet.fsid),
+			     le64_to_cpu(super->id));
+	} else if (greet.format_hash != super->format_hash) {
+		scoutfs_warn(sb, "client "SIN_FMT" has format hash 0x%llx, expected 0x%llx",
+			     SIN_ARG(&conn->peername),
+			     le64_to_cpu(greet.format_hash),
+			     le64_to_cpu(super->format_hash));
+	} else {
+		passed_greeting = true;
+	}
+
+	greet.fsid = super->id;
+	greet.format_hash = super->format_hash;
+	kv.iov_base = &greet;
+	kv.iov_len = sizeof(greet);
+	ret = scoutfs_sock_sendmsg(sock, &kv, 1);
+	if (ret)
+		goto out;
+
+	for (;;) {
 		/* receive the header */
 		ret = scoutfs_sock_recvmsg(sock, &nh, sizeof(nh));
 		if (ret)
+			break;
+
+		if (!passed_greeting)
 			break;
 
 		trace_scoutfs_server_recv_request(conn->server->sb,

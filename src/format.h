@@ -566,6 +566,11 @@ struct scoutfs_lock_name {
  * messages over the wire.
  */
 
+struct scoutfs_net_greeting {
+	__le64 fsid;
+	__le64 format_hash;
+} __packed;
+
 /*
  * This header precedes and describes all network messages sent over
  * sockets.  The id is set by the request and sent in the reply.  The

@@ -61,6 +61,18 @@ struct scoutfs_block_header {
 #define SCOUTFS_BTREE_MAX_VAL_LEN 768
 
 /*
+ * The min number of free bytes we must leave in a parent as we descend
+ * to modify.  This leaves enough free bytes to insert a possibly maximal
+ * sized key as a seperator for a child block.  Fewer bytes then this
+ * and split/merge might try to insert a max child item in the parent
+ * that wouldn't fit.
+ */
+#define SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES				\
+	(sizeof(struct scoutfs_btree_item_header) +			\
+	 sizeof(struct scoutfs_btree_item) + SCOUTFS_BTREE_MAX_KEY_LEN +\
+	 sizeof(struct scoutfs_btree_ref))
+
+/*
  * A 4EB test image measured a worst case height of 17.  This is plenty
  * generous.
  */

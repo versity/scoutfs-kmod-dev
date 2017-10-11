@@ -169,13 +169,6 @@ static inline unsigned int all_len_bytes(unsigned key_len, unsigned val_len)
 		len_bytes(key_len, val_len);
 }
 
-/* number of bytes needed to insert potentially max size child item */
-static inline unsigned int parent_min_free_bytes(void)
-{
-	return all_len_bytes(SCOUTFS_BTREE_MAX_KEY_LEN,
-			     sizeof(struct scoutfs_btree_ref));
-}
-
 /*
  * The minimum number of bytes we allow in a block.  During descent to
  * modify if we see a block with fewer used bytes then we'll try to
@@ -196,7 +189,7 @@ static inline unsigned int parent_min_free_bytes(void)
 static inline unsigned int min_used_bytes(void)
 {
 	return (SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block) -
-		parent_min_free_bytes()) / 2;
+		SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES) / 2;
 }
 
 /* total block bytes used by an existing item */
@@ -986,7 +979,7 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
 	int ret;
 
 	if (right->level)
-		all_bytes = parent_min_free_bytes();
+		all_bytes = SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES;
 	else
 		all_bytes = all_len_bytes(key_len, val_len);
 

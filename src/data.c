@@ -1179,8 +1179,9 @@ static int scoutfs_write_begin(struct file *file,
 		ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 		      scoutfs_inode_index_prepare(sb, &wbd->ind_locks, inode,
 						  new_size, true) ?:
-		      scoutfs_inode_index_lock_hold(sb, &wbd->ind_locks,
-						    ind_seq, SIC_WRITE_BEGIN());
+		      scoutfs_inode_index_try_lock_hold(sb, &wbd->ind_locks,
+							ind_seq,
+							SIC_WRITE_BEGIN());
 	} while (ret > 0);
 	if (ret < 0)
 		goto out;

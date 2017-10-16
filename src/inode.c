@@ -939,9 +939,9 @@ int scoutfs_inode_index_start(struct super_block *sb, u64 *seq)
  *
  * Returns > 0 if the seq changed and the locks should be retried.
  */
-int scoutfs_inode_index_lock_hold(struct super_block *sb,
-				  struct list_head *list, u64 seq,
-				  const struct scoutfs_item_count cnt)
+int scoutfs_inode_index_try_lock_hold(struct super_block *sb,
+				      struct list_head *list, u64 seq,
+				      const struct scoutfs_item_count cnt)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct index_lock *ind_lock;
@@ -1273,8 +1273,8 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 	      prepare_index_deletion(sb, &ind_locks, ino, mode, &sinode) ?:
-	      scoutfs_inode_index_lock_hold(sb, &ind_locks, ind_seq,
-					    SIC_DIRTY_INODE());
+	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
+						SIC_DIRTY_INODE());
 	if (ret > 0)
 		goto retry;
 	if (ret)

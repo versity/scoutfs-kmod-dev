@@ -576,7 +576,7 @@ retry:
 	      scoutfs_inode_index_prepare(sb, ind_locks, dir, dir_size, true) ?:
 	      scoutfs_inode_index_prepare_ino(sb, ind_locks, ino, mode,
 					      inode_size) ?:
-	      scoutfs_inode_index_lock_hold(sb, ind_locks, ind_seq, cnt);
+	      scoutfs_inode_index_try_lock_hold(sb, ind_locks, ind_seq, cnt);
 	if (ret > 0)
 		goto retry;
 	if (ret)
@@ -715,8 +715,8 @@ retry:
 					  dir_size, false) ?:
 	      scoutfs_inode_index_prepare(sb, &ind_locks, inode,
 					  i_size_read(inode), false) ?:
-	      scoutfs_inode_index_lock_hold(sb, &ind_locks, ind_seq,
-					    SIC_LINK(dentry->d_name.len));
+	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
+						SIC_LINK(dentry->d_name.len));
 	if (ret > 0)
 		goto retry;
 	if (ret)
@@ -799,8 +799,8 @@ retry:
 					  dir_size, false) ?:
 	      scoutfs_inode_index_prepare(sb, &ind_locks, inode,
 					  i_size_read(inode), false) ?:
-	      scoutfs_inode_index_lock_hold(sb, &ind_locks, ind_seq,
-					    SIC_UNLINK(dentry->d_name.len));
+	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
+						SIC_UNLINK(dentry->d_name.len));
 	if (ret > 0)
 		goto retry;
 	if (ret)
@@ -1465,7 +1465,7 @@ retry:
 	      (new_inode == NULL ? 0 :
 	       scoutfs_inode_index_prepare(sb, &ind_locks, new_inode,
 					   i_size_read(new_inode), false)) ?:
-	      scoutfs_inode_index_lock_hold(sb, &ind_locks, ind_seq,
+	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
 					    SIC_RENAME(old_dentry->d_name.len,
 						       new_dentry->d_name.len));
 	if (ret > 0)

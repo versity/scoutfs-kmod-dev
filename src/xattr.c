@@ -322,8 +322,8 @@ retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 	      scoutfs_inode_index_prepare(sb, &ind_locks, inode,
 					  i_size_read(inode), false) ?:
-	      scoutfs_inode_index_lock_hold(sb, &ind_locks, ind_seq,
-					    SIC_XATTR_SET(name_len, size));
+	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
+						SIC_XATTR_SET(name_len, size));
 	if (ret > 0)
 		goto retry;
 	if (ret)

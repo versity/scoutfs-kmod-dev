@@ -1052,6 +1052,7 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 		ret = find_alloc_block(sb, map, &key, ind, exists, lock);
 		if (ret)
 			goto out;
+		set_buffer_new(bh);
 	}
 
 	/* mark the bh mapped and set the size for as many contig as we see */
@@ -1063,7 +1064,6 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 
 		map_bh(bh, inode->i_sb, map->blknos[ind]);
 		bh->b_size = min_t(u64, bh->b_size, i << SCOUTFS_BLOCK_SHIFT);
-		clear_buffer_new(bh);
 	}
 
 	ret = 0;

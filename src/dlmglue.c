@@ -918,11 +918,14 @@ static inline int ocfs2_may_continue_on_blocked_lock(struct ocfs2_lock_res *lock
 	return wanted <= ocfs2_highest_compat_lock_level(lockres->l_blocking);
 }
 
+/* the caller doesn't have to wait on a blocked lock if their wanted level
+ * is compatible with it and there are already holders of the lock */
 static inline int lockres_allow_recursion(struct ocfs2_lock_res *lockres,
 					  int wanted)
 {
-	return (lockres->l_ops->flags & LOCK_TYPE_RECURSIVE)
-		&& wanted <= lockres->l_level;
+	return (lockres->l_ops->flags & LOCK_TYPE_RECURSIVE) &&
+	       wanted <= lockres->l_level &&
+	       (lockres->l_ex_holders || lockres->l_ro_holders);
 }
 
 static void ocfs2_init_mask_waiter(struct ocfs2_mask_waiter *mw)
@@ -2393,21 +2396,6 @@ recheck:
 		goto recheck;
 	}
 
-	if ((lockres->l_ops->flags & LOCK_TYPE_RECURSIVE) &&
-	    ((lockres->l_blocking == DLM_LOCK_PR && lockres->l_ex_holders) ||
-	     (lockres->l_blocking == DLM_LOCK_EX &&
-	      (lockres->l_ex_holders || lockres->l_ro_holders)))) {
-		/*
-		 * Recursive locks may have had their holder count
-		 * incremented while we were sleeping in
-		 * ->downconvert_worker. Recheck here.
-		 */
-		mlog(ML_BASTS, "lockres %s, block=%d:%d, level=%d:%d, ro=%d "
-		     "ex=%d, Recheck\n", lockres->l_name, blocking,
-		       lockres->l_blocking, level, lockres->l_level,
-		       lockres->l_ro_holders, lockres->l_ex_holders);
-		goto recheck;
-	}
 downconvert:
 	ctl->requeue = 0;
 

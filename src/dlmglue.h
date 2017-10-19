@@ -282,10 +282,11 @@ struct ocfs2_lock_res_ops {
 /*
  * Tells dlmglue to override fairness considerations when locking this
  * lock type - the blocking flag will be ignored when a lock is
- * requested and we already have it at the appropriate level. This
- * allows a process to acquire a dlmglue lock on the same resource
- * multiple times in a row without deadlocking, even if another node has
- * asked for a competing lock on the resource.
+ * requested and we already have it at the appropriate level and the
+ * resource is currently held.  This allows a process to acquire a
+ * dlmglue lock on the same resource multiple times in a row without
+ * deadlocking, even if another node has asked for a competing lock on
+ * the resource.
  *
  * Note that lock/unlock calls must always be balanced (1 unlock for
  * every lock), even when this flag is set.

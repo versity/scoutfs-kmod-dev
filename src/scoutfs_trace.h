@@ -1504,6 +1504,7 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
         TP_ARGS(sb, lck),
         TP_STRUCT__entry(
+		__field(__u64, fsid)
 		__field(u8, name_scope)
 		__field(u8, name_zone)
 		__field(u8, name_type)
@@ -1512,8 +1513,12 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__field(unsigned int, seq)
 		__field(unsigned int, refcnt)
 		__field(unsigned int, users)
+		__field(unsigned char, level)
+		__field(unsigned int, ro)
+		__field(unsigned int, ex)
 	),
         TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
 		__entry->name_scope = lck->lock_name.scope;
 		__entry->name_zone = lck->lock_name.zone;
 		__entry->name_type = lck->lock_name.type;
@@ -1522,14 +1527,24 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__entry->seq = lck->sequence;
 		__entry->refcnt = lck->refcnt;
 		__entry->users = lck->users;
+		/* racey, but safe refs of embedded struct */
+		__entry->level = lck->lockres.l_level;
+		__entry->ro = lck->lockres.l_ro_holders;
+		__entry->ex = lck->lockres.l_ex_holders;
         ),
-        TP_printk("name %u.%u.%u.%llu.%llu seq %u refs %d users %d",
-		  __entry->name_scope, __entry->name_zone, __entry->name_type,
-		  __entry->name_first, __entry->name_second, __entry->seq,
-		  __entry->refcnt, __entry->users)
+        TP_printk("fsid "FSID_FMT" name %u.%u.%u.%llu.%llu seq %u refs %d users %d level %u ro %u ex %u",
+		  __entry->fsid, __entry->name_scope, __entry->name_zone,
+		  __entry->name_type, __entry->name_first,
+		  __entry->name_second, __entry->seq, __entry->refcnt,
+		  __entry->users, __entry->level, __entry->ro, __entry->ex)
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_resource,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );
@@ -1549,6 +1564,11 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_bast,
        TP_ARGS(sb, lck)
 );
 
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidate,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_reclaim,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
@@ -1557,27 +1577,6 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_reclaim,
 DEFINE_EVENT(scoutfs_lock_class, shrink_lock_tree,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
-);
-
-TRACE_EVENT(scoutfs_lock_invalidate_sb,
-        TP_PROTO(struct super_block *sb, int mode,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
-        TP_ARGS(sb, mode, start, end),
-        TP_STRUCT__entry(
-		__field(void *, sb)
-		__field(int, mode)
-                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
-                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
-        ),
-        TP_fast_assign(
-		__entry->sb = sb;
-		__entry->mode = mode;
-		scoutfs_key_str(__get_dynamic_array(start), start);
-		scoutfs_key_str(__get_dynamic_array(end), end);
-        ),
-        TP_printk("sb %p mode %s start %s end %s",
-		  __entry->sb, lock_mode(__entry->mode),
-		  __get_str(start), __get_str(end))
 );
 
 DECLARE_EVENT_CLASS(scoutfs_seg_class,

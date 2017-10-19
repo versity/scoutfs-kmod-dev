@@ -74,7 +74,7 @@ static int invalidate_caches(struct super_block *sb, int mode,
 	u64 ino, last;
 	int ret;
 
-	trace_scoutfs_lock_invalidate_sb(sb, mode, start, end);
+	trace_scoutfs_lock_invalidate(sb, lock);
 
 	ret = scoutfs_item_writeback(sb, start, end);
 	if (ret)
@@ -438,6 +438,7 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 		dec_lock_users(lock);
 		put_scoutfs_lock(sb, lock);
 	} else {
+		trace_scoutfs_lock(sb, lock);
 		*ret_lock = lock;
 	}
 

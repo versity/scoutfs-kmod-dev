@@ -289,7 +289,8 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		goto out;
 	}
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, 0, inode, &lck);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &lck);
 	if (ret)
 		goto out;
 

@@ -12,8 +12,11 @@ struct scoutfs_per_task_entry {
 	void *ptr;
 };
 
-#define SCOUTFS_DECLARE_PER_TASK_ENTRY(name) \
-	struct scoutfs_per_task_entry name
+#define SCOUTFS_DECLARE_PER_TASK_ENTRY(name)			\
+	struct scoutfs_per_task_entry name = {			\
+		.head      = LIST_HEAD_INIT((name).head),	\
+	}
+
 
 void *scoutfs_per_task_get(struct scoutfs_per_task *pt);
 void scoutfs_per_task_add(struct scoutfs_per_task *pt,

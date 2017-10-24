@@ -77,23 +77,6 @@ struct scoutfs_block_header {
  * generous.
  */
 #define SCOUTFS_BTREE_MAX_HEIGHT 20
-#define SCOUTFS_BTREE_BITS 8
-
-/*
- * Btree items can have bits associated with them.  Their parent items
- * reflect all the bits that their child block contain.  Thus searches
- * can find items with bits set.
- *
- * @SCOUTFS_BTREE_BIT_HALF1: Tracks blocks found in the first half of
- * the ring.  It's used to migrate blocks from the old half of the ring
- * into the current half as blocks are dirtied.  It's not found in leaf
- * items but is calculated based on the block number of referenced
- * blocks.  _HALF2 is identical but for the second half of the ring.
- */
-enum {
-	SCOUTFS_BTREE_BIT_HALF1		= (1 << 0),
-	SCOUTFS_BTREE_BIT_HALF2		= (1 << 1),
-};
 
 struct scoutfs_btree_ref {
 	__le64 blkno;
@@ -116,7 +99,6 @@ struct scoutfs_btree_root {
 
 struct scoutfs_btree_item_header {
 	__le16 off;
-	__u8 bits;
 } __packed;
 
 struct scoutfs_btree_item {
@@ -134,7 +116,6 @@ struct scoutfs_btree_block {
 	__le16 free_end;
 	__le16 free_reclaim;
 	__le16 nr_items;
-	__le16 bit_counts[SCOUTFS_BTREE_BITS];
 	__u8 level;
 	struct scoutfs_btree_item_header item_hdrs[0];
 } __packed;

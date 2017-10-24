@@ -738,22 +738,31 @@ restart:
  * it be? :).
  */
 static bool lock_coverage(struct scoutfs_lock *lock,
-			  struct scoutfs_key_buf *key, int rw)
+			  struct scoutfs_key_buf *key, int op_level)
 {
-	bool writing = rw & WRITE;
 	signed char level;
-
-	if (rw & ~WRITE)
-		return false;
 
 	if (!lock || !lock->start || !lock->end)
 		return false;
 
 	level = ACCESS_ONCE(lock->lockres.l_level);
 
-	if ((writing && level != DLM_LOCK_EX) ||
-	    (!writing && level != DLM_LOCK_EX && level != DLM_LOCK_PR))
+	switch (op_level) {
+	case DLM_LOCK_CW:
+		if (level != DLM_LOCK_CW)
+			return false;
+		break;
+	case DLM_LOCK_PR:
+		if (level < DLM_LOCK_PR)
+			return false;
+		break;
+	case DLM_LOCK_EX:
+		if (level != DLM_LOCK_EX)
+			return false;
+		break;
+	default:
 		return false;
+	}
 
 	return scoutfs_key_compare_ranges(key, key,
 					  lock->start, lock->end) == 0;
@@ -776,7 +785,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 	unsigned long flags;
 	int ret;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, READ)))
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_PR)))
 		return -EINVAL;
 
 	trace_scoutfs_item_lookup(sb, key);
@@ -932,7 +941,7 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		goto out;
 	}
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, READ))) {
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_PR))) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -1077,7 +1086,7 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 	if (!item)
 		return -ENOMEM;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
 		return -EINVAL;
 
 	do {
@@ -1117,7 +1126,7 @@ int scoutfs_item_create_force(struct super_block *sb,
 	if (invalid_key_val(key, val))
 		return -EINVAL;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_CW)))
 		return -EINVAL;
 
 	item = alloc_item(sb, key, val);
@@ -1276,8 +1285,8 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	trace_scoutfs_item_set_batch(sb, first, last);
 
 	if (WARN_ON_ONCE(scoutfs_key_compare(first, last) > 0) ||
-	    WARN_ON_ONCE(!lock_coverage(lock, first, WRITE)) ||
-	    WARN_ON_ONCE(!lock_coverage(lock, last, WRITE)))
+	    WARN_ON_ONCE(!lock_coverage(lock, first, DLM_LOCK_EX)) ||
+	    WARN_ON_ONCE(!lock_coverage(lock, last, DLM_LOCK_EX)))
 		return -EINVAL;
 
 	range_end = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
@@ -1392,7 +1401,7 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
 	unsigned long flags;
 	int ret;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
 		return -EINVAL;
 
 	do {
@@ -1436,7 +1445,7 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 	if (invalid_key_val(key, val))
 		return -EINVAL;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
 		return -EINVAL;
 
 	if (val) {
@@ -1495,7 +1504,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 	unsigned long flags;
 	int ret;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
 		return -EINVAL;
 
 	scoutfs_kvec_init_null(del_val);
@@ -1535,7 +1544,7 @@ int scoutfs_item_delete_force(struct super_block *sb,
 	unsigned long flags;
 	int ret;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_CW)))
 		return -EINVAL;
 
 	scoutfs_kvec_init_null(del_val);

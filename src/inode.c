@@ -775,7 +775,7 @@ static int update_index_items(struct super_block *sb,
 	scoutfs_key_init(&ins, &ins_ikey, sizeof(ins_ikey));
 
 	ins_lock = find_index_lock(lock_list, type, major, minor, ino);
-	ret = scoutfs_item_create(sb, &ins, NULL, ins_lock);
+	ret = scoutfs_item_create_force(sb, &ins, NULL, ins_lock);
 	if (ret || !will_del_index(si, type, major, minor))
 		return ret;
 
@@ -791,7 +791,7 @@ static int update_index_items(struct super_block *sb,
 
 	del_lock = find_index_lock(lock_list, type, si->item_majors[type],
 				   si->item_minors[type], ino);
-	ret = scoutfs_item_delete(sb, &del, del_lock);
+	ret = scoutfs_item_delete_force(sb, &del, del_lock);
 	if (ret) {
 		err = scoutfs_item_delete(sb, &ins, ins_lock);
 		BUG_ON(err);
@@ -1088,7 +1088,7 @@ int scoutfs_inode_index_try_lock_hold(struct super_block *sb,
 	list_sort(NULL, list, cmp_index_lock);
 
 	list_for_each_entry(ind_lock, list, head) {
-		ret = scoutfs_lock_inode_index(sb, DLM_LOCK_EX, ind_lock->type,
+		ret = scoutfs_lock_inode_index(sb, DLM_LOCK_CW, ind_lock->type,
 					       ind_lock->major, ind_lock->ino,
 					       &ind_lock->lock);
 		if (ret)
@@ -1135,7 +1135,7 @@ void scoutfs_inode_index_unlock(struct super_block *sb, struct list_head *list)
 	struct index_lock *tmp;
 
 	list_for_each_entry_safe(ind_lock, tmp, list, head) {
-		scoutfs_unlock(sb, ind_lock->lock, DLM_LOCK_EX);
+		scoutfs_unlock(sb, ind_lock->lock, DLM_LOCK_CW);
 		list_del_init(&ind_lock->head);
 		kfree(ind_lock);
 	}
@@ -1158,7 +1158,7 @@ static int remove_index(struct super_block *sb, u64 ino, u8 type, u64 major,
 	scoutfs_key_init(&key, &ikey, sizeof(ikey));
 
 	lock = find_index_lock(ind_locks, type, major, minor, ino);
-	ret = scoutfs_item_delete(sb, &key, lock);
+	ret = scoutfs_item_delete_force(sb, &key, lock);
 	if (ret == -ENOENT)
 		ret = 0;
 	return ret;

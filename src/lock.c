@@ -80,7 +80,9 @@ static int invalidate_caches(struct super_block *sb, int mode,
 	if (ret)
 		return ret;
 
-	if (mode == DLM_LOCK_EX) {
+
+	if (mode == DLM_LOCK_EX ||
+	    (mode == DLM_LOCK_PR && lock->lockres.l_level == DLM_LOCK_CW)) {
 		if (lock->lock_name.zone == SCOUTFS_FS_ZONE) {
 			ino = le64_to_cpu(lock->lock_name.first);
 			last = ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1;

@@ -103,10 +103,15 @@ struct scoutfs_btree_ref {
 /*
  * A height of X means that the first block read will have level X-1 and
  * the leaves will have level 0.
+ *
+ * The migration key is used to walk the tree finding old blocks to migrate
+ * into the current half of the ring.
  */
 struct scoutfs_btree_root {
 	struct scoutfs_btree_ref ref;
 	__u8 height;
+	__le16 migration_key_len;
+	__u8 migration_key[SCOUTFS_BTREE_MAX_KEY_LEN];
 } __packed;
 
 struct scoutfs_btree_item_header {

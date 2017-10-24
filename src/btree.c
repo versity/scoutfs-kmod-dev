@@ -53,10 +53,9 @@
  * blocks by the time it fills up and wraps around to start overwriting
  * the old half of the ring.
  *
- * To find the blocks in the old half of the ring we augment the btree
- * items to store bits that are or-ed in parent items up to the root.
- * Parent items have bits set for the half of the ring that their child
- * block is stored in.
+ * To find the blocks in the old half of the ring we store a migration
+ * key in the super.  Whenever we need to dirty old blocks we sweep leaf
+ * blocks from that key dirtying old blocks we find.
  *
  * Blocks are of a fixed size and are set to 4k to avoid multi-page
  * blocks.  This means they can be smaller than the page size and we can
@@ -82,9 +81,9 @@
  * order.
  *
  * A dense array of item headers after the btree block header stores the
- * offsets and bits of the items and is kept sorted by the item's keys.
- * The array is small enough that keeping it sorted with memmove()
- * involves a few cache lines at most.
+ * offsets of the items and is kept sorted by the item's keys.  The
+ * array is small enough that keeping it sorted with memmove() involves
+ * a few cache lines at most.
  *
  * Parent blocks in the btree have the same format as leaf blocks.
  * There's one key for every child reference instead of having separator
@@ -100,7 +99,6 @@
  *  - counters and tracing
  *  - could issue read-ahead around reads up to dirty blkno
  *  - have barrier as we cross to prevent refreshing clobbering stale reads
- *  - audit split and merge for bit updating
  *  - audit/comment that dirty blknos can wrap around ring
  *  - figure out some max transaction size so ring won't wrap in one
  *  - update the world of comments
@@ -138,6 +136,7 @@ enum {
 	 BTW_ALLOC	= (1 <<  7), /* allocate a new block for 0 ref */
 	 BTW_INSERT	= (1 <<  8), /* walking to insert, try splitting */
 	 BTW_DELETE	= (1 <<  9), /* walking to delete, try merging */
+	 BTW_MIGRATE	= (1 << 10), /* don't dirty old leaf blocks */
 };
 
 /*
@@ -383,12 +382,6 @@ static u8 half_bit(struct scoutfs_btree_ring *bring, u64 blkno)
 				    SCOUTFS_BTREE_BIT_HALF2;
 }
 
-static u8 other_half_bit(struct scoutfs_btree_ring *bring, u64 blkno)
-{
-	return half_bit(bring, blkno) ^ (SCOUTFS_BTREE_BIT_HALF1 |
-					 SCOUTFS_BTREE_BIT_HALF2);
-}
-
 static u8 bits_from_counts(struct scoutfs_btree_block *bt)
 {
 	u8 bits = 0;
@@ -461,6 +454,37 @@ static void path_repair_reset(struct super_block *sb, struct btree_path *path)
 		bt = parent;
 	}
 }
+
+/*
+ * A block is current if it's in the same half of the ring as the next
+ * dirty block in the transaction.
+ */
+static bool blkno_is_current(struct scoutfs_btree_ring *bring, u64 blkno)
+{
+	u64 half_blkno = le64_to_cpu(bring->first_blkno) +
+			 (le64_to_cpu(bring->nr_blocks) / 2);
+	u64 next_blkno = le64_to_cpu(bring->first_blkno) +
+			 le64_to_cpu(bring->next_block);
+
+	return (blkno < half_blkno) == (next_blkno < half_blkno);
+}
+
+static bool first_block_in_half(struct scoutfs_btree_ring *bring)
+{
+	u64 block = le64_to_cpu(bring->next_block);
+
+	return block == 0 || block == (le64_to_cpu(bring->nr_blocks) / 2);
+}
+
+static size_t super_root_offsets[] = {
+	offsetof(struct scoutfs_super_block, alloc_root),
+	offsetof(struct scoutfs_super_block, manifest.root),
+};
+
+#define for_each_super_root(super, i, root)				\
+	for (i = 0; i < ARRAY_SIZE(super_root_offsets) &&		\
+		    (root = ((void *)super + super_root_offsets[i]), 1);\
+	     i++)
 
 static int cmp_hdr_item_key(void *priv, const void *a_ptr, const void *b_ptr)
 {
@@ -762,6 +786,7 @@ static int get_ref_block(struct super_block *sb, int flags,
 	DECLARE_BTREE_INFO(sb, bti);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_btree_ring *bring = &super->bring;
+	struct scoutfs_btree_root *root;
 	struct scoutfs_btree_block *bt = NULL;
 	struct scoutfs_btree_block *new;
 	struct buffer_head *bh;
@@ -769,6 +794,7 @@ static int get_ref_block(struct super_block *sb, int flags,
 	u64 blkno;
 	u64 seq;
 	int ret;
+	int i;
 
 retry:
 	/* always get the current block, either to return or cow from */
@@ -841,6 +867,15 @@ retry:
 		bring->next_block = 0;
 	else
 		le64_add_cpu(&bring->next_block, 1);
+
+	/* reset the migration keys if we've just entered a new half */
+	if (first_block_in_half(bring)) {
+		for_each_super_root(super, i, root) {
+			memset(root->migration_key, 0,
+			       sizeof(root->migration_key));
+			root->migration_key_len = cpu_to_le16(1);
+		}
+	}
 
 	le64_add_cpu(&bring->next_seq, 1);
 
@@ -1265,6 +1300,12 @@ static void inc_key(u8 *bytes, unsigned *len)
  * potentially updated bits in the leaf.  They must always repair the
  * path because we can modify parent bits during descent before
  * returning an error.
+ *
+ * Migrating is a special kind of dirtying that returns the parent block
+ * in the walk if the leaf block is already current and doesn't need to
+ * be migrated.  It's presumed that the caller is iterating over keys
+ * dirtying old leaf blocks and isn't actually doing anything with the
+ * blocks themselves.
  */
 static int btree_walk(struct super_block *sb, struct scoutfs_btree_root *root,
 		      struct btree_path *path, int flags,
@@ -1272,9 +1313,11 @@ static int btree_walk(struct super_block *sb, struct scoutfs_btree_root *root,
 		      struct scoutfs_btree_block **bt_ret,
 		      void *iter_key, unsigned *iter_len)
 {
+	struct scoutfs_btree_ring *bring = &SCOUTFS_SB(sb)->super.bring;
 	struct scoutfs_btree_block *parent = NULL;
 	struct scoutfs_btree_block *bt = NULL;
 	struct scoutfs_btree_item *item;
+	struct scoutfs_btree_ref *ref;
 	unsigned level;
 	unsigned pos;
 	unsigned nr;
@@ -1310,7 +1353,16 @@ restart:
 		goto out;
 	}
 
+	ref = &root->ref;
+
 	while(level-- > 0) {
+		/* no point in dirtying current leaf blocks for migration */
+		if ((flags & BTW_MIGRATE) && level == 0 &&
+		    blkno_is_current(bring, le64_to_cpu(ref->blkno))) {
+			ret = 0;
+			break;
+		}
+
 		if (parent)
 			ret = get_parent_ref_block(sb, flags, parent, pos, &bt);
 		else
@@ -1404,6 +1456,8 @@ restart:
 		put_btree_block(parent);
 		parent = bt;
 		bt = NULL;
+
+		ref = item_val(pos_item(parent, pos));
 	}
 
 out:
@@ -1790,40 +1844,53 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 	DECLARE_BTREE_INFO(sb, bti);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_btree_ring *bring = &super->bring;
-	struct scoutfs_btree_root *roots[] = {
-		&super->manifest.root,
-		&super->alloc_root,
-		NULL,
-	};
 	struct scoutfs_btree_root *root;
 	struct scoutfs_btree_block *bt;
 	DECLARE_BTREE_PATH(path);
 	struct buffer_head *tmp;
 	struct buffer_head *bh;
 	struct blk_plug plug;
-	unsigned next_root;
-	u8 bit;
+	unsigned int walk_len;
+	unsigned int iter_len;
+	bool progress;
+	void *walk_key;
+	void *iter_key;
 	int ret;
+	int i;
 
 	if (bti->first_dirty_bh == NULL)
 		return 0;
 
-	/* cow old dirty blocks to balance ring */
-	bit = other_half_bit(bring, bti->first_dirty_blkno);
-	next_root = 0;
-	root = roots[next_root];
-	while (root && bti->old_dirtied < bti->cur_dirtied) {
-		ret = btree_walk(sb, root, &path,
-				 BTW_DIRTY | BTW_BIT | BTW_DIRTY_OLD,
-				 NULL, 0, 0, bit, NULL, NULL, NULL);
-		path_repair_reset(sb, &path);
-		if (ret == -ENOENT) {
-			root = roots[next_root++];
-			continue;
+	iter_key = kmalloc(SCOUTFS_BTREE_MAX_KEY_LEN, GFP_NOFS);
+	if (!iter_key)
+		return -ENOMEM;
+
+	progress = true;
+	while (progress && bti->old_dirtied < bti->cur_dirtied) {
+		progress = false;
+
+		for_each_super_root(super, i, root) {
+			walk_key = root->migration_key;
+			walk_len = le16_to_cpu(root->migration_key_len);
+			if (walk_len == 0)
+				continue;
+
+			ret = btree_walk(sb, root, &path,
+					 BTW_DIRTY | BTW_NEXT | BTW_MIGRATE,
+					 walk_key, walk_len, 0, 0, &bt,
+					 iter_key, &iter_len);
+			path_repair_reset(sb, &path);
+			if (ret < 0)
+				goto out;
+
+			root->migration_key_len = cpu_to_le16(iter_len);
+			if (iter_len) {
+				memcpy(walk_key, iter_key, iter_len);
+				progress = true;
+			} else {
+				memset(walk_key, 0, SCOUTFS_BTREE_MAX_KEY_LEN);
+			}
 		}
-		if (ret < 0)
-			goto out;
 	}
 
 	/* checksum everything to reduce time between io submission merging */
@@ -1852,7 +1919,9 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 		if (!buffer_uptodate(bh))
 			ret = -EIO;
 	}
+
 out:
+	kfree(iter_key);
 	return ret;
 }
 

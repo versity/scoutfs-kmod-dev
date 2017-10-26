@@ -401,6 +401,18 @@ static inline int ocfs2_highest_compat_lock_level(int level)
 	return new_level;
 }
 
+#define H_EX 0x1
+#define H_PR 0x2
+#define H_ANY (H_EX|H_PR)
+static int lockres_has_holders(struct ocfs2_lock_res *lockres, int which)
+{
+	if (which & H_EX && lockres->l_ex_holders)
+		return 1;
+	if (which & H_PR && lockres->l_ro_holders)
+		return 1;
+	return 0;
+}
+
 static void lockres_set_flags(struct ocfs2_lock_res *lockres,
 			      unsigned long newflags)
 {
@@ -934,7 +946,7 @@ static inline int lockres_allow_recursion(struct ocfs2_lock_res *lockres,
 {
 	return (lockres->l_ops->flags & LOCK_TYPE_RECURSIVE) &&
 	       wanted <= lockres->l_level &&
-	       (lockres->l_ex_holders || lockres->l_ro_holders);
+	       lockres_has_holders(lockres, H_ANY);
 }
 
 static void ocfs2_init_mask_waiter(struct ocfs2_mask_waiter *mw)
@@ -1488,11 +1500,11 @@ static void ocfs2_downconvert_on_unlock(struct ocfs2_super *osb,
 	if (lockres->l_flags & OCFS2_LOCK_BLOCKED) {
 		switch(lockres->l_blocking) {
 		case DLM_LOCK_EX:
-			if (!lockres->l_ex_holders && !lockres->l_ro_holders)
+			if (!lockres_has_holders(lockres, H_ANY))
 				kick = 1;
 			break;
 		case DLM_LOCK_PR:
-			if (!lockres->l_ex_holders)
+			if (!lockres_has_holders(lockres, H_EX))
 				kick = 1;
 			break;
 		default:
@@ -2320,7 +2332,7 @@ recheck:
 	 * we notice and clear BLOCKING.
 	 */
 	if (lockres->l_level == DLM_LOCK_NL) {
-		BUG_ON(lockres->l_ex_holders || lockres->l_ro_holders);
+		BUG_ON(lockres_has_holders(lockres, H_ANY));
 		mlog(ML_BASTS, "lockres %s, Aborting dc\n", lockres->l_name);
 		lockres->l_blocking = DLM_LOCK_NL;
 		lockres_clear_flags(lockres, OCFS2_LOCK_BLOCKED);
@@ -2330,8 +2342,8 @@ recheck:
 
 	/* if we're blocking an exclusive and we have *any* holders,
 	 * then requeue. */
-	if ((lockres->l_blocking == DLM_LOCK_EX)
-	    && (lockres->l_ex_holders || lockres->l_ro_holders)) {
+	if (lockres->l_blocking == DLM_LOCK_EX &&
+	    lockres_has_holders(lockres, H_ANY)) {
 		mlog(ML_BASTS, "lockres %s, ReQ: EX/PR Holders %u,%u\n",
 		     lockres->l_name, lockres->l_ex_holders,
 		     lockres->l_ro_holders);
@@ -2341,7 +2353,7 @@ recheck:
 	/* If it's a PR we're blocking, then only
 	 * requeue if we've got any EX holders */
 	if (lockres->l_blocking == DLM_LOCK_PR &&
-	    lockres->l_ex_holders) {
+	    lockres_has_holders(lockres, H_EX)) {
 		mlog(ML_BASTS, "lockres %s, ReQ: EX Holders %u\n",
 		     lockres->l_name, lockres->l_ex_holders);
 		goto leave_requeue;

@@ -1371,8 +1371,10 @@ static int btree_iter(struct super_block *sb, struct scoutfs_btree_root *root,
 
 	walk_key = kmalloc(SCOUTFS_BTREE_MAX_KEY_LEN, GFP_NOFS);
 	iter_key = kmalloc(SCOUTFS_BTREE_MAX_KEY_LEN, GFP_NOFS);
-	if (!walk_key || !iter_key)
-		return -ENOMEM;
+	if (!walk_key || !iter_key) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	memcpy(walk_key, key, key_len);
 	walk_len = key_len;
@@ -1414,6 +1416,7 @@ static int btree_iter(struct super_block *sb, struct scoutfs_btree_root *root,
 		break;
 	}
 
+out:
 	kfree(walk_key);
 	kfree(iter_key);
 

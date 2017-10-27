@@ -179,9 +179,9 @@ static void ocfs2_update_lock_stats(struct ocfs2_lock_res *res, int level,
 	ktime_t kt;
 	struct ocfs2_lock_stats *stats;
 
-	if (level == LKM_PRMODE)
+	if (level == DLM_LOCK_PR)
 		stats = &res->l_lock_prmode;
-	else if (level == LKM_EXMODE)
+	else if (level == DLM_LOCK_EX)
 		stats = &res->l_lock_exmode;
 	else
 		return;

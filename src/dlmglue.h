@@ -107,6 +107,7 @@ struct ocfs2_lock_res {
 	unsigned long		 l_flags;
 	char                     l_name[OCFS2_LOCK_ID_MAX_LEN];
 	unsigned int             l_ro_holders;
+	unsigned int             l_cw_holders;
 	unsigned int             l_ex_holders;
 	signed char		 l_level;
 	signed char		 l_requested;
@@ -131,6 +132,7 @@ struct ocfs2_lock_res {
 	struct ocfs2_lock_stats  l_lock_prmode;		/* PR mode stats */
 	u32                      l_lock_refresh;	/* Disk refreshes */
 	struct ocfs2_lock_stats  l_lock_exmode;		/* EX mode stats */
+	struct ocfs2_lock_stats  l_lock_cwmode;		/* CW mode stats */
 #endif
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map	 l_lockdep_map;

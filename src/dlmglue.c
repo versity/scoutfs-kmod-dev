@@ -92,6 +92,15 @@ static inline struct ocfs2_super *ocfs2_get_lockres_osb(struct ocfs2_lock_res *l
 	return (struct ocfs2_super *)lockres->l_priv;
 }
 
+static inline void lockres_name(struct ocfs2_lock_res *lockres, char *buf,
+				unsigned int len)
+{
+	if (lockres->l_ops->print)
+		lockres->l_ops->print(lockres, buf, len);
+	else
+		snprintf(buf, len, "%s", lockres->l_name);
+}
+
 static inline int ocfs2_may_continue_on_blocked_lock(struct ocfs2_lock_res *lockres,
 						     int wanted);
 static void __ocfs2_cluster_unlock(struct ocfs2_super *osb,
@@ -1687,20 +1696,14 @@ static int ocfs2_dlm_seq_show(struct seq_file *m, void *v)
 	int i;
 	char *lvb;
 	struct ocfs2_lock_res *lockres = v;
+	char lockname[256];
 
 	if (!lockres)
 		return -EINVAL;
 
-	seq_printf(m, "0x%x\t", OCFS2_DLM_DEBUG_STR_VERSION);
+	lockres_name(lockres, lockname, 256);
 
-#if 0
-	if (lockres->l_type == OCFS2_LOCK_TYPE_DENTRY)
-		seq_printf(m, "%.*s%08x\t", OCFS2_DENTRY_LOCK_INO_START - 1,
-			   lockres->l_name,
-			   (unsigned int)ocfs2_get_dentry_lock_ino(lockres));
-	else
-#endif
-		seq_printf(m, "%.*s\t", OCFS2_LOCK_ID_MAX_LEN, lockres->l_name);
+	seq_printf(m, "0x%x\t%s\t", OCFS2_DLM_DEBUG_STR_VERSION, lockname);
 
 	seq_printf(m, "%d\t"
 		   "0x%lx\t"

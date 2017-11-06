@@ -170,10 +170,19 @@ static int ino_lock_downconvert(struct ocfs2_lock_res *lockres, int blocking)
 	return UNBLOCK_CONTINUE;
 }
 
+static void lock_name_string(struct ocfs2_lock_res *lockres, char *buf,
+			     unsigned int len)
+{
+	struct scoutfs_lock *lock = lockres->l_priv;
+
+	snprintf(buf, len, LN_FMT, LN_ARG(&lock->lock_name));
+}
+
 static struct ocfs2_lock_res_ops scoufs_ino_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
+	.print			= lock_name_string,
 	.flags			= LOCK_TYPE_REQUIRES_REFRESH|LOCK_TYPE_RECURSIVE,
 };
 
@@ -181,12 +190,14 @@ static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
+	.print			= lock_name_string,
 	.flags			= LOCK_TYPE_RECURSIVE,
 };
 
 static struct ocfs2_lock_res_ops scoutfs_global_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
+	.print			= lock_name_string,
 	.flags			= 0,
 };
 
@@ -194,6 +205,7 @@ static struct ocfs2_lock_res_ops scoutfs_node_id_lops = {
 	.get_osb		= get_ino_lock_osb,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.downconvert_worker 	= ino_lock_downconvert,
+	.print			= lock_name_string,
 	.flags			= 0,
 };
 

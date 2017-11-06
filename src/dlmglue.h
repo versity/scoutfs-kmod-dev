@@ -257,6 +257,11 @@ struct ocfs2_lock_res_ops {
 	int (*downconvert_worker)(struct ocfs2_lock_res *, int);
 
 	/*
+	 * Optional: pretty print the lockname into a buffer
+	 */
+	void (*print)(struct ocfs2_lock_res *, char *, unsigned int);
+
+	/*
 	 * LOCK_TYPE_* flags which describe the specific requirements
 	 * of a lock type. Descriptions of each individual flag follow.
 	 */

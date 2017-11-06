@@ -1397,6 +1397,8 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	int ret;
 	int err;
 
+	trace_scoutfs_rename(sb, old_dir, old_dentry, new_dir, new_dentry);
+
 	if (new_dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 

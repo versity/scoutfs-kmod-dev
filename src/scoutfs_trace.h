@@ -1778,6 +1778,44 @@ TRACE_EVENT(scoutfs_item_shrink_around,
 		  __get_str(last), __get_str(next))
 );
 
+TRACE_EVENT(scoutfs_rename,
+	TP_PROTO(struct super_block *sb, struct inode *old_dir,
+		 struct dentry *old_dentry, struct inode *new_dir,
+		 struct dentry *new_dentry),
+
+	TP_ARGS(sb, old_dir, old_dentry, new_dir, new_dentry),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, old_dir_ino)
+		__field(char *, old_name)
+		__field(unsigned int, old_name_len)
+		__field(__u64, new_dir_ino)
+		__field(char *, new_name)
+		__field(unsigned int, new_name_len)
+		__field(__u64, new_inode_ino)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->old_dir_ino = scoutfs_ino(old_dir);
+		__entry->old_name = (char *)old_dentry->d_name.name;
+		__entry->old_name_len = old_dentry->d_name.len;
+		__entry->new_dir_ino = scoutfs_ino(new_dir);
+		__entry->new_name = (char *)new_dentry->d_name.name;
+		__entry->new_name_len = new_dentry->d_name.len;
+		__entry->new_inode_ino = new_dentry->d_inode ?
+					 scoutfs_ino(new_dentry->d_inode) : 0;
+	),
+
+	TP_printk("fsid "FSID_FMT" old_dir_ino %llu old_name %.*s (len %u) new_dir_ino %llu new_name %.*s (len %u) new_inode_ino %llu",
+		  __entry->fsid, __entry->old_dir_ino, __entry->old_name_len,
+		  __entry->old_name, __entry->old_name_len,
+		  __entry->new_dir_ino, __entry->new_name_len,
+		  __entry->new_name, __entry->new_name_len,
+		  __entry->new_inode_ino)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

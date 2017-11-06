@@ -779,7 +779,8 @@ static int update_index_items(struct super_block *sb,
 	if (ret || !will_del_index(si, type, major, minor))
 		return ret;
 
-	trace_scoutfs_delete_index_item(sb, type, major, minor, ino);
+	trace_scoutfs_delete_index_item(sb, type, si->item_majors[type],
+					si->item_minors[type], ino);
 
 	del_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
 	del_ikey.type = type;

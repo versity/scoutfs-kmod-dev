@@ -1456,14 +1456,17 @@ DECLARE_EVENT_CLASS(scoutfs_range_class,
 		 struct scoutfs_key_buf *end),
         TP_ARGS(sb, start, end),
         TP_STRUCT__entry(
+		__field(__u64, fsid)
                 __dynamic_array(char, start, scoutfs_key_str(NULL, start))
                 __dynamic_array(char, end, scoutfs_key_str(NULL, end))
         ),
         TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
 		scoutfs_key_str(__get_dynamic_array(start), start);
 		scoutfs_key_str(__get_dynamic_array(end), end);
         ),
-        TP_printk("start %s end %s", __get_str(start), __get_str(end))
+        TP_printk("fsid "FSID_FMT" start %s end %s",
+		  __entry->fsid, __get_str(start), __get_str(end))
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_set_batch,

@@ -1104,6 +1104,47 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 	return ret;
 }
 
+int scoutfs_item_create_force(struct super_block *sb,
+			      struct scoutfs_key_buf *key,
+			      struct kvec *val, struct scoutfs_lock *lock)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *item;
+	unsigned long flags;
+	int ret;
+
+	if (invalid_key_val(key, val))
+		return -EINVAL;
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+		return -EINVAL;
+
+	item = alloc_item(sb, key, val);
+	if (!item)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	ret = insert_item(sb, cac, item, true, false);
+	if (ret) {
+		SK_PRINTK(KERN_EMERG "Scoutfs: corrupted item cache found while"
+			  " creating item "SK_FMT" on fs %llu\n",
+			  SK_ARG(key),
+			  le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid));
+		BUG_ON(ret);
+	}
+	scoutfs_inc_counter(sb, item_create);
+	mark_item_dirty(sb, cac, item);
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	if (ret)
+		free_item(sb, item);
+
+	return ret;
+}
+
 /*
  * Allocate an item with the key and value and add it to the list of
  * items to be inserted as a batch later.  The caller adds in sort order
@@ -1480,6 +1521,46 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 	scoutfs_kvec_kfree(del_val);
 
 	trace_scoutfs_item_delete_ret(sb, ret);
+	return ret;
+}
+
+int scoutfs_item_delete_force(struct super_block *sb,
+			      struct scoutfs_key_buf *key,
+			      struct scoutfs_lock *lock)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *item;
+	SCOUTFS_DECLARE_KVEC(del_val);
+	unsigned long flags;
+	int ret;
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, WRITE)))
+		return -EINVAL;
+
+	scoutfs_kvec_init_null(del_val);
+
+	item = alloc_item(sb, key, NULL);
+	if (!item)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&cac->lock, flags);
+	ret = insert_item(sb, cac, item, true, false);
+	if (ret) {
+		SK_PRINTK(KERN_EMERG "Scoutfs: corrupted item cache found while"
+			  " deleting item "SK_FMT" on fs %llu\n",
+			  SK_ARG(key),
+			  le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid));
+		BUG_ON(ret);
+	}
+	scoutfs_inc_counter(sb, item_create);
+	mark_item_dirty(sb, cac, item);
+
+	become_deletion_item(sb, cac, item, del_val);
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	scoutfs_kvec_kfree(del_val);
+
 	return ret;
 }
 

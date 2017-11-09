@@ -1819,6 +1819,8 @@ int scoutfs_item_invalidate(struct super_block *sb,
 	unsigned long flags;
 	int ret;
 
+	trace_scoutfs_item_invalidate_range(sb, start, end);
+
 	/* XXX think about racing with trans write */
 
 	scoutfs_inc_counter(sb, item_range_alloc);

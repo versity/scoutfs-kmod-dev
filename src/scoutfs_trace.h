@@ -1478,6 +1478,12 @@ DEFINE_EVENT(scoutfs_range_class, scoutfs_item_insert_batch,
         TP_ARGS(sb, start, end)
 );
 
+DEFINE_EVENT(scoutfs_range_class, scoutfs_item_invalidate_range,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
+		 struct scoutfs_key_buf *end),
+        TP_ARGS(sb, start, end)
+);
+
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_shrink_range,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),

@@ -1499,6 +1499,80 @@ DEFINE_EVENT(scoutfs_range_class, scoutfs_read_items,
         TP_ARGS(sb, start, end)
 );
 
+DECLARE_EVENT_CLASS(scoutfs_cached_range_class,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end),
+        TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, rng)
+                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
+                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
+        ),
+        TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->rng = rng;
+		scoutfs_key_str(__get_dynamic_array(start), start);
+		scoutfs_key_str(__get_dynamic_array(end), end);
+        ),
+        TP_printk("fsid "FSID_FMT" rng %p start %s end %s",
+		  __entry->fsid, __entry->rng, __get_str(start), __get_str(end))
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_free,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_ins_rb_insert,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_mid_left,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_start,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_end,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_rem_rb_insert,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_delete_enoent,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_shrink_start,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
+DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_shrink_end,
+        TP_PROTO(struct super_block *sb, void *rng,
+		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+        TP_ARGS(sb, rng, start, end)
+);
+
 #define lock_mode(mode)			\
 	__print_symbolic(mode,		\
 		{ DLM_LOCK_IV,	"IV" },	\

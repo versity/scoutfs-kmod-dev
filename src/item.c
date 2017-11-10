@@ -95,6 +95,9 @@ struct cached_range {
 	struct scoutfs_key_buf *end;
 };
 
+#define trace_range(which, sb, rng) \
+	trace_scoutfs_item_range_##which(sb, (rng), (rng)->start, (rng)->end)
+
 static u8 item_flags(struct cached_item *item)
 {
 	return item->deletion ? SCOUTFS_ITEM_FLAG_DELETION : 0;
@@ -575,6 +578,7 @@ static void free_range(struct super_block *sb, struct cached_range *rng)
 {
 	if (!IS_ERR_OR_NULL(rng)) {
 		scoutfs_inc_counter(sb, item_range_free);
+		trace_range(free, sb, rng);
 		scoutfs_key_free(sb, rng->start);
 		scoutfs_key_free(sb, rng->end);
 		kfree(rng);
@@ -640,6 +644,7 @@ restart:
 		goto restart;
 	}
 
+	trace_range(ins_rb_insert, sb, ins);
 	rb_link_node(&ins->node, parent, node);
 	rb_insert_color(&ins->node, root);
 }
@@ -696,6 +701,7 @@ restart:
 		if (start_cmp > 0 && end_cmp < 0) {
 			swap(rng->end, rem->start);
 			scoutfs_key_dec(rng->end);
+			trace_range(remove_mid_left, sb, rng);
 
 			swap(rem->start, rem->end);
 			scoutfs_key_inc(rem->start);
@@ -707,12 +713,14 @@ restart:
 		if (start_cmp < 0 && end_cmp < 0) {
 			swap(rem->end, rng->start);
 			scoutfs_key_inc(rng->start);
+			trace_range(remove_start, sb, rng);
 			continue;
 		}
 
 		if (start_cmp > 0 && end_cmp > 0) {
 			swap(rem->start, rng->end);
 			scoutfs_key_dec(rng->end);
+			trace_range(remove_end, sb, rng);
 			continue;
 		}
 
@@ -723,6 +731,7 @@ restart:
 	}
 
 	if (insert) {
+		trace_range(rem_rb_insert, sb, rem);
 		rb_link_node(&rem->node, parent, node);
 		rb_insert_color(&rem->node, root);
 	} else {
@@ -2014,6 +2023,7 @@ static int shrink_around(struct super_block *sb, struct cached_range *rng,
 		rng->end = first->key;
 		first->key = NULL;
 		scoutfs_key_dec_cur_len(rng->end);
+		trace_range(shrink_end, sb, rng);
 	}
 
 	/* set start of remaining existing range */
@@ -2022,6 +2032,7 @@ static int shrink_around(struct super_block *sb, struct cached_range *rng,
 		rng->start = last->key;
 		last->key = NULL;
 		scoutfs_key_inc_cur_len(rng->start);
+		trace_range(shrink_start, sb, rng);
 	}
 
 	/* add new range, stealing existing end */

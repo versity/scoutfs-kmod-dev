@@ -1662,6 +1662,16 @@ DEFINE_EVENT(scoutfs_lock_class, shrink_lock_tree,
        TP_ARGS(sb, lck)
 );
 
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_rb_insert,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_free,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
 DECLARE_EVENT_CLASS(scoutfs_seg_class,
         TP_PROTO(struct scoutfs_segment *seg),
         TP_ARGS(seg),

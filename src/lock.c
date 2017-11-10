@@ -128,6 +128,7 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 		BUG_ON(!lock->refcnt);
 		refs = --lock->refcnt;
 		if (!refs) {
+			trace_scoutfs_lock_free(sb, lock);
 			rb_erase(&lock->node, &linfo->lock_tree);
 			list_del(&lock->lru_entry);
 			spin_unlock(&linfo->lock);
@@ -312,6 +313,7 @@ search:
 		new = NULL;
 		found->refcnt = 1; /* Freed by shrinker or on umount */
 		found->sequence = ++linfo->seq_cnt;
+		trace_scoutfs_lock_rb_insert(sb, found);
 		rb_link_node(&found->node, parent, node);
 		rb_insert_color(&found->node, &linfo->lock_tree);
 		scoutfs_inc_counter(sb, lock_alloc);

@@ -723,7 +723,7 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 	end_ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
 	end_ikey.type = type;
 	end_ikey.major = cpu_to_be64(major | major_mask);
-	end_ikey.minor = cpu_to_be32(U32_MAX);
+	end_ikey.minor = cpu_to_be32(0);
 	end_ikey.ino = cpu_to_be64(ino | ino_mask);
 	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
 

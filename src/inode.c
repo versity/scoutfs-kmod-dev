@@ -712,6 +712,17 @@ static int cmp_index_lock(void *priv, struct list_head *A, struct list_head *B)
 	       scoutfs_cmp_u64s(a->ino, b->ino);
 }
 
+static void clamp_inode_index(u8 type, u64 *major, u32 *minor, u64 *ino)
+{
+	struct scoutfs_inode_index_key start;
+
+	scoutfs_lock_get_index_item_range(type, *major, *ino, &start, NULL);
+
+	*major = be64_to_cpu(start.major);
+	*minor = be32_to_cpu(start.minor);
+	*ino = be64_to_cpu(start.ino);
+}
+
 /*
  * Find the lock that covers the given index item.  Returns NULL if
  * there isn't a lock that covers the item.  We know that the list is
@@ -726,7 +737,7 @@ static struct scoutfs_lock *find_index_lock(struct list_head *lock_list,
 	struct index_lock needle;
 	int cmp;
 
-	scoutfs_lock_clamp_inode_index(type, &major, &minor, &ino);
+	clamp_inode_index(type, &major, &minor, &ino);
 	needle.type = type;
 	needle.major = major;
 	needle.minor = minor;
@@ -897,7 +908,7 @@ static int add_index_lock(struct list_head *list, u64 ino, u8 type, u64 major,
 {
 	struct index_lock *ind_lock;
 
-	scoutfs_lock_clamp_inode_index(type, &major, &minor, &ino);
+	clamp_inode_index(type, &major, &minor, &ino);
 
 	list_for_each_entry(ind_lock, list, head) {
 		if (ind_lock->type == type && ind_lock->major == major &&

@@ -558,6 +558,16 @@ int scoutfs_seg_next_off(struct scoutfs_segment *seg, int off)
 }
 
 /*
+ * Return the count of bytes of the segment actually used.
+ */
+u32 scoutfs_seg_total_bytes(struct scoutfs_segment *seg)
+{
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+
+	return le32_to_cpu(sblk->total_bytes);
+}
+
+/*
  * Returns true if the given item population will fit in a single
  * segment.
  *

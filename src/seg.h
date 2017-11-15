@@ -25,6 +25,7 @@ int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg);
 int scoutfs_seg_find_off(struct scoutfs_segment *seg,
 			 struct scoutfs_key_buf *key);
 int scoutfs_seg_next_off(struct scoutfs_segment *seg, int off);
+u32 scoutfs_seg_total_bytes(struct scoutfs_segment *seg);
 int scoutfs_seg_item_ptrs(struct scoutfs_segment *seg, int off,
 			  struct scoutfs_key_buf *key, struct kvec *val,
 			  u8 *flags);

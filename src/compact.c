@@ -430,7 +430,9 @@ static int compact_segments(struct super_block *sb,
 		if (ret)
 			break;
 
-		scoutfs_inc_counter(sb, compact_segment_written);
+		scoutfs_inc_counter(sb, compact_segment_writes);
+		scoutfs_add_counter(sb, compact_segment_write_bytes,
+				    scoutfs_seg_total_bytes(seg));
 	}
 
 	return ret;

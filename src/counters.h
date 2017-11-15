@@ -17,12 +17,14 @@
 	EXPAND_COUNTER(seg_alloc)	\
 	EXPAND_COUNTER(seg_shrink)	\
 	EXPAND_COUNTER(seg_free)	\
-	EXPAND_COUNTER(trans_level0_seg_write) \
+	EXPAND_COUNTER(trans_level0_seg_writes)			\
+	EXPAND_COUNTER(trans_level0_seg_write_bytes)		\
 	EXPAND_COUNTER(manifest_compact_migrate) \
 	EXPAND_COUNTER(compact_operations) \
 	EXPAND_COUNTER(compact_segment_moved) \
 	EXPAND_COUNTER(compact_segment_read)	\
-	EXPAND_COUNTER(compact_segment_written)	\
+	EXPAND_COUNTER(compact_segment_writes)			\
+	EXPAND_COUNTER(compact_segment_write_bytes)		\
 	EXPAND_COUNTER(compact_sticky_upper)	\
 	EXPAND_COUNTER(compact_sticky_written)	\
 	EXPAND_COUNTER(data_readpage)		\

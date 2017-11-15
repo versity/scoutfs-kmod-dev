@@ -142,7 +142,9 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		if (ret)
 			goto out;
 
-		scoutfs_inc_counter(sb, trans_level0_seg_write);
+		scoutfs_inc_counter(sb, trans_level0_seg_writes);
+		scoutfs_add_counter(sb, trans_level0_seg_write_bytes,
+				    scoutfs_seg_total_bytes(seg));
 
 	} else if (sbi->trans_deadline_expired) {
 		/*

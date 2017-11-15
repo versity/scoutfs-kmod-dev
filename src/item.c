@@ -1805,8 +1805,10 @@ int scoutfs_item_writeback(struct super_block *sb,
 
 	spin_unlock_irqrestore(&cac->lock, flags);
 
-	if (sync)
-		ret = scoutfs_sync_fs(sb, 1);
+	if (sync) {
+		scoutfs_inc_counter(sb, trans_commit_item_flush);
+		ret = scoutfs_trans_sync(sb, 1);
+	}
 
 	return ret;
 }

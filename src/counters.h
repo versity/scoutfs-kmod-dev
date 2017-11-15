@@ -17,6 +17,11 @@
 	EXPAND_COUNTER(seg_alloc)	\
 	EXPAND_COUNTER(seg_shrink)	\
 	EXPAND_COUNTER(seg_free)	\
+	EXPAND_COUNTER(trans_commit_fsync)			\
+	EXPAND_COUNTER(trans_commit_full)			\
+	EXPAND_COUNTER(trans_commit_item_flush)			\
+	EXPAND_COUNTER(trans_commit_sync_fs)			\
+	EXPAND_COUNTER(trans_commit_timer)			\
 	EXPAND_COUNTER(trans_level0_seg_writes)			\
 	EXPAND_COUNTER(trans_level0_seg_write_bytes)		\
 	EXPAND_COUNTER(manifest_compact_migrate) \

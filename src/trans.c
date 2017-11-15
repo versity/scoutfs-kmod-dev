@@ -123,7 +123,10 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 	trace_scoutfs_trans_write_func(sb, scoutfs_item_has_dirty(sb));
 
+
 	if (scoutfs_item_has_dirty(sb)) {
+		if (sbi->trans_deadline_expired)
+			scoutfs_inc_counter(sb, trans_commit_timer);
 		/*
 		 * XXX only straight pass through, we're not worrying
 		 * about leaking segnos nor duplicate manifest entries
@@ -218,13 +221,12 @@ static void queue_trans_work(struct scoutfs_sb_info *sbi)
  * before the caller got here that wouldn't be covered by a commit
  * that's in flight. 
  */
-int scoutfs_sync_fs(struct super_block *sb, int wait)
+int scoutfs_trans_sync(struct super_block *sb, int wait)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct write_attempt attempt;
 	int ret;
 
-	trace_scoutfs_sync_fs(sb, wait);
 
 	if (!wait) {
 		queue_trans_work(sbi);
@@ -248,7 +250,10 @@ int scoutfs_sync_fs(struct super_block *sb, int wait)
 int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 		       int datasync)
 {
-	return scoutfs_sync_fs(file->f_inode->i_sb, 1);
+	struct super_block *sb = file_inode(file)->i_sb;
+
+	scoutfs_inc_counter(sb, trans_commit_fsync);
+	return scoutfs_trans_sync(sb, 1);
 }
 
 void scoutfs_trans_restart_sync_deadline(struct super_block *sb)
@@ -317,6 +322,7 @@ static bool acquired_hold(struct super_block *sb,
 	vals = tri->reserved_vals + cnt->vals;
 	fits = scoutfs_item_dirty_fits_single(sb, items, keys, vals);
 	if (!fits) {
+		scoutfs_inc_counter(sb, trans_commit_full);
 		queue_trans_work(sbi);
 		goto out;
 	}

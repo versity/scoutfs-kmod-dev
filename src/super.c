@@ -90,6 +90,14 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	return 0;
 }
 
+static int scoutfs_sync_fs(struct super_block *sb, int wait)
+{
+	trace_scoutfs_sync_fs(sb, wait);
+	scoutfs_inc_counter(sb, trans_commit_sync_fs);
+
+	return scoutfs_trans_sync(sb, wait);
+}
+
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
 	.drop_inode = scoutfs_drop_inode,

@@ -4,7 +4,7 @@
 #include "count.h"
 
 void scoutfs_trans_write_func(struct work_struct *work);
-int scoutfs_sync_fs(struct super_block *sb, int wait);
+int scoutfs_trans_sync(struct super_block *sb, int wait);
 int scoutfs_file_fsync(struct file *file, loff_t start, loff_t end,
 		       int datasync);
 void scoutfs_trans_restart_sync_deadline(struct super_block *sb);

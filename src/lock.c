@@ -631,8 +631,8 @@ int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
 }
 
 /*
- * Set the caller's index items to the range of index item keys that are
- * covered by the lock which covers the given type and major.
+ * Set the caller's keys to the range of index item keys that are
+ * covered by the lock which covers the given index item.
  *
  * We're trying to strike a balance between minimizing lock
  * communication by locking a large number of items and minimizing
@@ -641,9 +641,15 @@ int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
  * The seq indexes have natural batching and limits on the number of
  * keys per major value.
  *
- * The file size index are very different.  For them we use a mix of a
- * sort of linear-log distribution (top 4 bits of size), and then also a
- * lot of inodes per size.
+ * The file size index is very different.  We don't control the
+ * distribution of sizes amongst inodes.  We map ranges of sizes to a
+ * small set of locks by rounding the size down to groups of sizes
+ * identified by their highest set bit and two next significant bits.
+ * This results in ranges that increase by quarters of powers of two.
+ * (small sizes don't have enough bits for this scheme, they're all
+ * mapped to a range from 0 to 15.) two (0 and 1 are mapped to 0).  Each
+ * lock then covers all the sizes in their range and all the inodes with
+ * those sizes.
  *
  * This can also be used to find items that are covered by the same lock
  * because their starting keys are the same.
@@ -652,25 +658,28 @@ void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
 				       struct scoutfs_inode_index_key *start,
 				       struct scoutfs_inode_index_key *end)
 {
-	u64 major_mask;
-	u64 ino_mask;
+	u64 start_major;
+	u64 end_major;
 	int bit;
 
 	switch(type) {
 	case SCOUTFS_INODE_INDEX_SIZE_TYPE:
-		major_mask = 0;
-		if (major) {
-			bit = fls64(major);
-			if (bit > 4)
-				major_mask = (1 << (bit - 4)) - 1;
+		bit = major ? fls64(major) : 0;
+		if (bit < 5) {
+			/* sizes [ 0 .. 15 ] are in their own lock */
+			start_major = 0;
+			end_major = 15;
+		} else {
+			/* last bit, 2 lesser bits, mask */
+			start_major = major & (7ULL << (bit - 3));
+			end_major = start_major + (1ULL << (bit - 3)) - 1;
 		}
-		ino_mask = (1 << 12) - 1;
 		break;
 
 	case SCOUTFS_INODE_INDEX_META_SEQ_TYPE:
 	case SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE:
-		major_mask = SCOUTFS_LOCK_SEQ_GROUP_MASK;
-		ino_mask = ~0ULL;
+		start_major = major & ~SCOUTFS_LOCK_SEQ_GROUP_MASK;
+		end_major = major | SCOUTFS_LOCK_SEQ_GROUP_MASK;
 		break;
 	default:
 		BUG();
@@ -679,19 +688,18 @@ void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
 	if (start) {
 		start->zone = SCOUTFS_INODE_INDEX_ZONE;
 		start->type = type;
-		start->major = cpu_to_be64(major & ~major_mask);
+		start->major = cpu_to_be64(start_major);
 		start->minor = 0;
-		start->ino = cpu_to_be64(ino & ~ino_mask);
+		start->ino = 0;
 	}
 
 	if (end) {
 		end->zone = SCOUTFS_INODE_INDEX_ZONE;
 		end->type = type;
-		end->major = cpu_to_be64(major | major_mask);
+		end->major = cpu_to_be64(end_major);
 		end->minor = 0;
-		end->ino = cpu_to_be64(ino | ino_mask);
+		end->ino = cpu_to_be64(~0ULL);
 	}
-
 }
 
 /*

@@ -1082,12 +1082,12 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 	if (invalid_key_val(key, val))
 		return -EINVAL;
 
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
+		return -EINVAL;
+
 	item = alloc_item(sb, key, val);
 	if (!item)
 		return -ENOMEM;
-
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
-		return -EINVAL;
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);

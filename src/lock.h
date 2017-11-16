@@ -22,6 +22,7 @@ struct scoutfs_lock {
 	struct dlm_lksb lksb;
 	unsigned int sequence; /* for debugging and sanity checks */
 	struct rb_node node;
+	struct rb_node range_node;
 	unsigned int refcnt;
 	struct ocfs2_lock_res lockres;
 	struct list_head lru_entry;

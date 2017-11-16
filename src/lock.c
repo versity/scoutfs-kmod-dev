@@ -49,6 +49,7 @@ struct lock_info {
 	spinlock_t lock;
 	unsigned int seq_cnt;
 	struct rb_root lock_tree;
+	struct rb_root lock_range_tree;
 	struct shrinker shrinker;
 	struct list_head lru_list;
 	unsigned long long lru_nr;
@@ -115,6 +116,8 @@ static void free_scoutfs_lock(struct scoutfs_lock *lock)
 		ocfs2_lock_res_free(&lock->lockres);
 		scoutfs_key_free(lock->sb, lock->start);
 		scoutfs_key_free(lock->sb, lock->end);
+		BUG_ON(!RB_EMPTY_NODE(&lock->node));
+		BUG_ON(!RB_EMPTY_NODE(&lock->range_node));
 		kfree(lock);
 	}
 }
@@ -131,6 +134,12 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 		if (!refs) {
 			trace_scoutfs_lock_free(sb, lock);
 			rb_erase(&lock->node, &linfo->lock_tree);
+			RB_CLEAR_NODE(&lock->node);
+			if(!RB_EMPTY_NODE(&lock->range_node)) {
+				rb_erase(&lock->range_node,
+					 &linfo->lock_range_tree);
+				RB_CLEAR_NODE(&lock->range_node);
+			}
 			list_del(&lock->lru_entry);
 			spin_unlock(&linfo->lock);
 			ocfs2_simple_drop_lockres(&linfo->dlmglue,
@@ -230,6 +239,9 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 	if (lock == NULL)
 		return NULL;
 
+	RB_CLEAR_NODE(&lock->node);
+	RB_CLEAR_NODE(&lock->range_node);
+
 	if (start) {
 		lock->start = scoutfs_key_dup(sb, start);
 		lock->end = scoutfs_key_dup(sb, end);
@@ -265,6 +277,46 @@ static int cmp_lock_names(struct scoutfs_lock_name *a,
 	       scoutfs_cmp_u64s(le64_to_cpu(a->second), le64_to_cpu(b->second));
 }
 
+static int insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
+{
+	DECLARE_LOCK_INFO(sb, linfo);
+	struct rb_root *root = &linfo->lock_range_tree;
+	struct rb_node **node = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct scoutfs_lock *lock;
+	int cmp;
+
+	if (!ins->start)
+		return 0;
+
+	while (*node) {
+		parent = *node;
+		lock = container_of(*node, struct scoutfs_lock, range_node);
+
+		cmp = scoutfs_key_compare_ranges(ins->start, ins->end,
+						 lock->start, lock->end);
+		if (WARN_ON_ONCE(cmp == 0)) {
+			scoutfs_warn_sk(sb, "inserting lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT" overlaps with existing lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT"\n",
+					ins, LN_ARG(&ins->lock_name),
+					SK_ARG(ins->start), SK_ARG(ins->end),
+					lock, LN_ARG(&lock->lock_name),
+					SK_ARG(lock->start), SK_ARG(lock->end));
+			return -EINVAL;
+		}
+
+		if (cmp < 0)
+			node = &(*node)->rb_left;
+		else
+			node = &(*node)->rb_right;
+	}
+
+
+	rb_link_node(&ins->range_node, parent, node);
+	rb_insert_color(&ins->range_node, root);
+
+	return 0;
+}
+
 static struct scoutfs_lock *find_alloc_scoutfs_lock(struct super_block *sb,
 					struct scoutfs_lock_name *lock_name,
 					struct ocfs2_lock_res_ops *type,
@@ -278,6 +330,7 @@ static struct scoutfs_lock *find_alloc_scoutfs_lock(struct super_block *sb,
 	struct rb_node *parent;
 	struct rb_node **node;
 	int cmp;
+	int ret;
 
 search:
 	spin_lock(&linfo->lock);
@@ -314,6 +367,14 @@ search:
 		new = NULL;
 		found->refcnt = 1; /* Freed by shrinker or on umount */
 		found->sequence = ++linfo->seq_cnt;
+
+		ret = insert_range_node(sb, found);
+		if (ret < 0) {
+			spin_unlock(&linfo->lock);
+			free_scoutfs_lock(found);
+			return NULL;
+		}
+
 		trace_scoutfs_lock_rb_insert(sb, found);
 		rb_link_node(&found->node, parent, node);
 		rb_insert_color(&found->node, &linfo->lock_tree);
@@ -817,6 +878,8 @@ static int init_lock_info(struct super_block *sb)
 	linfo->shrinker.seeks = DEFAULT_SEEKS;
 	register_shrinker(&linfo->shrinker);
 	linfo->sb = sb;
+	linfo->lock_tree = RB_ROOT;
+	linfo->lock_range_tree = RB_ROOT;
 
 	snprintf(linfo->ls_name, DLM_LOCKSPACE_LEN, "%llx",
 		 le64_to_cpu(sbi->super.hdr.fsid));

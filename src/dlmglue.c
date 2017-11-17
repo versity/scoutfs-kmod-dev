@@ -1889,6 +1889,17 @@ static int ocfs2_dlm_seq_show(struct seq_file *m, void *v)
 		   lock_max_exmode(lockres),
 		   lock_refresh(lockres));
 
+	seq_printf(m, "%u\t"
+		   "%u\t"
+		   "%u\t"
+		   "%llu\t"
+		   "%u\t",
+		   lockres->l_cw_holders,
+		   lock_num_cwmode(lockres),
+		   lock_num_cwmode_failed(lockres),
+		   lock_total_cwmode(lockres),
+		   lock_max_cwmode(lockres));
+
 	/* End the line */
 	seq_printf(m, "\n");
 	return 0;

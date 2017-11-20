@@ -3,6 +3,10 @@
 
 #include "msg.h"
 
+/*
+ * This can be called with pre-emption disabled if the caller is printing
+ * the contents of formated per-cpu key string buffers.
+ */
 void scoutfs_msg(struct super_block *sb, const char *prefix, const char *str,
 		 const char *fmt, ...)
 {

@@ -1,0 +1,72 @@
+%define kmod_name scoutfs
+#%%trace
+
+%define _tar_version @@TAR_VERSION@@
+# official builds set this to 1, we use 0 for internal/dev-test
+%{!?_release: %global _release 0}
+
+Name:           %{kmod_name}
+Summary:        %{kmod_name} kernel module
+Version:        @@VERSION@@
+Release:        %{_release}.@@RELEASE@@%{?dist}
+License:        GPLv2
+Group:          System/Kernel
+URL:            http://versity.com
+
+BuildRequires:  %kernel_module_package_buildreqs
+ExclusiveArch:  x86_64
+
+# Sources.
+Source0:        scoutfs-kmod-%{_tar_version}.tar.gz
+
+# Build only for standard kernel variant(s); for debug packages, append "debug"
+# after "default" (separated by space)
+%kernel_module_package default
+
+
+# Disable the building of the debug package(s).
+%define debug_package %{nil}
+
+%description
+%{kmod_name} - kernel module
+
+
+%prep
+
+
+%setup -q -n %{kmod_name}-%{_tar_version}
+set -- *
+mkdir source
+mv "$@" source/
+mkdir obj
+
+
+%build
+echo "Building for kernel: %{kernel_version} flavors: '%{flavors_to_build}'"
+echo "Build var: kmodtool = %{kmodtool}"
+echo "Build var: kverrel = %{kverrel}"
+for flavor in %flavors_to_build; do
+    rm -rf obj/$flavor
+    cp -r source obj/$flavor
+    make SK_KSRC=%{kernel_source $flavor} -C obj/$flavor module
+done
+
+
+%install
+export INSTALL_MOD_PATH=$RPM_BUILD_ROOT
+export INSTALL_MOD_DIR=extra/%{name}
+for flavor in %flavors_to_build ; do
+    # TODO add Makefile rule
+    #make SK_KSRC=%{kernel_source $flavor} -C obj/$flavor modules_install
+    make -C %{kernel_source $flavor} modules_install \
+        M=$PWD/obj/$flavor/src
+done
+
+
+%clean
+rm -rf %{buildroot}
+
+
+%changelog
+* Fri Nov 17 2017 Nic Henke <nic.henke@versity.com> - 1.0
+- Initial version.

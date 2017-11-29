@@ -163,6 +163,20 @@ static int put_task_ref(struct scoutfs_lock *lock, struct task_ref *ref)
 	return 1;
 }
 
+static void invalidate_inode(struct super_block *sb, u64 ino)
+{
+	struct inode *inode;
+
+	inode = scoutfs_ilookup(sb, ino);
+	if (!inode)
+		return;
+
+	if (S_ISREG(inode->i_mode))
+		truncate_inode_pages(inode->i_mapping, 0);
+
+	iput(inode);
+}
+
 /*
  * Invalidate caches on this because another node wants a lock
  * with the a lock with the given mode and range. We always have to
@@ -174,7 +188,6 @@ static int invalidate_caches(struct super_block *sb, int mode,
 {
 	struct scoutfs_key_buf *start = lock->start;
 	struct scoutfs_key_buf *end = lock->end;
-	struct inode *inode;
 	u64 ino, last;
 	int ret;
 
@@ -191,12 +204,7 @@ static int invalidate_caches(struct super_block *sb, int mode,
 			ino = le64_to_cpu(lock->lock_name.first);
 			last = ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1;
 			while (ino <= last) {
-				inode = scoutfs_ilookup(lock->sb, ino);
-				if (inode && S_ISREG(inode->i_mode))
-					truncate_inode_pages(inode->i_mapping,
-							     0);
-
-				iput(inode);
+				invalidate_inode(sb, ino);
 				ino++;
 			}
 		}

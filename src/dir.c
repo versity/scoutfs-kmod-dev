@@ -120,16 +120,8 @@ static void scoutfs_d_release(struct dentry *dentry)
 	}
 }
 
-static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags)
-{
-	if (flags & LOOKUP_RCU)
-		return -ECHILD;
-	return 0;/* Always revalidate for now */
-}
-
 static const struct dentry_operations scoutfs_dentry_ops = {
 	.d_release = scoutfs_d_release,
-	.d_revalidate = scoutfs_d_revalidate,
 };
 
 static int alloc_dentry_info(struct dentry *dentry)

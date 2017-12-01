@@ -1909,6 +1909,40 @@ TRACE_EVENT(scoutfs_rename,
 		  __entry->new_inode_ino)
 );
 
+DECLARE_EVENT_CLASS(scoutfs_super_lifecycle_class,
+        TP_PROTO(struct super_block *sb),
+        TP_ARGS(sb),
+        TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(void *, sb)
+		__field(void *, sbi)
+		__field(void *, s_root)
+        ),
+        TP_fast_assign(
+		__entry->fsid = SCOUTFS_SB(sb) ? FSID_ARG(sb) : 0;
+		__entry->sb = sb;
+		__entry->sbi = SCOUTFS_SB(sb);
+		__entry->s_root = sb->s_root;
+        ),
+	TP_printk("fsid "FSID_FMT" sb %p sbi %p s_root %p",
+		  __entry->fsid, __entry->sb, __entry->sbi, __entry->s_root)
+);
+
+DEFINE_EVENT(scoutfs_super_lifecycle_class, scoutfs_fill_super,
+        TP_PROTO(struct super_block *sb),
+        TP_ARGS(sb)
+);
+
+DEFINE_EVENT(scoutfs_super_lifecycle_class, scoutfs_put_super,
+        TP_PROTO(struct super_block *sb),
+        TP_ARGS(sb)
+);
+
+DEFINE_EVENT(scoutfs_super_lifecycle_class, scoutfs_kill_sb,
+        TP_PROTO(struct super_block *sb),
+        TP_ARGS(sb)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

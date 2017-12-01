@@ -82,13 +82,14 @@ int scoutfs_setup_counters(struct super_block *sb)
 	scoutfs_foreach_counter(sb, pcpu) {
 		ret = percpu_counter_init(pcpu, 0, GFP_KERNEL);
 		if (ret)
-			return ret;
+			goto out;
 	}
 
 	counters->kobj.kset = sbi->kset;
 	init_completion(&counters->comp);
 	ret = kobject_init_and_add(&counters->kobj, &scoutfs_counters_ktype,
 				    NULL, "counters");
+out:
 	if (ret) {
 		/* tear down partial to avoid destroying null kobjs */
 		scoutfs_foreach_counter(sb, pcpu)

@@ -497,10 +497,14 @@ void scoutfs_shutdown_trans(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_TRANS_INFO(sb, tri);
 
-	if (sbi->trans_write_workq) {
-		cancel_delayed_work_sync(&sbi->trans_write_work);
-		destroy_workqueue(sbi->trans_write_workq);
+	if (tri) {
+		if (sbi->trans_write_workq) {
+			cancel_delayed_work_sync(&sbi->trans_write_work);
+			destroy_workqueue(sbi->trans_write_workq);
+			/* trans work schedules after shutdown see null */
+			sbi->trans_write_workq = NULL;
+		}
+		kfree(tri);
+		sbi->trans_info = NULL;
 	}
-
-	kfree(tri);
 }

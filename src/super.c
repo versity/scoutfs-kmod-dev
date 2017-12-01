@@ -98,6 +98,42 @@ static int scoutfs_sync_fs(struct super_block *sb, int wait)
 	return scoutfs_trans_sync(sb, wait);
 }
 
+/*
+ * This destroys all the state that's built up in the sb info during
+ * mount.  It's called by us on errors during mount if we haven't set
+ * s_root, by mount after returning errors if we have set s_root, and by
+ * unmount after having synced the super.
+ */
+static void scoutfs_put_super(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	trace_scoutfs_put_super(sb);
+
+	scoutfs_unlock_flags(sb, sbi->node_id_lock, DLM_LOCK_EX,
+			     SCOUTFS_LKF_NO_TASK_REF);
+	sbi->node_id_lock = NULL;
+
+	scoutfs_shutdown_trans(sb);
+	scoutfs_client_destroy(sb);
+	scoutfs_data_destroy(sb);
+	scoutfs_inode_destroy(sb);
+	scoutfs_item_destroy(sb);
+
+	/* the server locks the listen address and compacts */
+	scoutfs_server_destroy(sb);
+	scoutfs_seg_destroy(sb);
+	scoutfs_lock_destroy(sb);
+
+	debugfs_remove(sbi->debug_root);
+	scoutfs_destroy_counters(sb);
+	if (sbi->kset)
+		kset_unregister(sbi->kset);
+	kfree(sbi);
+
+	sb->s_fs_info = NULL;
+}
+
 static const struct super_operations scoutfs_super_ops = {
 	.alloc_inode = scoutfs_alloc_inode,
 	.drop_inode = scoutfs_drop_inode,
@@ -105,6 +141,7 @@ static const struct super_operations scoutfs_super_ops = {
 	.destroy_inode = scoutfs_destroy_inode,
 	.sync_fs = scoutfs_sync_fs,
 	.statfs = scoutfs_statfs,
+	.put_super = scoutfs_put_super,
 };
 
 /*
@@ -244,6 +281,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	struct inode *inode;
 	int ret;
 
+	trace_scoutfs_fill_super(sb);
+
 	sb->s_magic = SCOUTFS_SUPER_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_op = &scoutfs_super_ops;
@@ -271,12 +310,14 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	/* XXX can have multiple mounts of a  device, need mount id */
 	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
-	if (!sbi->kset)
-		return -ENOMEM;
+	if (!sbi->kset) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	ret = scoutfs_parse_options(sb, data, &opts);
 	if (ret)
-		return ret;
+		goto out;
 
 	sbi->opts = opts;
 
@@ -288,23 +329,9 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_inode_setup(sb) ?:
 	      scoutfs_data_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:
-	      scoutfs_lock_setup(sb);
-	if (ret)
-		return ret;
-
-	/*
-	 * The server is a bit magical because it can try to read the
-	 * device in async work context.  Once we return an error from
-	 * here the kernel starts tearing down the mount and it isn't
-	 * safe to do IO.  So we shut the server down before returning
-	 * an error.
-	 *
-	 * But we still want to start the server before the client to
-	 * help single mounts come up without passing through connection
-	 * timeouts.
-	 */
-	ret = scoutfs_server_setup(sb) ?:
-	      scoutfs_client_setup(sb);
+	      scoutfs_lock_setup(sb) ?:
+	      scoutfs_server_setup(sb) ?:
+	      scoutfs_client_setup(sb) ?:
 	      scoutfs_lock_node_id(sb, DLM_LOCK_EX, 0, sbi->node_id,
 				   &sbi->node_id_lock);
 	if (ret)
@@ -330,12 +357,10 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 //	scoutfs_scan_orphans(sb);
 	ret = 0;
 out:
-	if (ret) {
-		scoutfs_server_destroy(sb);
-		scoutfs_unlock_flags(sb, sbi->node_id_lock, DLM_LOCK_EX,
-				     SCOUTFS_LKF_NO_TASK_REF);
-		sbi->node_id_lock = NULL;
-	}
+	/* on error, generic_shutdown_super calls put_super if s_root */
+	if (ret && !sb->s_root)
+		scoutfs_put_super(sb);
+
 	return ret;
 }
 
@@ -345,42 +370,14 @@ static struct dentry *scoutfs_mount(struct file_system_type *fs_type, int flags,
 	return mount_bdev(fs_type, flags, dev_name, data, scoutfs_fill_super);
 }
 
+/*
+ * kill_block_super eventually calls ->put_super if s_root is set
+ */
 static void scoutfs_kill_sb(struct super_block *sb)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-
-	/*
-	 * If we had successfully mounted then make sure dirty data
-	 * writeback and compaction is done before we kill the block
-	 * super and start tearing everything down.
-	 */
-	if (sb->s_root) {
-		sync_filesystem(sb);
-
-		scoutfs_server_destroy(sb);
-	}
+	trace_scoutfs_kill_sb(sb);
 
 	kill_block_super(sb);
-
-	if (sbi) {
-		scoutfs_unlock_flags(sb, sbi->node_id_lock, DLM_LOCK_EX,
-			SCOUTFS_LKF_NO_TASK_REF);
-		sbi->node_id_lock = NULL;
-
-		scoutfs_lock_destroy(sb);
-		scoutfs_client_destroy(sb);
-		scoutfs_server_destroy(sb);
-		scoutfs_shutdown_trans(sb);
-		scoutfs_data_destroy(sb);
-		scoutfs_inode_destroy(sb);
-		scoutfs_item_destroy(sb);
-		scoutfs_seg_destroy(sb);
-		debugfs_remove(sbi->debug_root);
-		scoutfs_destroy_counters(sb);
-		if (sbi->kset)
-			kset_unregister(sbi->kset);
-		kfree(sbi);
-	}
 }
 
 static struct file_system_type scoutfs_fs_type = {

@@ -419,7 +419,7 @@ static inline int __levels_compat(int lockres_level, int wanted)
 	return level_compat_matrix[wanted + 1][lockres_level + 1];
 }
 
-static inline int levels_compat(struct ocfs2_lock_res *lockres, int wanted)
+int ocfs2_levels_compat(struct ocfs2_lock_res *lockres, int wanted)
 {
 	return __levels_compat(lockres->l_level, wanted);
 }
@@ -519,7 +519,7 @@ static inline void ocfs2_generic_handle_downconvert_action(struct ocfs2_lock_res
 	BUG_ON(lockres->l_blocking <= DLM_LOCK_NL);
 
 	lockres->l_level = lockres->l_requested;
-	if (levels_compat(lockres, dc_level)) {
+	if (ocfs2_levels_compat(lockres, dc_level)) {
 		lockres->l_blocking = DLM_LOCK_NL;
 		lockres_clear_flags(lockres, OCFS2_LOCK_BLOCKED);
 	}
@@ -1005,16 +1005,6 @@ static inline int ocfs2_may_continue_on_blocked_lock(struct ocfs2_lock_res *lock
 	return wanted <= ocfs2_downconvert_level(lockres, lockres->l_blocking);
 }
 
-/* the caller doesn't have to wait on a blocked lock if their wanted level
- * is compatible with it and there are already holders of the lock */
-static inline int lockres_allow_recursion(struct ocfs2_lock_res *lockres,
-					  int wanted)
-{
-	return (lockres->l_ops->flags & LOCK_TYPE_RECURSIVE) &&
-	       levels_compat(lockres, wanted) &&
-	       lockres_has_holders(lockres, H_ANY);
-}
-
 static void ocfs2_init_mask_waiter(struct ocfs2_mask_waiter *mw)
 {
 	INIT_LIST_HEAD(&mw->mw_item);
@@ -1153,7 +1143,7 @@ again:
 	 * here. If the lock is blocked waiting on a downconvert,
 	 * we'll get caught below. */
 	if (lockres->l_flags & OCFS2_LOCK_BUSY &&
-	    !levels_compat(lockres, level)) {
+	    !ocfs2_levels_compat(lockres, level)) {
 		/* is someone sitting in dlm_lock? If so, wait on
 		 * them. */
 		lockres_add_mask_waiter(lockres, &mw, OCFS2_LOCK_BUSY, 0);
@@ -1176,12 +1166,11 @@ again:
 		 * OCFS2_LOCK_BLOCKED check to ensure that there is no pending
 		 * downconvert request.
 		 */
-		if (levels_compat(lockres, level))
+		if (ocfs2_levels_compat(lockres, level))
 			goto update_holders;
 	}
 
 	if (lockres->l_flags & OCFS2_LOCK_BLOCKED &&
-	    !lockres_allow_recursion(lockres, level) &&
 	    !ocfs2_may_continue_on_blocked_lock(lockres, level)) {
 		/* is the lock is currently blocked on behalf of
 		 * another node */

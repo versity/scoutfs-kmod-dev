@@ -7,6 +7,7 @@
 
 #define SCOUTFS_LKF_REFRESH_INODE	0x01 /* update stale inode from item */
 #define SCOUTFS_LKF_TRYLOCK		0x02 /* EAGAIN if contention */
+#define SCOUTFS_LKF_NO_TASK_REF  	0x04 /* don't create a task ref */
 
 /* flags for scoutfs_lock->flags */
 enum {
@@ -30,6 +31,8 @@ struct scoutfs_lock {
 	unsigned int users; /* Tracks active users of this lock */
 	unsigned long flags;
 	wait_queue_head_t waitq;
+	struct rb_root task_refs;
+	spinlock_t task_refs_lock;
 };
 
 u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock);
@@ -54,6 +57,8 @@ int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 			 u64 node_id, struct scoutfs_lock **lock);
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 		    int level);
+void scoutfs_unlock_flags(struct super_block *sb, struct scoutfs_lock *lock,
+			  int level, int flags);
 
 int scoutfs_lock_setup(struct super_block *sb);
 void scoutfs_lock_destroy(struct super_block *sb);

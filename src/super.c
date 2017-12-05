@@ -332,7 +332,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 out:
 	if (ret) {
 		scoutfs_server_destroy(sb);
-		scoutfs_unlock(sb, sbi->node_id_lock, DLM_LOCK_EX);
+		scoutfs_unlock_flags(sb, sbi->node_id_lock, DLM_LOCK_EX,
+				     SCOUTFS_LKF_NO_TASK_REF);
 		sbi->node_id_lock = NULL;
 	}
 	return ret;
@@ -362,7 +363,8 @@ static void scoutfs_kill_sb(struct super_block *sb)
 	kill_block_super(sb);
 
 	if (sbi) {
-		scoutfs_unlock(sb, sbi->node_id_lock, DLM_LOCK_EX);
+		scoutfs_unlock_flags(sb, sbi->node_id_lock, DLM_LOCK_EX,
+			SCOUTFS_LKF_NO_TASK_REF);
 		sbi->node_id_lock = NULL;
 
 		scoutfs_lock_destroy(sb);

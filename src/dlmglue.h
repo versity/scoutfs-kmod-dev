@@ -286,20 +286,6 @@ struct ocfs2_lock_res_ops {
  */
 #define LOCK_TYPE_USES_LVB		0x2
 
-/*
- * Tells dlmglue to override fairness considerations when locking this
- * lock type - the blocking flag will be ignored when a lock is
- * requested and we already have it at the appropriate level and the
- * resource is currently held.  This allows a process to acquire a
- * dlmglue lock on the same resource multiple times in a row without
- * deadlocking, even if another node has asked for a competing lock on
- * the resource.
- *
- * Note that lock/unlock calls must always be balanced (1 unlock for
- * every lock), even when this flag is set.
- */
-#define LOCK_TYPE_RECURSIVE 0x4
-
 struct ocfs2_lock_holder {
 	struct list_head oh_list;
 	struct pid *oh_owner_pid;
@@ -352,6 +338,7 @@ void ocfs2_wake_downconvert_thread(struct ocfs2_super *osb);
 
 struct ocfs2_dlm_debug *ocfs2_new_dlm_debug(void);
 void ocfs2_put_dlm_debug(struct ocfs2_dlm_debug *dlm_debug);
+int ocfs2_levels_compat(struct ocfs2_lock_res *lockres, int wanted);
 
 #if 0
 /* To set the locking protocol on module initialization */

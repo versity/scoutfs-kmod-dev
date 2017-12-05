@@ -61,6 +61,108 @@ struct lock_info {
 
 static void scoutfs_lock_reclaim(struct work_struct *work);
 
+struct task_ref {
+	struct task_struct *task;
+	struct rb_node node;
+	int count;
+	int mode;/* for debugging */
+};
+
+static struct task_ref *find_task_ref(struct scoutfs_lock *lock,
+				     struct task_struct *task)
+{
+	struct rb_node *n;
+	struct task_ref *tmp;
+
+	spin_lock(&lock->task_refs_lock);
+	n = lock->task_refs.rb_node;
+	while (n) {
+		tmp = rb_entry(n, struct task_ref, node);
+
+		if (tmp->task < task)
+			n = n->rb_left;
+		else if (tmp->task > task)
+			n = n->rb_right;
+		else {
+			spin_unlock(&lock->task_refs_lock);
+			return tmp;
+		}
+	}
+	spin_unlock(&lock->task_refs_lock);
+
+	return NULL;
+}
+
+static struct task_ref *alloc_task_ref(struct task_struct *task, int mode)
+{
+	struct task_ref *ref = kzalloc(sizeof(*ref), GFP_NOFS);
+	if (ref) {
+		ref->task = task;
+		ref->count = 1;
+		ref->mode = mode;
+		RB_CLEAR_NODE(&ref->node);
+	}
+	return ref;
+}
+
+static void insert_task_ref(struct scoutfs_lock *lock, struct task_ref *ref)
+{
+	struct task_ref *tmp;
+	struct rb_node *parent = NULL;
+	struct rb_node **p;
+
+	spin_lock(&lock->task_refs_lock);
+	p = &lock->task_refs.rb_node;
+	while (*p) {
+		parent = *p;
+
+		tmp = rb_entry(parent, struct task_ref, node);
+
+		if (tmp->task < ref->task)
+			p = &(*p)->rb_left;
+		else if (tmp->task > ref->task)
+			p = &(*p)->rb_right;
+		else
+			BUG(); /* We should never find a duplicate */
+	}
+
+	rb_link_node(&ref->node, parent, p);
+	rb_insert_color(&ref->node, &lock->task_refs);
+	spin_unlock(&lock->task_refs_lock);
+}
+
+static void get_task_ref(struct task_ref *ref)
+{
+	ref->count++;
+}
+
+static struct task_ref *new_task_ref(struct scoutfs_lock *lock,
+				     struct task_struct *task, int mode)
+{
+	struct task_ref *ref = alloc_task_ref(task, mode);
+	if (ref)
+		insert_task_ref(lock, ref);
+
+	return ref;
+}
+
+static int put_task_ref(struct scoutfs_lock *lock, struct task_ref *ref)
+{
+	if (!ref)
+		return 0;
+
+	ref->count--;
+	if (ref->count == 0) {
+		spin_lock(&lock->task_refs_lock);
+		rb_erase(&ref->node, &lock->task_refs);
+		spin_unlock(&lock->task_refs_lock);
+
+		kfree(ref);
+		return 0;
+	}
+	return 1;
+}
+
 /*
  * Invalidate caches on this because another node wants a lock
  * with the a lock with the given mode and range. We always have to
@@ -196,7 +298,7 @@ static struct ocfs2_lock_res_ops scoufs_ino_lops = {
 	.downconvert_worker 	= ino_lock_downconvert,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.print			= lock_name_string,
-	.flags			= LOCK_TYPE_REQUIRES_REFRESH|LOCK_TYPE_RECURSIVE,
+	.flags			= LOCK_TYPE_REQUIRES_REFRESH,
 };
 
 static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
@@ -204,7 +306,6 @@ static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
 	.downconvert_worker 	= ino_lock_downconvert,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.print			= lock_name_string,
-	.flags			= LOCK_TYPE_RECURSIVE,
 };
 
 static struct ocfs2_lock_res_ops scoutfs_global_lops = {
@@ -251,6 +352,8 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 		}
 	}
 
+	spin_lock_init(&lock->task_refs_lock);
+	lock->task_refs = RB_ROOT;
 	RB_CLEAR_NODE(&lock->node);
 	lock->sb = sb;
 	lock->lock_name = *lock_name;
@@ -491,6 +594,7 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
+	struct task_ref *ref = NULL;
 	int lkm_flags;
 	int ret;
 
@@ -506,13 +610,37 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 
 	trace_scoutfs_lock_resource(sb, lock);
 
+	if (!(flags & SCOUTFS_LKF_NO_TASK_REF)) {
+		ref = find_task_ref(lock, current);
+		if (ref) {
+			/*
+			 * We found a ref, which means we have already locked
+			 * this resource. Check that the calling task isn't
+			 * trying to switch modes in the middle of a recursive
+			 * lock request.
+			 */
+			BUG_ON(!ocfs2_levels_compat(&lock->lockres, mode));
+			get_task_ref(ref);
+			ret = 0;
+			goto out;
+		}
+
+		ref = new_task_ref(lock, current, mode);
+		if (!ref) {
+			ret = -ENOMEM;
+			goto out;
+		}
+	}
+
 	lkm_flags = DLM_LKF_NOORDER;
 	if (flags & SCOUTFS_LKF_TRYLOCK)
 		lkm_flags |= DLM_LKF_NOQUEUE; /* maybe also NONBLOCK? */
 
 	ret = ocfs2_cluster_lock(&linfo->dlmglue, &lock->lockres, mode,
 				 lkm_flags, 0);
+out:
 	if (ret) {
+		put_task_ref(lock, ref);
 		dec_lock_users(lock);
 		put_scoutfs_lock(sb, lock);
 	} else {
@@ -837,9 +965,10 @@ int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 			      &scoutfs_node_id_lops, &start, &end, lock);
 }
 
-void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
-		    int level)
+void scoutfs_unlock_flags(struct super_block *sb, struct scoutfs_lock *lock,
+			  int level, int flags)
 {
+	struct task_ref *ref;
 	DECLARE_LOCK_INFO(sb, linfo);
 
 	if (!lock)
@@ -847,11 +976,24 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 
 	trace_scoutfs_unlock(sb, lock);
 
+	if (!(flags & SCOUTFS_LKF_NO_TASK_REF)) {
+		ref = find_task_ref(lock, current);
+		BUG_ON(!ref);
+		if (put_task_ref(lock, ref))
+			return;
+	}
+
 	ocfs2_cluster_unlock(&linfo->dlmglue, &lock->lockres, level);
 
 	dec_lock_users(lock);
 
 	put_scoutfs_lock(sb, lock);
+}
+
+void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
+		    int level)
+{
+	scoutfs_unlock_flags(sb, lock, level, 0);
 }
 
 /*

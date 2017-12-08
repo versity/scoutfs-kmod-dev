@@ -915,7 +915,7 @@ static void scoutfs_server_func(struct work_struct *work)
 	static struct sockaddr_in zeros = {0,};
 	struct socket *new_sock;
 	struct socket *sock = NULL;
-	struct scoutfs_lock *lock;
+	struct scoutfs_lock *lock = NULL;
 	struct server_connection *conn;
 	struct server_connection *conn_tmp;
 	struct pending_seq *ps;
@@ -930,7 +930,7 @@ static void scoutfs_server_func(struct work_struct *work)
 	init_waitqueue_head(&waitq);
 
 	ret = scoutfs_lock_global(sb, DLM_LOCK_EX,
-				  SCOUTFS_LKF_TRYLOCK|SCOUTFS_LKF_NO_TASK_REF,
+				  SCOUTFS_LKF_TRYLOCK,
 				  SCOUTFS_LOCK_TYPE_GLOBAL_SERVER,
 				  &lock);
 	if (ret)
@@ -1070,6 +1070,8 @@ shutdown:
 out:
 	if (sock)
 		sock_release(sock);
+
+	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 
 	/* always requeues, cancel_delayed_work_sync cancels on shutdown */
 	queue_delayed_work(server->wq, &server->dwork, HZ / 2);

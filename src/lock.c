@@ -173,16 +173,12 @@ static int put_task_ref(struct scoutfs_lock *lock, struct task_ref *ref)
  * active users that could modify the entries in the dcache (lookup,
  * create, rename, unlink).  We have to make it through all the child
  * entries and remove them from the hash so that lookup can't find them.
- * They can still be disconnected in the cache or used as working
- * directories.  A directory can have an enormous number of children so
- * we try to be break the lock if needed.
  */
 static void invalidate_inode(struct super_block *sb, u64 ino)
 {
 	struct inode *inode;
 	struct dentry *parent;
 	struct dentry *child;
-	struct dentry *saved;
 
 	inode = scoutfs_ilookup(sb, ino);
 	if (!inode)
@@ -192,32 +188,9 @@ static void invalidate_inode(struct super_block *sb, u64 ino)
 		truncate_inode_pages(inode->i_mapping, 0);
 
 	if (S_ISDIR(inode->i_mode) && (parent = d_find_alias(inode))) {
-		saved = NULL;
-restart:
+
 		spin_lock(&parent->d_lock);
-		if (saved) {
-			if (saved->d_parent != parent)
-				child = NULL;
-			else
-				child = saved;
-			dput(saved);
-		} else {
-			child = NULL;
-		}
-
-		if (child == NULL)
-			child = list_entry(parent->d_subdirs.next,
-					   struct dentry, d_u.d_child);
-
-		list_for_each_entry_from(child, &parent->d_subdirs,d_u.d_child){
-			if (spin_needbreak(&parent->d_lock) || need_resched()) {
-				saved = child;
-				dget(saved);
-				spin_unlock(&parent->d_lock);
-				cond_resched();
-				goto restart;
-			}
-
+		list_for_each_entry(child, &parent->d_subdirs, d_u.d_child){
 			spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
 			__d_drop(child);
 			spin_unlock(&child->d_lock);

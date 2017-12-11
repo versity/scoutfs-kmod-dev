@@ -120,20 +120,9 @@ static void ocfs2_schedule_blocked_lock(struct ocfs2_super *osb,
 					struct ocfs2_lock_res *lockres);
 static inline void ocfs2_recover_from_dlm_error(struct ocfs2_lock_res *lockres,
 						int convert);
-#if 0
 #define ocfs2_log_dlm_error(_func, _err, _lockres) do {			\
-	if ((_lockres)->l_type != OCFS2_LOCK_TYPE_DENTRY)				\
-		mlog(ML_ERROR, "DLM error %d while calling %s on resource %s\n",	\
-		     _err, _func, _lockres->l_name);					\
-	else										\
-		mlog(ML_ERROR, "DLM error %d while calling %s on resource %.*s%08x\n",	\
-		     _err, _func, OCFS2_DENTRY_LOCK_INO_START - 1, (_lockres)->l_name,	\
-		     (unsigned int)ocfs2_get_dentry_lock_ino(_lockres));		\
-} while (0)
-#endif
-#define ocfs2_log_dlm_error(_func, _err, _lockres) do {			\
-	mlog(ML_ERROR, "DLM error %d while calling %s on resource %s\n",	\
-	     _err, _func, (_lockres)->l_name);		\
+	     printk(KERN_ERR "DLM error %d while calling %s on resource %s\n", \
+	     _err, _func, (_lockres)->l_pretty_name);			\
 } while (0)
 
 static int ocfs2_downconvert_thread(void *arg);
@@ -254,6 +243,8 @@ void ocfs2_lock_res_init_common(struct ocfs2_super *osb,
 	res->l_unlock_action = OCFS2_UNLOCK_INVALID;
 
 	res->l_flags         = OCFS2_LOCK_INITIALIZED;
+
+	lockres_name(res, res->l_pretty_name, OCFS2_LOCK_ID_PRETTY_LEN);
 
 	ocfs2_add_lockres_tracking(res, osb->osb_dlm_debug);
 

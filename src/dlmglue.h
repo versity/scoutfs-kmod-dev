@@ -31,6 +31,7 @@
 
 /* Max length of lockid name */
 #define OCFS2_LOCK_ID_MAX_LEN  32
+#define OCFS2_LOCK_ID_PRETTY_LEN 64
 
 enum ocfs2_ast_action {
 	OCFS2_AST_INVALID = 0,
@@ -106,6 +107,7 @@ struct ocfs2_lock_res {
 	u64			 l_refresh_gen;
 	unsigned long		 l_flags;
 	char                     l_name[OCFS2_LOCK_ID_MAX_LEN];
+	char                     l_pretty_name[OCFS2_LOCK_ID_PRETTY_LEN];
 	unsigned int             l_ro_holders;
 	unsigned int             l_cw_holders;
 	unsigned int             l_ex_holders;

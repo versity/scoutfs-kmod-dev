@@ -20,7 +20,8 @@ struct scoutfs_segment {
 
 struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 						u64 segno);
-int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg);
+int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg,
+		     u64 segno, u64 seq);
 
 int scoutfs_seg_find_off(struct scoutfs_segment *seg,
 			 struct scoutfs_key_buf *key);

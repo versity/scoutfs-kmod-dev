@@ -55,6 +55,14 @@ enum {
 	SF_END_IO = 0,
 };
 
+static void *off_ptr(struct scoutfs_segment *seg, u32 off)
+{
+	unsigned int pg = off >> PAGE_SHIFT;
+	unsigned int pg_off = off & ~PAGE_MASK;
+
+	return page_address(seg->pages[pg]) + pg_off;
+}
+
 static struct scoutfs_segment *alloc_seg(struct super_block *sb, u64 segno)
 {
 	struct scoutfs_segment *seg;
@@ -349,26 +357,49 @@ int scoutfs_seg_submit_write(struct super_block *sb,
 	return 0;
 }
 
-int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg)
+/*
+ * Wait for IO on the segment to complete.  In the cached read fast path
+ * the bit is already set by the reads that populated the cache.
+ *
+ * The caller provides the segno and seq from their segment reference to
+ * validate that we found the version of the segment that they were
+ * looking for.  If we find an old cached version we return -ESTALE and
+ * the caller has to retry its reference to find the current segment for
+ * its operation.  (Typically by getting a new manifest btree root and
+ * searching for keys in the manifest.)
+ *
+ * XXX drop stale segments from the cache
+ * XXX none of the callers perform that retry today.
+ */
+int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg,
+		     u64 segno, u64 seq)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct segment_cache *cac = sbi->segment_cache;
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	int ret;
 
 	ret = wait_event_interruptible(cac->waitq,
 				       test_bit(SF_END_IO, &seg->flags));
-	if (!ret)
+	if (ret)
+		goto out;
+
+	if (seg->err) {
 		ret = seg->err;
+		goto out;
+	}
 
+	sblk = off_ptr(seg, 0);
+
+	if (WARN_ON_ONCE(segno != le64_to_cpu(sblk->segno)) ||
+	    WARN_ON_ONCE(seq != le64_to_cpu(sblk->seq))) {
+		    ret = -ESTALE;
+		    goto out;
+	}
+
+	ret = 0;
+out:
 	return ret;
-}
-
-static void *off_ptr(struct scoutfs_segment *seg, u32 off)
-{
-	unsigned int pg = off >> PAGE_SHIFT;
-	unsigned int pg_off = off & ~PAGE_MASK;
-
-	return page_address(seg->pages[pg]) + pg_off;
 }
 
 static void kvec_from_pages(struct scoutfs_segment *seg,

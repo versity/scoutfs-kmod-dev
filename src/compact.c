@@ -153,7 +153,7 @@ static int read_segment(struct super_block *sb, struct compact_seg *cseg)
 	} else {
 		cseg->seg = seg;
 		scoutfs_inc_counter(sb, compact_segment_read);
-		ret = scoutfs_seg_wait(sb, cseg->seg);
+		ret = scoutfs_seg_wait(sb, cseg->seg, cseg->segno, cseg->seq);
 	}
 
 	/* XXX verify read segment metadata */

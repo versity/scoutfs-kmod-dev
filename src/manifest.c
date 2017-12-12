@@ -633,7 +633,7 @@ static int read_items(struct super_block *sb, struct scoutfs_key_buf *key,
 		if (!ref->seg)
 			break;
 
-		err = scoutfs_seg_wait(sb, ref->seg);
+		err = scoutfs_seg_wait(sb, ref->seg, ref->segno, ref->seq);
 		if (err && !ret)
 			ret = err;
 	}

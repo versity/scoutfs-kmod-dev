@@ -35,6 +35,8 @@
 #include "ioctl.h"
 #include "count.h"
 #include "bio.h"
+#include "dlmglue.h"
+#include "stackglue.h"
 
 struct lock_info;
 
@@ -1943,6 +1945,131 @@ DEFINE_EVENT(scoutfs_super_lifecycle_class, scoutfs_kill_sb,
         TP_ARGS(sb)
 );
 
+TRACE_EVENT(ocfs2_cluster_lock,
+	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres,
+		 int requested, unsigned int lkm_flags, unsigned int arg_flags),
+
+	TP_ARGS(osb, lockres, requested, lkm_flags, arg_flags),
+
+	TP_STRUCT__entry(
+		__field(char *, lockspace)
+		__field(int, lockspace_len)
+		__field(char *, lockname)
+		__field(int, requested)
+		__field(unsigned int, lkm_flags)
+		__field(unsigned int, arg_flags)
+		__field(unsigned int, lockres_flags)
+		__field(int, lockres_level)
+		__field(int, blocking)
+		__field(unsigned int, cw_holders)
+		__field(unsigned int, pr_holders)
+		__field(unsigned int, ex_holders)
+	),
+
+	TP_fast_assign(
+		__entry->lockspace = osb->cconn->cc_name;
+		__entry->lockspace_len = osb->cconn->cc_namelen;
+		__entry->lockname = lockres->l_pretty_name;
+		__entry->requested = requested;
+		__entry->lkm_flags = lkm_flags;
+		__entry->arg_flags = arg_flags;
+		__entry->lockres_flags = lockres->l_flags;
+		__entry->lockres_level = lockres->l_level;
+		__entry->blocking = lockres->l_blocking;
+		__entry->cw_holders = lockres->l_cw_holders;
+		__entry->pr_holders = lockres->l_ro_holders;
+		__entry->ex_holders = lockres->l_ex_holders;
+	),
+
+	TP_printk("lockspace %.*s lock %s requested %d lkm_flags 0x%x arg_flags 0x%x lockres->level %d lockres->flags 0x%x lockres->blocking %d holders cw/pr/ex %u/%u/%u",
+	__entry->lockspace_len, __entry->lockspace, __entry->lockname,
+	__entry->requested, __entry->lkm_flags, __entry->arg_flags,
+	__entry->lockres_level, __entry->lockres_flags, __entry->blocking,
+	__entry->cw_holders, __entry->pr_holders, __entry->ex_holders)
+);
+
+TRACE_EVENT(ocfs2_cluster_unlock,
+	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres,
+		 int level),
+
+	TP_ARGS(osb, lockres, level),
+
+	TP_STRUCT__entry(
+		__field(char *, lockspace)
+		__field(int, lockspace_len)
+		__field(char *, lockname)
+		__field(int, level)
+		__field(unsigned int, lockres_flags)
+		__field(int, lockres_level)
+		__field(int, blocking)
+		__field(unsigned int, cw_holders)
+		__field(unsigned int, pr_holders)
+		__field(unsigned int, ex_holders)
+	),
+
+	TP_fast_assign(
+		__entry->lockspace = osb->cconn->cc_name;
+		__entry->lockspace_len = osb->cconn->cc_namelen;
+		__entry->lockname = lockres->l_pretty_name;
+		__entry->level = level;
+		__entry->lockres_flags = lockres->l_flags;
+		__entry->lockres_level = lockres->l_level;
+		__entry->blocking = lockres->l_blocking;
+		__entry->cw_holders = lockres->l_cw_holders;
+		__entry->pr_holders = lockres->l_ro_holders;
+		__entry->ex_holders = lockres->l_ex_holders;
+	),
+
+	TP_printk("lockspace %.*s lock %s level %d lockres->level %d lockres->flags 0x%x lockres->blocking %d holders cw/pr/ex: %u/%u/%u",
+	__entry->lockspace_len, __entry->lockspace, __entry->lockname,
+	__entry->level, __entry->lockres_level, __entry->lockres_flags,
+	__entry->blocking, __entry->cw_holders, __entry->pr_holders,
+	__entry->ex_holders)
+);
+
+DECLARE_EVENT_CLASS(ocfs2_lock_res_class,
+	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres),
+
+	TP_ARGS(osb, lockres),
+
+	TP_STRUCT__entry(
+		__field(char *, lockspace)
+		__field(int, lockspace_len)
+		__field(char *, lockname)
+		__field(unsigned int, lockres_flags)
+		__field(int, lockres_level)
+		__field(int, blocking)
+		__field(unsigned int, cw_holders)
+		__field(unsigned int, pr_holders)
+		__field(unsigned int, ex_holders)
+	),
+
+	TP_fast_assign(
+		__entry->lockspace = osb->cconn->cc_name;
+		__entry->lockspace_len = osb->cconn->cc_namelen;
+		__entry->lockname = lockres->l_pretty_name;
+		__entry->lockres_flags = lockres->l_flags;
+		__entry->lockres_level = lockres->l_level;
+		__entry->blocking = lockres->l_blocking;
+		__entry->cw_holders = lockres->l_cw_holders;
+		__entry->pr_holders = lockres->l_ro_holders;
+		__entry->ex_holders = lockres->l_ex_holders;
+	),
+
+	TP_printk("lockspace %.*s lock %s lockres->level %d lockres->flags 0x%x lockres->blocking %d holders cw/pr/ex: %u/%u/%u",
+	__entry->lockspace_len, __entry->lockspace, __entry->lockname,
+	__entry->lockres_level, __entry->lockres_flags, __entry->blocking,
+	__entry->cw_holders, __entry->pr_holders, __entry->ex_holders)
+);
+
+DEFINE_EVENT(ocfs2_lock_res_class, ocfs2_simple_drop_lockres,
+	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres),
+	TP_ARGS(osb, lockres)
+);
+DEFINE_EVENT(ocfs2_lock_res_class, ocfs2_unblock_lock,
+	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres),
+	TP_ARGS(osb, lockres)
+);
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

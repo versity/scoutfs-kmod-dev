@@ -38,6 +38,8 @@
 
 #include "dlmglue.h"
 
+#include "scoutfs_trace.h"
+
 #ifdef TRACE_DLMGLUE
 #define mlog(mask, fmt, args...) trace_printk(fmt , ##args)
 #define mlog_errno(st) do {						\
@@ -1106,6 +1108,8 @@ static int __ocfs2_cluster_lock(struct ocfs2_super *osb,
 	int dlm_locked = 0;
 	int kick_dc = 0;
 
+	trace_ocfs2_cluster_lock(osb, lockres, level, lkm_flags, arg_flags);
+
 	if (!(lockres->l_flags & OCFS2_LOCK_INITIALIZED)) {
 		mlog_errno(-EINVAL);
 		return -EINVAL;
@@ -1319,13 +1323,14 @@ int ocfs2_cluster_lock(struct ocfs2_super *osb,
 				    0, _RET_IP_);
 }
 
-
 static void __ocfs2_cluster_unlock(struct ocfs2_super *osb,
 				   struct ocfs2_lock_res *lockres,
 				   int level,
 				   unsigned long caller_ip)
 {
 	unsigned long flags;
+
+	trace_ocfs2_cluster_unlock(osb, lockres, level);
 
 	spin_lock_irqsave(&lockres->l_lock, flags);
 	ocfs2_dec_holders(lockres, level);
@@ -2223,6 +2228,8 @@ void ocfs2_simple_drop_lockres(struct ocfs2_super *osb,
 {
 	int ret;
 
+	trace_ocfs2_simple_drop_lockres(osb, lockres);
+
 	ocfs2_mark_lockres_freeing(osb, lockres);
 	ret = ocfs2_drop_lock(osb, lockres);
 	if (ret)
@@ -2359,6 +2366,8 @@ static int ocfs2_unblock_lock(struct ocfs2_super *osb,
 	int ret = 0;
 	int set_lvb = 0;
 	unsigned int gen;
+
+	trace_ocfs2_unblock_lock(osb, lockres);
 
 	spin_lock_irqsave(&lockres->l_lock, flags);
 

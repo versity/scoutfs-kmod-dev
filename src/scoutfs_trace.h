@@ -1654,6 +1654,11 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidate,
        TP_ARGS(sb, lck)
 );
 
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidate_ret,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_reclaim,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)

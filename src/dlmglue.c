@@ -36,6 +36,7 @@
 #include <linux/sched.h>
 #include <linux/dlm.h>
 
+#include "counters.h"
 #include "dlmglue.h"
 
 #include "scoutfs_trace.h"
@@ -1143,6 +1144,7 @@ again:
 		 * them. */
 		lockres_add_mask_waiter(lockres, &mw, OCFS2_LOCK_BUSY, 0);
 		wait = 1;
+		scoutfs_inc_counter(osb->sb, lock_busy_wait);
 		goto unlock;
 	}
 
@@ -1171,6 +1173,7 @@ again:
 		 * another node */
 		lockres_add_mask_waiter(lockres, &mw, OCFS2_LOCK_BLOCKED, 0);
 		wait = 1;
+		scoutfs_inc_counter(osb->sb, lock_blocked_wait);
 		goto unlock;
 	}
 
@@ -1187,6 +1190,7 @@ again:
 		set_lock_blocking(lockres, DLM_LOCK_EX);
 		lockres_add_mask_waiter(lockres, &mw, OCFS2_LOCK_BLOCKED, 0);
 		wait = 1;
+		scoutfs_inc_counter(osb->sb, lock_incompat_wait);
 		goto unlock;
 	}
 
@@ -1215,6 +1219,11 @@ again:
 		lockres_or_flags(lockres, OCFS2_LOCK_BUSY);
 		gen = lockres_set_pending(lockres);
 		spin_unlock_irqrestore(&lockres->l_lock, flags);
+
+		if (lkm_flags & DLM_LKF_CONVERT)
+			scoutfs_inc_counter(osb->sb, dlm_convert_request);
+		else
+			scoutfs_inc_counter(osb->sb, dlm_lock_request);
 
 		BUG_ON(level == DLM_LOCK_IV);
 		BUG_ON(level == DLM_LOCK_NL);
@@ -1974,8 +1983,9 @@ static void ocfs2_do_node_down(int node_num, void *data)
 {
 }
 
-int ocfs2_dlm_init(struct ocfs2_super *osb, char *cluster_stack,
-		   char *cluster_name, char *ls_name, struct dentry *debug_root)
+int ocfs2_dlm_init(struct ocfs2_super *osb, struct super_block *sb,
+		   char *cluster_stack, char *cluster_name, char *ls_name,
+		   struct dentry *debug_root)
 {
 	int status = 0;
 	struct ocfs2_cluster_connection *conn = NULL;
@@ -1986,6 +1996,7 @@ int ocfs2_dlm_init(struct ocfs2_super *osb, char *cluster_stack,
 		goto local;
 	}
 #endif
+	osb->sb = sb;
 
 	status = ocfs2_dlm_init_debug(osb, debug_root);
 	if (status < 0) {
@@ -2148,6 +2159,8 @@ static int ocfs2_drop_lock(struct ocfs2_super *osb,
 	}
 	mlog(0, "lock %s, successful return from ocfs2_dlm_unlock\n",
 	     lockres->l_name);
+
+	scoutfs_inc_counter(osb->sb, dlm_unlock_request);
 
 	ocfs2_wait_on_busy_lock(lockres);
 out:
@@ -2352,6 +2365,8 @@ static int ocfs2_cancel_convert(struct ocfs2_super *osb,
 
 	mlog(ML_BASTS, "lockres %s\n", lockres->l_name);
 
+	scoutfs_inc_counter(osb->sb, dlm_cancel_convert);
+
 	return ret;
 }
 
@@ -2501,11 +2516,6 @@ recheck:
 		goto leave_requeue;
 	}
 
-	/* If we get here, then we know that there are no more
-	 * incompatible holders (and anyone asking for an incompatible
-	 * lock is blocked). We can now downconvert the lock */
-	if (!lockres->l_ops->downconvert_worker)
-		goto downconvert;
 
 	/* Some lockres types want to do a bit of work before
 	 * downconverting a lock. Allow that here. The worker function
@@ -2513,6 +2523,13 @@ recheck:
 	 * it may change while we're not holding the spin lock. */
 	blocking = lockres->l_blocking;
 	level = lockres->l_level;
+
+	/* If we get here, then we know that there are no more
+	 * incompatible holders (and anyone asking for an incompatible
+	 * lock is blocked). We can now downconvert the lock */
+	if (!lockres->l_ops->downconvert_worker)
+		goto downconvert;
+
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
 
 	ctl->unblock_action = lockres->l_ops->downconvert_worker(lockres, blocking);
@@ -2552,6 +2569,19 @@ downconvert:
 
 	gen = ocfs2_prepare_downconvert(lockres, new_level);
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
+
+	switch (level) {
+	case DLM_LOCK_EX:
+		scoutfs_inc_counter(osb->sb, dlm_ex_downconvert);
+		break;
+	case DLM_LOCK_PR:
+		scoutfs_inc_counter(osb->sb, dlm_pr_downconvert);
+		break;
+	case DLM_LOCK_CW:
+		scoutfs_inc_counter(osb->sb, dlm_cw_downconvert);
+		break;
+	}
+
 	ret = ocfs2_downconvert_lock(osb, lockres, new_level, set_lvb,
 				     gen);
 

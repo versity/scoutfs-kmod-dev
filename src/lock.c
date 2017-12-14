@@ -223,7 +223,6 @@ static int invalidate_caches(struct super_block *sb, int mode,
 	if (ret)
 		return ret;
 
-
 	if (mode == DLM_LOCK_EX ||
 	    (mode == DLM_LOCK_PR && lock->lockres.l_level == DLM_LOCK_CW)) {
 		if (lock->lock_name.zone == SCOUTFS_FS_ZONE) {
@@ -237,6 +236,12 @@ static int invalidate_caches(struct super_block *sb, int mode,
 
 		ret = scoutfs_item_invalidate(sb, start, end);
 	}
+
+	/*
+	 * Not really tracing the return value here, we're mostly
+	 * interested in elapsed time between the top trace and this one.
+	 */
+	trace_scoutfs_lock_invalidate_ret(sb, lock);
 
 	return ret;
 }
@@ -1123,8 +1128,9 @@ int scoutfs_lock_setup(struct super_block *sb)
 		goto out;
 	}
 
-	ret = ocfs2_dlm_init(&linfo->dlmglue, "null", sbi->opts.cluster_name,
-			     linfo->ls_name, sbi->debug_root);
+	ret = ocfs2_dlm_init(&linfo->dlmglue, sb, "null",
+			     sbi->opts.cluster_name, linfo->ls_name,
+			     sbi->debug_root);
 	if (ret)
 		goto out;
 	linfo->dlmglue_online = true;

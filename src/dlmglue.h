@@ -176,6 +176,10 @@ struct ocfs2_super
 	atomic64_t refresh_gen;
 
 	unsigned long s_mount_opt;
+
+	/* sb is for use with scoutfs counter macros only. Eventually
+	 * we'll roll our own counters code in dlmglue. */
+	struct super_block *sb;
 };
 /* For s_mount_opt */
 #define OCFS2_MOUNT_NOINTR (1 << 2)
@@ -318,8 +322,9 @@ void ocfs2_cluster_unlock(struct ocfs2_super *osb,
 			  struct ocfs2_lock_res *lockres, int level);
 
 int ocfs2_init_super(struct ocfs2_super *osb, int flags);
-int ocfs2_dlm_init(struct ocfs2_super *osb, char *cluster_stack,
-		   char *cluster_name, char *ls_name, struct dentry *debug_root);
+int ocfs2_dlm_init(struct ocfs2_super *osb, struct super_block *sb,
+		   char *cluster_stack, char *cluster_name, char *ls_name,
+		   struct dentry *debug_root);
 void ocfs2_dlm_shutdown(struct ocfs2_super *osb, int hangup_pending);
 void ocfs2_lock_res_init_once(struct ocfs2_lock_res *res);
 void ocfs2_lock_res_init_common(struct ocfs2_super *osb,

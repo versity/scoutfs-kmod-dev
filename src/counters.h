@@ -38,6 +38,13 @@
 	EXPAND_COUNTER(data_invalidatepage)	\
 	EXPAND_COUNTER(data_writepage)		\
 	EXPAND_COUNTER(data_end_writeback_page)	\
+	EXPAND_COUNTER(dlm_cancel_convert)	\
+	EXPAND_COUNTER(dlm_convert_request)	\
+	EXPAND_COUNTER(dlm_cw_downconvert)	\
+	EXPAND_COUNTER(dlm_ex_downconvert)	\
+	EXPAND_COUNTER(dlm_lock_request)	\
+	EXPAND_COUNTER(dlm_pr_downconvert)	\
+	EXPAND_COUNTER(dlm_unlock_request)	\
 	EXPAND_COUNTER(item_alloc)		\
 	EXPAND_COUNTER(item_free)		\
 	EXPAND_COUNTER(item_create)		\
@@ -58,10 +65,14 @@
 	EXPAND_COUNTER(item_shrink_small_split)	\
 	EXPAND_COUNTER(item_shrink)		\
 	EXPAND_COUNTER(lock_alloc)		\
-	EXPAND_COUNTER(lock_free)
+	EXPAND_COUNTER(lock_blocked_wait)	\
+	EXPAND_COUNTER(lock_busy_wait)		\
+	EXPAND_COUNTER(lock_free)		\
+	EXPAND_COUNTER(lock_incompat_wait)
+
 
 #define FIRST_COUNTER alloc_alloc
-#define LAST_COUNTER lock_free
+#define LAST_COUNTER lock_incompat_wait
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

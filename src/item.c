@@ -44,7 +44,7 @@
 static bool invalid_key_val(struct scoutfs_key_buf *key, struct kvec *val)
 {
 	return WARN_ON_ONCE(key->key_len > SCOUTFS_MAX_KEY_SIZE ||
-	        (val && (scoutfs_kvec_length(val) > SCOUTFS_MAX_VAL_SIZE)));
+	        (val && (val->iov_len > SCOUTFS_MAX_VAL_SIZE)));
 }
 
 struct item_cache {
@@ -79,8 +79,8 @@ struct cached_item {
 	unsigned deletion:1;
 
 	struct scoutfs_key_buf *key;
-
-	SCOUTFS_DECLARE_KVEC(val);
+	void *val;
+	unsigned int val_len;
 };
 
 struct cached_range {
@@ -105,11 +105,16 @@ static void free_item(struct super_block *sb, struct cached_item *item)
 		WARN_ON_ONCE(!list_empty(&item->entry));
 		WARN_ON_ONCE(!RB_EMPTY_NODE(&item->node));
 		scoutfs_key_free(sb, item->key);
-		scoutfs_kvec_kfree(item->val);
+		kfree(item->val);
 		kfree(item);
 	}
 }
 
+/*
+ * The value vec may be null if the item has no value.  Values are
+ * allocated separately so that we can free them when deleting or swap
+ * them in place when updating items.
+ */
 static struct cached_item *alloc_item(struct super_block *sb,
 				      struct scoutfs_key_buf *key,
 				      struct kvec *val)
@@ -121,12 +126,15 @@ static struct cached_item *alloc_item(struct super_block *sb,
 		RB_CLEAR_NODE(&item->node);
 		INIT_LIST_HEAD(&item->entry);
 
-		if (!val)
-			scoutfs_kvec_init_null(item->val);
-
 		item->key = scoutfs_key_dup(sb, key);
-		if (!item->key ||
-		    (val && scoutfs_kvec_dup_flatten(item->val, val))) {
+		if (val) {
+			item->val = kmalloc(val->iov_len, GFP_NOFS);
+			item->val_len = val->iov_len;
+			if (item->val)
+				memcpy(item->val, val->iov_base, val->iov_len);
+		}
+
+		if (!item->key || (val && !item->val)) {
 			free_item(sb, item);
 			item = NULL;
 		}
@@ -136,6 +144,25 @@ static struct cached_item *alloc_item(struct super_block *sb,
 		scoutfs_inc_counter(sb, item_alloc);
 
 	return item;
+}
+
+/*
+ * Copy the cached item's value into the caller's single value vector.
+ * The number of bytes that fit in the vec and were copied is returned.
+ * A null val returns 0.
+ */
+static int copy_item_val(struct kvec *val, struct cached_item *item)
+{
+	int ret;
+
+	if (val) {
+		ret = min_t(size_t, item->val_len, val->iov_len);
+		memcpy(val->iov_base, item->val, ret);
+	} else {
+		ret = 0;
+	}
+
+	return ret;
 }
 
 /*
@@ -340,9 +367,7 @@ static void mark_item_dirty(struct super_block *sb, struct item_cache *cac,
 	list_del_init(&item->entry);
 	cac->lru_nr--;
 
-	update_dirty_item_counts(sb, 1, item->key->key_len,
-				 scoutfs_kvec_length(item->val));
-
+	update_dirty_item_counts(sb, 1, item->key->key_len, item->val_len);
 	update_dirty_parents(item);
 }
 
@@ -359,8 +384,7 @@ static void clear_item_dirty(struct super_block *sb, struct item_cache *cac,
 	list_add_tail(&item->entry, &cac->lru_list);
 	cac->lru_nr++;
 
-	update_dirty_item_counts(sb, -1, -item->key->key_len,
-				 -scoutfs_kvec_length(item->val));
+	update_dirty_item_counts(sb, -1, -item->key->key_len, -item->val_len);
 
 	WARN_ON_ONCE(cac->nr_dirty_items < 0 || cac->dirty_key_bytes < 0 ||
 		     cac->dirty_val_bytes < 0);
@@ -408,9 +432,13 @@ static void become_deletion_item(struct super_block *sb,
 				 struct item_cache *cac,
 				 struct cached_item *item)
 {
+	/* uses val_len to update item accounting */
 	clear_item_dirty(sb, cac, item);
-	scoutfs_kvec_kfree(item->val);
-	scoutfs_kvec_init_null(item->val);
+
+	kfree(item->val);
+	item->val = NULL;
+	item->val_len = 0;
+
 	item->deletion = 1;
 	mark_item_dirty(sb, cac, item);
 	scoutfs_inc_counter(sb, item_delete);
@@ -788,7 +816,7 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 		if (item) {
 			item_referenced(cac, item);
 			if (val)
-				ret = scoutfs_kvec_memcpy(val, item->val);
+				ret = copy_item_val(val, item);
 			else
 				ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, NULL)) {
@@ -824,11 +852,10 @@ int scoutfs_item_lookup_exact(struct super_block *sb,
 			      struct scoutfs_key_buf *key, struct kvec *val,
 			      struct scoutfs_lock *lock)
 {
-	int size = scoutfs_kvec_length(val);
 	int ret;
 
 	ret = scoutfs_item_lookup(sb, key, val, lock);
-	if (ret == size)
+	if (ret == val->iov_len)
 		ret = 0;
 	else if (ret >= 0)
 		ret = -EIO;
@@ -994,7 +1021,7 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 		scoutfs_key_copy(key, item->key);
 		if (val) {
 			item_referenced(cac, item);
-			ret = scoutfs_kvec_memcpy(val, item->val);
+			ret = copy_item_val(val, item);
 		} else {
 			ret = 0;
 		}
@@ -1027,7 +1054,7 @@ int scoutfs_item_next_same_min(struct super_block *sb,
 
 	trace_scoutfs_item_next_same_min(sb, key_len, len);
 
-	if (WARN_ON_ONCE(!val || scoutfs_kvec_length(val) < len))
+	if (WARN_ON_ONCE(!val || val->iov_len < len))
 		return -EINVAL;
 
 	ret = scoutfs_item_next(sb, key, last, val, lock);
@@ -1306,9 +1333,9 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	SCOUTFS_DECLARE_KVEC(up_val);
 	struct cached_item *item;
 	unsigned long flags;
+	void *up_val = NULL;
 	int ret;
 
 	if (invalid_key_val(key, val))
@@ -1318,11 +1345,12 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 		return -EINVAL;
 
 	if (val) {
-		ret = scoutfs_kvec_dup_flatten(up_val, val);
-		if (ret)
+		up_val = kmalloc(val->iov_len, GFP_NOFS);
+		if (!up_val) {
+			ret = -ENOMEM;
 			goto out;
-	} else {
-		scoutfs_kvec_init_null(up_val);
+		}
+		memcpy(up_val, val->iov_base, val->iov_len);
 	}
 
 	do {
@@ -1331,7 +1359,8 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 		item = find_item(sb, &cac->items, key);
 		if (item) {
 			clear_item_dirty(sb, cac, item);
-			scoutfs_kvec_swap(up_val, item->val);
+			swap(up_val, item->val);
+			item->val_len = val ? val->iov_len : 0;
 			mark_item_dirty(sb, cac, item);
 			ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, NULL)) {
@@ -1346,7 +1375,7 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 		 (ret = scoutfs_manifest_read_items(sb, key, lock->start,
 						    lock->end)) == 0);
 out:
-	scoutfs_kvec_kfree(up_val);
+	kfree(up_val);
 
 	trace_scoutfs_item_update_ret(sb, ret);
 	return ret;
@@ -1411,7 +1440,6 @@ int scoutfs_item_delete_force(struct super_block *sb,
 
 	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_CW)))
 		return -EINVAL;
-
 
 	item = alloc_item(sb, key, NULL);
 	if (!item)
@@ -1568,7 +1596,6 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
 	struct cached_item *item;
 	unsigned long flags;
 
-
 	spin_lock_irqsave(&cac->lock, flags);
 
 	item = find_item(sb, &cac->items, key);
@@ -1581,7 +1608,9 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
 /*
  * Copy the callers value into the dirty item and truncate its value if
  * the existing value is longer.  The caller must have ensured that the
- * item was dirty and had a large enough value.
+ * item was dirty and had a large enough value.  If the updated value is
+ * smaller then it will sit in the larger item allocation until the
+ * value is eventually freed along with the item.
  */
 void scoutfs_item_update_dirty(struct super_block *sb,
 			       struct scoutfs_key_buf *key, struct kvec *val)
@@ -1590,17 +1619,19 @@ void scoutfs_item_update_dirty(struct super_block *sb,
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item;
 	unsigned long flags;
+	unsigned int new_len = val ? val->iov_len : 0;
 	signed delta;
 
 	spin_lock_irqsave(&cac->lock, flags);
 
 	item = find_item(sb, &cac->items, key);
 
-	BUG_ON(!item || !item_is_dirty(item) ||
-	       scoutfs_kvec_length(val) > scoutfs_kvec_length(item->val));
+	BUG_ON(!item || !item_is_dirty(item) || new_len > item->val_len);
 
-	delta = scoutfs_kvec_length(val) - scoutfs_kvec_length(item->val);
-	scoutfs_kvec_memcpy_truncate(item->val, val);
+	delta = new_len - item->val_len;
+	if (val)
+		memcpy(item->val, val->iov_base, new_len);
+	item->val_len = new_len;
 	update_dirty_item_counts(sb, 0, 0, delta);
 
 	spin_unlock_irqrestore(&cac->lock, flags);
@@ -1767,13 +1798,15 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 	struct cached_item *item = NULL;
 	struct cached_item *del;
 	unsigned long flags;
+	struct kvec val;
 	bool appended;
 
 	spin_lock_irqsave(&cac->lock, flags);
 
 	item = first_dirty(cac->items.rb_node);
 	while (item) {
-		appended = scoutfs_seg_append_item(sb, seg, item->key, item->val,
+		kvec_init(&val, item->val, item->val_len);
+		appended = scoutfs_seg_append_item(sb, seg, item->key, &val,
 						   item_flags(item), links);
 		/* trans reservation should have limited dirty */
 		BUG_ON(!appended);
@@ -2064,7 +2097,7 @@ static int shrink_around(struct super_block *sb, struct cached_range *rng,
 
 		unlink_item(sb, cac, item);
 		key = item->key;
-		scoutfs_kvec_kfree(item->val);
+		kfree(item->val);
 		nr++;
 
 		new_rng = (void *)item;

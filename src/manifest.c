@@ -640,12 +640,12 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	struct scoutfs_key_buf seg_start;
 	struct scoutfs_key_buf seg_end;
 	struct scoutfs_btree_root root;
-	SCOUTFS_DECLARE_KVEC(item_val);
-	SCOUTFS_DECLARE_KVEC(found_val);
 	struct scoutfs_segment *seg;
 	struct manifest_ref *ref;
 	struct manifest_ref *tmp;
 	__le64 last_root_seq;
+	struct kvec found_val;
+	struct kvec item_val;
 	LIST_HEAD(ref_list);
 	LIST_HEAD(batch);
 	u8 found_flags = 0;
@@ -753,7 +753,7 @@ retry_stale:
 			 * that our segments can see.
 			 */
 			ret = scoutfs_seg_item_ptrs(ref->seg, ref->off,
-						    &item_key, item_val,
+						    &item_key, &item_val,
 						    &item_flags);
 			if (ret < 0 ||
 			    scoutfs_key_compare(&item_key, &seg_end) > 0) {
@@ -774,7 +774,7 @@ retry_stale:
 
 			/* remember new least key */
 			scoutfs_key_clone(&found_key, &item_key);
-			scoutfs_kvec_clone(found_val, item_val);
+			found_val = item_val;
 			found_flags = item_flags;
 			ref->found_ctr = ++found_ctr;
 			found = true;
@@ -798,7 +798,7 @@ retry_stale:
 		 */
 		if (!(found_flags & SCOUTFS_ITEM_FLAG_DELETION)) {
 			ret = scoutfs_item_add_batch(sb, &batch, &found_key,
-						     found_val);
+						     &found_val);
 			if (ret) {
 				if (added)
 					ret = 0;

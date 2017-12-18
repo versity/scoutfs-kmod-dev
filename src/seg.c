@@ -439,9 +439,10 @@ static void item_ptrs(struct scoutfs_segment *seg, int off,
 	if (key)
 		scoutfs_key_init(key, item_key_ptr(item),
 				 le16_to_cpu(item->key_len));
-	if (val)
-		scoutfs_kvec_init(val, item_val_ptr(item),
-				le16_to_cpu(item->val_len));
+	if (val) {
+		val->iov_base = item_val_ptr(item);
+		val->iov_len = le16_to_cpu(item->val_len);
+	}
 }
 
 static void first_last_keys(struct scoutfs_segment *seg,
@@ -645,14 +646,14 @@ bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
 	struct scoutfs_segment_item *item;
 	struct scoutfs_key_buf item_key;
-	SCOUTFS_DECLARE_KVEC(item_val);
+	struct kvec item_val;
 	u8 nr_links;
 	u32 val_len;
 	u32 bytes;
 	u32 off;
 	int i;
 
-	val_len = scoutfs_kvec_length(val);
+	val_len = val ? val->iov_len : 0;
 
 	/* initialize the segment and skip links as the first item is appended */
 	if (sblk->nr_items == 0) {
@@ -701,9 +702,10 @@ bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg
 		links[i] = &item->skip_links[i];
 	}
 
-	item_ptrs(seg, off, &item_key, item_val);
+	item_ptrs(seg, off, &item_key, &item_val);
 	scoutfs_key_copy(&item_key, key);
-	scoutfs_kvec_memcpy(item_val, val);
+	if (val_len)
+		memcpy(item_val.iov_base, val->iov_base, val_len);
 
 	return true;
 }

@@ -25,6 +25,7 @@
 #include "inode.h"
 #include "key.h"
 #include "data.h"
+#include "kvec.h"
 #include "trans.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
@@ -355,14 +356,14 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 	struct scoutfs_free_bits_key fbk = {0,};
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int bit = 0;
 	int ret;
 
 	init_free_key(&key, &fbk, sbi->node_id, segno,
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
-	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+	kvec_init(&val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 	if (ret && ret != -ENOENT)
 		goto out;
 
@@ -371,7 +372,7 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 	if (ret == -ENOENT) {
 		memset(&frb, 0, sizeof(frb));
 		set_bit_le(bit, &frb);
-		ret = scoutfs_item_create(sb, &key, val, lock);
+		ret = scoutfs_item_create(sb, &key, &val, lock);
 		goto out;
 	}
 
@@ -380,7 +381,7 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 		goto out;
 	}
 
-	ret = scoutfs_item_update(sb, &key, val, lock);
+	ret = scoutfs_item_update(sb, &key, &val, lock);
 out:
 	trace_scoutfs_data_set_segno_free(sb, segno, be64_to_cpu(fbk.base),
 					  bit, ret);
@@ -399,18 +400,18 @@ static int create_blkno_free(struct super_block *sb, u64 blkno,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_lock *lock = sbi->node_id_lock;
 	struct scoutfs_free_bits frb;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int bit;
 
 	init_free_key(key, fbk, sbi->node_id, blkno,
 		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
-	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+	kvec_init(&val, &frb, sizeof(struct scoutfs_free_bits));
 
 	bit = blkno & SCOUTFS_FREE_BITS_MASK;
 	memset(&frb, 0xff, sizeof(frb));
 	clear_bit_le(bit, frb.bits);
 
-	return scoutfs_item_create(sb, key, val, lock);
+	return scoutfs_item_create(sb, key, &val, lock);
 }
 
 /*
@@ -433,15 +434,15 @@ static int clear_segno_free(struct super_block *sb, u64 segno)
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf b_key;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	u64 blkno;
 	int bit;
 	int ret;
 
 	init_free_key(&key, &fbk, sbi->node_id, segno,
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
-	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+	kvec_init(&val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 	if (ret) {
 		/* XXX corruption, caller saw item.. should still exist */
 		if (ret == -ENOENT)
@@ -465,7 +466,7 @@ static int clear_segno_free(struct super_block *sb, u64 segno)
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
 		ret = scoutfs_item_delete(sb, &key, lock);
 	else
-		ret = scoutfs_item_update(sb, &key, val, lock);
+		ret = scoutfs_item_update(sb, &key, &val, lock);
 	if (ret)
 		scoutfs_item_delete_dirty(sb, &b_key);
 out:
@@ -484,7 +485,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	u64 segno;
 	int bit;
 	int ret;
@@ -492,8 +493,8 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	/* get the specified item */
 	init_free_key(&key, &fbk, sbi->node_id, blkno,
 		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
-	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+	kvec_init(&val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 	if (ret && ret != -ENOENT)
 		goto out;
 
@@ -502,7 +503,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	if (ret == -ENOENT) {
 		memset(&frb, 0, sizeof(frb));
 		set_bit_le(bit, &frb);
-		ret = scoutfs_item_create(sb, &key, val, lock);
+		ret = scoutfs_item_create(sb, &key, &val, lock);
 		goto out;
 	}
 
@@ -512,7 +513,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	}
 
 	if (!bitmap_full((long *)frb.bits, SCOUTFS_FREE_BITS_BITS)) {
-		ret = scoutfs_item_update(sb, &key, val, lock);
+		ret = scoutfs_item_update(sb, &key, &val, lock);
 		goto out;
 	}
 
@@ -544,15 +545,15 @@ static int clear_blkno_free(struct super_block *sb, u64 blkno)
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int bit;
 	int ret;
 
 	/* get the specified item */
 	init_free_key(&key, &fbk, sbi->node_id, blkno,
 		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
-	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+	kvec_init(&val, &frb, sizeof(struct scoutfs_free_bits));
+	ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 	if (ret) {
 		/* XXX corruption, bits should have existed */
 		if (ret == -ENOENT)
@@ -570,7 +571,7 @@ static int clear_blkno_free(struct super_block *sb, u64 blkno)
 	if (bitmap_empty((long *)frb.bits, SCOUTFS_FREE_BITS_BITS))
 		ret = scoutfs_item_delete(sb, &key, lock);
 	else
-		ret = scoutfs_item_update(sb, &key, val, lock);
+		ret = scoutfs_item_update(sb, &key, &val, lock);
 out:
 	return ret;
 }
@@ -611,7 +612,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 	struct scoutfs_block_mapping_key last_bmk;
 	struct scoutfs_block_mapping_key bmk;
 	struct block_mapping *map;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	bool holding = false;
 	bool dirtied;
 	u64 blkno;
@@ -633,7 +634,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 	while (iblock <= last) {
 		/* find the mapping that could include iblock */
 		init_mapping_key(&key, &bmk, ino, iblock);
-		scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
+		kvec_init(&val, map->encoded, sizeof(map->encoded));
 
 		ret = scoutfs_hold_trans(sb, SIC_TRUNC_BLOCK());
 		if (ret)
@@ -642,7 +643,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 
 		down_write(&datinf->alloc_rwsem);
 
-		ret = scoutfs_item_next(sb, &key, &last_key, val, lock);
+		ret = scoutfs_item_next(sb, &key, &last_key, &val, lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -669,7 +670,7 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 
 			if (!dirtied) {
 				/* dirty item with full size encoded */
-				ret = scoutfs_item_update(sb, &key, val, lock);
+				ret = scoutfs_item_update(sb, &key, &val, lock);
 				if (ret)
 					break;
 				dirtied = true;
@@ -706,8 +707,8 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 			/* update how ever much of the item we finished */
 			bytes = encode_mapping(map);
 			if (bytes) {
-				scoutfs_kvec_init(val, map->encoded, bytes);
-				scoutfs_item_update_dirty(sb, &key, val);
+				kvec_init(&val, map->encoded, bytes);
+				scoutfs_item_update_dirty(sb, &key, &val);
 			} else {
 				scoutfs_item_delete_dirty(sb, &key);
 			}
@@ -840,15 +841,15 @@ static int find_free_blkno(struct super_block *sb, u64 blkno, u64 *blkno_ret)
 	struct scoutfs_free_bits_key fbk;
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int ret;
 	int bit;
 
 	init_free_key(&key, &fbk, sbi->node_id, blkno,
 		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
-	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+	kvec_init(&val, &frb, sizeof(struct scoutfs_free_bits));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 	if (ret < 0)
 		goto out;
 
@@ -878,7 +879,7 @@ static int find_free_segno(struct super_block *sb, u64 *segno)
 	struct scoutfs_free_bits frb;
 	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int bit;
 	int ret;
 
@@ -886,9 +887,9 @@ static int find_free_segno(struct super_block *sb, u64 *segno)
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
 	init_free_key(&last_key, &last_fbk, sbi->node_id, ~0,
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
-	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
+	kvec_init(&val, &frb, sizeof(struct scoutfs_free_bits));
 
-	ret = scoutfs_item_next(sb, &key, &last_key, val, lock);
+	ret = scoutfs_item_next(sb, &key, &last_key, &val, lock);
 	if (ret < 0)
 		goto out;
 
@@ -921,7 +922,7 @@ static int find_alloc_block(struct super_block *sb, struct inode *inode,
 {
 	DECLARE_DATA_INFO(sb, datinf);
 	struct task_cursor *curs;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int bytes;
 	u64 segno;
 	u64 blkno;
@@ -965,11 +966,11 @@ static int find_alloc_block(struct super_block *sb, struct inode *inode,
 	trace_scoutfs_data_find_alloc_block_found_seg(sb, segno, blkno);
 
 	/* ensure that we can copy in encoded without failing */
-	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
+	kvec_init(&val, map->encoded, sizeof(map->encoded));
 	if (map_exists)
-		ret = scoutfs_item_update(sb, map_key, val, data_lock);
+		ret = scoutfs_item_update(sb, map_key, &val, data_lock);
 	else
-		ret = scoutfs_item_create(sb, map_key, val, data_lock);
+		ret = scoutfs_item_create(sb, map_key, &val, data_lock);
 	if (ret)
 		goto out;
 
@@ -991,8 +992,8 @@ static int find_alloc_block(struct super_block *sb, struct inode *inode,
 	inode->i_blocks += SCOUTFS_BLOCK_SECTORS;
 
 	bytes = encode_mapping(map);
-	scoutfs_kvec_init(val, map->encoded, bytes);
-	scoutfs_item_update_dirty(sb, map_key, val);
+	kvec_init(&val, map->encoded, bytes);
+	scoutfs_item_update_dirty(sb, map_key, &val);
 
 	/* set cursor to next block, clearing if we finish the segment */
 	curs->blkno++;
@@ -1016,7 +1017,7 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	struct scoutfs_key_buf key;
 	struct scoutfs_lock *lock;
 	struct block_mapping *map;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	bool exists;
 	int ind;
 	int ret;
@@ -1031,10 +1032,10 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 		return -ENOMEM;
 
 	init_mapping_key(&key, &bmk, scoutfs_ino(inode), iblock);
-	scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
+	kvec_init(&val, map->encoded, sizeof(map->encoded));
 
 	/* find the mapping item that covers the logical block */
-	ret = scoutfs_item_lookup(sb, &key, val, lock);
+	ret = scoutfs_item_lookup(sb, &key, &val, lock);
 	if (ret < 0) {
 		if (ret != -ENOENT)
 			goto out;
@@ -1316,7 +1317,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	struct pending_fiemap pend;
 	struct scoutfs_block_mapping_key last_bmk;
 	struct scoutfs_block_mapping_key bmk;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	loff_t i_size;
 	bool offline;
 	u64 blk_off;
@@ -1358,9 +1359,9 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 
 	while (blk_off <= final) {
 		init_mapping_key(&key, &bmk, ino, blk_off);
-		scoutfs_kvec_init(val, &map->encoded, sizeof(map->encoded));
+		kvec_init(&val, &map->encoded, sizeof(map->encoded));
 
-		ret = scoutfs_item_next(sb, &key, &last_key, val, inode_lock);
+		ret = scoutfs_item_next(sb, &key, &last_key, &val, inode_lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;

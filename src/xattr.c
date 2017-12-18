@@ -117,7 +117,7 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
 	struct scoutfs_xattr_key last_xak;
 	struct scoutfs_key_buf last;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	u8 last_part;
 	int total;
 	u8 part;
@@ -140,8 +140,8 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
 
 	for (;;) {
 		xak->part = part;
-		scoutfs_kvec_init(val, (void *)xat + total, bytes - total);
-		ret = scoutfs_item_next(sb, &key, &last, val, lock);
+		kvec_init(&val, (void *)xat + total, bytes - total);
+		ret = scoutfs_item_next(sb, &key, &last, &val, lock);
 		if (ret < 0) {
 			/* XXX corruption, ran out of parts */
 			if (ret == -ENOENT && part > 0)
@@ -216,8 +216,8 @@ static int create_xattr_items(struct inode *inode, u64 id,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_xattr_key xak;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
 	unsigned int part_bytes;
+	struct kvec val;
 	int total;
 	int ret;
 
@@ -228,9 +228,9 @@ static int create_xattr_items(struct inode *inode, u64 id,
 	ret = 0;
 	while (total < bytes) {
 		part_bytes = min(bytes - total, SCOUTFS_XATTR_MAX_PART_SIZE);
-		scoutfs_kvec_init(val, (void *)xat + total, part_bytes);
+		kvec_init(&val, (void *)xat + total, part_bytes);
 
-		ret = scoutfs_item_create(sb, &key, val, lock);
+		ret = scoutfs_item_create(sb, &key, &val, lock);
 		if (ret) {
 			while (xak.part-- > 0)
 				scoutfs_item_delete_dirty(sb, &key);

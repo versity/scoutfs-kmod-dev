@@ -266,7 +266,7 @@ int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
 	struct scoutfs_key_buf key;
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	const u64 refresh_gen = lock->refresh_gen;
 	int ret;
 
@@ -282,11 +282,11 @@ int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
 		return 0;
 
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
-	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+	kvec_init(&val, &sinode, sizeof(sinode));
 
 	mutex_lock(&si->item_mutex);
 	if (atomic64_read(&si->last_refreshed) < refresh_gen) {
-		ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+		ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 		if (ret == 0) {
 			load_inode(inode, &sinode);
 			atomic64_set(&si->last_refreshed, refresh_gen);
@@ -909,7 +909,7 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_key_buf key;
 	struct scoutfs_inode sinode;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int ret;
 	int err;
 
@@ -925,9 +925,9 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
 	BUG_ON(ret);
 
 	scoutfs_inode_init_key(&key, &ikey, ino);
-	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+	kvec_init(&val, &sinode, sizeof(sinode));
 
-	err = scoutfs_item_update(sb, &key, val, lock);
+	err = scoutfs_item_update(sb, &key, &val, lock);
 	if (err) {
 		scoutfs_err(sb, "inode %llu update err %d", ino, err);
 		BUG_ON(err);
@@ -1314,8 +1314,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_key_buf key;
 	struct scoutfs_inode sinode;
-	SCOUTFS_DECLARE_KVEC(val);
 	struct inode *inode;
+	struct kvec val;
 	int ret;
 
 	inode = new_inode(sb);
@@ -1347,9 +1347,9 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	store_inode(&sinode, inode);
 	scoutfs_inode_init_key(&key, &ikey, scoutfs_ino(inode));
-	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+	kvec_init(&val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_create(sb, &key, val, lock);
+	ret = scoutfs_item_create(sb, &key, &val, lock);
 	if (ret) {
 		iput(inode);
 		return ERR_PTR(ret);
@@ -1400,9 +1400,9 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
 	LIST_HEAD(ind_locks);
 	bool release = false;
+	struct kvec val;
 	umode_t mode;
 	u64 ind_seq;
 	int ret;
@@ -1412,9 +1412,9 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 		return ret;
 
 	scoutfs_inode_init_key(&key, &ikey, ino);
-	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
+	kvec_init(&val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;

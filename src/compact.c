@@ -16,7 +16,6 @@
 
 #include "super.h"
 #include "format.h"
-#include "kvec.h"
 #include "seg.h"
 #include "bio.h"
 #include "cmp.h"
@@ -186,7 +185,7 @@ static int next_item(struct super_block *sb, struct compact_cursor *curs,
 	struct compact_seg *upper = curs->upper;
 	struct compact_seg *lower = curs->lower;
 	struct scoutfs_key_buf lower_key;
-	SCOUTFS_DECLARE_KVEC(lower_val);
+	struct kvec lower_val;
 	u8 lower_flags;
 	int cmp;
 	int ret;
@@ -205,7 +204,7 @@ retry:
 			goto out;
 
 		ret = scoutfs_seg_item_ptrs(lower->seg, lower->off,
-					    &lower_key, lower_val,
+					    &lower_key, &lower_val,
 					    &lower_flags);
 		if (ret == 0)
 			break;
@@ -232,7 +231,7 @@ retry:
 
 	if (cmp > 0) {
 		scoutfs_key_clone(item_key, &lower_key);
-		scoutfs_kvec_clone(item_val, lower_val);
+		*item_val = lower_val;
 		*item_flags = lower_flags;
 	}
 
@@ -278,13 +277,13 @@ static int compact_segments(struct super_block *sb,
 			    struct list_head *results)
 {
 	struct scoutfs_key_buf item_key;
-	SCOUTFS_DECLARE_KVEC(item_val);
 	struct scoutfs_segment *seg;
 	struct compact_seg *cseg;
 	struct compact_seg *upper;
 	struct compact_seg *lower;
 	unsigned next_segno = 0;
 	bool append_filled = false;
+	struct kvec item_val;
 	int ret = 0;
 	u8 flags;
 
@@ -363,7 +362,7 @@ static int compact_segments(struct super_block *sb,
 			break;
 
 		if (!append_filled)
-			ret = next_item(sb, curs, &item_key, item_val, &flags);
+			ret = next_item(sb, curs, &item_key, &item_val, &flags);
 		else
 			ret = 1;
 		if (ret <= 0)
@@ -410,13 +409,14 @@ static int compact_segments(struct super_block *sb,
 		list_add_tail(&cseg->entry, results);
 
 		for (;;) {
-			if (!scoutfs_seg_append_item(sb, seg, &item_key, item_val,
-						     flags, curs->links)) {
+			if (!scoutfs_seg_append_item(sb, seg, &item_key,
+						     &item_val, flags,
+						     curs->links)) {
 				append_filled = true;
 				ret = 0;
 				break;
 			}
-			ret = next_item(sb, curs, &item_key, item_val, &flags);
+			ret = next_item(sb, curs, &item_key, &item_val, &flags);
 			if (ret <= 0) {
 				append_filled = false;
 				break;

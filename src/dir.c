@@ -247,7 +247,7 @@ static int lookup_dirent(struct super_block *sb, struct inode *dir,
 			 struct scoutfs_lock *lock)
 {
 	struct scoutfs_key_buf *key = NULL;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int ret;
 
 	key = alloc_dirent_key(sb, scoutfs_ino(dir), name, name_len);
@@ -256,9 +256,9 @@ static int lookup_dirent(struct super_block *sb, struct inode *dir,
 		goto out;
 	}
 
-	scoutfs_kvec_init(val, dent, sizeof(struct scoutfs_dirent));
+	kvec_init(&val, dent, sizeof(struct scoutfs_dirent));
 
-	ret = scoutfs_item_lookup_exact(sb, key, val, lock);
+	ret = scoutfs_item_lookup_exact(sb, key, &val, lock);
 out:
 	scoutfs_key_free(sb, key);
 	return ret;
@@ -457,9 +457,9 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	struct scoutfs_readdir_key rkey;
 	struct scoutfs_readdir_key last_rkey;
 	struct scoutfs_lock *dir_lock;
-	SCOUTFS_DECLARE_KVEC(val);
 	unsigned int item_len;
 	unsigned int name_len;
+	struct kvec val;
 	u64 pos;
 	int ret;
 
@@ -483,8 +483,8 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	for (;;) {
 		init_readdir_key(&key, &rkey, scoutfs_ino(inode), file->f_pos);
 
-		scoutfs_kvec_init(val, dent, item_len);
-		ret = scoutfs_item_next_same_min(sb, &key, &last_key, val,
+		kvec_init(&val, dent, item_len);
+		ret = scoutfs_item_next_same_min(sb, &key, &last_key, &val,
 				offsetof(struct scoutfs_dirent, name[1]),
 						 dir_lock);
 		if (ret < 0) {
@@ -529,9 +529,9 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 	struct scoutfs_dirent *dent = NULL;
 	struct scoutfs_key_buf rdir_key;
 	struct scoutfs_readdir_key rkey;
-	SCOUTFS_DECLARE_KVEC(val);
 	bool del_ent = false;
 	bool del_rdir = false;
+	struct kvec val;
 	int ret;
 
 	ent_key = alloc_dirent_key(sb, dir_ino, name, name_len);
@@ -549,18 +549,17 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 	memcpy(dent->name, name, name_len);
 
 	/* dirent item for lookup */
-	scoutfs_kvec_init(val, dent, sizeof(struct scoutfs_dirent));
-	ret = scoutfs_item_create(sb, ent_key, val, dir_lock);
+	kvec_init(&val, dent, sizeof(struct scoutfs_dirent));
+	ret = scoutfs_item_create(sb, ent_key, &val, dir_lock);
 	if (ret)
 		goto out;
 	del_ent = true;
 
 	/* readdir item for .. readdir */
 	init_readdir_key(&rdir_key, &rkey, dir_ino, pos);
-	scoutfs_kvec_init(val, dent, offsetof(struct scoutfs_dirent,
-					      name[name_len]));
+	kvec_init(&val, dent, offsetof(struct scoutfs_dirent, name[name_len]));
 
-	ret = scoutfs_item_create(sb, &rdir_key, val, dir_lock);
+	ret = scoutfs_item_create(sb, &rdir_key, &val, dir_lock);
 	if (ret)
 		goto out;
 	del_rdir = true;
@@ -984,7 +983,7 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 {
 	struct scoutfs_symlink_key skey;
 	struct scoutfs_key_buf key;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	unsigned bytes;
 	unsigned nr;
 	int ret;
@@ -999,12 +998,12 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 
 		init_symlink_key(&key, &skey, ino, i);
 		bytes = min_t(u64, size, SCOUTFS_MAX_VAL_SIZE);
-		scoutfs_kvec_init(val, (void *)target, bytes);
+		kvec_init(&val, (void *)target, bytes);
 
 		if (op == SYM_CREATE)
-			ret = scoutfs_item_create(sb, &key, val, lock);
+			ret = scoutfs_item_create(sb, &key, &val, lock);
 		else if (op == SYM_LOOKUP)
-			ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
+			ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
 		else if (op == SYM_DELETE)
 			ret = scoutfs_item_delete(sb, &key, lock);
 		if (ret)
@@ -1440,16 +1439,16 @@ static int verify_entry(struct super_block *sb, u64 dir_ino, const char *name,
 {
 	struct scoutfs_key_buf *key = NULL;
 	struct scoutfs_dirent dent;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct kvec val;
 	int ret;
 
 	key = alloc_dirent_key(sb, dir_ino, name, name_len);
 	if (!key)
 		return -ENOMEM;
 
-	scoutfs_kvec_init(val, &dent, sizeof(dent));
+	kvec_init(&val, &dent, sizeof(dent));
 
-	ret = scoutfs_item_lookup_exact(sb, key, val, lock);
+	ret = scoutfs_item_lookup_exact(sb, key, &val, lock);
 	if (ret == 0 && le64_to_cpu(dent.ino) != ino)
 		ret = -ENOENT;
 	else if (ret == -ENOENT && ino == 0)

@@ -28,7 +28,6 @@
 
 #include "key.h"
 #include "format.h"
-#include "kvec.h"
 #include "lock.h"
 #include "seg.h"
 #include "super.h"

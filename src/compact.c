@@ -619,7 +619,10 @@ static void scoutfs_compact_func(struct work_struct *work)
 	free_cseg_list(sb, &curs.csegs);
 	free_cseg_list(sb, &results);
 
-	WARN_ON_ONCE(ret);
+	if (ret == -ESTALE)
+		scoutfs_inc_counter(sb, compact_stale_error);
+
+	WARN_ON_ONCE(ret && ret != -ESTALE);
 	trace_scoutfs_compact_func(sb, ret);
 }
 

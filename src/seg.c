@@ -26,6 +26,7 @@
 #include "alloc.h"
 #include "key.h"
 #include "counters.h"
+#include "triggers.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -377,6 +378,8 @@ int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct segment_cache *cac = sbi->segment_cache;
 	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+	unsigned long flags;
+	bool erased;
 	int ret;
 
 	ret = wait_event_interruptible(cac->waitq,
@@ -392,12 +395,17 @@ int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg,
 	sblk = off_ptr(seg, 0);
 
 	if (WARN_ON_ONCE(segno != le64_to_cpu(sblk->segno)) ||
-	    WARN_ON_ONCE(seq != le64_to_cpu(sblk->seq))) {
-		    ret = -ESTALE;
-		    goto out;
-	}
+	    WARN_ON_ONCE(seq != le64_to_cpu(sblk->seq)) ||
+	    scoutfs_trigger(sb, SEG_STALE_READ)) {
+		spin_lock_irqsave(&cac->lock, flags);
+		erased = erase_seg(cac, seg);
+		spin_unlock_irqrestore(&cac->lock, flags);
+		if (erased)
+			scoutfs_seg_put(seg);
 
-	ret = 0;
+		scoutfs_inc_counter(sb, seg_stale_read);
+		ret = -ESTALE;
+	}
 out:
 	return ret;
 }

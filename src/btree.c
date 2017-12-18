@@ -24,6 +24,8 @@
 #include "key.h"
 #include "btree.h"
 #include "sort_priv.h"
+#include "counters.h"
+#include "triggers.h"
 
 #include "scoutfs_trace.h"
 
@@ -603,12 +605,10 @@ static bool valid_referenced_block(struct scoutfs_super_block *super,
  *
  * Btree blocks don't have rigid cache consistency.  We can be following
  * a new root to read refs into previously stale cached blocks.  If we
- * see that the block metadata doesn't match we first assume that we
- * just have a stale block and try and re-read it.  If it still doesn't
- * match we assume that we're an reader racing with a writer overwriting
- * old blocks in the ring.  We return an error that tells the caller to
- * deal with this error: either find a new root or return a hard error
- * if the block is really corrupt.
+ * hit a cached block that doesn't match the ref (or indeed a corrupt
+ * block) we return -ESTALE which tells the caller to deal with this
+ * error: either find a new root or return a hard error if the block is
+ * really corrupt.
  *
  * btree callers serialize concurrent writers in a btree but not between
  * btrees.  We have to lock around the shared btree_info.  Callers do
@@ -626,13 +626,11 @@ static int get_ref_block(struct super_block *sb, int flags,
 	struct scoutfs_btree_block *bt = NULL;
 	struct scoutfs_btree_block *new;
 	struct buffer_head *bh;
-	int retries = 1;
 	u64 blkno;
 	u64 seq;
 	int ret;
 	int i;
 
-retry:
 	/* always get the current block, either to return or cow from */
 	if (ref && ref->blkno) {
 		bh = sb_bread(sb, le64_to_cpu(ref->blkno));
@@ -642,17 +640,17 @@ retry:
 		}
 		bt = (void *)bh->b_data;
 
-		if (!valid_referenced_block(super, ref, bt, bh)) {
-			if (retries-- > 0) {
-				lock_buffer(bh);
-				clear_buffer_uptodate(bh);
-				unlock_buffer(bh);
-				put_bh(bh);
-				bt = NULL;
-				goto retry;
-			}
-			/* XXX let us know when we eventually hit this */
-			ret = WARN_ON_ONCE(-ESTALE);
+		if (!valid_referenced_block(super, ref, bt, bh) ||
+		    scoutfs_trigger(sb, BTREE_STALE_READ)) {
+
+			lock_buffer(bh);
+			clear_buffer_uptodate(bh);
+			unlock_buffer(bh);
+			put_bh(bh);
+			bt = NULL;
+
+			scoutfs_inc_counter(sb, btree_stale_read);
+			ret = -ESTALE;
 			goto out;
 		}
 

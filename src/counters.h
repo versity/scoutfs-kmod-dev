@@ -14,11 +14,13 @@
 #define EXPAND_EACH_COUNTER					\
 	EXPAND_COUNTER(alloc_alloc)				\
 	EXPAND_COUNTER(alloc_free)				\
+	EXPAND_COUNTER(btree_stale_read)			\
 	EXPAND_COUNTER(compact_operations)			\
 	EXPAND_COUNTER(compact_segment_moved)			\
 	EXPAND_COUNTER(compact_segment_read)			\
 	EXPAND_COUNTER(compact_segment_write_bytes)		\
 	EXPAND_COUNTER(compact_segment_writes)			\
+	EXPAND_COUNTER(compact_stale_error)			\
 	EXPAND_COUNTER(compact_sticky_upper)			\
 	EXPAND_COUNTER(compact_sticky_written)			\
 	EXPAND_COUNTER(data_end_writeback_page)			\
@@ -59,9 +61,11 @@
 	EXPAND_COUNTER(lock_free)				\
 	EXPAND_COUNTER(lock_incompat_wait)			\
 	EXPAND_COUNTER(manifest_compact_migrate)		\
+	EXPAND_COUNTER(manifest_hard_stale_error)		\
 	EXPAND_COUNTER(seg_alloc)				\
 	EXPAND_COUNTER(seg_free)				\
 	EXPAND_COUNTER(seg_shrink)				\
+	EXPAND_COUNTER(seg_stale_read)				\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\
 	EXPAND_COUNTER(trans_commit_item_flush)			\

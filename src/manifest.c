@@ -26,6 +26,7 @@
 #include "manifest.h"
 #include "trans.h"
 #include "counters.h"
+#include "triggers.h"
 #include "client.h"
 #include "scoutfs_trace.h"
 
@@ -527,7 +528,6 @@ out:
 	scoutfs_btree_put_iref(&iref);
 	scoutfs_btree_put_iref(&prev);
 	kfree(mkey);
-	BUG_ON(ret == -ESTALE); /* XXX caller needs to retry or return error */
 	return ret;
 }
 
@@ -575,8 +575,10 @@ static int read_items(struct super_block *sb, struct scoutfs_key_buf *key,
 	struct scoutfs_segment *seg;
 	struct manifest_ref *ref;
 	struct manifest_ref *tmp;
+	__le64 last_root_seq;
 	LIST_HEAD(ref_list);
 	LIST_HEAD(batch);
+	bool force_hard;
 	u8 found_flags = 0;
 	u8 item_flags;
 	int found_ctr;
@@ -604,6 +606,8 @@ static int read_items(struct super_block *sb, struct scoutfs_key_buf *key,
 	 * either get a manifest ref in the lvb of their lock or they'll
 	 * ask the server the first time the system sees the lock.
 	 */
+	last_root_seq = 0;
+retry_stale:
 	ret = scoutfs_client_get_manifest_root(sb, &root);
 	if (ret)
 		goto out;
@@ -769,6 +773,25 @@ out:
 	list_for_each_entry_safe(ref, tmp, &ref_list, entry) {
 		list_del_init(&ref->entry);
 		free_ref(sb, ref);
+	}
+
+	/*
+	 * Resample the root and retry reads as long as we see
+	 * inconsistent blocks/segments and new roots to read through.
+	 * Persistent inconsistency in the same root is seen as corrupt
+	 * structures instead.
+	 */
+	force_hard = scoutfs_trigger(sb, HARD_STALE_ERROR);
+	if (ret == -ESTALE || force_hard) {
+		/* keep trying as long as the root changes */
+		if ((last_root_seq != root.ref.seq) && !force_hard) {
+			last_root_seq = root.ref.seq;
+			goto retry_stale;
+		}
+
+		/* persistent error */
+		scoutfs_inc_counter(sb, manifest_hard_stale_error);
+		ret = -EIO;
 	}
 
 	return ret;

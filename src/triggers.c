@@ -38,7 +38,9 @@ struct scoutfs_triggers {
 	struct scoutfs_triggers *name = SCOUTFS_SB(sb)->triggers
 
 static char *names[] = {
-	[SCOUTFS_TRIGGER_SOMETHING] = "something",
+	[SCOUTFS_TRIGGER_BTREE_STALE_READ] = "btree_stale_read",
+	[SCOUTFS_TRIGGER_HARD_STALE_ERROR] = "hard_stale_error",
+	[SCOUTFS_TRIGGER_SEG_STALE_READ] = "seg_stale_read",
 };
 
 bool scoutfs_trigger_test_and_clear(struct super_block *sb, unsigned int t)

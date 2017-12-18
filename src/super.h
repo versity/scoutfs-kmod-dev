@@ -8,6 +8,7 @@
 #include "options.h"
 
 struct scoutfs_counters;
+struct scoutfs_triggers;
 struct item_cache;
 struct manifest;
 struct segment_cache;
@@ -61,6 +62,7 @@ struct scoutfs_sb_info {
 	struct kset *kset;
 
 	struct scoutfs_counters *counters;
+	struct scoutfs_triggers *triggers;
 
 	struct mount_options opts;
 

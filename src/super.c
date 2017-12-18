@@ -28,6 +28,7 @@
 #include "xattr.h"
 #include "msg.h"
 #include "counters.h"
+#include "triggers.h"
 #include "trans.h"
 #include "item.h"
 #include "manifest.h"
@@ -125,6 +126,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_seg_destroy(sb);
 	scoutfs_lock_destroy(sb);
 
+	scoutfs_destroy_triggers(sb);
 	debugfs_remove(sbi->debug_root);
 	scoutfs_destroy_counters(sb);
 	if (sbi->kset)
@@ -324,6 +326,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	ret = scoutfs_setup_counters(sb) ?:
 	      scoutfs_read_supers(sb, &SCOUTFS_SB(sb)->super) ?:
 	      scoutfs_debugfs_setup(sb) ?:
+	      scoutfs_setup_triggers(sb) ?:
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
 	      scoutfs_inode_setup(sb) ?:

@@ -20,6 +20,7 @@ struct client_info;
 struct server_info;
 struct inode_sb_info;
 struct btree_info;
+struct sysfs_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -57,9 +58,7 @@ struct scoutfs_sb_info {
 	struct lock_info *lock_info;
 	struct client_info *client_info;
 	struct server_info *server_info;
-
-	/* $sysfs/fs/scoutfs/$id/ */
-	struct kset *kset;
+	struct sysfs_info *sfsinfo;
 
 	struct scoutfs_counters *counters;
 	struct scoutfs_triggers *triggers;

@@ -41,9 +41,9 @@
 #include "client.h"
 #include "server.h"
 #include "options.h"
+#include "sysfs.h"
 #include "scoutfs_trace.h"
 
-static struct kset *scoutfs_kset;
 static struct dentry *scoutfs_debugfs_root;
 
 /*
@@ -129,8 +129,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_destroy_triggers(sb);
 	debugfs_remove(sbi->debug_root);
 	scoutfs_destroy_counters(sb);
-	if (sbi->kset)
-		kset_unregister(sbi->kset);
+	scoutfs_destroy_sysfs(sb);
 	kfree(sbi);
 
 	sb->s_fs_info = NULL;
@@ -310,12 +309,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	INIT_DELAYED_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
 
-	/* XXX can have multiple mounts of a  device, need mount id */
-	sbi->kset = kset_create_and_add(sb->s_id, NULL, &scoutfs_kset->kobj);
-	if (!sbi->kset) {
-		ret = -ENOMEM;
-		goto out;
-	}
 
 	ret = scoutfs_parse_options(sb, data, &opts);
 	if (ret)
@@ -323,7 +316,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	sbi->opts = opts;
 
-	ret = scoutfs_setup_counters(sb) ?:
+	ret = scoutfs_setup_sysfs(sb) ?:
+	      scoutfs_setup_counters(sb) ?:
 	      scoutfs_read_supers(sb, &SCOUTFS_SB(sb)->super) ?:
 	      scoutfs_debugfs_setup(sb) ?:
 	      scoutfs_setup_triggers(sb) ?:
@@ -398,8 +392,7 @@ static void teardown_module(void)
 	debugfs_remove(scoutfs_debugfs_root);
 	scoutfs_dir_exit();
 	scoutfs_inode_exit();
-	if (scoutfs_kset)
-		kset_unregister(scoutfs_kset);
+	scoutfs_sysfs_exit();
 }
 
 static int __init scoutfs_module_init(void)
@@ -421,9 +414,9 @@ static int __init scoutfs_module_init(void)
 	if (ret)
 		return ret;
 
-	scoutfs_kset = kset_create_and_add("scoutfs", NULL, fs_kobj);
-	if (!scoutfs_kset)
-		return -ENOMEM;
+	ret = scoutfs_sysfs_init();
+	if (ret)
+		return ret;
 
 	scoutfs_debugfs_root = debugfs_create_dir("scoutfs", NULL);
 	if (!scoutfs_debugfs_root) {

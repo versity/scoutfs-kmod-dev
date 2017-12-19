@@ -16,6 +16,7 @@
 #include <linux/percpu_counter.h>
 
 #include "super.h"
+#include "sysfs.h"
 #include "counters.h"
 
 /*
@@ -85,10 +86,9 @@ int scoutfs_setup_counters(struct super_block *sb)
 			goto out;
 	}
 
-	counters->kobj.kset = sbi->kset;
 	init_completion(&counters->comp);
 	ret = kobject_init_and_add(&counters->kobj, &scoutfs_counters_ktype,
-				    NULL, "counters");
+				    scoutfs_sysfs_sb_dir(sb), "counters");
 out:
 	if (ret) {
 		/* tear down partial to avoid destroying null kobjs */

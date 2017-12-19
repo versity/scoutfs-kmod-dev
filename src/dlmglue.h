@@ -199,6 +199,14 @@ enum ocfs2_unblock_action {
 				      * ->post_unlock() callback. */
 };
 
+enum ocfs2_lock_events {
+	EVENT_DLM_LOCK = 0,
+	EVENT_DLM_UNLOCK,
+	EVENT_DLM_CONVERT,
+	EVENT_DLM_CANCEL_CONVERT,
+	EVENT_DLM_DOWNCONVERT_WORK,
+};
+
 /*
  * OCFS2 Lock Resource Operations
  *
@@ -268,6 +276,12 @@ struct ocfs2_lock_res_ops {
 	 * Optional: pretty print the lockname into a buffer
 	 */
 	void (*print)(struct ocfs2_lock_res *, char *, unsigned int);
+
+	/*
+	 * Optional: Lightweight event callback, intended for quick
+	 * operations like collecting stats, etc.
+	 */
+	void (*notify_event)(struct ocfs2_lock_res *, enum ocfs2_lock_events);
 
 	/*
 	 * LOCK_TYPE_* flags which describe the specific requirements

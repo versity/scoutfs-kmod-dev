@@ -104,6 +104,13 @@ static inline void lockres_name(struct ocfs2_lock_res *lockres, char *buf,
 		snprintf(buf, len, "%s", lockres->l_name);
 }
 
+static inline void lockres_notify_event(struct ocfs2_lock_res *lockres,
+					enum ocfs2_lock_events event)
+{
+	if (lockres->l_ops->notify_event)
+		lockres->l_ops->notify_event(lockres, event);
+}
+
 static inline int ocfs2_may_continue_on_blocked_lock(struct ocfs2_lock_res *lockres,
 						     int wanted);
 static void __ocfs2_cluster_unlock(struct ocfs2_super *osb,
@@ -1220,10 +1227,13 @@ again:
 		gen = lockres_set_pending(lockres);
 		spin_unlock_irqrestore(&lockres->l_lock, flags);
 
-		if (lkm_flags & DLM_LKF_CONVERT)
+		if (lkm_flags & DLM_LKF_CONVERT) {
 			scoutfs_inc_counter(osb->sb, dlm_convert_request);
-		else
+			lockres_notify_event(lockres, EVENT_DLM_CONVERT);
+		} else {
 			scoutfs_inc_counter(osb->sb, dlm_lock_request);
+			lockres_notify_event(lockres, EVENT_DLM_LOCK);
+		}
 
 		BUG_ON(level == DLM_LOCK_IV);
 		BUG_ON(level == DLM_LOCK_NL);
@@ -2161,6 +2171,7 @@ static int ocfs2_drop_lock(struct ocfs2_super *osb,
 	     lockres->l_name);
 
 	scoutfs_inc_counter(osb->sb, dlm_unlock_request);
+	lockres_notify_event(lockres, EVENT_DLM_UNLOCK);
 
 	ocfs2_wait_on_busy_lock(lockres);
 out:
@@ -2366,6 +2377,7 @@ static int ocfs2_cancel_convert(struct ocfs2_super *osb,
 	mlog(ML_BASTS, "lockres %s\n", lockres->l_name);
 
 	scoutfs_inc_counter(osb->sb, dlm_cancel_convert);
+	lockres_notify_event(lockres, EVENT_DLM_CONVERT);
 
 	return ret;
 }
@@ -2531,6 +2543,8 @@ recheck:
 		goto downconvert;
 
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
+
+	lockres_notify_event(lockres, EVENT_DLM_DOWNCONVERT_WORK);
 
 	ctl->unblock_action = lockres->l_ops->downconvert_worker(lockres, blocking);
 

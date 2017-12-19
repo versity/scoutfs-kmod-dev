@@ -60,6 +60,8 @@
 	EXPAND_COUNTER(lock_busy_wait)				\
 	EXPAND_COUNTER(lock_free)				\
 	EXPAND_COUNTER(lock_incompat_wait)			\
+	EXPAND_COUNTER(lock_type_ino_downconvert)		\
+	EXPAND_COUNTER(lock_type_idx_downconvert)		\
 	EXPAND_COUNTER(manifest_compact_migrate)		\
 	EXPAND_COUNTER(manifest_hard_stale_error)		\
 	EXPAND_COUNTER(seg_alloc)				\

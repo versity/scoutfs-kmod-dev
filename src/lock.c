@@ -332,17 +332,45 @@ static void lock_name_string(struct ocfs2_lock_res *lockres, char *buf,
 	snprintf(buf, len, LN_FMT, LN_ARG(&lock->lock_name));
 }
 
+static void count_ino_lock_event(struct ocfs2_lock_res *lockres,
+				 enum ocfs2_lock_events event)
+{
+	struct scoutfs_lock *lock = container_of(lockres, struct scoutfs_lock,
+						 lockres);
+	struct super_block *sb = lock->sb;
+
+	if (event == EVENT_DLM_DOWNCONVERT_WORK)
+		scoutfs_inc_counter(sb, lock_type_ino_downconvert);
+}
+
+static void count_idx_lock_event(struct ocfs2_lock_res *lockres,
+				 enum ocfs2_lock_events event)
+{
+	struct scoutfs_lock *lock = container_of(lockres, struct scoutfs_lock,
+						 lockres);
+	struct super_block *sb = lock->sb;
+
+	/*
+	 * Treat all indicies together. Later we can decode the
+	 * lockres name to get at specific indicies.
+	 */
+	if (event == EVENT_DLM_DOWNCONVERT_WORK)
+		scoutfs_inc_counter(sb, lock_type_idx_downconvert);
+}
+
 static struct ocfs2_lock_res_ops scoufs_ino_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.print			= lock_name_string,
+	.notify_event		= count_ino_lock_event,
 	.flags			= LOCK_TYPE_REQUIRES_REFRESH,
 };
 
 static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
+	.notify_event		= count_idx_lock_event,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.print			= lock_name_string,
 };

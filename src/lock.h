@@ -60,6 +60,8 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 void scoutfs_unlock_flags(struct super_block *sb, struct scoutfs_lock *lock,
 			  int level, int flags);
 
+void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr);
+
 int scoutfs_lock_setup(struct super_block *sb);
 void scoutfs_lock_destroy(struct super_block *sb);
 

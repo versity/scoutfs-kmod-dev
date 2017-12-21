@@ -29,6 +29,7 @@
 #include "trans.h"
 #include "counters.h"
 #include "endian_swap.h"
+#include "triggers.h"
 
 #define LN_FMT "%u.%u.%u.%llu.%llu"
 #define LN_ARG(name) \
@@ -592,19 +593,12 @@ static void scoutfs_lock_reclaim(struct work_struct *work)
 	put_scoutfs_lock(linfo->sb, lock);
 }
 
-static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
+void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr)
 {
-	struct lock_info *linfo = container_of(shrink, struct lock_info,
-					       shrinker);
+	struct lock_info *linfo = SCOUTFS_SB(sb)->lock_info;
 	struct scoutfs_lock *lock;
 	struct scoutfs_lock *tmp;
 	unsigned long flags;
-	unsigned long nr;
-	int ret;
-
-	nr = sc->nr_to_scan;
-	if (!nr)
-		goto out;
 
 	spin_lock_irqsave(&linfo->lock, flags);
 	list_for_each_entry_safe(lock, tmp, &linfo->lru_list, lru_entry) {
@@ -622,8 +616,19 @@ static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
 		queue_work(linfo->lock_reclaim_wq, &lock->reclaim_work);
 	}
 	spin_unlock_irqrestore(&linfo->lock, flags);
+}
 
-out:
+static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
+{
+	struct lock_info *linfo = container_of(shrink, struct lock_info,
+					       shrinker);
+	unsigned long nr;
+	int ret;
+
+	nr = sc->nr_to_scan;
+	if (nr)
+		scoutfs_free_unused_locks(linfo->sb, nr);
+
 	ret = min_t(unsigned long, linfo->lru_nr, INT_MAX);
 	trace_scoutfs_lock_shrink_exit(linfo->sb, sc->nr_to_scan, ret);
 	return ret;

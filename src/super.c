@@ -88,6 +88,14 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	kst->f_frsize = SCOUTFS_BLOCK_SIZE;
 	/* the vfs fills f_flags */
 
+	/*
+	 * We don't take cluster locks in statfs which makes it a very
+	 * convenient place to trigger lock reclaim for debugging. We
+	 * try to free as many locks as possible.
+	 */
+	if (scoutfs_trigger(sb, STATFS_LOCK_PURGE))
+		scoutfs_free_unused_locks(sb, -1UL);
+
 	return 0;
 }
 

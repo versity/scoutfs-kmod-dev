@@ -41,6 +41,7 @@ static char *names[] = {
 	[SCOUTFS_TRIGGER_BTREE_STALE_READ] = "btree_stale_read",
 	[SCOUTFS_TRIGGER_HARD_STALE_ERROR] = "hard_stale_error",
 	[SCOUTFS_TRIGGER_SEG_STALE_READ] = "seg_stale_read",
+	[SCOUTFS_TRIGGER_STATFS_LOCK_PURGE] = "statfs_lock_purge",
 };
 
 bool scoutfs_trigger_test_and_clear(struct super_block *sb, unsigned int t)

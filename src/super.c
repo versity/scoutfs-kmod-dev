@@ -119,6 +119,8 @@ static void scoutfs_put_super(struct super_block *sb)
 
 	trace_scoutfs_put_super(sb);
 
+	sbi->shutdown = true;
+
 	scoutfs_unlock_flags(sb, sbi->node_id_lock, DLM_LOCK_EX,
 			     SCOUTFS_LKF_NO_TASK_REF);
 	sbi->node_id_lock = NULL;

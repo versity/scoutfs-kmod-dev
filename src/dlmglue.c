@@ -2255,6 +2255,10 @@ void ocfs2_simple_drop_lockres(struct ocfs2_super *osb,
 	trace_ocfs2_simple_drop_lockres(osb, lockres);
 
 	ocfs2_mark_lockres_freeing(osb, lockres);
+
+	if (lockres->l_ops->drop_worker)
+		lockres->l_ops->drop_worker(lockres);
+
 	ret = ocfs2_drop_lock(osb, lockres);
 	if (ret)
 		mlog_errno(ret);

@@ -273,6 +273,18 @@ struct ocfs2_lock_res_ops {
 	int (*downconvert_worker)(struct ocfs2_lock_res *, int);
 
 	/*
+	 * Called before we free a lock from the system. This allows
+	 * the filesystem to sync and invalidate caches before that
+	 * happens. The concept is identical to ->downconvert_worker
+	 * except for two exceptions:
+	 *  - The FS must do the full downconvert work - as if it were
+	 *    blocking an EX.
+	 * - We do not return an ocfs2_unblock_action - this worker is not
+	 *    allowed to delay dropping of the lock.
+	 */
+	void (*drop_worker)(struct ocfs2_lock_res *);
+
+	/*
 	 * Optional: pretty print the lockname into a buffer
 	 */
 	void (*print)(struct ocfs2_lock_res *, char *, unsigned int);

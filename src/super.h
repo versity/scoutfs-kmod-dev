@@ -66,6 +66,8 @@ struct scoutfs_sb_info {
 	struct mount_options opts;
 
 	struct dentry *debug_root;
+
+	bool shutdown;
 };
 
 static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)

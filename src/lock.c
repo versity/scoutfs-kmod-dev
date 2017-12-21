@@ -325,6 +325,21 @@ static int ino_lock_downconvert(struct ocfs2_lock_res *lockres, int blocking)
 	return UNBLOCK_CONTINUE;
 }
 
+static void ino_lock_drop(struct ocfs2_lock_res *lockres)
+{
+	struct scoutfs_lock *lock = lockres->l_priv;
+	struct super_block *sb = lock->sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	/*
+	 * Locks get shut down near the end of our unmount process. By
+	 * now everything that needs to be synced or invalidated, has
+	 * been.
+	 */
+	if (!sbi->shutdown)
+		invalidate_caches(sb, DLM_LOCK_EX, lock);
+}
+
 static void lock_name_string(struct ocfs2_lock_res *lockres, char *buf,
 			     unsigned int len)
 {
@@ -362,6 +377,7 @@ static void count_idx_lock_event(struct ocfs2_lock_res *lockres,
 static struct ocfs2_lock_res_ops scoufs_ino_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
+	.drop_worker		= ino_lock_drop,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.print			= lock_name_string,
 	.notify_event		= count_ino_lock_event,
@@ -371,6 +387,7 @@ static struct ocfs2_lock_res_ops scoufs_ino_lops = {
 static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
 	.get_osb 		= get_ino_lock_osb,
 	.downconvert_worker 	= ino_lock_downconvert,
+	.drop_worker		= ino_lock_drop,
 	.notify_event		= count_idx_lock_event,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.print			= lock_name_string,
@@ -387,6 +404,7 @@ static struct ocfs2_lock_res_ops scoutfs_node_id_lops = {
 	.get_osb		= get_ino_lock_osb,
 	/* XXX: .check_downconvert that queries the item cache for dirty items */
 	.downconvert_worker 	= ino_lock_downconvert,
+	.drop_worker		= ino_lock_drop,
 	.print			= lock_name_string,
 	.flags			= 0,
 };

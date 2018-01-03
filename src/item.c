@@ -1040,8 +1040,7 @@ out:
 /*
  * Like _next but requires that the found keys be the same length as the
  * search key and that values be of at least a minimum size.  It treats
- * size mismatches as a sign of corruption.  A found key larger than the
- * found key buffer gives -ENOBUFS and is a sign of corruption.
+ * size mismatches as a sign of corruption and returns -EIO.
  */
 int scoutfs_item_next_same_min(struct super_block *sb,
 			       struct scoutfs_key_buf *key,

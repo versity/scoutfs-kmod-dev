@@ -201,116 +201,79 @@ out:
 	return ret;
 }
 
-struct ino_path_cursor {
-	__u64 dir_ino;
-	__u8 name[SCOUTFS_NAME_LEN + 1];
-} __packed;
-
 /*
- * see the definition of scoutfs_ioctl_ino_path for ioctl semantics.
- *
- * The null termination of the cursor name is a trick to skip past the
- * last name we read without having to try and "increment" the name.
- * Adding a null sorts the cursor after the non-null name and before all
- * the next names because the item names aren't null terminated.
+ * See the comment above the definition of struct scoutfs_ioctl_ino_path
+ * for ioctl semantics.
  */
 static long scoutfs_ioc_ino_path(struct file *file, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_ioctl_ino_path __user *uargs;
+	struct scoutfs_ioctl_ino_path_result __user *ures;
+	struct scoutfs_link_backref_entry *last_ent;
 	struct scoutfs_link_backref_entry *ent;
-	struct ino_path_cursor __user *ucurs;
 	struct scoutfs_ioctl_ino_path args;
-	char __user *upath;
 	LIST_HEAD(list);
-	u64 dir_ino;
-	u16 name_len;
+	u16 copied;
 	char term;
-	char *name;
 	int ret;
-
-	BUILD_BUG_ON(SCOUTFS_IOC_INO_PATH_CURSOR_BYTES !=
-		     sizeof(struct ino_path_cursor));
 
 	if (!capable(CAP_DAC_READ_SEARCH))
 		return -EPERM;
 
-	uargs = (void __user *)arg;
-	if (copy_from_user(&args, uargs, sizeof(args)))
+	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
 		return -EFAULT;
 
-	if (args.cursor_bytes != sizeof(struct ino_path_cursor))
-		return -EINVAL;
+	ures = (void __user *)(unsigned long)args.result_ptr;
 
-	ucurs = (void __user *)(unsigned long)args.cursor_ptr;
-	upath = (void __user *)(unsigned long)args.path_ptr;
-
-	if (get_user(dir_ino, &ucurs->dir_ino))
-		return -EFAULT;
-
-	/* alloc/copy the small cursor name, requires and includes null */
-	name_len = strnlen_user(ucurs->name, sizeof(ucurs->name));
-	if (name_len < 1 || name_len > sizeof(ucurs->name))
-		return -EINVAL;
-
-	name = kmalloc(name_len, GFP_KERNEL);
-	if (!name)
-		return -ENOMEM;
-
-	if (copy_from_user(name, ucurs->name, name_len)) {
-		ret = -EFAULT;
+	ret = scoutfs_dir_get_backref_path(sb, args.ino, args.dir_ino,
+					   args.dir_pos, &list);
+	if (ret < 0)
 		goto out;
-	}
 
-	ret = scoutfs_dir_get_backref_path(sb, args.ino, dir_ino, name,
-					   name_len, &list);
-	if (ret < 0) {
-		if (ret == -ENOENT)
-			ret = 0;
-		goto out;
-	}
-
-	ret = 0;
+	last_ent = list_last_entry(&list, struct scoutfs_link_backref_entry,
+				   head);
+	copied = 0;
 	list_for_each_entry(ent, &list, head) {
-		if (ret + ent->name_len + 1 > args.path_bytes) {
+
+		if (offsetof(struct scoutfs_ioctl_ino_path_result,
+			     path[copied + ent->name_len + 1])
+				> args.result_bytes) {
 			ret = -ENAMETOOLONG;
 			goto out;
 		}
 
-		if (copy_to_user(upath, ent->lbkey.name, ent->name_len)) {
+		if (copy_to_user(&ures->path[copied],
+				 ent->dent.name, ent->name_len)) {
 			ret = -EFAULT;
 			goto out;
 		}
 
-		upath += ent->name_len;
-		ret += ent->name_len;
+		copied += ent->name_len;
 
-		if (ent->head.next == &list)
+		if (ent == last_ent)
 			term = '\0';
 		else
 			term = '/';
 
-		if (put_user(term, upath)) {
+		if (put_user(term, &ures->path[copied])) {
 			ret = -EFAULT;
 			break;
 		}
 
-		upath++;
-		ret++;
+		copied++;
 	}
 
-	/* copy the last entry into the cursor */
-	ent = list_last_entry(&list, struct scoutfs_link_backref_entry, head);
-
-	if (put_user(be64_to_cpu(ent->lbkey.dir_ino), &ucurs->dir_ino) ||
-	    copy_to_user(ucurs->name, ent->lbkey.name, ent->name_len) ||
-	    put_user('\0', &ucurs->name[ent->name_len])) {
+	/* fill the result header now that we know the copied path length */
+	if (put_user(last_ent->dir_ino, &ures->dir_ino) ||
+	    put_user(last_ent->dir_pos, &ures->dir_pos) ||
+	    put_user(copied, &ures->path_bytes)) {
 		ret = -EFAULT;
+	} else {
+		ret = 0;
 	}
 
 out:
 	scoutfs_dir_free_backref_path(sb, &list);
-	kfree(name);
 	return ret;
 }
 

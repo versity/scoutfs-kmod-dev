@@ -114,13 +114,12 @@ static struct dentry *scoutfs_get_parent(struct dentry *child)
 	int ret;
 	u64 ino;
 
-	ret = scoutfs_dir_add_next_linkref(sb, scoutfs_ino(inode), 0, NULL, 0,
-					   &list);
+	ret = scoutfs_dir_add_next_linkref(sb, scoutfs_ino(inode), 0, 0, &list);
 	if (ret)
 		return ERR_PTR(ret);
 
 	ent = list_first_entry(&list, struct scoutfs_link_backref_entry, head);
-	ino = be64_to_cpu(ent->lbkey.dir_ino);
+	ino = ent->dir_ino;
 	scoutfs_dir_free_backref_path(sb, &list);
 	trace_scoutfs_get_parent(sb, inode, ino);
 
@@ -140,16 +139,16 @@ static int scoutfs_get_name(struct dentry *parent, char *name,
 	int ret;
 
 	ret = scoutfs_dir_add_next_linkref(sb, scoutfs_ino(inode), dir_ino,
-					   NULL, 0, &list);
+					   0, &list);
 	if (ret)
 		return ret;
 
 	ret = -ENOENT;
 	ent = list_first_entry(&list, struct scoutfs_link_backref_entry, head);
-	if (be64_to_cpu(ent->lbkey.ino) == scoutfs_ino(inode) &&
-	    be64_to_cpu(ent->lbkey.dir_ino) == dir_ino &&
+	if (le64_to_cpu(ent->dent.ino) == scoutfs_ino(inode) &&
+	    ent->dir_ino == dir_ino &&
 	    ent->name_len <= NAME_MAX) {
-		memcpy(name, ent->lbkey.name, ent->name_len);
+		memcpy(name, ent->dent.name, ent->name_len);
 		name[ent->name_len] = '\0';
 		ret = 0;
 		trace_scoutfs_get_name(sb, parent->d_inode, inode, name);

@@ -10,18 +10,20 @@ extern const struct inode_operations scoutfs_symlink_iops;
 
 struct scoutfs_link_backref_entry {
 	struct list_head head;
+	u64 dir_ino;
+	u64 dir_pos;
 	u16 name_len;
-	struct scoutfs_link_backref_key lbkey;
+	struct scoutfs_dirent dent;
+	/* the full name is allocated and stored in dent.name[0] */
 };
 
-int scoutfs_dir_get_backref_path(struct super_block *sb, u64 target_ino,
-				 u64 dir_ino, char *name, u16 name_len,
-				 struct list_head *list);
+int scoutfs_dir_get_backref_path(struct super_block *sb, u64 ino, u64 dir_ino,
+				 u64 dir_pos, struct list_head *list);
 void scoutfs_dir_free_backref_path(struct super_block *sb,
 				   struct list_head *list);
 
 int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
-				 u64 dir_ino, char *name, unsigned int name_len,
+				 u64 dir_ino, u64 dir_pos,
 				 struct list_head *list);
 
 int scoutfs_symlink_drop(struct super_block *sb, u64 ino,

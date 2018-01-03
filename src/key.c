@@ -276,35 +276,17 @@ static int pr_xattr(char *buf, struct scoutfs_key_buf *key, size_t size)
 static int pr_dirent(char *buf, struct scoutfs_key_buf *key, size_t size)
 {
 	struct scoutfs_dirent_key *dkey = key->data;
-	int len = (int)key->key_len - sizeof(struct scoutfs_dirent_key);
+	char *which = dkey->type == SCOUTFS_DIRENT_TYPE ? "dnt" :
+		      dkey->type == SCOUTFS_READDIR_TYPE ? "rdr" :
+		      dkey->type == SCOUTFS_LINK_BACKREF_TYPE ? "lbr" :
+		      "unk";
 
 	return snprintf_key(buf, size, key,
 			    sizeof(struct scoutfs_dirent_key), key->key_len,
-			    "fs.%llu.dnt.%.*s",
-			    be64_to_cpu(dkey->ino), len, dkey->name);
-}
-
-static int pr_readdir(char *buf, struct scoutfs_key_buf *key, size_t size)
-{
-	struct scoutfs_readdir_key *rkey = key->data;
-
-	return snprintf_key(buf, size, key,
-			    sizeof(struct scoutfs_readdir_key), 0,
-			    "fs.%llu.rdr.%llu",
-			    be64_to_cpu(rkey->ino), be64_to_cpu(rkey->pos));
-}
-
-static int pr_link_backref(char *buf, struct scoutfs_key_buf *key, size_t size)
-{
-	struct scoutfs_link_backref_key *lkey = key->data;
-	int len = (int)key->key_len - sizeof(*lkey);
-
-	return snprintf_key(buf, size, key,
-			    sizeof(struct scoutfs_link_backref_key),
-			    key->key_len,
-			    "fs.%llu.lbr.%llu.%.*s",
-			    be64_to_cpu(lkey->ino), be64_to_cpu(lkey->dir_ino),
-			    len, lkey->name);
+			    "fs.%llu.%s.%llu.%llu",
+			    be64_to_cpu(dkey->ino), which,
+			    be64_to_cpu(dkey->major),
+			    be64_to_cpu(dkey->minor));
 }
 
 static int pr_symlink(char *buf, struct scoutfs_key_buf *key, size_t size)
@@ -339,8 +321,8 @@ const static key_printer_t key_printers[SCOUTFS_MAX_ZONE][SCOUTFS_MAX_TYPE] = {
 	[SCOUTFS_FS_ZONE][SCOUTFS_INODE_TYPE] = pr_inode,
 	[SCOUTFS_FS_ZONE][SCOUTFS_XATTR_TYPE] = pr_xattr,
 	[SCOUTFS_FS_ZONE][SCOUTFS_DIRENT_TYPE] = pr_dirent,
-	[SCOUTFS_FS_ZONE][SCOUTFS_READDIR_TYPE] = pr_readdir,
-	[SCOUTFS_FS_ZONE][SCOUTFS_LINK_BACKREF_TYPE] = pr_link_backref,
+	[SCOUTFS_FS_ZONE][SCOUTFS_READDIR_TYPE] = pr_dirent,
+	[SCOUTFS_FS_ZONE][SCOUTFS_LINK_BACKREF_TYPE] = pr_dirent,
 	[SCOUTFS_FS_ZONE][SCOUTFS_SYMLINK_TYPE] = pr_symlink,
 	[SCOUTFS_FS_ZONE][SCOUTFS_BLOCK_MAPPING_TYPE] = pr_block_mapping,
 };

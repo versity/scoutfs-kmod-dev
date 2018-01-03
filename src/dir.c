@@ -35,34 +35,31 @@
 #include "scoutfs_trace.h"
 
 /*
- * Directory entries are stored in entries with offsets calculated from
- * the hash of their entry name.
+ * Directory entries are stored in three different items.  Each has the
+ * same key format and all have identical values which contain the full
+ * entry name.
  *
- * Having a single index of items used for both lookup and readdir
- * iteration reduces the storage overhead of directories.  It also
- * avoids having to manage the allocation of readdir positions as
- * directories age and the aggregate create count inches towards the
- * small 31 bit position limit.  The downside is that dirent name
- * operations produce random item access patterns.
+ * Entries for name lookup are stored at the hash of the name and the
+ * readdir position.  Including the position lets us create names
+ * without having to read the items to check for hash collisions.
+ * Lookup iterates over all the positions with the same hash values and
+ * compares the names.
  *
- * Hash values are limited to 31 bits primarily to support older
- * deployed protocols that only support 31 bits of file entry offsets,
- * but also to avoid unlikely bugs in programs that store offsets in
- * signed ints.
+ * Entries for readdir are stored in an increasing unique readdir
+ * position.  This results in returning entries in creation order which
+ * matches inode allocation order and avoids random inode access
+ * patterns during readdir.
  *
- * We have to worry about hash collisions.  We linearly probe a fixed
- * number of hash values past the natural value.  In a typical small
- * directory this search will terminate immediately because adjacent
- * items will have distant offset values.  It's only as the directory
- * gets very large that hash values will start to be this dense and
- * sweeping over items in a btree leaf is reasonably efficient.
+ * Entries for link backref traversal are stored at the target inode
+ * sorted by the parent dir and the entry's position in the parent dir.
+ * This keeps link backref users away from the higher contention area of
+ * dirent items in parent dirs.
  *
- * For each directory entry item stored in a directory inode there is a
- * corresponding link backref item stored at the target inode.  This
- * lets us find all the paths that refer to a given inode.  The link
- * backref offset comes from an advancing counter in the inode and the
- * item value contains the dir inode and dirent offset of the referring
- * link.
+ * All the entries have a dirent struct with the full name in their
+ * value.  The dirent struct contains the name hash and readdir position
+ * so that any item use can reference all the items for a given entry.
+ * This is important for deleting all the items given a dentry that was
+ * populated by lookup.
  */
 
 static unsigned int mode_to_type(umode_t mode)
@@ -102,14 +99,15 @@ static unsigned int dentry_type(unsigned int type)
 }
 
 /*
- * @readdir_pos  lets us remove items on final unlink without having to
- * look them up.
+ * @lock_cov: tells revalidation that the dentry is still locked and valid.
  *
- * @lock_cov tells revalidation that the dentry is still locked and valid.
+ * @pos, @hash: lets us remove items on final unlink without having to
+ * look them up.
  */
 struct dentry_info {
-	u64 readdir_pos;
 	struct scoutfs_lock_coverage lock_cov;
+	u64 hash;
+	u64 pos;
 };
 
 static struct kmem_cache *dentry_info_cache;
@@ -161,15 +159,26 @@ static int alloc_dentry_info(struct dentry *dentry)
 }
 
 static void update_dentry_info(struct super_block *sb, struct dentry *dentry,
-			       u64 pos, struct scoutfs_lock *lock)
+			       u64 hash, u64 pos, struct scoutfs_lock *lock)
 {
 	struct dentry_info *di = dentry->d_fsdata;
 
 	if (WARN_ON_ONCE(di == NULL))
 		return;
 
-	di->readdir_pos = pos;
 	scoutfs_lock_add_coverage(sb, lock, &di->lock_cov);
+	di->hash = hash;
+	di->pos = pos;
+}
+
+static u64 dentry_info_hash(struct dentry *dentry)
+{
+	struct dentry_info *di = dentry->d_fsdata;
+
+	if (WARN_ON_ONCE(di == NULL))
+		return 0;
+
+	return di->hash;
 }
 
 static u64 dentry_info_pos(struct dentry *dentry)
@@ -179,88 +188,102 @@ static u64 dentry_info_pos(struct dentry *dentry)
 	if (WARN_ON_ONCE(di == NULL))
 		return 0;
 
-	return di->readdir_pos;
+	return di->pos;
 }
 
-static struct scoutfs_key_buf *alloc_dirent_key(struct super_block *sb,
-						u64 dir_ino, const char *name,
-						unsigned name_len)
+static void init_dirent_key(struct scoutfs_key_buf *key,
+			    struct scoutfs_dirent_key *dkey, u8 type,
+			    u64 ino, u64 major, u64 minor)
 {
-	struct scoutfs_dirent_key *dkey;
-	struct scoutfs_key_buf *key;
+	dkey->zone = SCOUTFS_FS_ZONE;
+	dkey->ino = cpu_to_be64(ino);
+	dkey->type = type;
+	dkey->major = cpu_to_be64(major);
+	dkey->minor = cpu_to_be64(minor);
 
-	key = scoutfs_key_alloc(sb, offsetof(struct scoutfs_dirent_key,
-					     name[name_len]));
-	if (key) {
-		dkey = key->data;
-		dkey->zone = SCOUTFS_FS_ZONE;
-		dkey->ino = cpu_to_be64(dir_ino);
-		dkey->type = SCOUTFS_DIRENT_TYPE;
-		memcpy(dkey->name, (void *)name, name_len);
-	}
-
-	return key;
+	scoutfs_key_init(key, dkey, sizeof(struct scoutfs_dirent_key));
 }
 
-static void init_link_backref_key(struct scoutfs_key_buf *key,
-			          struct scoutfs_link_backref_key *lbrkey,
-				  u64 ino, u64 dir_ino,
-				  const char *name, unsigned name_len)
+static unsigned int dirent_bytes(unsigned int name_len)
 {
-	lbrkey->zone = SCOUTFS_FS_ZONE;
-	lbrkey->ino = cpu_to_be64(ino);
-	lbrkey->type = SCOUTFS_LINK_BACKREF_TYPE;
-	lbrkey->dir_ino = cpu_to_be64(dir_ino);
-	if (name_len)
-		memcpy(lbrkey->name, name, name_len);
-
-	scoutfs_key_init(key, lbrkey, offsetof(struct scoutfs_link_backref_key,
-					       name[name_len]));
+	return offsetof(struct scoutfs_dirent, name[name_len]);
 }
 
-static struct scoutfs_key_buf *alloc_link_backref_key(struct super_block *sb,
-						      u64 ino, u64 dir_ino,
-						      const char *name,
-						      unsigned name_len)
+static struct scoutfs_dirent *alloc_dirent(unsigned int name_len)
 {
-	struct scoutfs_link_backref_key *lbkey;
-	struct scoutfs_key_buf *key;
+	return kmalloc(dirent_bytes(name_len), GFP_NOFS);
+}
 
-	key = scoutfs_key_alloc(sb, offsetof(struct scoutfs_link_backref_key,
-					     name[name_len]));
-	if (key) {
-		lbkey = key->data;
-		init_link_backref_key(key, lbkey, ino, dir_ino,
-				      name, name_len);
-	}
+static u64 dirent_name_hash(const char *name, unsigned int name_len)
+{
+       unsigned int half = (name_len + 1) / 2;
 
-	return key;
+       return crc32c(~0, name, half) |
+              ((u64)crc32c(~0, name + name_len - half, half) << 32);
+}
+
+static u64 dirent_names_equal(const char *a_name, unsigned int a_len,
+			      const char *b_name, unsigned int b_len)
+{
+	return a_len == b_len && memcmp(a_name, b_name, a_len) == 0;
 }
 
 /*
  * Looks for the dirent item and fills the caller's dirent if it finds
  * it.  Returns item lookup errors including -ENOENT if it's not found.
  */
-static int lookup_dirent(struct super_block *sb, struct inode *dir,
-			 const char *name, unsigned name_len,
-			 struct scoutfs_dirent *dent,
+static int lookup_dirent(struct super_block *sb, u64 dir_ino, const char *name,
+			 unsigned name_len, u64 hash,
+			 struct scoutfs_dirent *dent_ret,
 			 struct scoutfs_lock *lock)
 {
-	struct scoutfs_key_buf *key = NULL;
+	struct scoutfs_dirent_key last_dkey;
+	struct scoutfs_dirent_key dkey;
+	struct scoutfs_key_buf last_key;
+	struct scoutfs_key_buf key;
+	struct scoutfs_dirent *dent = NULL;
 	struct kvec val;
 	int ret;
 
-	key = alloc_dirent_key(sb, scoutfs_ino(dir), name, name_len);
-	if (!key) {
+	dent = alloc_dirent(SCOUTFS_NAME_LEN);
+	if (!dent) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	kvec_init(&val, dent, sizeof(struct scoutfs_dirent));
+	init_dirent_key(&key, &dkey, SCOUTFS_DIRENT_TYPE,
+			dir_ino, hash, 0);
+	init_dirent_key(&last_key, &last_dkey, SCOUTFS_DIRENT_TYPE,
+			dir_ino, hash, U64_MAX);
+	kvec_init(&val, dent, dirent_bytes(SCOUTFS_NAME_LEN));
 
-	ret = scoutfs_item_lookup_exact(sb, key, &val, lock);
+	for (;;) {
+		ret = scoutfs_item_next(sb, &key, &last_key, &val, lock);
+		if (ret < 0)
+			break;
+
+		ret -= sizeof(struct scoutfs_dirent);
+		/* XXX corruption */
+		if (ret < 1 || ret > SCOUTFS_NAME_LEN) {
+			ret = -EIO;
+			goto out;
+		}
+
+		if (dirent_names_equal(name, name_len, dent->name, ret)) {
+			*dent_ret = *dent;
+			ret = 0;
+			break;
+		}
+
+		if (be64_to_cpu(dkey.minor) == U64_MAX) {
+			ret = -ENOENT;
+			break;
+		}
+		be64_add_cpu(&dkey.minor, 1);
+	}
+
 out:
-	scoutfs_key_free(sb, key);
+	kfree(dent);
 	return ret;
 }
 
@@ -318,18 +341,24 @@ static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 	if (ret)
 		goto out;
 
-	ret = lookup_dirent(sb, dir, dentry->d_name.name, dentry->d_name.len,
+	ret = lookup_dirent(sb, scoutfs_ino(dir),
+			    dentry->d_name.name, dentry->d_name.len,
+			    dirent_name_hash(dentry->d_name.name,
+					     dentry->d_name.len),
 			    &dent, lock);
-	if (ret == -ENOENT)
+	if (ret == -ENOENT) {
 		dent.ino = 0;
-	else if (ret < 0)
+		dent.hash = 0;
+		dent.pos = 0;
+	} else if (ret < 0) {
 		goto out;
+	}
 
 	dentry_ino = dentry->d_inode ? scoutfs_ino(dentry->d_inode) : 0;
 
 	if ((dentry_ino == le64_to_cpu(dent.ino))) {
-		update_dentry_info(sb, dentry, le64_to_cpu(dent.readdir_pos),
-				   lock);
+		update_dentry_info(sb, dentry, le64_to_cpu(dent.hash),
+				   le64_to_cpu(dent.pos), lock);
 		scoutfs_inc_counter(sb, dentry_revalidate_valid);
 		ret = 1;
 	} else {
@@ -368,7 +397,10 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	struct scoutfs_dirent dent;
 	struct inode *inode;
 	u64 ino = 0;
+	u64 hash;
 	int ret;
+
+	hash = dirent_name_hash(dentry->d_name.name, dentry->d_name.len);
 
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN) {
 		ret = -ENAMETOOLONG;
@@ -383,15 +415,15 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out;
 
-	ret = lookup_dirent(sb, dir, dentry->d_name.name, dentry->d_name.len,
-			    &dent, dir_lock);
+	ret = lookup_dirent(sb, scoutfs_ino(dir), dentry->d_name.name,
+			    dentry->d_name.len, hash, &dent, dir_lock);
 	if (ret == -ENOENT) {
 		ino = 0;
 		ret = 0;
 	} else if (ret == 0) {
 		ino = le64_to_cpu(dent.ino);
-		update_dentry_info(sb, dentry, le64_to_cpu(dent.readdir_pos),
-				   dir_lock);
+		update_dentry_info(sb, dentry, le64_to_cpu(dent.hash),
+				   le64_to_cpu(dent.pos), dir_lock);
 	}
 	scoutfs_unlock(sb, dir_lock, DLM_LOCK_PR);
 
@@ -428,18 +460,6 @@ static int dir_emit_dots(struct file *file, void *dirent, filldir_t filldir)
 	return 1;
 }
 
-static void init_readdir_key(struct scoutfs_key_buf *key,
-			     struct scoutfs_readdir_key *rkey, u64 dir_ino,
-			     loff_t pos)
-{
-	rkey->zone = SCOUTFS_FS_ZONE;
-	rkey->ino = cpu_to_be64(dir_ino);
-	rkey->type = SCOUTFS_READDIR_TYPE;
-	rkey->pos = cpu_to_be64(pos);
-
-	scoutfs_key_init(key, rkey, sizeof(struct scoutfs_readdir_key));
-}
-
 /*
  * readdir simply iterates over the dirent items for the dir inode and
  * uses their offset as the readdir position.
@@ -454,10 +474,9 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	struct scoutfs_dirent *dent;
 	struct scoutfs_key_buf key;
 	struct scoutfs_key_buf last_key;
-	struct scoutfs_readdir_key rkey;
-	struct scoutfs_readdir_key last_rkey;
+	struct scoutfs_dirent_key dkey;
+	struct scoutfs_dirent_key last_dkey;
 	struct scoutfs_lock *dir_lock;
-	unsigned int item_len;
 	unsigned int name_len;
 	struct kvec val;
 	u64 pos;
@@ -466,27 +485,26 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	if (!dir_emit_dots(file, dirent, filldir))
 		return 0;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &dir_lock);
-	if (ret)
-		return ret;
-
-	init_readdir_key(&last_key, &last_rkey, scoutfs_ino(inode),
-			 SCOUTFS_DIRENT_LAST_POS);
-
-	item_len = offsetof(struct scoutfs_dirent, name[SCOUTFS_NAME_LEN]);
-	dent = kmalloc(item_len, GFP_KERNEL);
+	dent = alloc_dirent(SCOUTFS_NAME_LEN);
 	if (!dent) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	for (;;) {
-		init_readdir_key(&key, &rkey, scoutfs_ino(inode), file->f_pos);
+	init_dirent_key(&last_key, &last_dkey, SCOUTFS_READDIR_TYPE,
+			scoutfs_ino(inode), SCOUTFS_DIRENT_LAST_POS, 0);
+	kvec_init(&val, dent, dirent_bytes(SCOUTFS_NAME_LEN));
 
-		kvec_init(&val, dent, item_len);
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &dir_lock);
+	if (ret)
+		goto out;
+
+	for (;;) {
+		init_dirent_key(&key, &dkey, SCOUTFS_READDIR_TYPE,
+				scoutfs_ino(inode), file->f_pos, 0);
+
 		ret = scoutfs_item_next_same_min(sb, &key, &last_key, &val,
-				offsetof(struct scoutfs_dirent, name[1]),
-						 dir_lock);
+						 dirent_bytes(1), dir_lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -494,7 +512,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 		}
 
 		name_len = ret - sizeof(struct scoutfs_dirent);
-		pos = be64_to_cpu(rkey.pos);
+		pos = be64_to_cpu(dkey.major);
 
 		if (filldir(dirent, dent->name, name_len, pos,
 			    le64_to_cpu(dent->ino), dentry_type(dent->type))) {
@@ -519,69 +537,63 @@ out:
  *
  * If this returns an error then nothing will have changed.
  */
-static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
-			   const char *name, unsigned name_len, u64 ino,
-			   umode_t mode, struct scoutfs_lock *dir_lock,
+static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 hash,
+			   u64 pos, const char *name, unsigned name_len,
+			   u64 ino, umode_t mode, struct scoutfs_lock *dir_lock,
 			   struct scoutfs_lock *inode_lock)
 {
-	struct scoutfs_key_buf *ent_key = NULL;
-	struct scoutfs_key_buf *lb_key = NULL;
-	struct scoutfs_dirent *dent = NULL;
+	struct scoutfs_dirent_key rdir_dkey;
+	struct scoutfs_dirent_key ent_dkey;
+	struct scoutfs_dirent_key lb_dkey;
 	struct scoutfs_key_buf rdir_key;
-	struct scoutfs_readdir_key rkey;
+	struct scoutfs_key_buf ent_key;
+	struct scoutfs_key_buf lb_key;
+	struct scoutfs_dirent *dent;
 	bool del_ent = false;
 	bool del_rdir = false;
 	struct kvec val;
 	int ret;
 
-	ent_key = alloc_dirent_key(sb, dir_ino, name, name_len);
-	dent = kmalloc(offsetof(struct scoutfs_dirent, name[name_len]),
-		       GFP_NOFS);
-	if (!ent_key || !dent) {
+	dent = alloc_dirent(name_len);
+	if (!dent) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
 	/* initialize the dent */
 	dent->ino = cpu_to_le64(ino);
-	dent->readdir_pos = cpu_to_le64(pos);
+	dent->hash = cpu_to_le64(hash);
+	dent->pos = cpu_to_le64(pos);
 	dent->type = mode_to_type(mode);
 	memcpy(dent->name, name, name_len);
 
-	/* dirent item for lookup */
-	kvec_init(&val, dent, sizeof(struct scoutfs_dirent));
-	ret = scoutfs_item_create(sb, ent_key, &val, dir_lock);
+	init_dirent_key(&ent_key, &ent_dkey, SCOUTFS_DIRENT_TYPE,
+			dir_ino, hash, pos);
+	init_dirent_key(&rdir_key, &rdir_dkey, SCOUTFS_READDIR_TYPE,
+			dir_ino, pos, 0);
+	init_dirent_key(&lb_key, &lb_dkey, SCOUTFS_LINK_BACKREF_TYPE,
+			ino, dir_ino, pos);
+	kvec_init(&val, dent, dirent_bytes(name_len));
+
+	ret = scoutfs_item_create(sb, &ent_key, &val, dir_lock);
 	if (ret)
 		goto out;
 	del_ent = true;
-
-	/* readdir item for .. readdir */
-	init_readdir_key(&rdir_key, &rkey, dir_ino, pos);
-	kvec_init(&val, dent, offsetof(struct scoutfs_dirent, name[name_len]));
 
 	ret = scoutfs_item_create(sb, &rdir_key, &val, dir_lock);
 	if (ret)
 		goto out;
 	del_rdir = true;
 
-	/* link backref item for inode to path resolution */
-	lb_key = alloc_link_backref_key(sb, ino, dir_ino, name, name_len);
-	if (!lb_key) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	ret = scoutfs_item_create(sb, lb_key, NULL, inode_lock);
+	ret = scoutfs_item_create(sb, &lb_key, &val, inode_lock);
 out:
 	if (ret < 0) {
 		if (del_ent)
-			scoutfs_item_delete_dirty(sb, ent_key);
+			scoutfs_item_delete_dirty(sb, &ent_key);
 		if (del_rdir)
 			scoutfs_item_delete_dirty(sb, &rdir_key);
 	}
 
-	scoutfs_key_free(sb, ent_key);
-	scoutfs_key_free(sb, lb_key);
 	kfree(dent);
 
 	return ret;
@@ -592,49 +604,40 @@ out:
  * Only items are modified.  The caller is responsible for locking,
  * entering a transaction, dirtying items, and managing the vfs structs.
  *
- * The items match the items used in add_entry_items() but we don't have
- * to worry about values here and we can dirty all the items before
- * starting to delete them which makes cleanup a little easier.
- *
  * If this returns an error then nothing will have changed.
  */
-static int del_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
-			   const char *name, unsigned name_len, u64 ino,
-			   struct scoutfs_lock *dir_lock,
+static int del_entry_items(struct super_block *sb, u64 dir_ino, u64 hash,
+			   u64 pos, u64 ino, struct scoutfs_lock *dir_lock,
 			   struct scoutfs_lock *inode_lock)
 {
-	struct scoutfs_key_buf *ent_key;
-	struct scoutfs_key_buf *lb_key;
+	struct scoutfs_dirent_key rdir_dkey;
+	struct scoutfs_dirent_key ent_dkey;
+	struct scoutfs_dirent_key lb_dkey;
 	struct scoutfs_key_buf rdir_key;
-	struct scoutfs_readdir_key rkey;
+	struct scoutfs_key_buf ent_key;
+	struct scoutfs_key_buf lb_key;
+	LIST_HEAD(dir_saved);
+	LIST_HEAD(inode_saved);
 	int ret;
 
-	ent_key = alloc_dirent_key(sb, dir_ino, name, name_len);
-	if (!ent_key)
-		return -ENOMEM;
+	init_dirent_key(&ent_key, &ent_dkey, SCOUTFS_DIRENT_TYPE,
+			dir_ino, hash, pos);
+	init_dirent_key(&rdir_key, &rdir_dkey, SCOUTFS_READDIR_TYPE,
+			dir_ino, pos, 0);
+	init_dirent_key(&lb_key, &lb_dkey, SCOUTFS_LINK_BACKREF_TYPE,
+			ino, dir_ino, pos);
 
-	init_readdir_key(&rdir_key, &rkey, dir_ino, pos);
-
-	lb_key = alloc_link_backref_key(sb, ino, dir_ino, name, name_len);
-	if (!lb_key) {
-		ret = -ENOMEM;
-		goto out;
+	ret = scoutfs_item_delete_save(sb, &ent_key, &dir_saved, dir_lock) ?:
+	      scoutfs_item_delete_save(sb, &rdir_key, &dir_saved, dir_lock) ?:
+	      scoutfs_item_delete_save(sb, &lb_key, &inode_saved, inode_lock);
+	if (ret < 0) {
+		scoutfs_item_restore(sb, &dir_saved, dir_lock);
+		scoutfs_item_restore(sb, &inode_saved, inode_lock);
+	} else {
+		scoutfs_item_free_batch(sb, &dir_saved);
+		scoutfs_item_free_batch(sb, &inode_saved);
 	}
 
-	ret = scoutfs_item_dirty(sb, ent_key, dir_lock) ?:
-	      scoutfs_item_dirty(sb, &rdir_key, dir_lock) ?:
-	      scoutfs_item_dirty(sb, lb_key, inode_lock);
-	if (ret)
-		goto out;
-
-	scoutfs_item_delete_dirty(sb, ent_key);
-	scoutfs_item_delete_dirty(sb, &rdir_key);
-	scoutfs_item_delete_dirty(sb, lb_key);
-	ret = 0;
-
-out:
-	kfree(ent_key);
-	kfree(lb_key);
 	return ret;
 }
 
@@ -724,12 +727,14 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct scoutfs_lock *dir_lock = NULL;
 	struct scoutfs_lock *inode_lock = NULL;
 	LIST_HEAD(ind_locks);
+	u64 hash;
 	u64 pos;
 	int ret;
 
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
+	hash = dirent_name_hash(dentry->d_name.name, dentry->d_name.len);
 	inode = lock_hold_create(dir, dentry, mode, rdev,
 				 SIC_MKNOD(dentry->d_name.len),
 				 &dir_lock, &inode_lock, &ind_locks);
@@ -738,13 +743,14 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 
 	pos = SCOUTFS_I(dir)->next_readdir_pos++;
 
-	ret = add_entry_items(sb, scoutfs_ino(dir), pos, dentry->d_name.name,
-			      dentry->d_name.len, scoutfs_ino(inode),
-			      inode->i_mode, dir_lock, inode_lock);
+	ret = add_entry_items(sb, scoutfs_ino(dir), hash, pos,
+			      dentry->d_name.name, dentry->d_name.len,
+			      scoutfs_ino(inode), inode->i_mode, dir_lock,
+			      inode_lock);
 	if (ret)
 		goto out;
 
-	update_dentry_info(sb, dentry, pos, dir_lock);
+	update_dentry_info(sb, dentry, hash, pos, dir_lock);
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -795,8 +801,11 @@ static int scoutfs_link(struct dentry *old_dentry,
 	LIST_HEAD(ind_locks);
 	u64 dir_size;
 	u64 ind_seq;
+	u64 hash;
 	u64 pos;
 	int ret;
+
+	hash = dirent_name_hash(dentry->d_name.name, dentry->d_name.len);
 
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
@@ -834,12 +843,13 @@ retry:
 
 	pos = SCOUTFS_I(dir)->next_readdir_pos++;
 
-	ret = add_entry_items(sb, scoutfs_ino(dir), pos, dentry->d_name.name,
-			      dentry->d_name.len, scoutfs_ino(inode),
-			      inode->i_mode, dir_lock, inode_lock);
+	ret = add_entry_items(sb, scoutfs_ino(dir), hash, pos,
+			      dentry->d_name.name, dentry->d_name.len,
+			      scoutfs_ino(inode), inode->i_mode, dir_lock,
+			      inode_lock);
 	if (ret)
 		goto out;
-	update_dentry_info(sb, dentry, pos, dir_lock);
+	update_dentry_info(sb, dentry, hash, pos, dir_lock);
 
 	i_size_write(dir, dir_size);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -908,9 +918,9 @@ retry:
 	if (ret)
 		goto unlock;
 
-	ret = del_entry_items(sb, scoutfs_ino(dir), dentry_info_pos(dentry),
-			      dentry->d_name.name, dentry->d_name.len,
-			      scoutfs_ino(inode), dir_lock, inode_lock);
+	ret = del_entry_items(sb, scoutfs_ino(dir), dentry_info_hash(dentry),
+			      dentry_info_pos(dentry), scoutfs_ino(inode),
+			      dir_lock, inode_lock);
 	if (ret)
 		goto out;
 
@@ -1108,8 +1118,11 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	struct scoutfs_lock *dir_lock = NULL;
 	struct scoutfs_lock *inode_lock = NULL;
 	LIST_HEAD(ind_locks);
+	u64 hash;
 	u64 pos;
 	int ret;
+
+	hash = dirent_name_hash(dentry->d_name.name, dentry->d_name.len);
 
 	/* path_max includes null as does our value for nd_set_link */
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN ||
@@ -1133,13 +1146,14 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 
 	pos = SCOUTFS_I(dir)->next_readdir_pos++;
 
-	ret = add_entry_items(sb, scoutfs_ino(dir), pos, dentry->d_name.name,
-			      dentry->d_name.len, scoutfs_ino(inode),
-			      inode->i_mode, dir_lock, inode_lock);
+	ret = add_entry_items(sb, scoutfs_ino(dir), hash, pos,
+			      dentry->d_name.name, dentry->d_name.len,
+			      scoutfs_ino(inode), inode->i_mode, dir_lock,
+			      inode_lock);
 	if (ret)
 		goto out;
 
-	update_dentry_info(sb, dentry, pos, dir_lock);
+	update_dentry_info(sb, dentry, hash, pos, dir_lock);
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -1185,7 +1199,7 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino,
 
 /*
  * Find the next link backref key for the given ino starting from the
- * given dir inode and null terminated name.  If we find a backref item
+ * given dir inode and final entry position.  If we find a backref item
  * we add an allocated copy of it to the head of the caller's list.
  *
  * Returns 0 if we added an entry, -ENOENT if we didn't, and -errno for
@@ -1195,40 +1209,37 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino,
  * building up a path with individual locked backref item lookups.
  */
 int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
-				 u64 dir_ino, char *name, unsigned int name_len,
+				 u64 dir_ino, u64 dir_pos,
 				 struct list_head *list)
 {
-	struct scoutfs_link_backref_key last_lbkey;
 	struct scoutfs_link_backref_entry *ent;
-	struct scoutfs_lock *lock = NULL;
-	struct scoutfs_key_buf last;
+	struct scoutfs_dirent_key last_dkey;
+	struct scoutfs_dirent_key dkey;
+	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
+	struct scoutfs_lock *lock = NULL;
+	struct kvec val;
 	int len;
 	int ret;
 
 	ent = kmalloc(offsetof(struct scoutfs_link_backref_entry,
-			       lbkey.name[SCOUTFS_NAME_LEN + 1]), GFP_KERNEL);
+			       dent.name[SCOUTFS_NAME_LEN]), GFP_KERNEL);
 	if (!ent)
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&ent->head);
 
-	/* put search key in ent */
-	init_link_backref_key(&key, &ent->lbkey, ino, dir_ino, name, name_len);
-	/* we actually have room for a full backref item */
-	scoutfs_key_init_buf_len(&key, key.data, key.key_len,
-				 offsetof(struct scoutfs_link_backref_key,
-					  name[SCOUTFS_NAME_LEN + 1]));
+	init_dirent_key(&key, &dkey, SCOUTFS_LINK_BACKREF_TYPE,
+			ino, dir_ino, dir_pos);
+	init_dirent_key(&last_key, &last_dkey, SCOUTFS_LINK_BACKREF_TYPE,
+			ino, U64_MAX, U64_MAX);
+	kvec_init(&val, &ent->dent, dirent_bytes(SCOUTFS_NAME_LEN));
 
-	/* small last key to avoid full name copy, XXX enforce no U64_MAX ino */
-	init_link_backref_key(&last, &last_lbkey, ino, U64_MAX, NULL, 0);
-
-	/* next backref key is now in ent */
 	ret = scoutfs_lock_ino(sb, DLM_LOCK_PR, 0, ino, &lock);
 	if (ret)
 		goto out;
 
-	ret = scoutfs_item_next(sb, &key, &last, NULL, lock);
+	ret = scoutfs_item_next(sb, &key, &last_key, &val, lock);
 	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 	lock = NULL;
 
@@ -1236,15 +1247,17 @@ int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
 	if (ret < 0)
 		goto out;
 
-	len = (int)key.key_len - sizeof(struct scoutfs_link_backref_key);
+	len = ret - sizeof(struct scoutfs_dirent);
 	/* XXX corruption */
 	if (len < 1 || len > SCOUTFS_NAME_LEN) {
 		ret = -EIO;
 		goto out;
 	}
 
-	ent->name_len = len;
 	list_add(&ent->head, list);
+	ent->dir_ino = be64_to_cpu(dkey.major);
+	ent->dir_pos = be64_to_cpu(dkey.minor);
+	ent->name_len = len;
 	ret = 0;
 out:
 	if (list_empty(&ent->head))
@@ -1257,7 +1270,7 @@ static u64 first_backref_dir_ino(struct list_head *list)
 	struct scoutfs_link_backref_entry *ent;
 
 	ent = list_first_entry(list, struct scoutfs_link_backref_entry, head);
-	return be64_to_cpu(ent->lbkey.dir_ino);
+	return ent->dir_ino;
 }
 
 void scoutfs_dir_free_backref_path(struct super_block *sb,
@@ -1310,8 +1323,7 @@ void scoutfs_dir_free_backref_path(struct super_block *sb,
  * sync if we see our dirty seq.
  */
 int scoutfs_dir_get_backref_path(struct super_block *sb, u64 ino, u64 dir_ino,
-				 char *name, u16 name_len,
-				 struct list_head *list)
+				 u64 dir_pos, struct list_head *list)
 {
 	u64 par_ino;
 	int ret;
@@ -1323,15 +1335,14 @@ retry:
 	 * confident we won't hit an endless loop here again.
 	 */
 	if (WARN_ONCE(++iters >= 4000, "scoutfs: Excessive retries in "
-		      "dir_get_backref_path. ino %llu dir_ino %llu name %.*s\n",
-		      ino, dir_ino, name_len, name)) {
+		      "dir_get_backref_path. ino %llu dir_ino %llu pos %llu\n",
+		      ino, dir_ino, dir_pos)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
 	/* get the next link name to the given inode */
-	ret = scoutfs_dir_add_next_linkref(sb, ino, dir_ino, name, name_len,
-					   list);
+	ret = scoutfs_dir_add_next_linkref(sb, ino, dir_ino, dir_pos, list);
 	if (ret < 0)
 		goto out;
 
@@ -1339,8 +1350,7 @@ retry:
 	par_ino = first_backref_dir_ino(list);
 	while (par_ino != SCOUTFS_ROOT_INO) {
 
-		ret = scoutfs_dir_add_next_linkref(sb, par_ino, 0, NULL, 0,
-						   list);
+		ret = scoutfs_dir_add_next_linkref(sb, par_ino, 0, 0, list);
 		if (ret < 0) {
 			if (ret == -ENOENT) {
 				/* restart if there was no parent component */
@@ -1374,26 +1384,23 @@ static int item_d_ancestor(struct super_block *sb, u64 p1, u64 p2, u64 *p_ret)
 {
 	struct scoutfs_link_backref_entry *ent;
 	LIST_HEAD(list);
-	u64 dir_ino;
 	int ret;
 	u64 p;
 
 	*p_ret = 0;
 
-	ret = scoutfs_dir_get_backref_path(sb, p2, 0, NULL, 0, &list);
+	ret = scoutfs_dir_get_backref_path(sb, p2, 0, 0, &list);
 	if (ret)
 		goto out;
 
 	p = p2;
 	list_for_each_entry(ent, &list, head) {
-		dir_ino = be64_to_cpu(ent->lbkey.dir_ino);
-
-		if (dir_ino == p1) {
+		if (ent->dir_ino == p1) {
 			*p_ret = p;
 			ret = 0;
 			break;
 		}
-		p = dir_ino;
+		p = ent->dir_ino;
 	}
 
 out:
@@ -1434,27 +1441,18 @@ static int verify_ancestors(struct super_block *sb, u64 p1, u64 p2,
  * The caller has the name locked in the dir.
  */
 static int verify_entry(struct super_block *sb, u64 dir_ino, const char *name,
-			unsigned name_len, u64 ino,
+			unsigned name_len, u64 hash, u64 ino,
 			struct scoutfs_lock *lock)
 {
-	struct scoutfs_key_buf *key = NULL;
 	struct scoutfs_dirent dent;
-	struct kvec val;
 	int ret;
 
-	key = alloc_dirent_key(sb, dir_ino, name, name_len);
-	if (!key)
-		return -ENOMEM;
-
-	kvec_init(&val, &dent, sizeof(dent));
-
-	ret = scoutfs_item_lookup_exact(sb, key, &val, lock);
+	ret = lookup_dirent(sb, dir_ino, name, name_len, hash, &dent, lock);
 	if (ret == 0 && le64_to_cpu(dent.ino) != ino)
 		ret = -ENOENT;
 	else if (ret == -ENOENT && ino == 0)
 		ret = 0;
 
-	scoutfs_key_free(sb, key);
 	return ret;
 }
 
@@ -1503,11 +1501,18 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	bool ins_old = false;
 	LIST_HEAD(ind_locks);
 	u64 ind_seq;
+	u64 old_hash;
+	u64 new_hash;
 	u64 new_pos;
 	int ret;
 	int err;
 
 	trace_scoutfs_rename(sb, old_dir, old_dentry, new_dir, new_dentry);
+
+	old_hash = dirent_name_hash(old_dentry->d_name.name,
+				    old_dentry->d_name.len);
+	new_hash = dirent_name_hash(new_dentry->d_name.name,
+				    new_dentry->d_name.len);
 
 	if (new_dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
@@ -1545,10 +1550,10 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 
 	/* make sure that the entries assumed by the argument still exist */
 	ret = verify_entry(sb, scoutfs_ino(old_dir), old_dentry->d_name.name,
-			   old_dentry->d_name.len, scoutfs_ino(old_inode),
-			   old_dir_lock) ?:
+			   old_dentry->d_name.len, old_hash,
+			   scoutfs_ino(old_inode), old_dir_lock) ?:
 	      verify_entry(sb, scoutfs_ino(new_dir), new_dentry->d_name.name,
-			   new_dentry->d_name.len,
+			   new_dentry->d_name.len, new_hash,
 			   new_inode ? scoutfs_ino(new_inode) : 0,
 			   new_dir_lock);
 	if (ret)
@@ -1586,9 +1591,8 @@ retry:
 	/* remove the new entry if it exists */
 	if (new_inode) {
 		ret = del_entry_items(sb, scoutfs_ino(new_dir),
+				      dentry_info_hash(new_dentry),
 				      dentry_info_pos(new_dentry),
-				      new_dentry->d_name.name,
-				      new_dentry->d_name.len,
 				      scoutfs_ino(new_inode),
 				      new_dir_lock, new_inode_lock);
 		if (ret)
@@ -1597,7 +1601,7 @@ retry:
 	}
 
 	/* create the new entry */
-	ret = add_entry_items(sb, scoutfs_ino(new_dir), new_pos,
+	ret = add_entry_items(sb, scoutfs_ino(new_dir), new_hash, new_pos,
 			      new_dentry->d_name.name, new_dentry->d_name.len,
 			      scoutfs_ino(old_inode), old_inode->i_mode,
 			      new_dir_lock, old_inode_lock);
@@ -1607,9 +1611,8 @@ retry:
 
 	/* remove the old entry */
 	ret = del_entry_items(sb, scoutfs_ino(old_dir),
+			      dentry_info_hash(old_dentry),
 			      dentry_info_pos(old_dentry),
-			      old_dentry->d_name.name,
-			      old_dentry->d_name.len,
 			      scoutfs_ino(old_inode),
 			      old_dir_lock, old_inode_lock);
 	if (ret)
@@ -1625,7 +1628,7 @@ retry:
 	/* won't fail from here on out, update all the vfs structs */
 
 	/* the caller will use d_move to move the old_dentry into place */
-	update_dentry_info(sb, old_dentry, new_pos, new_dir_lock);
+	update_dentry_info(sb, old_dentry, new_hash, new_pos, new_dir_lock);
 
        i_size_write(old_dir, i_size_read(old_dir) - old_dentry->d_name.len);
        if (!new_inode)
@@ -1664,7 +1667,6 @@ retry:
 	if (new_inode)
 		scoutfs_update_inode_item(new_inode, new_inode_lock,
 					  &ind_locks);
-
 	ret = 0;
 out:
 	if (ret) {
@@ -1677,10 +1679,14 @@ out:
 		 * succeed.  Maybe we could have an item replace call
 		 * that gives us the dupe to re-insert on cleanup?  Not
 		 * sure.
+		 *
+		 * It's safe to use dentry_info here 'cause they haven't
+		 * been updated if we saw an error.
 		 */
 		err = 0;
 		if (ins_old)
 			err = add_entry_items(sb, scoutfs_ino(old_dir),
+					      dentry_info_hash(old_dentry),
 					      dentry_info_pos(old_dentry),
 					      old_dentry->d_name.name,
 					      old_dentry->d_name.len,
@@ -1691,14 +1697,13 @@ out:
 
 		if (del_new && err == 0)
 			err = del_entry_items(sb, scoutfs_ino(new_dir),
-					      new_pos,
-					      new_dentry->d_name.name,
-					      new_dentry->d_name.len,
+					      new_hash, new_pos,
 					      scoutfs_ino(old_inode),
 					      new_dir_lock, old_inode_lock);
 
 		if (ins_new && err == 0)
 			err = add_entry_items(sb, scoutfs_ino(new_dir),
+					      dentry_info_hash(new_dentry),
 					      dentry_info_pos(new_dentry),
 					      new_dentry->d_name.name,
 					      new_dentry->d_name.len,

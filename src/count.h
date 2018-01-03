@@ -71,17 +71,14 @@ static inline const struct scoutfs_item_count SIC_DIRTY_INODE(void)
 }
 
 /*
- * Adding a dirent adds the entry key, readdir key, and backref.
+ * Directory entries are stored in three items.
  */
 static inline void __count_dirents(struct scoutfs_item_count *cnt,
 				   unsigned name_len)
 {
-
 	cnt->items += 3;
-	cnt->keys += offsetof(struct scoutfs_dirent_key, name[name_len]) +
-		      sizeof(struct scoutfs_readdir_key) +
-		      offsetof(struct scoutfs_link_backref_key, name[name_len]);
-	cnt->vals += 2 * offsetof(struct scoutfs_dirent, name[name_len]);
+	cnt->keys += 3 * sizeof(struct scoutfs_dirent_key);
+	cnt->vals += 3 * offsetof(struct scoutfs_dirent, name[name_len]);
 }
 
 static inline void __count_sym_target(struct scoutfs_item_count *cnt,

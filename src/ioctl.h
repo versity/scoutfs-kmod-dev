@@ -64,24 +64,36 @@ enum {
 				     struct scoutfs_ioctl_walk_inodes)
 
 /*
- * Fill the path buffer with the next path to the target inode.  An
- * iteration cursor is stored in the cursor buffer which advances
- * through the paths to the inode at each call.
+ * Fill the result buffer with the next absolute path to the target
+ * inode searching from a given position in a parent directory.
  *
  * @ino: The target ino that we're finding paths to.  Constant across
  * all the calls that make up an iteration over all the inode's paths.
  *
- * @cursor_ptr: A pointer to the buffer that will hold the iteration
- * cursor.  It must be initialized to 0 before iterating.  Each call
- * modifies it to skip past the result of that call.
+ * @dir_ino: The inode number of the directory containing the entry to
+ * our inode to search from.  If this parent directory contains no more
+ * entries to our inode then we'll search through other parent directory
+ * inodes in inode order.
  *
- * @cusur_bytes: The length of the cursor buffer.  Must be
- * SCOUTFS_IOC_INO_PATH_CURSOR_BYTES.
+ * @dir_pos: The position in the dir_ino parent directory of the entry
+ * to our inode to search from.  If there is no entry at this position
+ * then we'll search through other entry positions in increasing order.
+ * If we exhaust the parent directory then we'll search through
+ * additional parent directories in inode order.
  *
- * @path_ptr: The buffer to store each found path.
+ * @result_ptr: A pointer to the buffer where the result struct and
+ * absolute path will be stored.
  *
- * @path_bytes: The size of the buffer that will the found path
- * including null termination.  (PATH_MAX is a solid choice.)
+ * @result_bytes: The size of the buffer that will contain the result
+ * struct and the null terminated absolute path name.
+ *
+ * To start iterating set the desired target inode, dir_ino to 0,
+ * dir_pos to 0, and set result_ptr and _bytes to a sufficiently large
+ * buffeer (sizeof(result) + PATH_MAX is a solid choice).
+ *
+ * After each returned result set the next search dir_ino and dir_pos to
+ * the returned dir_ino and dir_pos.  Then increment the search dir_pos,
+ * and if it wrapped to 0, increment dir_ino.
  *
  * This only walks back through full hard links.  None of the returned
  * paths will reflect symlinks to components in the path.
@@ -90,28 +102,39 @@ enum {
  * returned paths to the inode.  It requires CAP_DAC_READ_SEARCH which
  * bypasses permissions checking.
  *
- * ENAMETOOLONG is returned when the next path found from the cursor
- * doesn't fit in the path buffer.
- *
  * This call is not serialized with any modification (create, rename,
  * unlink) of the path components.  It will return all the paths that
  * were stable both before and after the call.  It may or may not return
  * paths which are created or unlinked during the call.
  *
- * The number of bytes in the path, including the null terminator, are
- * returned when a path is found.  0 is returned when there are no more
- * paths to the link to the inode from the cursor.
+ * On success 0 is returned and result struct is filled with the next
+ * absolute path.  The path_bytes length of the path includes a null
+ * terminating byte.  dir_ino and dir_pos refer to the position of the
+ * final component in its parent directory and can be advanced to search
+ * for the next terminal entry whose path is then built by walking up
+ * parent directories.
+ *
+ * ENOENT is returned when no paths are found.
+ *
+ * ENAMETOOLONG is returned when the result struct and path found
+ * doesn't fit in the result buffer.
+ *
+ * Many other errnos indicate hard failure to find the next path.
  */
 struct scoutfs_ioctl_ino_path {
 	__u64 ino;
-	__u64 cursor_ptr;
-	__u64 path_ptr;
-	__u16 cursor_bytes;
-	__u16 path_bytes;
+	__u64 dir_ino;
+	__u64 dir_pos;
+	__u64 result_ptr;
+	__u16 result_bytes;
 } __packed;
 
-#define SCOUTFS_IOC_INO_PATH_CURSOR_BYTES \
-	(sizeof(__u64) + SCOUTFS_NAME_LEN + 1)
+struct scoutfs_ioctl_ino_path_result {
+	__u64 dir_ino;
+	__u64 dir_pos;
+	__u16 path_bytes;
+	__u8  path[0];
+} __packed;
 
 /* Get a single path from the root to the given inode number */
 #define SCOUTFS_IOC_INO_PATH _IOW(SCOUTFS_IOCTL_MAGIC, 2, \

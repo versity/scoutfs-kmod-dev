@@ -266,29 +266,13 @@ struct scoutfs_inode_key {
 	__u8 type;
 } __packed;
 
-/* value is struct scoutfs_dirent without the name */
+/* value is struct scoutfs_dirent with the name */
 struct scoutfs_dirent_key {
 	__u8 zone;
 	__be64 ino;
 	__u8 type;
-	__u8 name[0];
-} __packed;
-
-/* value is struct scoutfs_dirent with the name */
-struct scoutfs_readdir_key {
-	__u8 zone;
-	__be64 ino;
-	__u8 type;
-	__be64 pos;
-} __packed;
-
-/* value is empty */
-struct scoutfs_link_backref_key {
-	__u8 zone;
-	__be64 ino;
-	__u8 type;
-	__be64 dir_ino;
-	__u8 name[0];
+	__be64 major;
+	__be64 minor;
 } __packed;
 
 /* key is bytes of encoded block mapping */
@@ -494,13 +478,17 @@ struct scoutfs_inode {
 #define SCOUTFS_SYMLINK_MAX_SIZE 4096
 
 /*
- * Dirents are stored in items with an offset of the hash of their name.
- * Colliding names are packed into the value.
+ * Dirents are stored in multiple places to isolate contention when
+ * performing different operations: hashed by name for creation and
+ * lookup, at incrementing positions for readdir and resolving inodes to
+ * paths.  Each entry has all the metadata needed to reference all the
+ * items (so an entry cached by lookup can be used to unlink all the
+ * items).
  */
 struct scoutfs_dirent {
 	__le64 ino;
-	__le64 counter;
-	__le64 readdir_pos;
+	__le64 hash;
+	__le64 pos;
 	__u8 type;
 	__u8 name[0];
 } __packed;
@@ -526,9 +514,8 @@ enum {
 	SCOUTFS_DT_WHT,
 };
 
-/* ino_path can search for backref items with a null term */
 #define SCOUTFS_MAX_KEY_SIZE \
-	offsetof(struct scoutfs_link_backref_key, name[SCOUTFS_NAME_LEN + 1])
+	sizeof(struct scoutfs_dirent_key)
 
 #define SCOUTFS_MAX_VAL_SIZE SCOUTFS_BLOCK_MAPPING_MAX_BYTES
 

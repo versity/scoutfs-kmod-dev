@@ -22,6 +22,7 @@
 #include <linux/debugfs.h>
 
 #include "super.h"
+#include "export.h"
 #include "format.h"
 #include "inode.h"
 #include "dir.h"
@@ -297,6 +298,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_magic = SCOUTFS_SUPER_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_op = &scoutfs_super_ops;
+	sb->s_export_op = &scoutfs_export_ops;
 
 	/* btree blocks use long lived bh->b_data refs */
 	mapping_set_gfp_mask(sb->s_bdev->bd_inode->i_mapping, GFP_NOFS);

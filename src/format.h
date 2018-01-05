@@ -642,4 +642,16 @@ enum {
 	SCOUTFS_NET_STATUS_UNKNOWN,
 };
 
+/*
+ * Scoutfs file handle structure - this can be copied out to userspace
+ * via open by handle or put on the wire from NFS.
+ */
+struct scoutfs_fid {
+	__le64 ino;
+	__le64 parent_ino;
+} __packed;
+
+#define FILEID_SCOUTFS			0x81
+#define FILEID_SCOUTFS_WITH_PARENT	0x82
+
 #endif

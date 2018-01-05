@@ -1089,9 +1089,9 @@ int scoutfs_symlink_drop(struct super_block *sb, u64 ino,
  * Callers are comfortable with the race inherent to incrementally
  * building up a path with individual locked backref item lookups.
  */
-static int add_next_linkref(struct super_block *sb, u64 ino,
-			    u64 dir_ino, char *name, unsigned int name_len,
-			    struct list_head *list)
+int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
+				 u64 dir_ino, char *name, unsigned int name_len,
+				 struct list_head *list)
 {
 	struct scoutfs_link_backref_key last_lbkey;
 	struct scoutfs_link_backref_entry *ent;
@@ -1225,7 +1225,8 @@ retry:
 	}
 
 	/* get the next link name to the given inode */
-	ret = add_next_linkref(sb, ino, dir_ino, name, name_len, list);
+	ret = scoutfs_dir_add_next_linkref(sb, ino, dir_ino, name, name_len,
+					   list);
 	if (ret < 0)
 		goto out;
 
@@ -1233,7 +1234,8 @@ retry:
 	par_ino = first_backref_dir_ino(list);
 	while (par_ino != SCOUTFS_ROOT_INO) {
 
-		ret = add_next_linkref(sb, par_ino, 0, NULL, 0, list);
+		ret = scoutfs_dir_add_next_linkref(sb, par_ino, 0, NULL, 0,
+						   list);
 		if (ret < 0) {
 			if (ret == -ENOENT) {
 				/* restart if there was no parent component */

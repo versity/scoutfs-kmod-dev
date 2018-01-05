@@ -37,6 +37,7 @@
 #include "bio.h"
 #include "dlmglue.h"
 #include "stackglue.h"
+#include "export.h"
 
 struct lock_info;
 
@@ -2076,6 +2077,89 @@ DEFINE_EVENT(ocfs2_lock_res_class, ocfs2_unblock_lock,
 	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres),
 	TP_ARGS(osb, lockres)
 );
+
+DECLARE_EVENT_CLASS(scoutfs_fileid_class,
+	TP_PROTO(struct super_block *sb, int fh_type, struct scoutfs_fid *fid),
+	TP_ARGS(sb, fh_type, fid),
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, fh_type)
+		__field(u64, ino)
+		__field(u64, parent_ino)
+	),
+	TP_fast_assign(
+		__entry->fsid = SCOUTFS_SB(sb) ? FSID_ARG(sb) : 0;
+		__entry->fh_type = fh_type;
+		__entry->ino = le64_to_cpu(fid->ino);
+		__entry->parent_ino = fh_type == FILEID_SCOUTFS_WITH_PARENT ?
+				le64_to_cpu(fid->parent_ino) : 0ULL;
+	),
+	TP_printk("fsid "FSID_FMT" type %d ino %llu parent %llu",
+		  __entry->fsid, __entry->fh_type, __entry->ino,
+		  __entry->parent_ino)
+);
+
+DEFINE_EVENT(scoutfs_fileid_class, scoutfs_encode_fh,
+	TP_PROTO(struct super_block *sb, int fh_type, struct scoutfs_fid *fid),
+	TP_ARGS(sb, fh_type, fid)
+);
+
+DEFINE_EVENT(scoutfs_fileid_class, scoutfs_fh_to_dentry,
+	TP_PROTO(struct super_block *sb, int fh_type, struct scoutfs_fid *fid),
+	TP_ARGS(sb, fh_type, fid)
+);
+
+DEFINE_EVENT(scoutfs_fileid_class, scoutfs_fh_to_parent,
+	TP_PROTO(struct super_block *sb, int fh_type, struct scoutfs_fid *fid),
+	TP_ARGS(sb, fh_type, fid)
+);
+
+TRACE_EVENT(scoutfs_get_parent,
+	TP_PROTO(struct super_block *sb, struct inode *inode, u64 parent),
+
+	TP_ARGS(sb, inode, parent),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(__u64, parent)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = SCOUTFS_SB(sb) ? FSID_ARG(sb) : 0;
+		__entry->ino = scoutfs_ino(inode);
+		__entry->parent = parent;
+	),
+
+	TP_printk("fsid "FSID_FMT" child %llu parent %llu",
+		  __entry->fsid, __entry->ino, __entry->parent)
+);
+
+TRACE_EVENT(scoutfs_get_name,
+	TP_PROTO(struct super_block *sb, struct inode *parent,
+		 struct inode *child, char *name),
+
+	TP_ARGS(sb, parent, child, name),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, parent_ino)
+		__field(__u64, child_ino)
+		__string(name, name)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = SCOUTFS_SB(sb) ? FSID_ARG(sb) : 0;
+		__entry->parent_ino = scoutfs_ino(parent);
+		__entry->child_ino = scoutfs_ino(child);
+		__assign_str(name, name);
+	),
+
+	TP_printk("fsid "FSID_FMT" parent %llu child %llu name: %s",
+		  __entry->fsid, __entry->parent_ino, __entry->child_ino,
+		  __get_str(name))
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

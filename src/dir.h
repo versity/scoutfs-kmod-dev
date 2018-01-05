@@ -20,6 +20,10 @@ int scoutfs_dir_get_backref_path(struct super_block *sb, u64 target_ino,
 void scoutfs_dir_free_backref_path(struct super_block *sb,
 				   struct list_head *list);
 
+int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
+				 u64 dir_ino, char *name, unsigned int name_len,
+				 struct list_head *list);
+
 int scoutfs_symlink_drop(struct super_block *sb, u64 ino,
 			 struct scoutfs_lock *lock, u64 i_size);
 

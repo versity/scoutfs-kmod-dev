@@ -14,7 +14,7 @@ int scoutfs_hold_trans(struct super_block *sb,
 bool scoutfs_trans_held(void);
 void scoutfs_release_trans(struct super_block *sb);
 void scoutfs_trans_track_item(struct super_block *sb, signed items,
-			      signed keys, signed vals);
+			      signed vals);
 
 int scoutfs_setup_trans(struct super_block *sb);
 void scoutfs_shutdown_trans(struct super_block *sb);

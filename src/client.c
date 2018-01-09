@@ -589,22 +589,14 @@ int scoutfs_client_record_segment(struct super_block *sb,
 				  struct scoutfs_segment *seg, u8 level)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-	struct scoutfs_net_manifest_entry *net_ment;
+	struct scoutfs_net_manifest_entry net_ment;
 	struct scoutfs_manifest_entry ment;
-	int ret;
 
 	scoutfs_seg_init_ment(&ment, level, seg);
-	net_ment = scoutfs_alloc_net_ment(&ment);
-	if (net_ment) {
-		ret = client_request(client, SCOUTFS_NET_RECORD_SEGMENT,
-				     net_ment, scoutfs_net_ment_bytes(net_ment),
-				     NULL, 0);
-		kfree(net_ment);
-	} else {
-		ret = -ENOMEM;
-	}
+	scoutfs_init_ment_to_net(&net_ment, &ment);
 
-	return ret;
+	return client_request(client, SCOUTFS_NET_RECORD_SEGMENT, &net_ment,
+			      sizeof(net_ment), NULL, 0);
 }
 
 static int sort_cmp_u64s(const void *A, const void *B)

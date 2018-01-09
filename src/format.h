@@ -53,6 +53,75 @@ struct scoutfs_block_header {
 } __packed;
 
 /*
+ * scoutfs identifies all file system metadata items by a small key
+ * struct.
+ *
+ * Each item type maps their logical structures to the fixed fields in
+ * sort order.  This lets us print keys without needing per-type
+ * formats.
+ *
+ * The keys are compared by considering the fields in struct order from
+ * most to least significant.  They are considered a multi precision
+ * value when navigating the keys in ordered key space.  We can
+ * increment them, subtract them from each other, etc.
+ */
+struct scoutfs_key {
+	__u8	sk_zone;
+	__le64	_sk_first;
+	__u8	sk_type;
+	__le64	_sk_second;
+	__le64	_sk_third;
+	__u8	_sk_fourth;
+}__packed;
+
+/* inode index */
+#define skii_major	_sk_second
+#define skii_ino	_sk_third
+
+/* node free bit map  */
+#define skf_node_id	_sk_first
+#define skf_base	_sk_second
+
+/* node orphan inode */
+#define sko_node_id	_sk_first
+#define sko_ino		_sk_second
+
+/* inode */
+#define ski_ino		_sk_first
+
+/* xattr parts */
+#define skx_ino		_sk_first
+#define skx_name_hash	_sk_second
+#define skx_id		_sk_third
+#define skx_part	_sk_fourth
+
+/* directory entries */
+#define skd_ino		_sk_first
+#define skd_major	_sk_second
+#define skd_minor	_sk_third
+
+/* symlink target */
+#define sks_ino		_sk_first
+#define sks_nr		_sk_second
+
+/* file data mapping */
+#define skm_ino		_sk_first
+#define skm_base	_sk_second
+
+/*
+ * The btree still uses memcmp() to compare keys.  We should fix that
+ * before too long.
+ */
+struct scoutfs_key_be {
+	__u8	sk_zone;
+	__be64	_sk_first;
+	__u8	sk_type;
+	__be64	_sk_second;
+	__be64	_sk_third;
+	__u8	_sk_fourth;
+}__packed;
+
+/*
  * Assert that we'll be able to represent all possible keys with 8 64bit
  * primary sort values.
  */
@@ -143,34 +212,24 @@ struct scoutfs_manifest {
 } __packed;
 
 /*
- * Manifest entries are packed into btree keys and values in a very
- * fiddly way so that we can sort them with memcmp first by level then
- * by their position in the level.  First comes the level.
+ * Manifest entries are split across btree keys and values.  Putting
+ * some entry fields in the value keeps the key smaller and increases
+ * the fanout of the btree which keeps the tree smaller and reduces
+ * block IO.
  *
- * Level 0 segments are sorted by their seq so they don't have the first
- * segment key in the manifest btree key.  Both of their keys are in the
- * value.
- *
- * Level 1 segments are sorted by their first key so their last key is
- * in the value.
- *
- * We go to all this trouble so that we can communicate a version of the
- * manifest with one btree root, have dense btree keys which are used as
- * seperators in parent blocks, and don't duplicate the large keys in
- * the manifest btree key and value.
+ * The key is made up of the level, first key, and seq.  At level 0
+ * segments can completely overlap and have identical key ranges but we
+ * avoid duplicate btree keys by including the unique seq.
  */
-
 struct scoutfs_manifest_btree_key {
 	__u8 level;
-	__u8 bkey[0];
+	struct scoutfs_key_be first_key;
+	__be64 seq;
 } __packed;
 
 struct scoutfs_manifest_btree_val {
 	__le64 segno;
-	__le64 seq;
-	__le16 first_key_len;
-	__le16 last_key_len;
-	__u8 keys[0];
+	struct scoutfs_key last_key;
 } __packed;
 
 #define SCOUTFS_ALLOC_REGION_SHIFT 8
@@ -201,15 +260,12 @@ struct scoutfs_alloc_region_btree_val {
  * They're not allowed to cross a block boundary.
  */
 struct scoutfs_segment_item {
-	__le16 key_len;
+	struct scoutfs_key key;
 	__le16 val_len;
 	__u8 flags;
 	__u8 nr_links;
 	__le32 skip_links[0];
-	/*
-	 * __u8 key_bytes[key_len]
-	 * __u8 val_bytes[val_len]
-	 */
+	/* __u8 val_bytes[val_len] */
 } __packed;
 
 #define SCOUTFS_ITEM_FLAG_DELETION (1 << 0)
@@ -259,30 +315,6 @@ struct scoutfs_segment_block {
 
 #define SCOUTFS_MAX_TYPE			16 /* power of 2 is efficient */
 
-/* value is struct scoutfs_inode */
-struct scoutfs_inode_key {
-	__u8 zone;
-	__be64 ino;
-	__u8 type;
-} __packed;
-
-/* value is struct scoutfs_dirent with the name */
-struct scoutfs_dirent_key {
-	__u8 zone;
-	__be64 ino;
-	__u8 type;
-	__be64 major;
-	__be64 minor;
-} __packed;
-
-/* key is bytes of encoded block mapping */
-struct scoutfs_block_mapping_key {
-	__u8 zone;
-	__be64 ino;
-	__u8 type;
-	__be64 base;
-} __packed;
-
 /* each mapping item describes a fixed number of blocks */
 #define SCOUTFS_BLOCK_MAPPING_SHIFT	6
 #define SCOUTFS_BLOCK_MAPPING_BLOCKS	(1 << SCOUTFS_BLOCK_MAPPING_SHIFT)
@@ -328,31 +360,8 @@ struct scoutfs_block_mapping_key {
 #define SCOUTFS_FREE_BITS_U64S \
 	DIV_ROUND_UP(SCOUTFS_FREE_BITS_BITS, 64)
 
-struct scoutfs_free_bits_key {
-	__u8 zone;
-	__be64 node_id;
-	__u8 type;
-	__be64 base;
-} __packed;
-
 struct scoutfs_free_bits {
 	__le64 bits[SCOUTFS_FREE_BITS_U64S];
-} __packed;
-
-struct scoutfs_orphan_key {
-	__u8 zone;
-	__be64 node_id;
-	__u8 type;
-	__be64 ino;
-} __packed;
-
-struct scoutfs_xattr_key {
-	__u8 zone;
-	__be64 ino;
-	__u8 type;
-	__be32 name_hash;
-	__be64 id;
-	__u8 part;
 } __packed;
 
 /*
@@ -366,25 +375,9 @@ struct scoutfs_xattr {
 	__u8 name[0];
 } __packed;
 
-/* size determines nr needed to store full target path in their values */
-struct scoutfs_symlink_key {
-	__u8 zone;
-	__be64 ino;
-	__u8 type;
-	__u8 nr;
-} __packed;
-
 struct scoutfs_betimespec {
 	__be64 sec;
 	__be32 nsec;
-} __packed;
-
-struct scoutfs_inode_index_key {
-	__u8 zone;
-	__u8 type;
-	__be64 major;
-	__be32 minor;
-	__be64 ino;
 } __packed;
 
 /* XXX does this exist upstream somewhere? */
@@ -514,9 +507,6 @@ enum {
 	SCOUTFS_DT_WHT,
 };
 
-#define SCOUTFS_MAX_KEY_SIZE \
-	sizeof(struct scoutfs_dirent_key)
-
 #define SCOUTFS_MAX_VAL_SIZE SCOUTFS_BLOCK_MAPPING_MAX_BYTES
 
 #define SCOUTFS_XATTR_MAX_NAME_LEN	255
@@ -591,8 +581,8 @@ struct scoutfs_net_key_range {
 struct scoutfs_net_manifest_entry {
 	__le64 segno;
 	__le64 seq;
-	__le16 first_key_len;
-	__le16 last_key_len;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
 	__u8 level;
 	__u8 keys[0];
 } __packed;

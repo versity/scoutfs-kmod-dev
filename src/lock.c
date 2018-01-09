@@ -112,8 +112,8 @@ static void invalidate_inode(struct super_block *sb, u64 ino)
 static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
 			   int prev, int mode)
 {
-	struct scoutfs_key_buf *start = lock->start;
-	struct scoutfs_key_buf *end = lock->end;
+	struct scoutfs_key *start = &lock->start;
+	struct scoutfs_key *end = &lock->end;
 	struct scoutfs_lock_coverage *cov;
 	struct scoutfs_lock_coverage *tmp;
 	u64 ino, last;
@@ -191,15 +191,13 @@ static void lock_free(struct lock_info *linfo, struct scoutfs_lock *lock)
 		list_del(&lock->lru_head);
 		linfo->lru_nr--;
 	}
-	scoutfs_key_free(sb, lock->start);
-	scoutfs_key_free(sb, lock->end);
 	kfree(lock);
 }
 
 static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 				       struct scoutfs_lock_name *name,
-				       struct scoutfs_key_buf *start,
-				       struct scoutfs_key_buf *end)
+				       struct scoutfs_key *start,
+				       struct scoutfs_key *end)
 
 {
 	DECLARE_LOCK_INFO(sb, linfo);
@@ -235,12 +233,8 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 	INIT_LIST_HEAD(&lock->cov_list);
 
 	if (start) {
-		lock->start = scoutfs_key_dup(sb, start);
-		lock->end = scoutfs_key_dup(sb, end);
-		if (!lock->start || !lock->end) {
-			lock_free(linfo, lock);
-			return NULL;
-		}
+		lock->start = *start;
+		lock->end = *end;
 	}
 
 	lock->sb = sb;
@@ -465,14 +459,14 @@ static bool insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
 		parent = *node;
 		lock = container_of(*node, struct scoutfs_lock, range_node);
 
-		cmp = scoutfs_key_compare_ranges(ins->start, ins->end,
-						 lock->start, lock->end);
+		cmp = scoutfs_key_compare_ranges(&ins->start, &ins->end,
+						 &lock->start, &lock->end);
 		if (WARN_ON_ONCE(cmp == 0)) {
-			scoutfs_warn_sk(sb, "inserting lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT" overlaps with existing lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT"\n",
-					ins, LN_ARG(&ins->name),
-					SK_ARG(ins->start), SK_ARG(ins->end),
-					lock, LN_ARG(&lock->name),
-					SK_ARG(lock->start), SK_ARG(lock->end));
+			scoutfs_warn(sb, "inserting lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT" overlaps with existing lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT"\n",
+				     ins, LN_ARG(&ins->name),
+				     SK_ARG(&ins->start), SK_ARG(&ins->end),
+				     lock, LN_ARG(&lock->name),
+				     SK_ARG(&lock->start), SK_ARG(&lock->end));
 			return false;
 		}
 
@@ -544,8 +538,8 @@ static void scoutfs_lock_ast(void *arg)
 	struct super_block *sb = lock->sb;
 	DECLARE_LOCK_INFO(sb, linfo);
 	int status = lock->lksb.sb_status;
-	bool cached;
-	bool dirty;
+	bool cached = false;
+	bool dirty = false;
 
 	scoutfs_inc_counter(sb, lock_ast);
 
@@ -584,17 +578,20 @@ static void scoutfs_lock_ast(void *arg)
 	 * changing lock modes.  We can't have cached items if we're not
 	 * in the two modes that allow caching.
 	 */
-	cached = lock->start && scoutfs_item_range_cached(sb, lock->start,
-							  lock->end, false);
-	dirty = lock->start && scoutfs_item_range_cached(sb, lock->start,
-							 lock->end, true);
+	if (!RB_EMPTY_NODE(&lock->range_node)) {
+		cached = scoutfs_item_range_cached(sb, &lock->start,
+						   &lock->end, false);
+		dirty = scoutfs_item_range_cached(sb, &lock->start, &lock->end,
+						  true);
+	}
+
 	if (WARN_ON_ONCE(dirty ||
 			 (cached && lock->granted_mode != DLM_LOCK_PR &&
 				    lock->granted_mode != DLM_LOCK_EX))) {
-		scoutfs_err_sk(sb, "lock item cache consistency violation, cached %u dirty %u: name "LN_FMT" start "SK_FMT" end "SK_FMT" refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u dlmlksb: status %d lkid 0x%x flags 0x%x\n",
+		scoutfs_err(sb, "lock item cache consistency violation, cached %u dirty %u: name "LN_FMT" start "SK_FMT" end "SK_FMT" refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u dlmlksb: status %d lkid 0x%x flags 0x%x\n",
 			   cached, dirty,
-			   LN_ARG(&lock->name), SK_ARG(lock->start),
-			   SK_ARG(lock->end), lock->refresh_gen, lock->error,
+			   LN_ARG(&lock->name), SK_ARG(&lock->start),
+			   SK_ARG(&lock->end), lock->refresh_gen, lock->error,
 			   lock->granted_mode, lock->bast_mode,
 			   lock->work_prev_mode, lock->work_mode,
 			   lock->waiters[DLM_LOCK_PR],
@@ -674,7 +671,7 @@ static void scoutfs_lock_work(struct work_struct *work)
 
 	spin_unlock(&linfo->lock);
 
-	if (lock->start) {
+	if (!RB_EMPTY_NODE(&lock->range_node)) {
 		ret = lock_invalidate(sb, lock, prev, mode);
 		BUG_ON(ret);
 	}
@@ -793,8 +790,7 @@ static bool lock_wait(struct lock_info *linfo, struct scoutfs_lock *lock,
  */
 static int lock_name_keys(struct super_block *sb, int mode, int flags,
 			  struct scoutfs_lock_name *name,
-			  struct scoutfs_key_buf *start,
-			  struct scoutfs_key_buf *end,
+			  struct scoutfs_key *start, struct scoutfs_key *end,
 			  struct scoutfs_lock **ret_lock)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
@@ -873,10 +869,8 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 		     struct scoutfs_lock **ret_lock)
 {
 	struct scoutfs_lock_name name;
-	struct scoutfs_inode_key start_ikey;
-	struct scoutfs_inode_key end_ikey;
-	struct scoutfs_key_buf start;
-	struct scoutfs_key_buf end;
+	struct scoutfs_key start;
+	struct scoutfs_key end;
 
 	ino &= ~(u64)SCOUTFS_LOCK_INODE_GROUP_MASK;
 
@@ -886,15 +880,17 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 	name.first = cpu_to_le64(ino);
 	name.second = 0;
 
-	start_ikey.zone = SCOUTFS_FS_ZONE;
-	start_ikey.ino = cpu_to_be64(ino);
-	start_ikey.type = 0;
-	scoutfs_key_init(&start, &start_ikey, sizeof(start_ikey));
+	start = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_FS_ZONE,
+		.ski_ino = cpu_to_le64(ino),
+		.sk_type = 0,
+	};
 
-	end_ikey.zone = SCOUTFS_FS_ZONE;
-	end_ikey.ino = cpu_to_be64(ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1);
-	end_ikey.type = ~0;
-	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
+	end = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_FS_ZONE,
+		.ski_ino = cpu_to_le64(ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1),
+		.sk_type = U8_MAX,
+	};
 
 	return lock_name_keys(sb, mode, flags, &name, &start, &end, ret_lock);
 }
@@ -1045,8 +1041,8 @@ int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
  * because their starting keys are the same.
  */
 void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
-				       struct scoutfs_inode_index_key *start,
-				       struct scoutfs_inode_index_key *end)
+				       struct scoutfs_key *start,
+				       struct scoutfs_key *end)
 {
 	u64 start_major = major & ~SCOUTFS_LOCK_SEQ_GROUP_MASK;
 	u64 end_major = major | SCOUTFS_LOCK_SEQ_GROUP_MASK;
@@ -1054,21 +1050,12 @@ void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
 	BUG_ON(type != SCOUTFS_INODE_INDEX_META_SEQ_TYPE &&
 	       type != SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE);
 
-	if (start) {
-		start->zone = SCOUTFS_INODE_INDEX_ZONE;
-		start->type = type;
-		start->major = cpu_to_be64(start_major);
-		start->minor = 0;
-		start->ino = 0;
-	}
+	if (start)
+		scoutfs_inode_init_index_key(start, type, start_major, 0, 0);
 
-	if (end) {
-		end->zone = SCOUTFS_INODE_INDEX_ZONE;
-		end->type = type;
-		end->major = cpu_to_be64(end_major);
-		end->minor = 0;
-		end->ino = cpu_to_be64(~0ULL);
-	}
+	if (end)
+		scoutfs_inode_init_index_key(end, type, end_major, U32_MAX,
+					     U64_MAX);
 }
 
 /*
@@ -1082,22 +1069,16 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     struct scoutfs_lock **ret_lock)
 {
 	struct scoutfs_lock_name name;
-	struct scoutfs_inode_index_key start_ikey;
-	struct scoutfs_inode_index_key end_ikey;
-	struct scoutfs_key_buf start;
-	struct scoutfs_key_buf end;
+	struct scoutfs_key start;
+	struct scoutfs_key end;
 
-	scoutfs_lock_get_index_item_range(type, major, ino,
-					  &start_ikey, &end_ikey);
+	scoutfs_lock_get_index_item_range(type, major, ino, &start, &end);
 
 	name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
-	name.zone = start_ikey.zone;
-	name.type = start_ikey.type;
-	name.first = be64_to_le64(start_ikey.major);
-	name.second = be64_to_le64(start_ikey.ino);
-
-	scoutfs_key_init(&start, &start_ikey, sizeof(start_ikey));
-	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
+	name.zone = start.sk_zone;
+	name.type = start.sk_type;
+	name.first = start.skii_major;
+	name.second = start.skii_ino;
 
 	return lock_name_keys(sb, mode, 0, &name, &start, &end, ret_lock);
 }
@@ -1117,10 +1098,8 @@ int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 			 u64 node_id, struct scoutfs_lock **lock)
 {
 	struct scoutfs_lock_name name;
-	struct scoutfs_orphan_key start_okey;
-	struct scoutfs_orphan_key end_okey;
-	struct scoutfs_key_buf start;
-	struct scoutfs_key_buf end;
+	struct scoutfs_key start;
+	struct scoutfs_key end;
 
 	name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
 	name.zone = SCOUTFS_NODE_ZONE;
@@ -1128,17 +1107,17 @@ int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 	name.first = cpu_to_le64(node_id);
 	name.second = 0;
 
-	start_okey.zone = SCOUTFS_NODE_ZONE;
-	start_okey.node_id = cpu_to_be64(node_id);
-	start_okey.type = 0;
-	start_okey.ino = 0;
-	scoutfs_key_init(&start, &start_okey, sizeof(start_okey));
+	start = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_NODE_ZONE,
+		.sko_node_id = cpu_to_le64(node_id),
+		.sk_type = 0,
+	};
 
-	end_okey.zone = SCOUTFS_NODE_ZONE;
-	end_okey.node_id = cpu_to_be64(node_id);
-	end_okey.type = ~0;
-	end_okey.ino = cpu_to_be64(~0ULL);
-	scoutfs_key_init(&end, &end_okey, sizeof(end_okey));
+	end = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_NODE_ZONE,
+		.sko_node_id = cpu_to_le64(node_id),
+		.sk_type = U8_MAX,
+	};
 
 	return lock_name_keys(sb, mode, flags, &name, &start, &end, lock);
 }
@@ -1330,9 +1309,9 @@ static int scoutfs_debug_locks_seq_show(struct seq_file *m, void *v)
 {
 	struct scoutfs_lock *lock = v;
 
-	SK_PCPU(seq_printf(m, "name "LN_FMT" start "SK_FMT" end "SK_FMT" refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u dlmlksb: status %d lkid 0x%x flags 0x%x\n",
-			   LN_ARG(&lock->name), SK_ARG(lock->start),
-			   SK_ARG(lock->end), lock->refresh_gen, lock->error,
+	seq_printf(m, "name "LN_FMT" start "SK_FMT" end "SK_FMT" refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u dlmlksb: status %d lkid 0x%x flags 0x%x\n",
+			   LN_ARG(&lock->name), SK_ARG(&lock->start),
+			   SK_ARG(&lock->end), lock->refresh_gen, lock->error,
 			   lock->granted_mode, lock->bast_mode,
 			   lock->work_prev_mode, lock->work_mode,
 			   lock->waiters[DLM_LOCK_PR],
@@ -1343,7 +1322,7 @@ static int scoutfs_debug_locks_seq_show(struct seq_file *m, void *v)
 			   lock->users[DLM_LOCK_CW],
 			   lock->lksb.sb_status,
 			   lock->lksb.sb_lkid,
-			   lock->lksb.sb_flags));
+			   lock->lksb.sb_flags);
 
 	return 0;
 }
@@ -1437,10 +1416,10 @@ void scoutfs_lock_destroy(struct super_block *sb)
 
 		for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
 			if (lock->waiters[mode] || lock->users[mode]) {
-				scoutfs_warn_sk(sb, "lock name "LN_FMT" start "SK_FMT" end "SK_FMT" has mode %d user after shutdown",
+				scoutfs_warn(sb, "lock name "LN_FMT" start "SK_FMT" end "SK_FMT" has mode %d user after shutdown",
 						LN_ARG(&lock->name),
-						SK_ARG(lock->start),
-						SK_ARG(lock->end), mode);
+						SK_ARG(&lock->start),
+						SK_ARG(&lock->end), mode);
 				break;
 			}
 		}

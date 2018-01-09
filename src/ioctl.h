@@ -208,11 +208,16 @@ struct scoutfs_ioctl_stat_more {
 #define SCOUTFS_IOC_STAT_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \
 				   struct scoutfs_ioctl_stat_more)
 
+/*
+ * Fills the buffer with either the keys for the cached items or the
+ * keys for the cached ranges found starting with the given key.  The
+ * number of keys filled in the buffer is returned.  When filling range
+ * keys the returned number will always be a multiple of two.
+ */
 struct scoutfs_ioctl_item_cache_keys {
-	__u64 key_ptr;
-	__u64 key_len;
+	struct scoutfs_key key;
 	__u64 buf_ptr;
-	__u64 buf_len;
+	__u16 buf_nr;
 	__u8 which;
 } __packed;
 

@@ -60,7 +60,6 @@
 struct trans_info {
 	spinlock_t lock;
 	unsigned reserved_items;
-	unsigned reserved_keys;
 	unsigned reserved_vals;
 	unsigned holders;
 	bool writing;
@@ -295,7 +294,6 @@ static bool acquired_hold(struct super_block *sb,
 	DECLARE_TRANS_INFO(sb, tri);
 	bool acquired = false;
 	unsigned items;
-	unsigned keys;
 	unsigned vals;
 	bool fits;
 
@@ -305,7 +303,6 @@ static bool acquired_hold(struct super_block *sb,
 					  &rsv->reserved, &rsv->actual,
 					  tri->holders, tri->writing,
 					  tri->reserved_items,
-					  tri->reserved_keys,
 					  tri->reserved_vals);
 
 	/* use a caller's existing reservation */
@@ -318,9 +315,8 @@ static bool acquired_hold(struct super_block *sb,
 
 	/* see if we can reserve space for our item count */
 	items = tri->reserved_items + cnt->items;
-	keys = tri->reserved_keys + cnt->keys;
 	vals = tri->reserved_vals + cnt->vals;
-	fits = scoutfs_item_dirty_fits_single(sb, items, keys, vals);
+	fits = scoutfs_item_dirty_fits_single(sb, items, vals);
 	if (!fits) {
 		scoutfs_inc_counter(sb, trans_commit_full);
 		queue_trans_work(sbi);
@@ -328,11 +324,9 @@ static bool acquired_hold(struct super_block *sb,
 	}
 
 	tri->reserved_items = items;
-	tri->reserved_keys = keys;
 	tri->reserved_vals = vals;
 
 	rsv->reserved.items = cnt->items;
-	rsv->reserved.keys = cnt->keys;
 	rsv->reserved.vals = cnt->vals;
 
 hold:
@@ -358,9 +352,8 @@ int scoutfs_hold_trans(struct super_block *sb,
 	 * Caller shouldn't provide garbage counts, nor counts that
 	 * can't fit in segments by themselves.
 	 */
-	if (WARN_ON_ONCE(cnt.items <= 0 || cnt.keys < 0 || cnt.vals < 0) ||
-	    WARN_ON_ONCE(!scoutfs_seg_fits_single(cnt.items, cnt.keys,
-						  cnt.vals)))
+	if (WARN_ON_ONCE(cnt.items <= 0 || cnt.vals < 0) ||
+	    WARN_ON_ONCE(!scoutfs_seg_fits_single(cnt.items, cnt.vals)))
 		return -EINVAL;
 
 	if (current == sbi->trans_task)
@@ -400,7 +393,7 @@ bool scoutfs_trans_held(void)
 }
 
 void scoutfs_trans_track_item(struct super_block *sb, signed items,
-			      signed keys, signed vals)
+			      signed vals)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_reservation *rsv = current->journal_info;
@@ -411,11 +404,9 @@ void scoutfs_trans_track_item(struct super_block *sb, signed items,
 	BUG_ON(!rsv || rsv->magic != SCOUTFS_RESERVATION_MAGIC);
 
 	rsv->actual.items += items;
-	rsv->actual.keys += keys;
 	rsv->actual.vals += vals;
 
 	WARN_ON_ONCE(rsv->actual.items > rsv->reserved.items);
-	WARN_ON_ONCE(rsv->actual.keys > rsv->reserved.keys);
 	WARN_ON_ONCE(rsv->actual.vals > rsv->reserved.vals);
 }
 
@@ -442,15 +433,13 @@ void scoutfs_release_trans(struct super_block *sb)
 
 	trace_scoutfs_release_trans(sb, rsv, rsv->holders, &rsv->reserved,
 				    &rsv->actual, tri->holders, tri->writing,
-				    tri->reserved_items, tri->reserved_keys,
-				    tri->reserved_vals);
+				    tri->reserved_items, tri->reserved_vals);
 
 	BUG_ON(rsv->holders <= 0);
 	BUG_ON(tri->holders <= 0);
 
 	if (--rsv->holders == 0) {
 		tri->reserved_items -= rsv->reserved.items;
-		tri->reserved_keys -= rsv->reserved.keys;
 		tri->reserved_vals -= rsv->reserved.vals;
 		current->journal_info = NULL;
 		kfree(rsv);

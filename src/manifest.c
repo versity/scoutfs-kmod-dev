@@ -50,7 +50,7 @@ struct manifest {
 
 	unsigned long flags;
 
-	struct scoutfs_key_buf *compact_keys[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
+	struct scoutfs_key compact_keys[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
 };
 
 #define MANI_FLAG_LEVEL0_FULL (1 << 0)
@@ -77,8 +77,8 @@ struct manifest_ref {
 	int off;
 	u8 level;
 
-	struct scoutfs_key_buf *first;
-	struct scoutfs_key_buf *last;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
 };
 
 /*
@@ -123,95 +123,29 @@ bool scoutfs_manifest_level0_full(struct super_block *sb)
 
 void scoutfs_manifest_init_entry(struct scoutfs_manifest_entry *ment,
 				 u64 level, u64 segno, u64 seq,
-				 struct scoutfs_key_buf *first,
-				 struct scoutfs_key_buf *last)
+				 struct scoutfs_key *first,
+				 struct scoutfs_key *last)
 {
 	ment->level = level;
 	ment->segno = segno;
 	ment->seq = seq;
-
-	if (first)
-		scoutfs_key_clone(&ment->first, first);
-	else
-		scoutfs_key_init(&ment->first, NULL, 0);
-
-	if (last)
-		scoutfs_key_clone(&ment->last, last);
-	else
-		scoutfs_key_init(&ment->last, NULL, 0);
+	scoutfs_key_copy_or_zeros(&ment->first, first);
+	scoutfs_key_copy_or_zeros(&ment->last, last);
 }
 
-/*
- * level 0 segments have the extra seq up in the btree key.
- */
-static struct scoutfs_manifest_btree_key *
-alloc_btree_key_val_lens(unsigned first_len, unsigned last_len)
+static void init_btree_key(struct scoutfs_manifest_btree_key *mkey,
+			   u8 level, u64 seq, struct scoutfs_key *first)
 {
-	return kmalloc(sizeof(struct scoutfs_manifest_btree_key) +
-		       sizeof(u64) +
-		       sizeof(struct scoutfs_manifest_btree_val) +
-		       first_len + last_len, GFP_NOFS);
+	mkey->level = level;
+	scoutfs_key_to_be(&mkey->first_key, first);
+	mkey->seq = cpu_to_be64(seq);
 }
 
-/*
- * Initialize the btree key and value for a manifest entry in one contiguous
- * allocation.
- */
-static struct scoutfs_manifest_btree_key *
-alloc_btree_key_val(struct scoutfs_manifest_entry *ment, unsigned *mkey_len,
-		    struct scoutfs_manifest_btree_val **mval_ret,
-		    unsigned *mval_len_ret)
+static void init_btree_val(struct scoutfs_manifest_btree_val *mval,
+			   u64 segno, struct scoutfs_key *last)
 {
-	struct scoutfs_manifest_btree_key *mkey;
-	struct scoutfs_manifest_btree_val *mval;
-	struct scoutfs_key_buf b_first;
-	struct scoutfs_key_buf b_last;
-	unsigned bkey_len;
-	unsigned mval_len;
-	__be64 seq;
-
-	mkey = alloc_btree_key_val_lens(ment->first.key_len, ment->last.key_len);
-	if (!mkey)
-		return NULL;
-
-	if (ment->level == 0) {
-		seq = cpu_to_be64(ment->seq);
-		bkey_len = sizeof(seq);
-		memcpy(mkey->bkey, &seq, bkey_len);
-	} else {
-		bkey_len = ment->first.key_len;
-	}
-
-	*mkey_len = offsetof(struct scoutfs_manifest_btree_key, bkey[bkey_len]);
-	mval = (void *)mkey + *mkey_len;
-
-	if (ment->level == 0) {
-		scoutfs_key_init(&b_first, mval->keys, ment->first.key_len);
-		scoutfs_key_init(&b_last, mval->keys + ment->first.key_len,
-				 ment->last.key_len);
-		mval_len = sizeof(struct scoutfs_manifest_btree_val) +
-			   ment->first.key_len + ment->last.key_len;
-	} else {
-		scoutfs_key_init(&b_first, mkey->bkey, ment->first.key_len);
-		scoutfs_key_init(&b_last, mval->keys, ment->last.key_len);
-		mval_len = sizeof(struct scoutfs_manifest_btree_val) +
-			   ment->last.key_len;
-	}
-
-	mkey->level = ment->level;
-	mval->segno = cpu_to_le64(ment->segno);
-	mval->seq = cpu_to_le64(ment->seq);
-	mval->first_key_len = cpu_to_le16(ment->first.key_len);
-	mval->last_key_len = cpu_to_le16(ment->last.key_len);
-
-	scoutfs_key_copy(&b_first, &ment->first);
-	scoutfs_key_copy(&b_last, &ment->last);
-
-	if (mval_ret) {
-		*mval_ret = mval;
-		*mval_len_ret = mval_len;
-	}
-	return mkey;
+	mval->segno = cpu_to_le64(segno);
+	mval->last_key = *last;
 }
 
 /* initialize a native manifest entry to point to the btree key and value */
@@ -222,50 +156,12 @@ static void init_ment_iref(struct scoutfs_manifest_entry *ment,
 	struct scoutfs_manifest_btree_val *mval = iref->val;
 
 	ment->level = mkey->level;
+	scoutfs_key_from_be(&ment->first, &mkey->first_key);
+	ment->seq = be64_to_cpu(mkey->seq);
 	ment->segno = le64_to_cpu(mval->segno);
-	ment->seq = le64_to_cpu(mval->seq);
-
-	if (ment->level == 0) {
-		scoutfs_key_init(&ment->first, mval->keys,
-				 le16_to_cpu(mval->first_key_len));
-		scoutfs_key_init(&ment->last, mval->keys +
-				 le16_to_cpu(mval->first_key_len),
-				 le16_to_cpu(mval->last_key_len));
-	} else {
-		scoutfs_key_init(&ment->first, mkey->bkey,
-				 le16_to_cpu(mval->first_key_len));
-		scoutfs_key_init(&ment->last, mval->keys,
-				 le16_to_cpu(mval->last_key_len));
-	}
+	ment->last = mval->last_key;
 }
 
-/*
- * Fill the callers max-size btree key with the given values and return
- * its length.
- */
-static unsigned init_btree_key(struct scoutfs_manifest_btree_key *mkey,
-			       u8 level, u64 seq, struct scoutfs_key_buf *first)
-{
-	struct scoutfs_key_buf b_first;
-	unsigned bkey_len;
-	__be64 bseq;
-
-	mkey->level = level;
-
-	if (level == 0) {
-		bseq = cpu_to_be64(seq);
-		bkey_len = sizeof(bseq);
-		memcpy(mkey->bkey, &bseq, bkey_len);
-	} else if (first) {
-		scoutfs_key_init(&b_first, mkey->bkey, first->key_len);
-		scoutfs_key_copy(&b_first, first);
-		bkey_len = first->key_len;
-	} else {
-		bkey_len = 0;
-	}
-
-	return offsetof(struct scoutfs_manifest_btree_key, bkey[bkey_len]);
-}
 
 /*
  * Insert a new manifest entry in the ring.  The ring allocates a new
@@ -279,29 +175,25 @@ int scoutfs_manifest_add(struct super_block *sb,
 	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_manifest_btree_key *mkey;
-	struct scoutfs_manifest_btree_val *mval;
-	unsigned mkey_len;
-	unsigned mval_len;
+	struct scoutfs_manifest_btree_key mkey;
+	struct scoutfs_manifest_btree_val mval;
 	int ret;
 
 	lockdep_assert_held(&mani->rwsem);
 
-	mkey = alloc_btree_key_val(ment, &mkey_len, &mval, &mval_len);
-	if (!mkey)
-		return -ENOMEM;
+	init_btree_key(&mkey, ment->level, ment->seq, &ment->first);
+	init_btree_val(&mval, ment->segno, &ment->last);
 
 	trace_scoutfs_manifest_add(sb, ment->level, ment->segno, ment->seq,
 				   &ment->first, &ment->last);
 
-	ret = scoutfs_btree_insert(sb, &super->manifest.root, mkey, mkey_len,
-				   mval, mval_len);
+	ret = scoutfs_btree_insert(sb, &super->manifest.root,
+				   &mkey, sizeof(mkey), &mval, sizeof(mval));
 	if (ret == 0) {
 		mani->nr_levels = max_t(u8, mani->nr_levels, ment->level + 1);
 		add_level_count(sb, ment->level, 1);
 	}
 
-	kfree(mkey);
 	return ret;
 }
 
@@ -317,8 +209,7 @@ int scoutfs_manifest_del(struct super_block *sb,
 	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_manifest_btree_key *mkey;
-	unsigned mkey_len;
+	struct scoutfs_manifest_btree_key mkey;
 	int ret;
 
 	trace_scoutfs_manifest_delete(sb, ment->level, ment->segno, ment->seq,
@@ -326,15 +217,13 @@ int scoutfs_manifest_del(struct super_block *sb,
 
 	lockdep_assert_held(&mani->rwsem);
 
-	mkey = alloc_btree_key_val(ment, &mkey_len, NULL, NULL);
-	if (!mkey)
-		return -ENOMEM;
+	init_btree_key(&mkey, ment->level, ment->seq, &ment->first);
 
-	ret = scoutfs_btree_delete(sb, &super->manifest.root, mkey, mkey_len);
+	ret = scoutfs_btree_delete(sb, &super->manifest.root,
+				   &mkey, sizeof(mkey));
 	if (ret == 0)
 		add_level_count(sb, ment->level, -1ULL);
 
-	kfree(mkey);
 	return ret;
 }
 
@@ -367,8 +256,6 @@ static void free_ref(struct super_block *sb, struct manifest_ref *ref)
 	if (!IS_ERR_OR_NULL(ref)) {
 		WARN_ON_ONCE(!list_empty(&ref->entry));
 		scoutfs_seg_put(ref->seg);
-		scoutfs_key_free(sb, ref->first);
-		scoutfs_key_free(sb, ref->last);
 		kfree(ref);
 	}
 }
@@ -383,15 +270,11 @@ static int alloc_manifest_ref(struct super_block *sb, struct list_head *ref_list
 	struct manifest_ref *ref;
 
 	ref = kzalloc(sizeof(struct manifest_ref), GFP_NOFS);
-	if (ref) {
-		ref->first = scoutfs_key_dup(sb, &ment->first);
-		ref->last = scoutfs_key_dup(sb, &ment->last);
-	}
-	if (!ref || !ref->first || !ref->last) {
-		free_ref(sb, ref);
+	if (!ref)
 		return -ENOMEM;
-	}
 
+	ref->first = ment->first;
+	ref->last = ment->last;
 	ref->level = ment->level;
 	ref->segno = ment->segno;
 	ref->seq = ment->seq;
@@ -410,7 +293,7 @@ static int alloc_manifest_ref(struct super_block *sb, struct list_head *ref_list
 static int btree_prev_overlap_or_next(struct super_block *sb,
 				      struct scoutfs_btree_root *root,
 				      void *key, unsigned key_len,
-				      struct scoutfs_key_buf *start, u8 level,
+				      struct scoutfs_key *start, u8 level,
 				      struct scoutfs_btree_item_ref *iref)
 {
 	struct scoutfs_manifest_entry ment;
@@ -436,55 +319,63 @@ static int btree_prev_overlap_or_next(struct super_block *sb,
 
 /*
  * Get references to all the level 0 segments whose item ranges
- * intersect with the callers range.  We walk the manifest backwards so
- * that we end up adding refs to the caller's list reverse sorted by
- * sequence, which is what they want to be able to use the segment with
- * the newest item.
+ * intersect with the callers range.  The entries are sorted by their
+ * first key so we can stop searching once our end key can only keep
+ * being less than the increasing start key.
  *
  * This can return -ESTALE if it reads through stale btree blocks.
  */
 static int get_zero_refs(struct super_block *sb,
 			 struct scoutfs_btree_root *root,
-			 struct scoutfs_key_buf *start,
-			 struct scoutfs_key_buf *end,
+			 struct scoutfs_key *start,
+			 struct scoutfs_key *end,
 			 struct list_head *ref_list)
 {
-	struct scoutfs_manifest_btree_key *mkey;
+	struct scoutfs_manifest_btree_key mkey;
 	struct scoutfs_manifest_entry ment;
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	SCOUTFS_BTREE_ITEM_REF(prev);
-	unsigned mkey_len;
+	struct scoutfs_key zeros;
+	int cmp;
 	int ret;
 
-	scoutfs_manifest_init_entry(&ment, 0, 0, 0, start, NULL);
-	mkey = alloc_btree_key_val(&ment, &mkey_len, NULL, NULL);
-	if (!mkey)
-		return -ENOMEM;
+	scoutfs_key_set_zeros(&zeros);
+	init_btree_key(&mkey, 0, 0, &zeros);
 
-	/* get level 0 segments that overlap with the missing range */
-	mkey_len = init_btree_key(mkey, 0, ~0ULL, NULL);
-	ret = scoutfs_btree_prev(sb, root, mkey, mkey_len, &iref);
-	while (ret == 0) {
+	for (;;) {
+		ret = scoutfs_btree_next(sb, root, &mkey, sizeof(mkey), &iref);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
 		init_ment_iref(&ment, &iref);
+		scoutfs_btree_put_iref(&iref);
 
-		if (scoutfs_key_compare_ranges(start, end, &ment.first,
-					       &ment.last) == 0) {
+		/* done if we went past level 0 */
+		if (ment.level > 0) {
+			ret = 0;
+			break;
+		}
+
+		cmp = scoutfs_key_compare_ranges(start, end, &ment.first,
+					         &ment.last);
+		/* done if all the ments will be greater */
+		if (cmp < 0) {
+			ret = 0;
+			break;
+		}
+
+		if (cmp == 0) {
 			ret = alloc_manifest_ref(sb, ref_list, &ment);
 			if (ret)
 				break;
 		}
 
-		swap(prev, iref);
-		ret = scoutfs_btree_before(sb, root, prev.key, prev.key_len,
-					   &iref);
-		scoutfs_btree_put_iref(&prev);
+		scoutfs_key_inc(&ment.first);
+		init_btree_key(&mkey, ment.level, ment.seq, &ment.first);
 	}
-	if (ret == -ENOENT)
-		ret = 0;
 
-	scoutfs_btree_put_iref(&iref);
-	scoutfs_btree_put_iref(&prev);
-	kfree(mkey);
 	return ret;
 }
 
@@ -502,37 +393,29 @@ static int get_zero_refs(struct super_block *sb,
  */
 static int get_nonzero_refs(struct super_block *sb,
 			    struct scoutfs_btree_root *root,
-			    struct scoutfs_key_buf *key,
-			    struct scoutfs_key_buf *end,
+			    struct scoutfs_key *key,
+			    struct scoutfs_key *end,
 			    struct list_head *ref_list)
 {
-	struct scoutfs_manifest_btree_key *mkey;
+	struct scoutfs_manifest_btree_key mkey;
 	struct scoutfs_manifest_entry ment;
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	SCOUTFS_BTREE_ITEM_REF(prev);
-	unsigned mkey_len;
 	int ret;
 	int i;
 
-	scoutfs_manifest_init_entry(&ment, 0, 0, 0, key, NULL);
-	mkey = alloc_btree_key_val(&ment, &mkey_len, NULL, NULL);
-	if (!mkey)
-		return -ENOMEM;
-
-	mkey_len = init_btree_key(mkey, 1, 0, key);
 	for (i = 1; ; i++) {
-		mkey->level = i;
+		init_btree_key(&mkey, i, 0, key);
 
-		scoutfs_btree_put_iref(&iref);
-		ret = btree_prev_overlap_or_next(sb, root, mkey, mkey_len, key,
-						 i, &iref);
+		ret = btree_prev_overlap_or_next(sb, root, &mkey, sizeof(mkey),
+						 key, i, &iref);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
-			goto out;
+			break;
 		}
 
 		init_ment_iref(&ment, &iref);
+		scoutfs_btree_put_iref(&iref);
 
 		if (ment.level != i ||
 		    scoutfs_key_compare(&ment.first, end) > 0)
@@ -540,14 +423,9 @@ static int get_nonzero_refs(struct super_block *sb,
 
 		ret = alloc_manifest_ref(sb, ref_list, &ment);
 		if (ret)
-			goto out;
+			break;
 	}
-	ret = 0;
 
-out:
-	scoutfs_btree_put_iref(&iref);
-	scoutfs_btree_put_iref(&prev);
-	kfree(mkey);
 	return ret;
 }
 
@@ -630,15 +508,15 @@ static int cmp_ment_ref_level_seq(void *priv, struct list_head *A,
  * as long as we hold refs.
  */
 int scoutfs_manifest_read_items(struct super_block *sb,
-				struct scoutfs_key_buf *key,
-				struct scoutfs_key_buf *start,
-				struct scoutfs_key_buf *end)
+				struct scoutfs_key *key,
+				struct scoutfs_key *start,
+				struct scoutfs_key *end)
 {
-	struct scoutfs_key_buf item_key;
-	struct scoutfs_key_buf found_key;
-	struct scoutfs_key_buf batch_end;
-	struct scoutfs_key_buf seg_start;
-	struct scoutfs_key_buf seg_end;
+	struct scoutfs_key item_key;
+	struct scoutfs_key found_key;
+	struct scoutfs_key batch_end;
+	struct scoutfs_key seg_start;
+	struct scoutfs_key seg_end;
 	struct scoutfs_btree_root root;
 	struct scoutfs_segment *seg;
 	struct manifest_ref *ref;
@@ -666,8 +544,8 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 	last_root_seq = 0;
 retry_stale:
 
-	scoutfs_key_clone(&seg_start, start);
-	scoutfs_key_clone(&seg_end, end);
+	seg_start = *start;
+	seg_end = *end;
 
 	ret = scoutfs_client_get_manifest_root(sb, &root);
 	if (ret)
@@ -681,13 +559,13 @@ retry_stale:
 	/* clamp start and end to the segment boundaries, including key */
 	list_for_each_entry(ref, &ref_list, entry) {
 
-		if (scoutfs_key_compare(ref->first, &seg_start) > 0 &&
-		    scoutfs_key_compare(ref->first, key) <= 0)
-			scoutfs_key_clone(&seg_start, ref->first);
+		if (scoutfs_key_compare(&ref->first, &seg_start) > 0 &&
+		    scoutfs_key_compare(&ref->first, key) <= 0)
+			seg_start = ref->first;
 
-		if (scoutfs_key_compare(ref->last, &seg_end) < 0 &&
-		    scoutfs_key_compare(ref->last, key) >= 0)
-			scoutfs_key_clone(&seg_end, ref->last);
+		if (scoutfs_key_compare(&ref->last, &seg_end) < 0 &&
+		    scoutfs_key_compare(&ref->last, key) >= 0)
+			seg_end = ref->last;
 	}
 
 	trace_scoutfs_read_item_keys(sb, key, start, end, &seg_start, &seg_end);
@@ -703,8 +581,9 @@ retry_stale:
 	/* submit reads for all the segments */
 	list_for_each_entry(ref, &ref_list, entry) {
 
-		trace_scoutfs_read_item_segment(sb, ref->level,  ref->segno,
-						ref->seq, ref->first, ref->last);
+		trace_scoutfs_read_item_segment(sb, ref->level, ref->segno,
+						ref->seq, &ref->first,
+						&ref->last);
 
 		seg = scoutfs_seg_submit_read(sb, ref->segno);
 		if (IS_ERR(seg)) {
@@ -752,9 +631,9 @@ retry_stale:
 			 * items or if the next item is past the keys
 			 * that our segments can see.
 			 */
-			ret = scoutfs_seg_item_ptrs(ref->seg, ref->off,
-						    &item_key, &item_val,
-						    &item_flags);
+			ret = scoutfs_seg_get_item(ref->seg, ref->off,
+						   &item_key, &item_val,
+						   &item_flags);
 			if (ret < 0 ||
 			    scoutfs_key_compare(&item_key, &seg_end) > 0) {
 				ref->off = -1;
@@ -773,7 +652,7 @@ retry_stale:
 			}
 
 			/* remember new least key */
-			scoutfs_key_clone(&found_key, &item_key);
+			found_key = item_key;
 			found_val = item_val;
 			found_flags = item_flags;
 			ref->found_ctr = ++found_ctr;
@@ -782,7 +661,7 @@ retry_stale:
 
 		/* ran out of keys in segs, range extends to seg end */
 		if (!found) {
-			scoutfs_key_clone(&batch_end, &seg_end);
+			batch_end = seg_end;
 			ret = 0;
 			break;
 		}
@@ -808,7 +687,7 @@ retry_stale:
 		}
 
 		/* the last successful key determines range end until run out */
-		scoutfs_key_clone(&batch_end, &found_key);
+		batch_end = found_key;
 
 		/* if we just saw the end key then we're done */
 		if (scoutfs_key_compare(&found_key, &seg_end) == 0) {
@@ -864,14 +743,12 @@ out:
  * Returns 0 if it set next_key and -ENOENT if the key was after all the
  * segments in the manifest.
  */
-int scoutfs_manifest_next_key(struct super_block *sb,
-			      struct scoutfs_key_buf *key,
-			      struct scoutfs_key_buf *next_key)
+int scoutfs_manifest_next_key(struct super_block *sb, struct scoutfs_key *key,
+			      struct scoutfs_key *next_key)
 {
-	struct scoutfs_key_buf item_key;
-	struct scoutfs_key_buf end;
+	struct scoutfs_key item_key;
+	struct scoutfs_key end;
 	struct scoutfs_btree_root root;
-	struct scoutfs_inode_key end_key;
 	struct scoutfs_segment *seg;
 	struct manifest_ref *ref;
 	struct manifest_ref *tmp;
@@ -887,8 +764,7 @@ retry_stale:
 	if (ret)
 		goto out;
 
-	scoutfs_key_init(&end, &end_key, sizeof(end_key));
-	scoutfs_key_set_max(&end);
+	scoutfs_key_set_ones(&end);
 
 	ret = get_zero_refs(sb, &root, key, &end, &ref_list) ?:
 	      get_nonzero_refs(sb, &root, key, &end, &ref_list);
@@ -929,8 +805,9 @@ retry_stale:
 	found = false;
 	list_for_each_entry(ref, &ref_list, entry) {
 		if (ref->level > 0 &&
-		    (!found || scoutfs_key_compare(ref->last, next_key) < 0)) {
-			scoutfs_key_copy(next_key, ref->last);
+		    (!found ||
+		     scoutfs_key_compare(&ref->last, next_key) < 0)) {
+			*next_key = ref->last;
 			found = true;
 		}
 
@@ -942,13 +819,13 @@ retry_stale:
 		if (ref->off < 0)
 			continue;
 
-		ret = scoutfs_seg_item_ptrs(ref->seg, ref->off, &item_key,
-					    NULL, NULL);
+		ret = scoutfs_seg_get_item(ref->seg, ref->off, &item_key,
+					   NULL, NULL);
 		if (ret < 0)
 			continue;
 
 		if (!found || scoutfs_key_compare(&item_key, next_key) < 0) {
-			scoutfs_key_copy(next_key, &item_key);
+			*next_key = item_key;
 			found = true;
 		}
 	}
@@ -996,18 +873,22 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_manifest_btree_key mkey;
+	struct scoutfs_manifest_entry next;
 	struct scoutfs_manifest_entry ment;
 	struct scoutfs_manifest_entry over;
-	struct scoutfs_manifest_btree_key *mkey = NULL;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	SCOUTFS_BTREE_ITEM_REF(over_iref);
 	SCOUTFS_BTREE_ITEM_REF(prev);
-	unsigned mkey_len;
+	struct scoutfs_key zeros;
+	bool wrapped;
 	bool sticky;
 	int level;
 	int ret;
 	int nr = 0;
 	int i;
+
+	scoutfs_key_set_zeros(&zeros);
 
 	down_write(&mani->rwsem);
 
@@ -1024,45 +905,60 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 		goto out;
 	}
 
-	/* alloc a full size mkey, fill it with whatever search key */
-
-	mkey = alloc_btree_key_val_lens(SCOUTFS_MAX_KEY_SIZE, 0);
-	if (!mkey) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	/* find the oldest level 0 or the next higher order level by key */
+	/* fill ment and ret == 0 if we find an entry at the level */
 	if (level == 0) {
+
 		/* find the oldest level 0 */
-		mkey_len = init_btree_key(mkey, 0, 0, NULL);
-		ret = scoutfs_btree_next(sb, &super->manifest.root,
-					 mkey, mkey_len, &iref);
+		init_btree_key(&mkey, 0, 0, &zeros);
+		ment.seq = U64_MAX;
+
+		for (;;) {
+			ret = scoutfs_btree_next(sb, &super->manifest.root,
+						 &mkey, sizeof(mkey), &iref);
+			if (ret < 0) {
+				if (ret == -ENOENT && ment.seq != U64_MAX)
+					ret = 0;
+				break;
+			}
+
+			init_ment_iref(&next, &iref);
+			scoutfs_btree_put_iref(&iref);
+
+			if (next.level > 0) {
+				if (ment.seq == U64_MAX)
+					ret = -ENOENT;
+				break;
+			}
+
+			if (next.seq < ment.seq)
+				ment = next;
+
+			scoutfs_key_inc(&next.first);
+			init_btree_key(&mkey, next.level, next.seq,
+				       &next.first);
+		}
+
 	} else {
 		/* find the next segment after the compaction at this level */
-		mkey_len = init_btree_key(mkey, level, 0,
-					  mani->compact_keys[level]);
-
+		init_btree_key(&mkey, level, 0, &mani->compact_keys[level]);
+		wrapped = false;
+again:
 		ret = scoutfs_btree_next(sb, &super->manifest.root,
-					 mkey, mkey_len, &iref);
+					 &mkey, sizeof(mkey), &iref);
 		if (ret == 0) {
 			init_ment_iref(&ment, &iref);
+			scoutfs_btree_put_iref(&iref);
 			if (ment.level != level)
 				ret = -ENOENT;
 		}
-		if (ret == -ENOENT) {
-			/* .. possibly wrapping to the first key in level */
-			mkey_len = init_btree_key(mkey, level, 0, NULL);
-			scoutfs_btree_put_iref(&iref);
-			ret = scoutfs_btree_next(sb, &super->manifest.root,
-						 mkey, mkey_len, &iref);
+		/* try again if we wrapped */
+		if (ret == -ENOENT && !wrapped) {
+			init_btree_key(&mkey, level, 0, &zeros);
+			wrapped = true;
+			goto again;
 		}
 	}
-	if (ret == 0) {
-		init_ment_iref(&ment, &iref);
-		if (ment.level != level)
-			goto out;
-	}
+
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;
@@ -1076,10 +972,10 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	nr++;
 
 	/* and add a fanout's worth of lower overlapping segments */
-	mkey_len = init_btree_key(mkey, level + 1, 0, &ment.first);
+	init_btree_key(&mkey, level + 1, 0, &ment.first);
 	ret = btree_prev_overlap_or_next(sb, &super->manifest.root,
-					 mkey, mkey_len,
-					 &ment.first, level + 1, &over_iref);
+					 &mkey, sizeof(mkey), &ment.first,
+					 level + 1, &over_iref);
 	sticky = false;
 	for (i = 0; ret == 0 && i < SCOUTFS_MANIFEST_FANOUT + 1; i++) {
 		init_ment_iref(&over, &over_iref);
@@ -1112,14 +1008,13 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	scoutfs_compact_describe(sb, data, level, mani->nr_levels - 1, sticky);
 
 	/* record the next key to start from */
-	scoutfs_key_copy(mani->compact_keys[level], &ment.last);
-	scoutfs_key_inc(mani->compact_keys[level]);
+	mani->compact_keys[level] = ment.last;
+	scoutfs_key_inc(&mani->compact_keys[level]);
 
 	ret = 0;
 out:
 	up_write(&mani->rwsem);
 
-	kfree(mkey);
 	scoutfs_btree_put_iref(&iref);
 	scoutfs_btree_put_iref(&over_iref);
 	scoutfs_btree_put_iref(&prev);
@@ -1140,18 +1035,8 @@ int scoutfs_manifest_setup(struct super_block *sb)
 
 	init_rwsem(&mani->rwsem);
 
-	for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++) {
-		mani->compact_keys[i] = scoutfs_key_alloc(sb,
-							  SCOUTFS_MAX_KEY_SIZE);
-		if (!mani->compact_keys[i]) {
-			while (--i >= 0)
-				scoutfs_key_free(sb, mani->compact_keys[i]);
-			kfree(mani);
-			return -ENOMEM;
-		}
-
-		scoutfs_key_set_min(mani->compact_keys[i]);
-	}
+	for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++)
+		scoutfs_key_set_zeros(&mani->compact_keys[i]);
 
 	for (i = ARRAY_SIZE(super->manifest.level_counts) - 1; i >= 0; i--) {
 		if (super->manifest.level_counts[i]) {
@@ -1177,11 +1062,8 @@ void scoutfs_manifest_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct manifest *mani = sbi->manifest;
-	int i;
 
 	if (mani) {
-		for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++)
-			scoutfs_key_free(sb, mani->compact_keys[i]);
 		kfree(mani);
 		sbi->manifest = NULL;
 	}

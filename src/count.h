@@ -2,10 +2,8 @@
 #define _SCOUTFS_COUNT_H_
 
 /*
- * Our estimate of the space consumed while dirtying items isn't a
- * single value.  We're packing items into segments which have different
- * overheads for items (header overhead), keys (block aligned), and
- * values (can span blocks, not aligned).
+ * Our estimate of the space consumed while dirtying items is based on
+ * the number of items and the size of their values.
  *
  * The estimate is still a read-only input to entering the transaction.
  * We'd like to use it as a clean rhs arg to hold_trans.  We define SIC_
@@ -21,7 +19,6 @@
 
 struct scoutfs_item_count {
 	signed items;
-	signed keys;
 	signed vals;
 };
 
@@ -33,8 +30,6 @@ static inline void __count_alloc_inode(struct scoutfs_item_count *cnt)
 	const int nr_indices = SCOUTFS_INODE_INDEX_NR;
 
 	cnt->items += 1 + nr_indices;
-	cnt->keys += sizeof(struct scoutfs_inode_key) +
-		     (nr_indices * sizeof(struct scoutfs_inode_index_key));
 	cnt->vals += sizeof(struct scoutfs_inode);
 }
 
@@ -47,8 +42,6 @@ static inline void __count_dirty_inode(struct scoutfs_item_count *cnt)
 	const int nr_indices = 2 * SCOUTFS_INODE_INDEX_NR;
 
 	cnt->items += 1 + nr_indices;
-	cnt->keys += sizeof(struct scoutfs_inode_key) +
-		     (nr_indices * sizeof(struct scoutfs_inode_index_key));
 	cnt->vals += sizeof(struct scoutfs_inode);
 }
 
@@ -77,7 +70,6 @@ static inline void __count_dirents(struct scoutfs_item_count *cnt,
 				   unsigned name_len)
 {
 	cnt->items += 3;
-	cnt->keys += 3 * sizeof(struct scoutfs_dirent_key);
 	cnt->vals += 3 * offsetof(struct scoutfs_dirent, name[name_len]);
 }
 
@@ -87,7 +79,6 @@ static inline void __count_sym_target(struct scoutfs_item_count *cnt,
 	unsigned nr = DIV_ROUND_UP(size, SCOUTFS_MAX_VAL_SIZE);
 
 	cnt->items += nr;
-	cnt->keys += nr * sizeof(struct scoutfs_symlink_key);
 	cnt->vals += size;
 }
 
@@ -95,7 +86,6 @@ static inline void __count_orphan(struct scoutfs_item_count *cnt)
 {
 
 	cnt->items += 1;
-	cnt->keys += sizeof(struct scoutfs_orphan_key);
 }
 
 static inline void __count_mknod(struct scoutfs_item_count *cnt,
@@ -197,16 +187,13 @@ static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned old_parts,
 
 	__count_dirty_inode(&cnt);
 
-	if (old_parts) {
+	if (old_parts)
 		cnt.items += old_parts;
-		cnt.keys += old_parts * sizeof(struct scoutfs_xattr_key);
-	}
 
 	if (creating) {
 		new_parts = SCOUTFS_XATTR_NR_PARTS(name_len, size)
 
 		cnt.items += new_parts;
-		cnt.keys += new_parts * sizeof(struct scoutfs_xattr_key);
 		cnt.vals += sizeof(struct scoutfs_xattr) + name_len + size;
 	}
 
@@ -225,8 +212,6 @@ static inline const struct scoutfs_item_count SIC_WRITE_BEGIN(void)
 	__count_dirty_inode(&cnt);
 
 	cnt.items += 1 + nr_free;
-	cnt.keys += sizeof(struct scoutfs_block_mapping_key) +
-		    (nr_free * sizeof(struct scoutfs_free_bits_key));
 	cnt.vals += SCOUTFS_BLOCK_MAPPING_MAX_BYTES +
 		    (nr_free * sizeof(struct scoutfs_free_bits));
 
@@ -244,8 +229,6 @@ static inline const struct scoutfs_item_count SIC_TRUNC_BLOCK(void)
 	unsigned nr_free = (2 * SCOUTFS_BLOCK_MAPPING_BLOCKS);
 
 	cnt.items += 1 + nr_free;
-	cnt.keys += sizeof(struct scoutfs_block_mapping_key) +
-		    (nr_free * sizeof(struct scoutfs_free_bits_key));
 	cnt.vals += SCOUTFS_BLOCK_MAPPING_MAX_BYTES +
 		    (nr_free * sizeof(struct scoutfs_free_bits));
 

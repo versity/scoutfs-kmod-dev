@@ -15,14 +15,14 @@ struct scoutfs_manifest_entry {
 	u8 level;
 	u64 segno;
 	u64 seq;
-	struct scoutfs_key_buf first;
-	struct scoutfs_key_buf last;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
 };
 
 void scoutfs_manifest_init_entry(struct scoutfs_manifest_entry *ment,
 				 u64 level, u64 segno, u64 seq,
-				 struct scoutfs_key_buf *first,
-				 struct scoutfs_key_buf *last);
+				 struct scoutfs_key *first,
+				 struct scoutfs_key *last);
 int scoutfs_manifest_add(struct super_block *sb,
 			 struct scoutfs_manifest_entry *ment);
 int scoutfs_manifest_del(struct super_block *sb,
@@ -32,12 +32,11 @@ int scoutfs_manifest_lock(struct super_block *sb);
 int scoutfs_manifest_unlock(struct super_block *sb);
 
 int scoutfs_manifest_read_items(struct super_block *sb,
-				struct scoutfs_key_buf *key,
-				struct scoutfs_key_buf *start,
-				struct scoutfs_key_buf *end);
-int scoutfs_manifest_next_key(struct super_block *sb,
-			      struct scoutfs_key_buf *key,
-			      struct scoutfs_key_buf *next_key);
+				struct scoutfs_key *key,
+				struct scoutfs_key *start,
+				struct scoutfs_key *end);
+int scoutfs_manifest_next_key(struct super_block *sb, struct scoutfs_key *key,
+			      struct scoutfs_key *next_key);
 
 int scoutfs_manifest_next_compact(struct super_block *sb, void *data);
 

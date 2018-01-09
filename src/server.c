@@ -232,67 +232,24 @@ static int send_reply(struct server_connection *conn, u64 id,
 	return ret;
 }
 
-void scoutfs_init_net_ment_keys(struct scoutfs_net_manifest_entry *net_ment,
-				struct scoutfs_key_buf *first,
-				struct scoutfs_key_buf *last)
+void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
+			      struct scoutfs_manifest_entry *ment)
 {
-	scoutfs_key_init(first, net_ment->keys,
-			 le16_to_cpu(net_ment->first_key_len));
-	scoutfs_key_init(last, net_ment->keys +
-			 le16_to_cpu(net_ment->first_key_len),
-			 le16_to_cpu(net_ment->last_key_len));
-}
-
-/*
- * Allocate a contiguous manifest entry for communication over the network.
- */
-struct scoutfs_net_manifest_entry *
-scoutfs_alloc_net_ment(struct scoutfs_manifest_entry *ment)
-{
-	struct scoutfs_net_manifest_entry *net_ment;
-	struct scoutfs_key_buf first;
-	struct scoutfs_key_buf last;
-
-	net_ment = kmalloc(offsetof(struct scoutfs_net_manifest_entry,
-				    keys[ment->first.key_len +
-					 ment->last.key_len]), GFP_NOFS);
-	if (!net_ment)
-		return NULL;
-
 	net_ment->segno = cpu_to_le64(ment->segno);
 	net_ment->seq = cpu_to_le64(ment->seq);
-	net_ment->first_key_len = cpu_to_le16(ment->first.key_len);
-	net_ment->last_key_len = cpu_to_le16(ment->last.key_len);
+	net_ment->first = ment->first;
+	net_ment->last = ment->last;
 	net_ment->level = ment->level;
-
-	scoutfs_init_net_ment_keys(net_ment, &first, &last);
-	scoutfs_key_copy(&first, &ment->first);
-	scoutfs_key_copy(&last, &ment->last);
-
-	return net_ment;
 }
 
-/* point a native manifest entry at a contiguous net manifest */
-void scoutfs_init_ment_net_ment(struct scoutfs_manifest_entry *ment,
+void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
 				struct scoutfs_net_manifest_entry *net_ment)
 {
-	struct scoutfs_key_buf first;
-	struct scoutfs_key_buf last;
-
-	scoutfs_init_net_ment_keys(net_ment, &first, &last);
-	scoutfs_key_clone(&ment->first, &first);
-	scoutfs_key_clone(&ment->last, &last);
-
 	ment->segno = le64_to_cpu(net_ment->segno);
 	ment->seq = le64_to_cpu(net_ment->seq);
 	ment->level = net_ment->level;
-}
-
-unsigned scoutfs_net_ment_bytes(struct scoutfs_net_manifest_entry *net_ment)
-{
-	return offsetof(struct scoutfs_net_manifest_entry,
-			keys[le16_to_cpu(net_ment->first_key_len) +
-			     le16_to_cpu(net_ment->last_key_len)]);
+	ment->first = net_ment->first;
+	ment->last = net_ment->last;
 }
 
 static int process_alloc_inodes(struct server_connection *conn,
@@ -381,7 +338,7 @@ static int process_record_segment(struct server_connection *conn, u64 id,
 
 	net_ment = data;
 
-	if (data_len != scoutfs_net_ment_bytes(net_ment))  {
+	if (data_len != sizeof(*net_ment))  {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -399,7 +356,7 @@ retry:
 		goto retry;
 	}
 
-	scoutfs_init_ment_net_ment(&ment, net_ment);
+	scoutfs_init_ment_from_net(&ment, net_ment);
 
 	ret = scoutfs_manifest_add(sb, &ment);
 	scoutfs_manifest_unlock(sb);

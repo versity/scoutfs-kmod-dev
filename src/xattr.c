@@ -68,19 +68,17 @@ static unsigned int xattr_nr_parts(struct scoutfs_xattr *xat)
 				      le16_to_cpu(xat->val_len));
 }
 
-/* If no name is provided then the hash arg is used, caller can modify part */
-static void init_xattr_key(struct scoutfs_key_buf *key,
-			   struct scoutfs_xattr_key *xak, u64 ino,
-			   u32 name_hash, u64 id)
+static void init_xattr_key(struct scoutfs_key *key, u64 ino, u32 name_hash,
+			   u64 id)
 {
-	xak->zone = SCOUTFS_FS_ZONE;
-	xak->ino = cpu_to_be64(ino);
-	xak->type = SCOUTFS_XATTR_TYPE;
-	xak->name_hash = cpu_to_be32(name_hash);
-	xak->id = cpu_to_be64(id);
-	xak->part = 0;
-
-	scoutfs_key_init(key, xak, sizeof(struct scoutfs_xattr_key));
+	*key = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_FS_ZONE,
+		.skx_ino = cpu_to_le64(ino),
+		.sk_type = SCOUTFS_XATTR_TYPE,
+		.skx_name_hash = cpu_to_le64(name_hash),
+		.skx_id = cpu_to_le64(id),
+		.skx_part = 0,
+	};
 }
 
 static int unknown_prefix(const char *name)
@@ -108,15 +106,13 @@ static int unknown_prefix(const char *name)
  *
  * Returns -ENOENT if it didn't find a next item.
  */
-static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
+static int get_next_xattr(struct inode *inode, struct scoutfs_key *key,
 			  struct scoutfs_xattr *xat, unsigned int bytes,
 			  const char *name, unsigned int name_len,
 			  u64 name_hash, u64 id, struct scoutfs_lock *lock)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_xattr_key last_xak;
-	struct scoutfs_key_buf last;
-	struct scoutfs_key_buf key;
+	struct scoutfs_key last;
 	struct kvec val;
 	u8 last_part;
 	int total;
@@ -131,17 +127,17 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
 	if (name_len)
 		name_hash = xattr_name_hash(name, name_len);
 
-	init_xattr_key(&key, xak, scoutfs_ino(inode), name_hash, id);
-	init_xattr_key(&last, &last_xak, scoutfs_ino(inode), U32_MAX, U64_MAX);
+	init_xattr_key(key, scoutfs_ino(inode), name_hash, id);
+	init_xattr_key(&last, scoutfs_ino(inode), U32_MAX, U64_MAX);
 
 	last_part = 0;
 	part = 0;
 	total = 0;
 
 	for (;;) {
-		xak->part = part;
+		key->skx_part = part;
 		kvec_init(&val, (void *)xat + total, bytes - total);
-		ret = scoutfs_item_next(sb, &key, &last, &val, lock);
+		ret = scoutfs_item_next(sb, key, &last, &val, lock);
 		if (ret < 0) {
 			/* XXX corruption, ran out of parts */
 			if (ret == -ENOENT && part > 0)
@@ -149,10 +145,10 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
 			break;
 		}
 
-		trace_scoutfs_xattr_get_next_key(sb, &key);
+		trace_scoutfs_xattr_get_next_key(sb, key);
 
 		/* XXX corruption */
-		if (xak->part != part) {
+		if (key->skx_part != part) {
 			ret = -EIO;
 			break;
 		}
@@ -175,7 +171,7 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
 
 		if (part == 0 && name_len) {
 			/* ran out of names that could match */
-			if (be32_to_cpu(xak->name_hash) != name_hash) {
+			if (le64_to_cpu(key->skx_name_hash) != name_hash) {
 				ret = -ENOENT;
 				break;
 			}
@@ -184,7 +180,7 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
 			if (!xattr_names_equal(name, name_len,
 					       xat->name, xat->name_len)) {
 				part = 0;
-				be64_add_cpu(&xak->id, 1);
+				le64_add_cpu(&key->skx_id, 1);
 				continue;
 			}
 
@@ -214,14 +210,13 @@ static int create_xattr_items(struct inode *inode, u64 id,
 			      struct scoutfs_lock *lock)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_xattr_key xak;
-	struct scoutfs_key_buf key;
+	struct scoutfs_key key;
 	unsigned int part_bytes;
 	struct kvec val;
 	int total;
 	int ret;
 
-	init_xattr_key(&key, &xak, scoutfs_ino(inode),
+	init_xattr_key(&key, scoutfs_ino(inode),
 		       xattr_name_hash(xat->name, xat->name_len), id);
 
 	total = 0;
@@ -232,13 +227,13 @@ static int create_xattr_items(struct inode *inode, u64 id,
 
 		ret = scoutfs_item_create(sb, &key, &val, lock);
 		if (ret) {
-			while (xak.part-- > 0)
+			while (key.skx_part-- > 0)
 				scoutfs_item_delete_dirty(sb, &key);
 			break;
 		}
 
 		total += part_bytes;
-		xak.part++;
+		key.skx_part++;
 	}
 
 	return ret;
@@ -249,20 +244,19 @@ static int create_xattr_items(struct inode *inode, u64 id,
  * returns an error then the deleted and saved items are left on the
  * list for the caller to restore.
  */
-static int delete_xattr_items(struct inode *inode, u64 name_hash, u64 id,
+static int delete_xattr_items(struct inode *inode, u32 name_hash, u64 id,
 			      u8 nr_parts, struct list_head *list,
 			      struct scoutfs_lock *lock)
 {
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_xattr_key xak;
-	struct scoutfs_key_buf key;
+	struct scoutfs_key key;
 	int ret;
 
-	init_xattr_key(&key, &xak, scoutfs_ino(inode), name_hash, id);
+	init_xattr_key(&key, scoutfs_ino(inode), name_hash, id);
 
 	do {
 		ret = scoutfs_item_delete_save(sb, &key, list, lock);
-	} while (ret == 0 && ++xak.part < nr_parts);
+	} while (ret == 0 && ++key.skx_part < nr_parts);
 
 	return ret;
 }
@@ -279,7 +273,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_lock *lck = NULL;
-	struct scoutfs_xattr_key xak;
+	struct scoutfs_key key;
 	unsigned int bytes;
 	size_t name_len;
 	int ret;
@@ -303,7 +297,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 
 	down_read(&si->xattr_rwsem);
 
-	ret = get_next_xattr(inode, &xak, xat, bytes,
+	ret = get_next_xattr(inode, &key, xat, bytes,
 			     name, name_len, 0, 0, lck);
 
 	up_read(&si->xattr_rwsem);
@@ -360,7 +354,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_lock *lck = NULL;
 	size_t name_len = strlen(name);
-	struct scoutfs_xattr_key xak;
+	struct scoutfs_key key;
 	LIST_HEAD(ind_locks);
 	LIST_HEAD(saved);
 	u8 found_parts;
@@ -399,7 +393,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	down_write(&si->xattr_rwsem);
 
 	/* find an existing xattr to delete */
-	ret = get_next_xattr(inode, &xak, xat,
+	ret = get_next_xattr(inode, &key, xat,
 			     sizeof(struct scoutfs_xattr) + name_len,
 			     name, name_len, 0, 0, lck);
 	if (ret < 0 && ret != -ENOENT)
@@ -420,7 +414,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		goto unlock;
 	}
 
-	/* found fields in xak will also be used */
+	/* found fields in key will also be used */
 	found_parts = ret >= 0 ? xattr_nr_parts(xat) : 0;
 
 	/* prepare our xattr */
@@ -450,8 +444,8 @@ retry:
 
 	ret = 0;
 	if (found_parts)
-		ret = delete_xattr_items(inode, be32_to_cpu(xak.name_hash),
-					 be64_to_cpu(xak.id), found_parts,
+		ret = delete_xattr_items(inode, le64_to_cpu(key.skx_name_hash),
+					 le64_to_cpu(key.skx_id), found_parts,
 					 &saved, lck);
 	if (value && ret == 0)
 		ret = create_xattr_items(inode, id, xat, bytes, lck);
@@ -500,7 +494,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_lock *lck = NULL;
-	struct scoutfs_xattr_key xak;
+	struct scoutfs_key key;
 	unsigned int bytes;
 	ssize_t total;
 	u32 name_hash;
@@ -526,7 +520,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	total = 0;
 
 	for (;;) {
-		ret = get_next_xattr(inode, &xak, xat, bytes,
+		ret = get_next_xattr(inode, &key, xat, bytes,
 				     NULL, 0, name_hash, id, lck);
 		if (ret < 0) {
 			if (ret == -ENOENT)
@@ -547,8 +541,8 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 			*(buffer++) = '\0';
 		}
 
-		name_hash = be32_to_cpu(xak.name_hash);
-		id = be64_to_cpu(xak.id) + 1;
+		name_hash = le64_to_cpu(key.skx_name_hash);
+		id = le64_to_cpu(key.skx_id) + 1;
 	}
 
 	up_read(&si->xattr_rwsem);
@@ -571,15 +565,13 @@ out:
  */
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 {
-	struct scoutfs_xattr_key last_xak;
-	struct scoutfs_xattr_key xak;
-	struct scoutfs_key_buf last;
-	struct scoutfs_key_buf key;
+	struct scoutfs_key last;
+	struct scoutfs_key key;
 	struct scoutfs_lock *lck;
 	int ret;
 
-	init_xattr_key(&key, &xak, ino, 0, 0);
-	init_xattr_key(&last, &last_xak, ino, U32_MAX, U64_MAX);
+	init_xattr_key(&key, ino, 0, 0);
+	init_xattr_key(&last, ino, U32_MAX, U64_MAX);
 
 	/* while we read to delete we need to writeback others */
 	ret = scoutfs_lock_ino(sb, DLM_LOCK_EX, 0, ino, &lck);
@@ -598,7 +590,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 		if (ret)
 			break;
 
-		xak.part++;
+		key.skx_part++;
 	}
 
 	scoutfs_unlock(sb, lck, DLM_LOCK_EX);

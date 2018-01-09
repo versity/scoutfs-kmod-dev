@@ -317,45 +317,6 @@ TRACE_EVENT(scoutfs_item_next_same_ret,
 	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
 );
 
-TRACE_EVENT(scoutfs_item_next_same_min,
-	TP_PROTO(struct super_block *sb, int key_len, int len),
-
-	TP_ARGS(sb, key_len, len),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(int, key_len)
-		__field(int, len)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->key_len = key_len;
-		__entry->len = len;
-	),
-
-	TP_printk(FSID_FMT" key len %u min val len %d", __entry->fsid,
-		  __entry->key_len, __entry->len)
-);
-
-TRACE_EVENT(scoutfs_item_next_same_min_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
-);
-
 TRACE_EVENT(scoutfs_item_next_ret,
 	TP_PROTO(struct super_block *sb, int ret),
 
@@ -619,25 +580,22 @@ TRACE_EVENT(scoutfs_release_trans,
 		 struct scoutfs_item_count *res,
 		 struct scoutfs_item_count *act, unsigned int tri_holders,
 		 unsigned int tri_writing, unsigned int tri_items,
-		 unsigned int tri_keys, unsigned int tri_vals),
+		 unsigned int tri_vals),
 
 	TP_ARGS(sb, rsv, rsv_holders, res, act, tri_holders, tri_writing,
-		tri_items, tri_keys, tri_vals),
+		tri_items, tri_vals),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(void *, rsv)
 		__field(unsigned int, rsv_holders)
 		__field(int, res_items)
-		__field(int, res_keys)
 		__field(int, res_vals)
 		__field(int, act_items)
-		__field(int, act_keys)
 		__field(int, act_vals)
 		__field(unsigned int, tri_holders)
 		__field(unsigned int, tri_writing)
 		__field(unsigned int, tri_items)
-		__field(unsigned int, tri_keys)
 		__field(unsigned int, tri_vals)
 	),
 
@@ -646,25 +604,21 @@ TRACE_EVENT(scoutfs_release_trans,
 		__entry->rsv = rsv;
 		__entry->rsv_holders = rsv_holders;
 		__entry->res_items = res->items;
-		__entry->res_keys = res->keys;
 		__entry->res_vals = res->vals;
 		__entry->act_items = act->items;
-		__entry->act_keys = act->keys;
 		__entry->act_vals = act->vals;
 		__entry->tri_holders = tri_holders;
 		__entry->tri_writing = tri_writing;
 		__entry->tri_items = tri_items;
-		__entry->tri_keys = tri_keys;
 		__entry->tri_vals = tri_vals;
 	),
 
-	TP_printk(FSID_FMT" rsv %p holders %u reserved %u.%u.%u actual "
-		  "%d.%d.%d, trans holders %u writing %u reserved "
-		  "%u.%u.%u", __entry->fsid, __entry->rsv,
-		  __entry->rsv_holders, __entry->res_items, __entry->res_keys,
-		  __entry->res_vals, __entry->act_items, __entry->act_keys,
+	TP_printk(FSID_FMT" rsv %p holders %u reserved %u.%u actual "
+		  "%d.%d, trans holders %u writing %u reserved "
+		  "%u.%u", __entry->fsid, __entry->rsv, __entry->rsv_holders,
+		  __entry->res_items, __entry->res_vals, __entry->act_items,
 		  __entry->act_vals, __entry->tri_holders, __entry->tri_writing,
-		  __entry->tri_items, __entry->tri_keys, __entry->tri_vals)
+		  __entry->tri_items, __entry->tri_vals)
 );
 
 TRACE_EVENT(scoutfs_trans_acquired_hold,
@@ -673,59 +627,50 @@ TRACE_EVENT(scoutfs_trans_acquired_hold,
 		 struct scoutfs_item_count *res,
 		 struct scoutfs_item_count *act, unsigned int tri_holders,
 		 unsigned int tri_writing, unsigned int tri_items,
-		 unsigned int tri_keys, unsigned int tri_vals),
+		 unsigned int tri_vals),
 
 	TP_ARGS(sb, cnt, rsv, rsv_holders, res, act, tri_holders, tri_writing,
-		tri_items, tri_keys, tri_vals),
+		tri_items, tri_vals),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(int, cnt_items)
-		__field(int, cnt_keys)
 		__field(int, cnt_vals)
 		__field(void *, rsv)
 		__field(unsigned int, rsv_holders)
 		__field(int, res_items)
-		__field(int, res_keys)
 		__field(int, res_vals)
 		__field(int, act_items)
-		__field(int, act_keys)
 		__field(int, act_vals)
 		__field(unsigned int, tri_holders)
 		__field(unsigned int, tri_writing)
 		__field(unsigned int, tri_items)
-		__field(unsigned int, tri_keys)
 		__field(unsigned int, tri_vals)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->cnt_items = cnt->items;
-		__entry->cnt_keys = cnt->keys;
 		__entry->cnt_vals = cnt->vals;
 		__entry->rsv = rsv;
 		__entry->rsv_holders = rsv_holders;
 		__entry->res_items = res->items;
-		__entry->res_keys = res->keys;
 		__entry->res_vals = res->vals;
 		__entry->act_items = act->items;
-		__entry->act_keys = act->keys;
 		__entry->act_vals = act->vals;
 		__entry->tri_holders = tri_holders;
 		__entry->tri_writing = tri_writing;
 		__entry->tri_items = tri_items;
-		__entry->tri_keys = tri_keys;
 		__entry->tri_vals = tri_vals;
 	),
 
-	TP_printk(FSID_FMT" cnt %u.%u.%u, rsv %p holders %u reserved %u.%u.%u "
-		  "actual %d.%d.%d, trans holders %u writing %u reserved "
-		  "%u.%u.%u", __entry->fsid, __entry->cnt_items,
-		  __entry->cnt_keys, __entry->cnt_vals, __entry->rsv,
-		  __entry->rsv_holders, __entry->res_items, __entry->res_keys,
-		  __entry->res_vals, __entry->act_items, __entry->act_keys,
+	TP_printk(FSID_FMT" cnt %u.%u, rsv %p holders %u reserved %u.%u "
+		  "actual %d.%d, trans holders %u writing %u reserved "
+		  "%u.%u", __entry->fsid, __entry->cnt_items,
+		  __entry->cnt_vals, __entry->rsv, __entry->rsv_holders,
+		  __entry->res_items, __entry->res_vals, __entry->act_items,
 		  __entry->act_vals, __entry->tri_holders, __entry->tri_writing,
-		  __entry->tri_items, __entry->tri_keys, __entry->tri_vals)
+		  __entry->tri_items, __entry->tri_vals)
 );
 
 TRACE_EVENT(scoutfs_ioc_release_ret,
@@ -1102,30 +1047,30 @@ TRACE_EVENT(scoutfs_advance_dirty_super,
 );
 
 TRACE_EVENT(scoutfs_dir_add_next_linkref,
-	TP_PROTO(struct super_block *sb, __u64 ino, __u64 dir_ino, int ret,
-		 unsigned int key_len),
+	TP_PROTO(struct super_block *sb, __u64 ino, __u64 dir_ino,
+		 __u64 dir_pos, int ret),
 
-	TP_ARGS(sb, ino, dir_ino, ret, key_len),
+	TP_ARGS(sb, ino, dir_ino, dir_pos, ret),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(__u64, ino)
 		__field(__u64, dir_ino)
+		__field(__u64, dir_pos)
 		__field(int, ret)
-		__field(unsigned int, key_len)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->ino = ino;
 		__entry->dir_ino = dir_ino;
+		__entry->dir_pos = dir_pos;
 		__entry->ret = ret;
-		__entry->key_len = key_len;
 	),
 
-	TP_printk(FSID_FMT" ino %llu dir_ino %llu ret %d key_len %u",
-		  __entry->fsid, __entry->ino, __entry->dir_ino, __entry->ret,
-		  __entry->key_len)
+	TP_printk(FSID_FMT" ino %llu dir_ino %llu dis_pos %llu ret %d",
+		  __entry->fsid, __entry->ino, __entry->dir_ino,
+		  __entry->dir_ino, __entry->ret)
 );
 
 TRACE_EVENT(scoutfs_compact_func,
@@ -1342,98 +1287,97 @@ TRACE_EVENT(scoutfs_scan_orphans,
 
 DECLARE_EVENT_CLASS(scoutfs_manifest_class,
         TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+		 struct scoutfs_key *first, struct scoutfs_key *last),
         TP_ARGS(sb, level, segno, seq, first, last),
         TP_STRUCT__entry(
 		__field(u8, level)
 		__field(u64, segno)
 		__field(u64, seq)
-                __dynamic_array(char, first, scoutfs_key_str(NULL, first))
-                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
+		__field_struct(struct scoutfs_key, first)
+		__field_struct(struct scoutfs_key, last)
         ),
         TP_fast_assign(
 		__entry->level = level;
 		__entry->segno = segno;
 		__entry->seq = seq;
-		scoutfs_key_str(__get_dynamic_array(first), first);
-		scoutfs_key_str(__get_dynamic_array(last), last);
+		scoutfs_key_copy_or_zeros(&__entry->first, first);
+		scoutfs_key_copy_or_zeros(&__entry->last, last);
         ),
-        TP_printk("level %u segno %llu seq %llu first %s last %s",
+        TP_printk("level %u segno %llu seq %llu first "SK_FMT" last "SK_FMT,
 		  __entry->level, __entry->segno, __entry->seq,
-		  __get_str(first), __get_str(last))
+		  SK_ARG(&__entry->first), SK_ARG(&__entry->last))
 );
 
 DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_add,
         TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+		 struct scoutfs_key *first, struct scoutfs_key *last),
         TP_ARGS(sb, level, segno, seq, first, last)
 );
 
 DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_delete,
         TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+		 struct scoutfs_key *first, struct scoutfs_key *last),
         TP_ARGS(sb, level, segno, seq, first, last)
 );
 
 DEFINE_EVENT(scoutfs_manifest_class, scoutfs_compact_input,
         TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+		 struct scoutfs_key *first, struct scoutfs_key *last),
         TP_ARGS(sb, level, segno, seq, first, last)
 );
 
 DEFINE_EVENT(scoutfs_manifest_class, scoutfs_read_item_segment,
         TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key_buf *first, struct scoutfs_key_buf *last),
+		 struct scoutfs_key *first, struct scoutfs_key *last),
         TP_ARGS(sb, level, segno, seq, first, last)
 );
 
 TRACE_EVENT(scoutfs_read_item_keys,
         TP_PROTO(struct super_block *sb,
-		 struct scoutfs_key_buf *key,
-		 struct scoutfs_key_buf *start,
-		 struct scoutfs_key_buf *end,
-		 struct scoutfs_key_buf *seg_start,
-		 struct scoutfs_key_buf *seg_end),
+		 struct scoutfs_key *key,
+		 struct scoutfs_key *start,
+		 struct scoutfs_key *end,
+		 struct scoutfs_key *seg_start,
+		 struct scoutfs_key *seg_end),
         TP_ARGS(sb, key, start, end, seg_start, seg_end),
         TP_STRUCT__entry(
 		__field(__u64, fsid)
-                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
-                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
-                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
-                __dynamic_array(char, seg_start,
-				scoutfs_key_str(NULL, seg_start))
-                __dynamic_array(char, seg_end,
-				scoutfs_key_str(NULL, seg_end))
+		__field_struct(struct scoutfs_key, key)
+		__field_struct(struct scoutfs_key, start)
+		__field_struct(struct scoutfs_key, end)
+		__field_struct(struct scoutfs_key, seg_start)
+		__field_struct(struct scoutfs_key, seg_end)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		scoutfs_key_str(__get_dynamic_array(key), key);
-		scoutfs_key_str(__get_dynamic_array(start), start);
-		scoutfs_key_str(__get_dynamic_array(end), end);
-		scoutfs_key_str(__get_dynamic_array(seg_start), seg_start);
-		scoutfs_key_str(__get_dynamic_array(seg_end), seg_end);
+		scoutfs_key_copy_or_zeros(&__entry->key, key);
+		scoutfs_key_copy_or_zeros(&__entry->start, start);
+		scoutfs_key_copy_or_zeros(&__entry->end, end);
+		scoutfs_key_copy_or_zeros(&__entry->seg_start, seg_start);
+		scoutfs_key_copy_or_zeros(&__entry->seg_end, seg_end);
         ),
-        TP_printk("fsid "FSID_FMT" key %s start %s end %s seg_start %s seg_end %s",
-		  __entry->fsid, __get_str(key), __get_str(start),
-		  __get_str(end), __get_str(seg_start), __get_str(seg_end))
+        TP_printk("fsid "FSID_FMT" key "SK_FMT" start "SK_FMT" end "SK_FMT" seg_start "SK_FMT" seg_end "SK_FMT"",
+		  __entry->fsid, SK_ARG(&__entry->key), SK_ARG(&__entry->start),
+		  SK_ARG(&__entry->end), SK_ARG(&__entry->seg_start),
+		  SK_ARG(&__entry->seg_end))
 );
 
 DECLARE_EVENT_CLASS(scoutfs_key_class,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
         TP_ARGS(sb, key),
         TP_STRUCT__entry(
  		__field(__u64, fsid)
-               __dynamic_array(char, key, scoutfs_key_str(NULL, key))
+		__field_struct(struct scoutfs_key, key)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		scoutfs_key_str(__get_dynamic_array(key), key);
+		scoutfs_key_copy_or_zeros(&__entry->key, key);
         ),
-	TP_printk(FSID_FMT" key %s", __entry->fsid, __get_str(key))
+	TP_printk(FSID_FMT" key "SK_FMT, __entry->fsid, SK_ARG(&__entry->key))
 );
 
 DEFINE_EVENT(scoutfs_key_class, scoutfs_item_lookup,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
         TP_ARGS(sb, key)
 );
 
@@ -1456,127 +1400,129 @@ TRACE_EVENT(scoutfs_item_lookup_ret,
 );
 
 DEFINE_EVENT(scoutfs_key_class, scoutfs_item_insertion,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
         TP_ARGS(sb, key)
 );
 
 DEFINE_EVENT(scoutfs_key_class, scoutfs_item_shrink,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
         TP_ARGS(sb, key)
 );
 
 DEFINE_EVENT(scoutfs_key_class, scoutfs_xattr_get_next_key,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
         TP_ARGS(sb, key)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_range_class,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
-		 struct scoutfs_key_buf *end),
+        TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
+		 struct scoutfs_key *end),
         TP_ARGS(sb, start, end),
         TP_STRUCT__entry(
 		__field(__u64, fsid)
-                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
-                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
+		__field_struct(struct scoutfs_key, start)
+		__field_struct(struct scoutfs_key, end)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		scoutfs_key_str(__get_dynamic_array(start), start);
-		scoutfs_key_str(__get_dynamic_array(end), end);
+		scoutfs_key_copy_or_zeros(&__entry->start, start);
+		scoutfs_key_copy_or_zeros(&__entry->end, end);
         ),
-        TP_printk("fsid "FSID_FMT" start %s end %s",
-		  __entry->fsid, __get_str(start), __get_str(end))
+        TP_printk("fsid "FSID_FMT" start "SK_FMT" end "SK_FMT,
+		  __entry->fsid, SK_ARG(&__entry->start),
+		  SK_ARG(&__entry->end))
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_insert_batch,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
-		 struct scoutfs_key_buf *end),
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
+		 struct scoutfs_key *end),
         TP_ARGS(sb, start, end)
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_invalidate_range,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
-		 struct scoutfs_key_buf *end),
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
+		 struct scoutfs_key *end),
         TP_ARGS(sb, start, end)
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_shrink_range,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
-		 struct scoutfs_key_buf *end),
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
+		 struct scoutfs_key *end),
         TP_ARGS(sb, start, end)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_cached_range_class,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end),
         TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(void *, rng)
-                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
-                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
+		__field_struct(struct scoutfs_key, start)
+		__field_struct(struct scoutfs_key, end)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->rng = rng;
-		scoutfs_key_str(__get_dynamic_array(start), start);
-		scoutfs_key_str(__get_dynamic_array(end), end);
+		scoutfs_key_copy_or_zeros(&__entry->start, start);
+		scoutfs_key_copy_or_zeros(&__entry->end, end);
         ),
-        TP_printk("fsid "FSID_FMT" rng %p start %s end %s",
-		  __entry->fsid, __entry->rng, __get_str(start), __get_str(end))
+        TP_printk("fsid "FSID_FMT" rng %p start "SK_FMT" end "SK_FMT,
+		  __entry->fsid, __entry->rng, SK_ARG(&__entry->start),
+		  SK_ARG(&__entry->end))
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_free,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_ins_rb_insert,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_mid_left,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_start,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_end,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_rem_rb_insert,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_delete_enoent,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_shrink_start,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_shrink_end,
         TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key_buf *start, struct scoutfs_key_buf *end),
+		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)
 );
 
@@ -1784,32 +1730,32 @@ DEFINE_EVENT(scoutfs_net_class, scoutfs_client_recv_reply,
 
 TRACE_EVENT(scoutfs_item_next_range_check,
         TP_PROTO(struct super_block *sb, int cached,
-		 struct scoutfs_key_buf *key, struct scoutfs_key_buf *pos,
-		 struct scoutfs_key_buf *last, struct scoutfs_key_buf *end,
-		 struct scoutfs_key_buf *range_end),
+		 struct scoutfs_key *key, struct scoutfs_key *pos,
+		 struct scoutfs_key *last, struct scoutfs_key *end,
+		 struct scoutfs_key *range_end),
         TP_ARGS(sb, cached, key, pos, last, end, range_end),
         TP_STRUCT__entry(
 		__field(void *, sb)
 		__field(int, cached)
-                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
-                __dynamic_array(char, pos, scoutfs_key_str(NULL, pos))
-                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
-                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
-                __dynamic_array(char, range_end,
-				scoutfs_key_str(NULL, range_end))
+		__field_struct(struct scoutfs_key, key)
+		__field_struct(struct scoutfs_key, pos)
+		__field_struct(struct scoutfs_key, last)
+		__field_struct(struct scoutfs_key, end)
+		__field_struct(struct scoutfs_key, range_end)
         ),
         TP_fast_assign(
 		__entry->sb = sb;
 		__entry->cached = cached;
-		scoutfs_key_str(__get_dynamic_array(key), key);
-		scoutfs_key_str(__get_dynamic_array(pos), pos);
-		scoutfs_key_str(__get_dynamic_array(last), last);
-		scoutfs_key_str(__get_dynamic_array(end), end);
-		scoutfs_key_str(__get_dynamic_array(range_end), range_end);
+		scoutfs_key_copy_or_zeros(&__entry->key, key);
+		scoutfs_key_copy_or_zeros(&__entry->pos, pos);
+		scoutfs_key_copy_or_zeros(&__entry->last, last);
+		scoutfs_key_copy_or_zeros(&__entry->end, end);
+		scoutfs_key_copy_or_zeros(&__entry->range_end, range_end);
         ),
-        TP_printk("sb %p cached %d key %s pos %s last %s end %s range_end %s",
-		  __entry->sb, __entry->cached, __get_str(key), __get_str(pos),
-		  __get_str(last), __get_str(end), __get_str(range_end))
+        TP_printk("sb %p cached %d key "SK_FMT" pos "SK_FMT" last "SK_FMT" end "SK_FMT" range_end "SK_FMT,
+		  __entry->sb, __entry->cached, SK_ARG(&__entry->key),
+		  SK_ARG(&__entry->pos), SK_ARG(&__entry->last),
+		  SK_ARG(&__entry->end), SK_ARG(&__entry->range_end))
 );
 
 DECLARE_EVENT_CLASS(scoutfs_shrink_exit_class,
@@ -1846,37 +1792,36 @@ DEFINE_EVENT(scoutfs_shrink_exit_class, scoutfs_item_shrink_exit,
 
 TRACE_EVENT(scoutfs_item_shrink_around,
         TP_PROTO(struct super_block *sb,
-		 struct scoutfs_key_buf *rng_start,
-		 struct scoutfs_key_buf *rng_end, struct scoutfs_key_buf *item,
-		 struct scoutfs_key_buf *prev, struct scoutfs_key_buf *first,
-		 struct scoutfs_key_buf *last, struct scoutfs_key_buf *next),
+		 struct scoutfs_key *rng_start,
+		 struct scoutfs_key *rng_end, struct scoutfs_key *item,
+		 struct scoutfs_key *prev, struct scoutfs_key *first,
+		 struct scoutfs_key *last, struct scoutfs_key *next),
         TP_ARGS(sb, rng_start, rng_end, item, prev, first, last, next),
         TP_STRUCT__entry(
 		__field(void *, sb)
-                __dynamic_array(char, rng_start,
-				scoutfs_key_str(NULL, rng_start))
-                __dynamic_array(char, rng_end,
-				scoutfs_key_str(NULL, rng_end))
-                __dynamic_array(char, item, scoutfs_key_str(NULL, item))
-                __dynamic_array(char, prev, scoutfs_key_str(NULL, prev))
-                __dynamic_array(char, first, scoutfs_key_str(NULL, first))
-                __dynamic_array(char, last, scoutfs_key_str(NULL, last))
-                __dynamic_array(char, next, scoutfs_key_str(NULL, next))
+		__field_struct(struct scoutfs_key, rng_start)
+		__field_struct(struct scoutfs_key, rng_end)
+		__field_struct(struct scoutfs_key, item)
+		__field_struct(struct scoutfs_key, prev)
+		__field_struct(struct scoutfs_key, first)
+		__field_struct(struct scoutfs_key, last)
+		__field_struct(struct scoutfs_key, next)
         ),
         TP_fast_assign(
 		__entry->sb = sb;
-		scoutfs_key_str(__get_dynamic_array(rng_start), rng_start);
-		scoutfs_key_str(__get_dynamic_array(rng_end), rng_end);
-		scoutfs_key_str(__get_dynamic_array(item), item);
-		scoutfs_key_str(__get_dynamic_array(prev), prev);
-		scoutfs_key_str(__get_dynamic_array(first), first);
-		scoutfs_key_str(__get_dynamic_array(last), last);
-		scoutfs_key_str(__get_dynamic_array(next), next);
+		scoutfs_key_copy_or_zeros(&__entry->rng_start, rng_start);
+		scoutfs_key_copy_or_zeros(&__entry->rng_end, rng_end);
+		scoutfs_key_copy_or_zeros(&__entry->item, item);
+		scoutfs_key_copy_or_zeros(&__entry->prev, prev);
+		scoutfs_key_copy_or_zeros(&__entry->first, first);
+		scoutfs_key_copy_or_zeros(&__entry->last, last);
+		scoutfs_key_copy_or_zeros(&__entry->next, next);
         ),
-        TP_printk("sb %p rng_start %s rng_end %s item %s prev %s first %s last %s next %s",
-		  __entry->sb, __get_str(rng_start), __get_str(rng_end),
-		  __get_str(item), __get_str(prev), __get_str(first),
-		  __get_str(last), __get_str(next))
+        TP_printk("sb %p rng_start "SK_FMT" rng_end "SK_FMT" item "SK_FMT" prev "SK_FMT" first "SK_FMT" last "SK_FMT" next "SK_FMT,
+		  __entry->sb, SK_ARG(&__entry->rng_start),
+		  SK_ARG(&__entry->rng_end), SK_ARG(&__entry->item),
+		  SK_ARG(&__entry->prev), SK_ARG(&__entry->first),
+		  SK_ARG(&__entry->last), SK_ARG(&__entry->next))
 );
 
 TRACE_EVENT(scoutfs_rename,

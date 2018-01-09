@@ -16,8 +16,8 @@
 struct scoutfs_lock {
 	struct super_block *sb;
 	struct scoutfs_lock_name name;
-	struct scoutfs_key_buf *start;
-	struct scoutfs_key_buf *end;
+	struct scoutfs_key start;
+	struct scoutfs_key end;
 	struct rb_node node;
 	struct rb_node range_node;
 	unsigned int debug_locks_id;
@@ -53,8 +53,8 @@ int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
 int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 		     struct scoutfs_lock **ret_lock);
 void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
-				       struct scoutfs_inode_index_key *start,
-				       struct scoutfs_inode_index_key *end);
+				       struct scoutfs_key *start,
+				       struct scoutfs_key *end);
 int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock);

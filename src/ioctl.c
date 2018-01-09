@@ -55,11 +55,9 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	struct scoutfs_ioctl_walk_inodes __user *uwalk = (void __user *)arg;
 	struct scoutfs_ioctl_walk_inodes walk;
 	struct scoutfs_ioctl_walk_inodes_entry ent;
-	struct scoutfs_inode_index_key last_ikey;
-	struct scoutfs_inode_index_key ikey;
-	struct scoutfs_key_buf *next_key;
-	struct scoutfs_key_buf last_key;
-	struct scoutfs_key_buf key;
+	struct scoutfs_key next_key;
+	struct scoutfs_key last_key;
+	struct scoutfs_key key;
 	struct scoutfs_lock *lock;
 	u64 last_seq;
 	int ret = 0;
@@ -93,23 +91,10 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		}
 	}
 
-	next_key = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	if (!next_key)
-		return -ENOMEM;
-
-	ikey.zone = SCOUTFS_INODE_INDEX_ZONE;
-	ikey.type = type;
-	ikey.major = cpu_to_be64(walk.first.major);
-	ikey.minor = cpu_to_be32(walk.first.minor);
-	ikey.ino = cpu_to_be64(walk.first.ino);
-	scoutfs_key_init(&key, &ikey, sizeof(ikey));
-
-	last_ikey.zone = ikey.zone;
-	last_ikey.type = ikey.type;
-	last_ikey.major = cpu_to_be64(walk.last.major);
-	last_ikey.minor = cpu_to_be32(walk.last.minor);
-	last_ikey.ino = cpu_to_be64(walk.last.ino);
-	scoutfs_key_init(&last_key, &last_ikey, sizeof(last_ikey));
+	scoutfs_inode_init_index_key(&key, type, walk.first.major,
+				     walk.first.minor, walk.first.ino);
+	scoutfs_inode_init_index_key(&last_key, type, walk.last.major,
+				     walk.last.minor, walk.last.ino);
 
 	/* cap nr to the max the ioctl can return to a compat task */
 	walk.nr_entries = min_t(u64, walk.nr_entries, INT_MAX);
@@ -121,21 +106,21 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 	for (nr = 0; nr < walk.nr_entries; ) {
 
-		ret = scoutfs_item_next_same(sb, &key, &last_key, NULL, lock);
+		ret = scoutfs_item_next(sb, &key, &last_key, NULL, lock);
 		if (ret < 0 && ret != -ENOENT)
 			break;
 
 		if (ret == -ENOENT) {
 
 			/* done if lock covers last iteration key */
-			if (scoutfs_key_compare(&last_key, lock->end) <= 0) {
+			if (scoutfs_key_compare(&last_key, &lock->end) <= 0) {
 				ret = 0;
 				break;
 			}
 
 			/* continue iterating after locked empty region */
-			scoutfs_key_copy(&key, lock->end);
-			scoutfs_key_inc_cur_len(&key);
+			key = lock->end;
+			scoutfs_key_inc(&key);
 
 			scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 
@@ -146,37 +131,32 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 			 * It'd mean adding a lock to the inode index
 			 * items which isn't quite there yet.
 			 */
-			ret = scoutfs_manifest_next_key(sb, &key, next_key);
+			ret = scoutfs_manifest_next_key(sb, &key, &next_key);
 			if (ret < 0 && ret != -ENOENT)
 				goto out;
 
 			if (ret == -ENOENT ||
-			    scoutfs_key_compare(next_key, &last_key) > 0) {
+			    scoutfs_key_compare(&next_key, &last_key) > 0) {
 				ret = 0;
 				goto out;
 			}
 
-			/* if it's within last it should be same size */
-			if (next_key->key_len != key.key_len) {
-				ret = -EIO;
-				goto out;
-			}
+			key = next_key;
 
-			scoutfs_key_copy(&key, next_key);
-
-			ret = scoutfs_lock_inode_index(sb, DLM_LOCK_PR, ikey.type,
-						       be64_to_cpu(ikey.major),
-						       be64_to_cpu(ikey.ino),
-						       &lock);
+			ret = scoutfs_lock_inode_index(sb, DLM_LOCK_PR,
+						key.sk_type,
+						le64_to_cpu(key.skii_major),
+						le64_to_cpu(key.skii_ino),
+						&lock);
 			if (ret < 0)
 				goto out;
 
 			continue;
 		}
 
-		ent.major = be64_to_cpu(ikey.major);
-		ent.minor = be32_to_cpu(ikey.minor);
-		ent.ino = be64_to_cpu(ikey.ino);
+		ent.major = le64_to_cpu(key.skii_major);
+		ent.minor = 0;
+		ent.ino = le64_to_cpu(key.skii_ino);
 
 		if (copy_to_user((void __user *)walk.entries_ptr, &ent,
 				 sizeof(ent))) {
@@ -187,14 +167,12 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		nr++;
 		walk.entries_ptr += sizeof(ent);
 
-		scoutfs_key_inc_cur_len(&key);
+		scoutfs_key_inc(&key);
 	}
 
 	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 
 out:
-	scoutfs_key_free(sb, next_key);
-
 	if (nr > 0)
 		ret = nr;
 
@@ -499,65 +477,46 @@ static long scoutfs_ioc_item_cache_keys(struct file *file, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct scoutfs_ioctl_item_cache_keys ick;
-	struct scoutfs_key_buf *key;
-	struct page *page;
-	unsigned bytes;
-	void *buf;
+	struct scoutfs_key __user *ukeys;
+	struct scoutfs_key keys[16];
+	unsigned int nr;
 	int total;
 	int ret;
 
 	if (copy_from_user(&ick, (void __user *)arg, sizeof(ick)))
 		return -EFAULT;
 
-	if ((!!ick.key_ptr != !!ick.key_len) ||
-	    ick.key_len > SCOUTFS_MAX_KEY_SIZE ||
-	    ick.which > SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES)
+	if (ick.which > SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES)
 		return -EINVAL;
 
-	/* don't overflow signed 32bit syscall return longs */
-	ick.buf_len = min_t(u64, ick.buf_len, S32_MAX);
-
-	key = scoutfs_key_alloc(sb, SCOUTFS_MAX_KEY_SIZE);
-	page = alloc_page(GFP_KERNEL);
-	if (!key || !page) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	if (copy_from_user(key->data, (void __user *)ick.key_ptr, ick.key_len)) {
-		ret = -EFAULT;
-		goto out;
-	}
-	scoutfs_key_init_buf_len(key, key->data, ick.key_len,
-				 SCOUTFS_MAX_KEY_SIZE);
-	scoutfs_key_inc(key);
-
-	buf = page_address(page);
+	ukeys = (void __user *)(long)ick.buf_ptr;
 	total = 0;
 	ret = 0;
-	while (ick.buf_len) {
-		bytes = min_t(u64, ick.buf_len, PAGE_SIZE);
+	while (ick.buf_nr) {
+		nr = min_t(size_t, ick.buf_nr, ARRAY_SIZE(keys));
 
 		if (ick.which == SCOUTFS_IOC_ITEM_CACHE_KEYS_ITEMS)
-			ret = scoutfs_item_copy_keys(sb, key, buf, bytes);
+			ret = scoutfs_item_copy_keys(sb, &ick.key, keys, nr);
 		else
-			ret = scoutfs_item_copy_range_keys(sb, key, buf, bytes);
-
-		if (ret > 0 && copy_to_user((void __user *)ick.buf_ptr, buf, ret))
-			ret = -EFAULT;
+			ret = scoutfs_item_copy_range_keys(sb, &ick.key, keys,
+							   nr);
+		BUG_ON(ret > nr); /* stack overflow \o/ */
 		if (ret <= 0)
 			break;
 
-		ick.buf_len -= ret;
-		ick.buf_ptr += ret;
+		if (copy_to_user(ukeys, keys, ret * sizeof(keys[0]))) {
+			ret = -EFAULT;
+			break;
+		}
+
+		ick.key = keys[ret - 1];
+		scoutfs_key_inc(&ick.key);
+
+		ukeys += ret;
+		ick.buf_nr -= ret;
 		total += ret;
 		ret = 0;
 	}
-
-out:
-	scoutfs_key_free(sb, key);
-	if (page)
-		__free_page(page);
 
 	return ret ?: total;
 }

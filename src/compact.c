@@ -66,8 +66,8 @@ struct compact_seg {
 	u64 segno;
 	u64 seq;
 	u8 level;
-	struct scoutfs_key_buf *first;
-	struct scoutfs_key_buf *last;
+	struct scoutfs_key first;
+	struct scoutfs_key last;
 	struct scoutfs_segment *seg;
 	int off;
 	bool part_of_move;
@@ -101,27 +101,20 @@ static void free_cseg(struct super_block *sb, struct compact_seg *cseg)
 	WARN_ON_ONCE(!list_empty(&cseg->entry));
 
 	scoutfs_seg_put(cseg->seg);
-	scoutfs_key_free(sb, cseg->first);
-	scoutfs_key_free(sb, cseg->last);
-
 	kfree(cseg);
 }
 
 static struct compact_seg *alloc_cseg(struct super_block *sb,
-				      struct scoutfs_key_buf *first,
-				      struct scoutfs_key_buf *last)
+				      struct scoutfs_key *first,
+				      struct scoutfs_key *last)
 {
 	struct compact_seg *cseg;
 
 	cseg = kzalloc(sizeof(struct compact_seg), GFP_NOFS);
 	if (cseg) {
 		INIT_LIST_HEAD(&cseg->entry);
-		cseg->first = scoutfs_key_dup(sb, first);
-		cseg->last = scoutfs_key_dup(sb, last);
-		if (!cseg->first || !cseg->last) {
-			free_cseg(sb, cseg);
-			cseg = NULL;
-		}
+		cseg->first = *first;
+		cseg->last = *last;
 	}
 
 	return cseg;
@@ -179,12 +172,12 @@ static struct compact_seg *next_spos(struct compact_cursor *curs,
  * incremental update items.
  */
 static int next_item(struct super_block *sb, struct compact_cursor *curs,
-		     struct scoutfs_key_buf *item_key, struct kvec *item_val,
+		     struct scoutfs_key *item_key, struct kvec *item_val,
 		     u8 *item_flags)
 {
 	struct compact_seg *upper = curs->upper;
 	struct compact_seg *lower = curs->lower;
-	struct scoutfs_key_buf lower_key;
+	struct scoutfs_key lower_key;
 	struct kvec lower_val;
 	u8 lower_flags;
 	int cmp;
@@ -192,8 +185,8 @@ static int next_item(struct super_block *sb, struct compact_cursor *curs,
 
 retry:
 	if (upper) {
-		ret = scoutfs_seg_item_ptrs(upper->seg, upper->off,
-					    item_key, item_val, item_flags);
+		ret = scoutfs_seg_get_item(upper->seg, upper->off,
+					   item_key, item_val, item_flags);
 		if (ret < 0)
 			upper = NULL;
 	}
@@ -203,9 +196,9 @@ retry:
 		if (ret)
 			goto out;
 
-		ret = scoutfs_seg_item_ptrs(lower->seg, lower->off,
-					    &lower_key, &lower_val,
-					    &lower_flags);
+		ret = scoutfs_seg_get_item(lower->seg, lower->off,
+					   &lower_key, &lower_val,
+					   &lower_flags);
 		if (ret == 0)
 			break;
 		lower = next_spos(curs, lower);
@@ -230,7 +223,7 @@ retry:
 		cmp = 1;
 
 	if (cmp > 0) {
-		scoutfs_key_clone(item_key, &lower_key);
+		*item_key = lower_key;
 		*item_val = lower_val;
 		*item_flags = lower_flags;
 	}
@@ -243,7 +236,7 @@ retry:
 	 */
 	if (curs->sticky && curs->lower &&
 	    (!lower || lower == curs->last_lower) &&
-	    scoutfs_key_compare(item_key, curs->last_lower->last) > 0) {
+	    scoutfs_key_compare(item_key, &curs->last_lower->last) > 0) {
 		ret = 0;
 		goto out;
 	}
@@ -276,7 +269,7 @@ static int compact_segments(struct super_block *sb,
 			    struct scoutfs_bio_completion *comp,
 			    struct list_head *results)
 {
-	struct scoutfs_key_buf item_key;
+	struct scoutfs_key item_key;
 	struct scoutfs_segment *seg;
 	struct compact_seg *cseg;
 	struct compact_seg *upper;
@@ -315,7 +308,7 @@ static int compact_segments(struct super_block *sb,
 			 * entry iterator that reading and compacting
 			 * can use.
 			 */
-			cseg = alloc_cseg(sb, upper->first, upper->last);
+			cseg = alloc_cseg(sb, &upper->first, &upper->last);
 			if (!cseg) {
 				ret = -ENOMEM;
 				break;
@@ -535,7 +528,7 @@ int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
 		}
 
 		scoutfs_manifest_init_entry(&ment, cseg->level, 0, cseg->seq,
-					    cseg->first, NULL);
+					    &cseg->first, NULL);
 		ret = scoutfs_manifest_del(sb, &ment);
 		BUG_ON(ret);
 	}
@@ -548,7 +541,7 @@ int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
 		else
 			scoutfs_manifest_init_entry(&ment, cseg->level,
 						    cseg->segno, cseg->seq,
-						    cseg->first, cseg->last);
+						    &cseg->first, &cseg->last);
 		ret = scoutfs_manifest_add(sb, &ment);
 		BUG_ON(ret);
 	}
@@ -590,7 +583,8 @@ static void scoutfs_compact_func(struct work_struct *work)
 	/* trace compaction ranges */
 	list_for_each_entry(cseg, &curs.csegs, entry) {
 		trace_scoutfs_compact_input(sb, cseg->level, cseg->segno,
-					    cseg->seq, cseg->first, cseg->last);
+					    cseg->seq, &cseg->first,
+					    &cseg->last);
 	}
 
 	if (ret == 0 && !list_empty(&curs.csegs)) {

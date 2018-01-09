@@ -5,6 +5,7 @@
 #include "lock.h"
 #include "per_task.h"
 #include "count.h"
+#include "format.h"
 
 struct scoutfs_lock;
 
@@ -62,9 +63,6 @@ static inline u64 scoutfs_ino(struct inode *inode)
 	return SCOUTFS_I(inode)->ino;
 }
 
-void scoutfs_inode_init_key(struct scoutfs_key_buf *key,
-			    struct scoutfs_inode_key *ikey, u64 ino);
-
 struct inode *scoutfs_alloc_inode(struct super_block *sb);
 void scoutfs_destroy_inode(struct inode *inode);
 int scoutfs_drop_inode(struct inode *inode);
@@ -74,6 +72,8 @@ int scoutfs_orphan_inode(struct inode *inode);
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino);
 struct inode *scoutfs_ilookup(struct super_block *sb, u64 ino);
 
+void scoutfs_inode_init_index_key(struct scoutfs_key *key, u8 type, u64 major,
+				  u32 minor, u64 ino);
 int scoutfs_inode_index_start(struct super_block *sb, u64 *seq);
 int scoutfs_inode_index_prepare(struct super_block *sb, struct list_head *list,
 			        struct inode *inode, bool set_data_seq);

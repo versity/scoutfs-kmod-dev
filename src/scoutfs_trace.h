@@ -1599,7 +1599,9 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__field(unsigned int, refcnt)
 		__field(unsigned int, users)
 		__field(unsigned char, level)
-		__field(unsigned int, ro)
+		__field(unsigned char, blocking)
+		__field(unsigned int, cw)
+		__field(unsigned int, pr)
 		__field(unsigned int, ex)
 	),
         TP_fast_assign(
@@ -1614,14 +1616,17 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__entry->users = lck->users;
 		/* racey, but safe refs of embedded struct */
 		__entry->level = lck->lockres.l_level;
-		__entry->ro = lck->lockres.l_ro_holders;
+		__entry->blocking = lck->lockres.l_blocking;
+		__entry->cw = lck->lockres.l_cw_holders;
+		__entry->pr = lck->lockres.l_ro_holders;
 		__entry->ex = lck->lockres.l_ex_holders;
         ),
-        TP_printk("fsid "FSID_FMT" name %u.%u.%u.%llu.%llu seq %u refs %d users %d level %u ro %u ex %u",
+        TP_printk("fsid "FSID_FMT" name %u.%u.%u.%llu.%llu seq %u refs %d users %d level %u blocking %u cw %u pr %u ex %u",
 		  __entry->fsid, __entry->name_scope, __entry->name_zone,
 		  __entry->name_type, __entry->name_first,
 		  __entry->name_second, __entry->seq, __entry->refcnt,
-		  __entry->users, __entry->level, __entry->ro, __entry->ex)
+		  __entry->users, __entry->level, __entry->blocking,
+		  __entry->cw, __entry->pr, __entry->ex)
 );
 
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_resource,

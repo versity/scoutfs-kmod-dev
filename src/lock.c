@@ -732,6 +732,8 @@ static int lock_name_keys(struct super_block *sb, int mode, int flags,
 			 */
 			BUG_ON(!ocfs2_levels_compat(&lock->lockres, mode));
 			get_task_ref(ref);
+			dec_lock_users(lock);
+			put_scoutfs_lock(sb, lock);
 			ret = 0;
 			goto out;
 		}

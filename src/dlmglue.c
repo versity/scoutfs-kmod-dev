@@ -2398,11 +2398,12 @@ static int ocfs2_unblock_lock(struct ocfs2_super *osb,
 	int set_lvb = 0;
 	unsigned int gen;
 
-	trace_ocfs2_unblock_lock(osb, lockres);
 
 	spin_lock_irqsave(&lockres->l_lock, flags);
 
 recheck:
+	trace_ocfs2_unblock_lock(osb, lockres);
+
 	/*
 	 * Is it still blocking? If not, we have no more work to do.
 	 */

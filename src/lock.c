@@ -17,6 +17,9 @@
 #include <linux/dlm.h>
 #include <linux/mm.h>
 #include <linux/sort.h>
+#include <linux/debugfs.h>
+#include <linux/idr.h>
+#include <linux/ctype.h>
 
 #include "super.h"
 #include "lock.h"
@@ -55,6 +58,8 @@ struct lock_info {
 	struct list_head lru_list;
 	unsigned long long lru_nr;
 	struct workqueue_struct *lock_reclaim_wq;
+	struct dentry *debug_locks_dentry;
+	struct idr debug_locks_idr;
 };
 
 #define DECLARE_LOCK_INFO(sb, name) \
@@ -283,6 +288,9 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 				RB_CLEAR_NODE(&lock->range_node);
 			}
 			list_del(&lock->lru_entry);
+			if (lock->debug_locks_id)
+				idr_remove(&linfo->debug_locks_idr,
+					   lock->debug_locks_id);
 			spin_unlock(&linfo->lock);
 			ocfs2_simple_drop_lockres(&linfo->dlmglue,
 						  &lock->lockres);
@@ -418,6 +426,7 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
+	int id;
 
 	if (WARN_ON_ONCE(!!start != !!end))
 		return NULL;
@@ -425,6 +434,18 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 	lock = kzalloc(sizeof(struct scoutfs_lock), GFP_NOFS);
 	if (lock == NULL)
 		return NULL;
+
+	idr_preload(GFP_NOFS);
+	spin_lock(&linfo->lock);
+	id = idr_alloc(&linfo->debug_locks_idr, lock, 1, INT_MAX, GFP_NOWAIT);
+	if (id > 0)
+		lock->debug_locks_id = id;
+	spin_unlock(&linfo->lock);
+	idr_preload_end();
+	if (id <= 0) {
+		free_scoutfs_lock(lock);
+		return NULL;
+	}
 
 	RB_CLEAR_NODE(&lock->node);
 	RB_CLEAR_NODE(&lock->range_node);
@@ -1106,6 +1127,7 @@ static int init_lock_info(struct super_block *sb)
 
 	spin_lock_init(&linfo->lock);
 	INIT_LIST_HEAD(&linfo->lru_list);
+	idr_init(&linfo->debug_locks_idr);
 	linfo->shrinker.shrink = shrink_lock_tree;
 	linfo->shrinker.seeks = DEFAULT_SEEKS;
 	register_shrinker(&linfo->shrinker);
@@ -1132,6 +1154,9 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	DECLARE_LOCK_INFO(sb, linfo);
 
 	if (linfo) {
+		/* XXX does anything synchronize with open debugfs fds? */
+		debugfs_remove(linfo->debug_locks_dentry);
+
 		unregister_shrinker(&linfo->shrinker);
 		if (linfo->lock_reclaim_wq)
 			destroy_workqueue(linfo->lock_reclaim_wq);
@@ -1140,6 +1165,7 @@ void scoutfs_lock_destroy(struct super_block *sb)
 		 * draining the reclaim workqueue.
 		 */
 		free_lock_tree(sb);
+		idr_destroy(&linfo->debug_locks_idr);
 
 		if (linfo->dlmglue_online) {
 			/*
@@ -1161,6 +1187,94 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	}
 }
 
+/* _stop is always called no matter what start returns */
+static void *scoutfs_debug_locks_seq_start(struct seq_file *m, loff_t *pos)
+	__acquires(linfo->lock)
+{
+	struct super_block *sb = m->private;
+	DECLARE_LOCK_INFO(sb, linfo);
+	int id;
+
+	spin_lock(&linfo->lock);
+
+	if (*pos >= INT_MAX)
+		return NULL;
+
+	id = *pos;
+	return idr_get_next(&linfo->debug_locks_idr, &id);
+}
+
+static void *scoutfs_debug_locks_seq_next(struct seq_file *m, void *v,
+					  loff_t *pos)
+{
+	struct super_block *sb = m->private;
+	DECLARE_LOCK_INFO(sb, linfo);
+	struct scoutfs_lock *lock = v;
+	int id;
+
+	id = lock->debug_locks_id + 1;
+	lock = idr_get_next(&linfo->debug_locks_idr, &id);
+	if (lock)
+		*pos = lock->debug_locks_id;
+	return lock;
+}
+
+static void scoutfs_debug_locks_seq_stop(struct seq_file *m, void *v)
+	__releases(linfo->lock)
+{
+	struct super_block *sb = m->private;
+	DECLARE_LOCK_INFO(sb, linfo);
+
+	spin_unlock(&linfo->lock);
+}
+
+/* print an upper or lower case char depending on if the flag is set */
+#define locks_flag_char(lock, nr, c)	\
+	(test_bit(nr, &(lock)->flags) ? c : tolower(c))
+
+#define locks_flags(lock)					\
+	locks_flag_char(lock, SCOUTFS_LOCK_RECLAIM, 'R'),	\
+	locks_flag_char(lock, SCOUTFS_LOCK_DROPPED, 'D')
+
+static int scoutfs_debug_locks_seq_show(struct seq_file *m, void *v)
+{
+	struct scoutfs_lock *lock = v;
+
+	SK_PCPU(seq_printf(m, "name "LN_FMT" start "SK_FMT" end "SK_FMT" sequence %u refcnt %u users %u flags %c%c\n",
+			   LN_ARG(&lock->lock_name), SK_ARG(lock->start),
+			   SK_ARG(lock->end), lock->sequence, lock->refcnt,
+			   lock->users, locks_flags(lock)));
+
+	return 0;
+}
+
+static const struct seq_operations scoutfs_debug_locks_seq_ops = {
+	.start =	scoutfs_debug_locks_seq_start,
+	.next =		scoutfs_debug_locks_seq_next,
+	.stop =		scoutfs_debug_locks_seq_stop,
+	.show =		scoutfs_debug_locks_seq_show,
+};
+
+static int scoutfs_debug_locks_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *m;
+	int ret;
+
+	ret = seq_open(file, &scoutfs_debug_locks_seq_ops);
+	if (ret == 0) {
+		m = file->private_data;
+		m->private = inode->i_private;
+	}
+	return ret;
+}
+
+static const struct file_operations scoutfs_debug_locks_fops = {
+	.open	=	scoutfs_debug_locks_open,
+	.release =	seq_release,
+	.read =		seq_read,
+	.llseek =	seq_lseek,
+};
+
 int scoutfs_lock_setup(struct super_block *sb)
 {
 	struct lock_info *linfo;
@@ -1171,6 +1285,14 @@ int scoutfs_lock_setup(struct super_block *sb)
 	if (ret)
 		return ret;
 	linfo = sbi->lock_info;
+
+	linfo->debug_locks_dentry = debugfs_create_file("locks",
+					S_IFREG|S_IRUSR, sbi->debug_root, sb,
+					&scoutfs_debug_locks_fops);
+	if (!linfo->debug_locks_dentry) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	linfo->lock_reclaim_wq = alloc_workqueue("scoutfs_reclaim",
 						 WQ_UNBOUND|WQ_HIGHPRI, 0);

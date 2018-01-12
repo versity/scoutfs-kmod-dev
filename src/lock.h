@@ -25,6 +25,7 @@ struct scoutfs_lock {
 	struct rb_node node;
 	struct rb_node range_node;
 	unsigned int refcnt;
+	unsigned int debug_locks_id;
 	struct ocfs2_lock_res lockres;
 	struct list_head lru_entry;
 	struct work_struct reclaim_work;

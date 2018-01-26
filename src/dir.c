@@ -24,6 +24,7 @@
 #include "inode.h"
 #include "ioctl.h"
 #include "key.h"
+#include "msg.h"
 #include "super.h"
 #include "trans.h"
 #include "xattr.h"
@@ -1209,8 +1210,20 @@ int scoutfs_dir_get_backref_path(struct super_block *sb, u64 ino, u64 dir_ino,
 {
 	u64 par_ino;
 	int ret;
+	int iters = 0;
 
 retry:
+	/*
+	 * Debugging for SCOUT-107, can be removed later when we're
+	 * confident we won't hit an endless loop here again.
+	 */
+	if (WARN_ONCE(++iters >= 4000, "scoutfs: Excessive retries in "
+		      "dir_get_backref_path. ino %llu dir_ino %llu name %.*s\n",
+		      ino, dir_ino, name_len, name)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	/* get the next link name to the given inode */
 	ret = add_next_linkref(sb, ino, dir_ino, name, name_len, list);
 	if (ret < 0)

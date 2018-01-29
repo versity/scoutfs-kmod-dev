@@ -237,10 +237,9 @@ struct scoutfs_segment_block {
 #define SCOUTFS_MAX_ZONE			4 /* power of 2 is efficient */
 
 /* inode index zone */
-#define SCOUTFS_INODE_INDEX_SIZE_TYPE		1
-#define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	2
-#define SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE	3
-#define SCOUTFS_INODE_INDEX_NR			4 /* don't forget to update */
+#define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	1
+#define SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE	2
+#define SCOUTFS_INODE_INDEX_NR			3 /* don't forget to update */
 
 /* node zone */
 #define SCOUTFS_FREE_BITS_SEGNO_TYPE		1

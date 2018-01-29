@@ -1147,7 +1147,6 @@ static int scoutfs_write_begin(struct file *file,
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct write_begin_data *wbd;
-	u64 new_size;
 	u64 ind_seq;
 	int ret;
 
@@ -1166,19 +1165,10 @@ static int scoutfs_write_begin(struct file *file,
 		goto out;
 	}
 
-	/*
-	 * Lock a size update item assuming we perform the full write.
-	 * If If the write is inside i_size then we don't lock and
-	 * nothing will be updated.  Lock granularity is larger than
-	 * pages so any size update in this call will be covered by the
-	 * lock.  If there's an error and we don't change i_size then
-	 * the item update won't happen and the lock will be unused.
-	 */
-	new_size = max(pos + len, i_size_read(inode));
 	do {
 		ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 		      scoutfs_inode_index_prepare(sb, &wbd->ind_locks, inode,
-						  new_size, true) ?:
+						  true) ?:
 		      scoutfs_inode_index_try_lock_hold(sb, &wbd->ind_locks,
 							ind_seq,
 							SIC_WRITE_BEGIN());

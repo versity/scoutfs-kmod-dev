@@ -531,7 +531,6 @@ out:
 static struct inode *lock_hold_create(struct inode *dir, struct dentry *dentry,
 				      umode_t mode, dev_t rdev,
 				      const struct scoutfs_item_count cnt,
-				      u64 dir_size, u64 inode_size,
 				      struct scoutfs_lock **dir_lock,
 				      struct scoutfs_lock **inode_lock,
 				      struct list_head *ind_locks)
@@ -566,9 +565,8 @@ static struct inode *lock_hold_create(struct inode *dir, struct dentry *dentry,
 
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
-	      scoutfs_inode_index_prepare(sb, ind_locks, dir, dir_size, true) ?:
-	      scoutfs_inode_index_prepare_ino(sb, ind_locks, ino, mode,
-					      inode_size) ?:
+	      scoutfs_inode_index_prepare(sb, ind_locks, dir, true) ?:
+	      scoutfs_inode_index_prepare_ino(sb, ind_locks, ino, mode) ?:
 	      scoutfs_inode_index_try_lock_hold(sb, ind_locks, ind_seq, cnt);
 	if (ret > 0)
 		goto retry;
@@ -607,16 +605,14 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct scoutfs_lock *dir_lock = NULL;
 	struct scoutfs_lock *inode_lock = NULL;
 	LIST_HEAD(ind_locks);
-	u64 dir_size;
 	u64 pos;
 	int ret;
 
 	if (dentry->d_name.len > SCOUTFS_NAME_LEN)
 		return -ENAMETOOLONG;
 
-	dir_size = i_size_read(dir) + dentry->d_name.len;
 	inode = lock_hold_create(dir, dentry, mode, rdev,
-				 SIC_MKNOD(dentry->d_name.len), dir_size, 0,
+				 SIC_MKNOD(dentry->d_name.len),
 				 &dir_lock, &inode_lock, &ind_locks);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
@@ -631,7 +627,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 
 	update_dentry_info(dentry, pos);
 
-	i_size_write(dir, dir_size);
+	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = dir->i_mtime;
 
@@ -704,10 +700,8 @@ static int scoutfs_link(struct dentry *old_dentry,
 	dir_size = i_size_read(dir) + dentry->d_name.len;
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
-	      scoutfs_inode_index_prepare(sb, &ind_locks, dir,
-					  dir_size, false) ?:
-	      scoutfs_inode_index_prepare(sb, &ind_locks, inode,
-					  i_size_read(inode), false) ?:
+	      scoutfs_inode_index_prepare(sb, &ind_locks, dir, false) ?:
+	      scoutfs_inode_index_prepare(sb, &ind_locks, inode, false) ?:
 	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
 						SIC_LINK(dentry->d_name.len));
 	if (ret > 0)
@@ -770,7 +764,6 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 	struct scoutfs_lock *inode_lock = NULL;
 	struct scoutfs_lock *dir_lock = NULL;
 	LIST_HEAD(ind_locks);
-	u64 dir_size;
 	u64 ind_seq;
 	int ret = 0;
 
@@ -785,13 +778,10 @@ static int scoutfs_unlink(struct inode *dir, struct dentry *dentry)
 		goto unlock;
 	}
 
-	dir_size = i_size_read(dir) - dentry->d_name.len;
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
-	      scoutfs_inode_index_prepare(sb, &ind_locks, dir,
-					  dir_size, false) ?:
-	      scoutfs_inode_index_prepare(sb, &ind_locks, inode,
-					  i_size_read(inode), false) ?:
+	      scoutfs_inode_index_prepare(sb, &ind_locks, dir, false) ?:
+	      scoutfs_inode_index_prepare(sb, &ind_locks, inode, false) ?:
 	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
 						SIC_UNLINK(dentry->d_name.len));
 	if (ret > 0)
@@ -819,7 +809,7 @@ retry:
 
 	dir->i_ctime = ts;
 	dir->i_mtime = ts;
-	i_size_write(dir, dir_size);
+	i_size_write(dir, i_size_read(dir) - dentry->d_name.len);
 
 	inode->i_ctime = ts;
 	drop_nlink(inode);
@@ -1000,7 +990,6 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	struct scoutfs_lock *dir_lock = NULL;
 	struct scoutfs_lock *inode_lock = NULL;
 	LIST_HEAD(ind_locks);
-	u64 dir_size;
 	u64 pos;
 	int ret;
 
@@ -1013,10 +1002,8 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		return ret;
 
-	dir_size = i_size_read(dir) + dentry->d_name.len;
 	inode = lock_hold_create(dir, dentry, S_IFLNK|S_IRWXUGO, 0,
 				 SIC_SYMLINK(dentry->d_name.len, name_len),
-				 dir_size, name_len,
 				 &dir_lock, &inode_lock, &ind_locks);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
@@ -1036,7 +1023,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 
 	update_dentry_info(dentry, pos);
 
-	i_size_write(dir, dir_size);
+	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
 
 	inode->i_ctime = dir->i_mtime;
@@ -1397,8 +1384,6 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	bool del_new = false;
 	bool ins_old = false;
 	LIST_HEAD(ind_locks);
-	u64 old_size;
-	u64 uninitialized_var(new_size);
 	u64 ind_seq;
 	u64 new_pos;
 	int ret;
@@ -1451,30 +1436,14 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	if (ret)
 		goto out_unlock;
 
-	old_size = i_size_read(old_dir) - old_dentry->d_name.len;
-	if (!new_inode) {
-		if (old_dir != new_dir)
-			new_size = i_size_read(new_dir) +
-				   new_dentry->d_name.len;
-		else
-			old_size += new_dentry->d_name.len;
-	} else {
-		if (old_dir != new_dir)
-			new_size = i_size_read(new_dir);
-	}
-
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
-	      scoutfs_inode_index_prepare(sb, &ind_locks, old_dir,
-					  old_size, false) ?:
-	      scoutfs_inode_index_prepare(sb, &ind_locks, old_inode,
-					  i_size_read(old_inode), false) ?:
+	      scoutfs_inode_index_prepare(sb, &ind_locks, old_dir, false) ?:
+	      scoutfs_inode_index_prepare(sb, &ind_locks, old_inode, false) ?:
 	      (new_dir == old_dir ? 0 :
-	       scoutfs_inode_index_prepare(sb, &ind_locks, new_dir,
-					   new_size, false)) ?:
+	       scoutfs_inode_index_prepare(sb, &ind_locks, new_dir, false)) ?:
 	      (new_inode == NULL ? 0 :
-	       scoutfs_inode_index_prepare(sb, &ind_locks, new_inode,
-					   i_size_read(new_inode), false)) ?:
+	       scoutfs_inode_index_prepare(sb, &ind_locks, new_inode, false)) ?:
 	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
 					    SIC_RENAME(old_dentry->d_name.len,
 						       new_dentry->d_name.len));
@@ -1540,9 +1509,10 @@ retry:
 	/* the caller will use d_move to move the old_dentry into place */
 	update_dentry_info(old_dentry, new_pos);
 
-	i_size_write(old_dir, old_size);
-	if (old_dir != new_dir)
-		i_size_write(new_dir, new_size);
+       i_size_write(old_dir, i_size_read(old_dir) - old_dentry->d_name.len);
+       if (!new_inode)
+               i_size_write(new_dir, i_size_read(new_dir) +
+                            new_dentry->d_name.len);
 
 	if (new_inode) {
 		drop_nlink(new_inode);

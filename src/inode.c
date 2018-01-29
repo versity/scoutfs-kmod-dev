@@ -214,8 +214,6 @@ static void set_item_info(struct scoutfs_inode_info *si,
 	memset(si->item_minors, 0, sizeof(si->item_minors));
 
 	si->have_item = true;
-	si->item_majors[SCOUTFS_INODE_INDEX_SIZE_TYPE] =
-		le64_to_cpu(sinode->size);
 	si->item_majors[SCOUTFS_INODE_INDEX_META_SEQ_TYPE] =
 		le64_to_cpu(sinode->meta_seq);
 	si->item_majors[SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE] =
@@ -340,7 +338,7 @@ static int set_inode_size(struct inode *inode, struct scoutfs_lock *lock,
 	if (!S_ISREG(inode->i_mode))
 		return 0;
 
-	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, new_size, true,
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, true,
 					    SIC_DIRTY_INODE());
 	if (ret)
 		return ret;
@@ -365,8 +363,7 @@ static int clear_truncate_flag(struct inode *inode, struct scoutfs_lock *lock)
 	LIST_HEAD(ind_locks);
 	int ret;
 
-	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks,
-					    i_size_read(inode), false,
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, false,
 					    SIC_DIRTY_INODE());
 	if (ret)
 		return ret;
@@ -445,8 +442,7 @@ int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
 		}
 	}
 
-	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks,
-					    i_size_read(inode), false,
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, false,
 					    SIC_DIRTY_INODE());
 	if (ret)
 		goto out;
@@ -691,7 +687,6 @@ static bool will_ins_index(struct scoutfs_inode_info *si,
 static bool inode_has_index(umode_t mode, u8 type)
 {
 	switch(type) {
-		case SCOUTFS_INODE_INDEX_SIZE_TYPE:
 		case SCOUTFS_INODE_INDEX_META_SEQ_TYPE:
 			return true;
 		case SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE:
@@ -821,8 +816,6 @@ static int update_indices(struct super_block *sb,
 		u64 major;
 		u32 minor;
 	} *upd, upds[] = {
-		{ SCOUTFS_INODE_INDEX_SIZE_TYPE,
-			le64_to_cpu(sinode->size), 0 },
 		{ SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
 			le64_to_cpu(sinode->meta_seq), 0 },
 		{ SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
@@ -900,8 +893,8 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
  * We map the item to coarse locks here.  This reduces the number of
  * locks we track and means that when we later try to find the lock that
  * covers an item we can deal with the item update changing a little
- * (seq, size) while still being covered.  It does mean we have to share
- * some logic with lock naming.
+ * while still being covered.  It does mean we have to share some logic
+ * with lock naming.
  */
 static int add_index_lock(struct list_head *list, u64 ino, u8 type, u64 major,
 			  u32 minor)
@@ -979,7 +972,7 @@ static u64 upd_data_seq(struct scoutfs_sb_info *sbi,
  */
 static int prepare_indices(struct super_block *sb, struct list_head *list,
 			   struct scoutfs_inode_info *si, u64 ino,
-			   umode_t mode, u64 new_size, bool set_data_seq)
+			   umode_t mode, bool set_data_seq)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct index_update {
@@ -987,7 +980,6 @@ static int prepare_indices(struct super_block *sb, struct list_head *list,
 		u64 major;
 		u32 minor;
 	} *upd, upds[] = {
-		{ SCOUTFS_INODE_INDEX_SIZE_TYPE, new_size, 0},
 		{ SCOUTFS_INODE_INDEX_META_SEQ_TYPE, sbi->trans_seq, 0},
 		{ SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
 			upd_data_seq(sbi, si, set_data_seq), 0},
@@ -1009,13 +1001,12 @@ static int prepare_indices(struct super_block *sb, struct list_head *list,
 }
 
 int scoutfs_inode_index_prepare(struct super_block *sb, struct list_head *list,
-			        struct inode *inode, u64 new_size,
-				bool set_data_seq)
+			        struct inode *inode, bool set_data_seq)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 
 	return prepare_indices(sb, list, si, scoutfs_ino(inode),
-			       inode->i_mode, new_size, set_data_seq);
+			       inode->i_mode, set_data_seq);
 }
 
 /*
@@ -1026,9 +1017,9 @@ int scoutfs_inode_index_prepare(struct super_block *sb, struct list_head *list,
  */
 int scoutfs_inode_index_prepare_ino(struct super_block *sb,
 				    struct list_head *list, u64 ino,
-				    umode_t mode, u64 new_size)
+				    umode_t mode)
 {
-	return prepare_indices(sb, list, NULL, ino, mode, new_size, true);
+	return prepare_indices(sb, list, NULL, ino, mode, true);
 }
 
 /*
@@ -1045,8 +1036,6 @@ static int prepare_index_deletion(struct super_block *sb,
 		u64 major;
 		u32 minor;
 	} *ind, inds[] = {
-		{ SCOUTFS_INODE_INDEX_SIZE_TYPE,
-			le64_to_cpu(sinode->size), 0 },
 		{ SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
 			le64_to_cpu(sinode->meta_seq), 0 },
 		{ SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,
@@ -1120,7 +1109,7 @@ out:
 }
 
 int scoutfs_inode_index_lock_hold(struct inode *inode, struct list_head *list,
-				  u64 size, bool set_data_seq,
+				  bool set_data_seq,
 				  const struct scoutfs_item_count cnt)
 {
 	struct super_block *sb = inode->i_sb;
@@ -1129,7 +1118,7 @@ int scoutfs_inode_index_lock_hold(struct inode *inode, struct list_head *list,
 
 	do {
 		ret = scoutfs_inode_index_start(sb, &seq) ?:
-		      scoutfs_inode_index_prepare(sb, list, inode, size,
+		      scoutfs_inode_index_prepare(sb, list, inode,
 						  set_data_seq) ?:
 		      scoutfs_inode_index_try_lock_hold(sb, list, seq, cnt);
 	} while (ret > 0);
@@ -1191,9 +1180,7 @@ static int remove_index_items(struct super_block *sb, u64 ino,
 	umode_t mode = le32_to_cpu(sinode->mode);
 	int ret;
 
-	ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_SIZE_TYPE,
-			   le64_to_cpu(sinode->size), 0, ind_locks) ?:
-	      remove_index(sb, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
+	ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_META_SEQ_TYPE,
 			   le64_to_cpu(sinode->meta_seq), 0, ind_locks);
 	if (ret == 0 && S_ISREG(mode))
 		ret = remove_index(sb, ino, SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE,

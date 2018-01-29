@@ -211,7 +211,6 @@ typedef int (*key_printer_t)(char *buf, struct scoutfs_key_buf *key,
 static int pr_ino_idx(char *buf, struct scoutfs_key_buf *key, size_t size)
 {
 	static char *type_strings[] = {
-		[SCOUTFS_INODE_INDEX_SIZE_TYPE]		= "siz",
 		[SCOUTFS_INODE_INDEX_META_SEQ_TYPE]	= "msq",
 		[SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE]	= "dsq",
 	};
@@ -329,8 +328,6 @@ static int pr_block_mapping(char *buf, struct scoutfs_key_buf *key, size_t size)
 }
 
 const static key_printer_t key_printers[SCOUTFS_MAX_ZONE][SCOUTFS_MAX_TYPE] = {
-	[SCOUTFS_INODE_INDEX_ZONE][SCOUTFS_INODE_INDEX_SIZE_TYPE] =
-		pr_ino_idx,
 	[SCOUTFS_INODE_INDEX_ZONE][SCOUTFS_INODE_INDEX_META_SEQ_TYPE] =
 		pr_ino_idx,
 	[SCOUTFS_INODE_INDEX_ZONE][SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE] =

@@ -64,16 +64,15 @@ struct inode *scoutfs_ilookup(struct super_block *sb, u64 ino);
 
 int scoutfs_inode_index_start(struct super_block *sb, u64 *seq);
 int scoutfs_inode_index_prepare(struct super_block *sb, struct list_head *list,
-			        struct inode *inode, u64 new_size,
-				bool set_data_seq);
+			        struct inode *inode, bool set_data_seq);
 int scoutfs_inode_index_prepare_ino(struct super_block *sb,
 				    struct list_head *list, u64 ino,
-				    umode_t mode, u64 new_size);
+				    umode_t mode);
 int scoutfs_inode_index_try_lock_hold(struct super_block *sb,
 				      struct list_head *list, u64 seq,
 				      const struct scoutfs_item_count cnt);
 int scoutfs_inode_index_lock_hold(struct inode *inode, struct list_head *list,
-				  u64 size, bool set_data_seq,
+				  bool set_data_seq,
 				  const struct scoutfs_item_count cnt);
 void scoutfs_inode_index_unlock(struct super_block *sb, struct list_head *list);
 

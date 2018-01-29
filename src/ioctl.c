@@ -71,9 +71,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 	trace_scoutfs_ioc_walk_inodes(sb, &walk);
 
-	if (walk.index == SCOUTFS_IOC_WALK_INODES_SIZE)
-		type = SCOUTFS_INODE_INDEX_SIZE_TYPE;
-	else if (walk.index == SCOUTFS_IOC_WALK_INODES_META_SEQ)
+	if (walk.index == SCOUTFS_IOC_WALK_INODES_META_SEQ)
 		type = SCOUTFS_INODE_INDEX_META_SEQ_TYPE;
 	else if (walk.index == SCOUTFS_IOC_WALK_INODES_DATA_SEQ)
 		type = SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE;

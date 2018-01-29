@@ -947,16 +947,6 @@ int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
  * The seq indexes have natural batching and limits on the number of
  * keys per major value.
  *
- * The file size index is very different.  We don't control the
- * distribution of sizes amongst inodes.  We map ranges of sizes to a
- * small set of locks by rounding the size down to groups of sizes
- * identified by their highest set bit and two next significant bits.
- * This results in ranges that increase by quarters of powers of two.
- * (small sizes don't have enough bits for this scheme, they're all
- * mapped to a range from 0 to 15.) two (0 and 1 are mapped to 0).  Each
- * lock then covers all the sizes in their range and all the inodes with
- * those sizes.
- *
  * This can also be used to find items that are covered by the same lock
  * because their starting keys are the same.
  */
@@ -964,32 +954,11 @@ void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
 				       struct scoutfs_inode_index_key *start,
 				       struct scoutfs_inode_index_key *end)
 {
-	u64 start_major;
-	u64 end_major;
-	int bit;
+	u64 start_major = major & ~SCOUTFS_LOCK_SEQ_GROUP_MASK;
+	u64 end_major = major | SCOUTFS_LOCK_SEQ_GROUP_MASK;
 
-	switch(type) {
-	case SCOUTFS_INODE_INDEX_SIZE_TYPE:
-		bit = major ? fls64(major) : 0;
-		if (bit < 5) {
-			/* sizes [ 0 .. 15 ] are in their own lock */
-			start_major = 0;
-			end_major = 15;
-		} else {
-			/* last bit, 2 lesser bits, mask */
-			start_major = major & (7ULL << (bit - 3));
-			end_major = start_major + (1ULL << (bit - 3)) - 1;
-		}
-		break;
-
-	case SCOUTFS_INODE_INDEX_META_SEQ_TYPE:
-	case SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE:
-		start_major = major & ~SCOUTFS_LOCK_SEQ_GROUP_MASK;
-		end_major = major | SCOUTFS_LOCK_SEQ_GROUP_MASK;
-		break;
-	default:
-		BUG();
-	}
+	BUG_ON(type != SCOUTFS_INODE_INDEX_META_SEQ_TYPE &&
+	       type != SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE);
 
 	if (start) {
 		start->zone = SCOUTFS_INODE_INDEX_ZONE;

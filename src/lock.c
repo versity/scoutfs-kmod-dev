@@ -259,6 +259,13 @@ static void free_scoutfs_lock(struct scoutfs_lock *lock)
 	if (lock) {
 		linfo = SCOUTFS_SB(lock->sb)->lock_info;
 
+		if (lock->debug_locks_id) {
+			spin_lock(&linfo->lock);
+			idr_remove(&linfo->debug_locks_idr,
+				   lock->debug_locks_id);
+			spin_unlock(&linfo->lock);
+		}
+
 		scoutfs_inc_counter(lock->sb, lock_free);
 		ocfs2_lock_res_free(&lock->lockres);
 		scoutfs_key_free(lock->sb, lock->start);
@@ -288,9 +295,6 @@ static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
 				RB_CLEAR_NODE(&lock->range_node);
 			}
 			list_del(&lock->lru_entry);
-			if (lock->debug_locks_id)
-				idr_remove(&linfo->debug_locks_idr,
-					   lock->debug_locks_id);
 			spin_unlock(&linfo->lock);
 			ocfs2_simple_drop_lockres(&linfo->dlmglue,
 						  &lock->lockres);

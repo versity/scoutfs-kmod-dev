@@ -378,7 +378,8 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	end_inc = ((args.block + args.count) << SCOUTFS_BLOCK_SHIFT) - 1;
 	truncate_inode_pages_range(&inode->i_data, start, end_inc);
 
-	ret = scoutfs_data_truncate_items(sb, scoutfs_ino(inode), args.block,
+	ret = scoutfs_data_truncate_items(sb, inode, scoutfs_ino(inode),
+					  args.block,
 					  args.block + args.count - 1, true,
 					  lock);
 out:
@@ -522,6 +523,8 @@ static long scoutfs_ioc_stat_more(struct file *file, unsigned long arg)
 	stm.meta_seq = scoutfs_inode_meta_seq(inode);
 	stm.data_seq = scoutfs_inode_data_seq(inode);
 	stm.data_version = scoutfs_inode_data_version(inode);
+	stm.online_blocks = scoutfs_inode_online_blocks(inode);
+	stm.offline_blocks = scoutfs_inode_offline_blocks(inode);
 
 	if (copy_to_user((void __user *)arg, &stm, stm.valid_bytes))
 		return -EFAULT;

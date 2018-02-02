@@ -21,6 +21,8 @@ struct scoutfs_inode_info {
 	u64 meta_seq;
 	u64 data_seq;
 	u64 data_version;
+	u64 online_blocks;
+	u64 offline_blocks;
 	u32 flags;
 
 	/*
@@ -97,9 +99,13 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 void scoutfs_inode_set_meta_seq(struct inode *inode);
 void scoutfs_inode_set_data_seq(struct inode *inode);
 void scoutfs_inode_inc_data_version(struct inode *inode);
+void scoutfs_inode_add_online_blocks(struct inode *inode, u64 val);
+void scoutfs_inode_add_offline_blocks(struct inode *inode, u64 val);
 u64 scoutfs_inode_meta_seq(struct inode *inode);
 u64 scoutfs_inode_data_seq(struct inode *inode);
 u64 scoutfs_inode_data_version(struct inode *inode);
+u64 scoutfs_inode_online_blocks(struct inode *inode);
+u64 scoutfs_inode_offline_blocks(struct inode *inode);
 int scoutfs_complete_truncate(struct inode *inode, struct scoutfs_lock *lock);
 
 int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,

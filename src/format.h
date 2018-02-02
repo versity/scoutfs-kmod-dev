@@ -449,6 +449,12 @@ struct scoutfs_timespec {
  * have changed.  It is exposed via an ioctl and is then provided as an
  * argument to data functions to protect racing modification.
  *
+ * @online_blocks: The number of fixed 4k blocks currently allocated and
+ * storing data in the volume.
+ *
+ * @offline_blocks: The number of fixed 4k blocks that could be made
+ * online by staging.
+ *
  * XXX
  *	- otime?
  *	- compat flags?
@@ -462,6 +468,8 @@ struct scoutfs_inode {
 	__le64 meta_seq;
 	__le64 data_seq;
 	__le64 data_version;
+	__le64 online_blocks;
+	__le64 offline_blocks;
 	__le64 next_readdir_pos;
 	__le32 nlink;
 	__le32 uid;

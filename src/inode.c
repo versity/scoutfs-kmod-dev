@@ -231,6 +231,8 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	ci->meta_seq = le64_to_cpu(cinode->meta_seq);
 	ci->data_seq = le64_to_cpu(cinode->data_seq);
 	ci->data_version = le64_to_cpu(cinode->data_version);
+	ci->online_blocks = le64_to_cpu(cinode->online_blocks);
+	ci->offline_blocks = le64_to_cpu(cinode->offline_blocks);
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
 
 	ci->flags = le32_to_cpu(cinode->flags);
@@ -380,8 +382,9 @@ int scoutfs_complete_truncate(struct inode *inode, struct scoutfs_lock *lock)
 		return 0;
 
 	start = (i_size_read(inode) + SCOUTFS_BLOCK_SIZE - 1) >> SCOUTFS_BLOCK_SHIFT;
-	ret = scoutfs_data_truncate_items(inode->i_sb, scoutfs_ino(inode),
-					  start, ~0ULL, false, lock);
+	ret = scoutfs_data_truncate_items(inode->i_sb, inode,
+					  scoutfs_ino(inode), start, ~0ULL,
+					  false, lock);
 	err = clear_truncate_flag(inode, lock);
 
 	return ret ? ret : err;
@@ -493,6 +496,35 @@ void scoutfs_inode_inc_data_version(struct inode *inode)
 	preempt_enable();
 }
 
+static void add_seq_value(struct scoutfs_inode_info *si, u64 *si_u64, u64 val)
+{
+	preempt_disable();
+	write_seqcount_begin(&si->seqcount);
+	*si_u64 += val;
+	write_seqcount_end(&si->seqcount);
+	preempt_enable();
+}
+
+void scoutfs_inode_add_online_blocks(struct inode *inode, u64 val)
+{
+	struct scoutfs_inode_info *si;
+
+	if (inode) {
+		si = SCOUTFS_I(inode);
+		add_seq_value(si, &SCOUTFS_I(inode)->online_blocks, val);
+	}
+}
+
+void scoutfs_inode_add_offline_blocks(struct inode *inode, u64 val)
+{
+	struct scoutfs_inode_info *si;
+
+	if (inode) {
+		si = SCOUTFS_I(inode);
+		add_seq_value(si, &SCOUTFS_I(inode)->offline_blocks, val);
+	}
+}
+
 static u64 read_seqcount_u64(struct inode *inode, u64 *val)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
@@ -528,6 +560,19 @@ u64 scoutfs_inode_data_version(struct inode *inode)
 	return read_seqcount_u64(inode, &si->data_version);
 }
 
+u64 scoutfs_inode_online_blocks(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	return read_seqcount_u64(inode, &si->online_blocks);
+}
+
+u64 scoutfs_inode_offline_blocks(struct inode *inode)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	return read_seqcount_u64(inode, &si->offline_blocks);
+}
 static int scoutfs_iget_test(struct inode *inode, void *arg)
 {
 	struct scoutfs_inode_info *ci = SCOUTFS_I(inode);
@@ -612,6 +657,9 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->meta_seq = cpu_to_le64(scoutfs_inode_meta_seq(inode));
 	cinode->data_seq = cpu_to_le64(scoutfs_inode_data_seq(inode));
 	cinode->data_version = cpu_to_le64(scoutfs_inode_data_version(inode));
+	cinode->online_blocks = cpu_to_le64(scoutfs_inode_online_blocks(inode));
+	cinode->offline_blocks =
+		cpu_to_le64(scoutfs_inode_offline_blocks(inode));
 	cinode->next_readdir_pos = cpu_to_le64(ci->next_readdir_pos);
 	cinode->flags = cpu_to_le32(ci->flags);
 }
@@ -1270,6 +1318,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci = SCOUTFS_I(inode);
 	ci->ino = ino;
 	ci->data_version = 0;
+	ci->online_blocks = 0;
+	ci->offline_blocks = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->have_item = false;
 	atomic64_set(&ci->last_refreshed, lock->refresh_gen);

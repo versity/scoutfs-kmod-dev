@@ -178,6 +178,8 @@ struct scoutfs_ioctl_stat_more {
 	__u64 meta_seq;
 	__u64 data_seq;
 	__u64 data_version;
+	__u64 online_blocks;
+	__u64 offline_blocks;
 } __packed;
 
 #define SCOUTFS_IOC_STAT_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \

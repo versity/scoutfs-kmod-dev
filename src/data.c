@@ -603,9 +603,13 @@ out:
  * This is the low level extent item manipulation code.  We hold and
  * release the transaction so the caller doesn't have to deal with
  * partial progress.
+ *
+ * If the inode is provided then we update its tracking of the online
+ * and offline blocks.  If it's not provided then the inode is being
+ * destroyed and we don't have to keep it updated.
  */
-int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
-				u64 last, bool offline,
+int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
+				u64 ino, u64 iblock, u64 last, bool offline,
 				struct scoutfs_lock *lock)
 {
 	struct scoutfs_key_buf last_key;
@@ -687,12 +691,17 @@ int scoutfs_data_truncate_items(struct super_block *sb, u64 ino, u64 iblock,
 					break;
 
 				map->blknos[i] = 0;
+				scoutfs_inode_add_online_blocks(inode, -1);
 			}
 
-			if (offline && !test_bit(i, map->offline))
+			if (offline && !test_bit(i, map->offline)) {
 				set_bit(i, map->offline);
-			else if (!offline && test_bit(i, map->offline))
+				scoutfs_inode_add_offline_blocks(inode, 1);
+
+			} else if (!offline && test_bit(i, map->offline)) {
 				clear_bit(i, map->offline);
+				scoutfs_inode_add_offline_blocks(inode, -1);
+			}
 
 			modified = true;
 		}
@@ -905,7 +914,8 @@ out:
  * a new segment.  Lots of concurrent allocations can interleave at
  * segment granularity.
  */
-static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
+static int find_alloc_block(struct super_block *sb, struct inode *inode,
+			    struct block_mapping *map,
 			    struct scoutfs_key_buf *map_key,
 			    unsigned map_ind, bool map_exists,
 			    struct scoutfs_lock *data_lock)
@@ -973,8 +983,10 @@ static int find_alloc_block(struct super_block *sb, struct block_mapping *map,
 		goto out;
 
 	/* update the mapping */
-	clear_bit(map_ind, map->offline);
+	if (test_and_clear_bit(map_ind, map->offline))
+		scoutfs_inode_add_offline_blocks(inode, -1);
 	map->blknos[map_ind] = blkno;
+	scoutfs_inode_add_online_blocks(inode, 1);
 
 	bytes = encode_mapping(map);
 	scoutfs_kvec_init(val, map->encoded, bytes);
@@ -1049,7 +1061,7 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 		 * and try again if we've already done a bulk alloc in
 		 * our transaction.
 		 */
-		ret = find_alloc_block(sb, map, &key, ind, exists, lock);
+		ret = find_alloc_block(sb, inode, map, &key, ind, exists, lock);
 		if (ret)
 			goto out;
 		set_buffer_new(bh);

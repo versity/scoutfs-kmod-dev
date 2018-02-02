@@ -1076,29 +1076,38 @@ out:
 	return ret;
 }
 
+/*
+ * This is almost never used.  We can't block on a cluster lock while
+ * holding the page lock because lock invalidation gets the page lock
+ * while blocking locks.  If we can't use an existing lock then we drop
+ * the page lock and try again.
+ */
 static int scoutfs_readpage(struct file *file, struct page *page)
 {
 	struct inode *inode = file->f_inode;
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *inode_lock = NULL;
-	int unlock = 1;
+	int flags;
 	int ret;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE |
-				 SCOUTFS_LKF_TRYLOCK, inode, &inode_lock);
-	if (ret) {
-		if (ret == -EAGAIN)
-			ret = AOP_TRUNCATED_PAGE;
-		goto out;
+	flags = SCOUTFS_LKF_REFRESH_INODE | SCOUTFS_LKF_NONBLOCK;
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, flags, inode, &inode_lock);
+	if (ret < 0) {
+		unlock_page(page);
+		if (ret == -EAGAIN) {
+			flags &= ~SCOUTFS_LKF_NONBLOCK;
+			ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, flags, inode,
+					   &inode_lock);
+			if (ret == 0) {
+				scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+				ret = AOP_TRUNCATED_PAGE;
+			}
+		}
+		return ret;
 	}
 
 	ret = mpage_readpage(page, scoutfs_get_block);
-	unlock = 0;
-
 	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
-out:
-	if (unlock)
-		unlock_page(page);
 	return ret;
 }
 

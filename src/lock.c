@@ -27,147 +27,67 @@
 #include "scoutfs_trace.h"
 #include "msg.h"
 #include "cmp.h"
-#include "dlmglue.h"
 #include "inode.h"
 #include "trans.h"
 #include "counters.h"
 #include "endian_swap.h"
 #include "triggers.h"
 
+/*
+ * scoutfs manages internode item cache consistency using the kernel's
+ * dlm service.  We map ranges of item keys to dlm locks and use each
+ * lock's modes to govern what we can do with the items under the lock.
+ *
+ * The management of locks is based around state updates that queue work
+ * which then acts on the state.  The work calls the dlm to change modes
+ * and gets completion notification in callbacks.
+ *
+ * We free locks that aren't actively protecting items instead of
+ * converting them to NL and leaving them around.  It gives us fewer
+ * locks consuming resources and fewer locks to wade through to try and
+ * diagnose a problem.
+ *
+ * So far we've only needed a minimal trylock.  We don't issue a NOQUEUE
+ * request to the dlm which can eventually return -EAGAIN if it finds
+ * contention.  We return -EAGAIN ourselves if a user can't immediately
+ * match an existing granted lock.  This is fine for the only rare user
+ * which can back out of its lock inversion and retry with a full
+ * blocking lock.  This saves us from having to plumb per-waiter flags
+ * down to dlm requests.
+ */
+
+#define GRACE_WORK_DELAY_JIFFIES	msecs_to_jiffies(2)
+#define GRACE_UNLOCK_DEADLINE_KT	ms_to_ktime(2)
+
 #define LN_FMT "%u.%u.%u.%llu.%llu"
 #define LN_ARG(name) \
 	(name)->scope, (name)->zone, (name)->type, le64_to_cpu((name)->first),\
 	le64_to_cpu((name)->second)
-
-typedef struct ocfs2_super dlmglue_ctxt;
 
 /*
  * allocated per-super, freed on unmount.
  */
 struct lock_info {
 	struct super_block *sb;
-	dlmglue_ctxt dlmglue;
-	bool dlmglue_online;
-	char ls_name[DLM_LOCKSPACE_LEN];
-
 	spinlock_t lock;
-	unsigned int seq_cnt;
+	bool shutdown;
 	struct rb_root lock_tree;
 	struct rb_root lock_range_tree;
 	struct shrinker shrinker;
 	struct list_head lru_list;
 	unsigned long long lru_nr;
-	struct workqueue_struct *lock_reclaim_wq;
+	struct workqueue_struct *workq;
+	dlm_lockspace_t *lockspace;
 	struct dentry *debug_locks_dentry;
 	struct idr debug_locks_idr;
+	atomic64_t next_refresh_gen;
 };
 
 #define DECLARE_LOCK_INFO(sb, name) \
 	struct lock_info *name = SCOUTFS_SB(sb)->lock_info
 
-static void scoutfs_lock_reclaim(struct work_struct *work);
-
-struct task_ref {
-	struct task_struct *task;
-	struct rb_node node;
-	int count;
-	int mode;/* for debugging */
-};
-
-static struct task_ref *find_task_ref(struct scoutfs_lock *lock,
-				     struct task_struct *task)
-{
-	struct rb_node *n;
-	struct task_ref *tmp;
-
-	spin_lock(&lock->task_refs_lock);
-	n = lock->task_refs.rb_node;
-	while (n) {
-		tmp = rb_entry(n, struct task_ref, node);
-
-		if (tmp->task < task)
-			n = n->rb_left;
-		else if (tmp->task > task)
-			n = n->rb_right;
-		else {
-			spin_unlock(&lock->task_refs_lock);
-			return tmp;
-		}
-	}
-	spin_unlock(&lock->task_refs_lock);
-
-	return NULL;
-}
-
-static struct task_ref *alloc_task_ref(struct task_struct *task, int mode)
-{
-	struct task_ref *ref = kzalloc(sizeof(*ref), GFP_NOFS);
-	if (ref) {
-		ref->task = task;
-		ref->count = 1;
-		ref->mode = mode;
-		RB_CLEAR_NODE(&ref->node);
-	}
-	return ref;
-}
-
-static void insert_task_ref(struct scoutfs_lock *lock, struct task_ref *ref)
-{
-	struct task_ref *tmp;
-	struct rb_node *parent = NULL;
-	struct rb_node **p;
-
-	spin_lock(&lock->task_refs_lock);
-	p = &lock->task_refs.rb_node;
-	while (*p) {
-		parent = *p;
-
-		tmp = rb_entry(parent, struct task_ref, node);
-
-		if (tmp->task < ref->task)
-			p = &(*p)->rb_left;
-		else if (tmp->task > ref->task)
-			p = &(*p)->rb_right;
-		else
-			BUG(); /* We should never find a duplicate */
-	}
-
-	rb_link_node(&ref->node, parent, p);
-	rb_insert_color(&ref->node, &lock->task_refs);
-	spin_unlock(&lock->task_refs_lock);
-}
-
-static void get_task_ref(struct task_ref *ref)
-{
-	ref->count++;
-}
-
-static struct task_ref *new_task_ref(struct scoutfs_lock *lock,
-				     struct task_struct *task, int mode)
-{
-	struct task_ref *ref = alloc_task_ref(task, mode);
-	if (ref)
-		insert_task_ref(lock, ref);
-
-	return ref;
-}
-
-static int put_task_ref(struct scoutfs_lock *lock, struct task_ref *ref)
-{
-	if (!ref)
-		return 0;
-
-	ref->count--;
-	if (ref->count == 0) {
-		spin_lock(&lock->task_refs_lock);
-		rb_erase(&ref->node, &lock->task_refs);
-		spin_unlock(&lock->task_refs_lock);
-
-		kfree(ref);
-		return 0;
-	}
-	return 1;
-}
+static void scoutfs_lock_work(struct work_struct *work);
+static void scoutfs_lock_grace_work(struct work_struct *work);
 
 /*
  * invalidate cached data associated with an inode whose lock is going
@@ -210,29 +130,34 @@ static void invalidate_inode(struct super_block *sb, u64 ino)
 }
 
 /*
- * Invalidate caches on this because another node wants a lock
- * with the a lock with the given mode and range. We always have to
- * write out dirty overlapping items.  If they're writing then we need
- * to also invalidate all cached overlapping structures.
+ * Invalidate caches associated with this lock.  We're going from the
+ * previous mode to the next mode.
  */
-static int invalidate_caches(struct super_block *sb, int mode,
-			     struct scoutfs_lock *lock)
+static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
+			   int prev, int mode)
 {
 	struct scoutfs_key_buf *start = lock->start;
 	struct scoutfs_key_buf *end = lock->end;
 	u64 ino, last;
 	int ret;
 
-	trace_scoutfs_lock_invalidate(sb, lock);
+	/* any transition from a mode allowed to dirty items has to write */
+	if (prev == DLM_LOCK_CW || prev == DLM_LOCK_EX) {
+		ret = scoutfs_item_writeback(sb, start, end);
+		if (ret < 0)
+			return ret;
+		if (ret > 0) {
+			scoutfs_add_counter(sb, lock_write_dirty_item, ret);
+			ret = 0;
+		}
+	}
 
-	ret = scoutfs_item_writeback(sb, start, end);
-	if (ret)
-		return ret;
-
-	if (mode == DLM_LOCK_EX ||
-	    (mode == DLM_LOCK_PR && lock->lockres.l_level == DLM_LOCK_CW)) {
-		if (lock->lock_name.zone == SCOUTFS_FS_ZONE) {
-			ino = le64_to_cpu(lock->lock_name.first);
+	/* invalidate items that we could have but won't be able to use */
+	if (prev == DLM_LOCK_CW ||
+            (prev == DLM_LOCK_PR && mode != DLM_LOCK_EX) ||
+            (prev == DLM_LOCK_EX && mode != DLM_LOCK_PR)) {
+		if (lock->name.zone == SCOUTFS_FS_ZONE) {
+			ino = le64_to_cpu(lock->name.first);
 			last = ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1;
 			while (ino <= last) {
 				invalidate_inode(sb, ino);
@@ -241,191 +166,46 @@ static int invalidate_caches(struct super_block *sb, int mode,
 		}
 
 		ret = scoutfs_item_invalidate(sb, start, end);
+		if (ret > 0) {
+			scoutfs_add_counter(sb, lock_invalidate_clean_item,
+					    ret);
+			ret = 0;
+		}
 	}
-
-	/*
-	 * Not really tracing the return value here, we're mostly
-	 * interested in elapsed time between the top trace and this one.
-	 */
-	trace_scoutfs_lock_invalidate_ret(sb, lock);
 
 	return ret;
 }
 
-static void free_scoutfs_lock(struct scoutfs_lock *lock)
+static void lock_free(struct lock_info *linfo, struct scoutfs_lock *lock)
 {
-	struct lock_info *linfo;
+	struct super_block *sb = lock->sb;
 
-	if (lock) {
-		linfo = SCOUTFS_SB(lock->sb)->lock_info;
+	assert_spin_locked(&linfo->lock);
 
-		if (lock->debug_locks_id) {
-			spin_lock(&linfo->lock);
-			idr_remove(&linfo->debug_locks_idr,
-				   lock->debug_locks_id);
-			spin_unlock(&linfo->lock);
-		}
+	trace_scoutfs_lock_free(sb, lock);
+	scoutfs_inc_counter(sb, lock_free);
 
-		scoutfs_inc_counter(lock->sb, lock_free);
-		ocfs2_lock_res_free(&lock->lockres);
-		scoutfs_key_free(lock->sb, lock->start);
-		scoutfs_key_free(lock->sb, lock->end);
-		BUG_ON(!RB_EMPTY_NODE(&lock->node));
-		BUG_ON(!RB_EMPTY_NODE(&lock->range_node));
-		kfree(lock);
+	BUG_ON(delayed_work_pending(&lock->grace_work));
+
+	if (lock->debug_locks_id)
+		idr_remove(&linfo->debug_locks_idr, lock->debug_locks_id);
+	if (!RB_EMPTY_NODE(&lock->node))
+		rb_erase(&lock->node, &linfo->lock_tree);
+	if (!RB_EMPTY_NODE(&lock->range_node))
+		rb_erase(&lock->range_node, &linfo->lock_range_tree);
+	if (!list_empty(&lock->lru_head)) {
+		list_del(&lock->lru_head);
+		linfo->lru_nr--;
 	}
+	scoutfs_key_free(sb, lock->start);
+	scoutfs_key_free(sb, lock->end);
+	kfree(lock);
 }
 
-static void put_scoutfs_lock(struct super_block *sb, struct scoutfs_lock *lock)
-{
-	DECLARE_LOCK_INFO(sb, linfo);
-	unsigned int refs;
-
-	if (lock) {
-		spin_lock(&linfo->lock);
-		BUG_ON(!lock->refcnt);
-		refs = --lock->refcnt;
-		if (!refs) {
-			trace_scoutfs_lock_free(sb, lock);
-			rb_erase(&lock->node, &linfo->lock_tree);
-			RB_CLEAR_NODE(&lock->node);
-			if(!RB_EMPTY_NODE(&lock->range_node)) {
-				rb_erase(&lock->range_node,
-					 &linfo->lock_range_tree);
-				RB_CLEAR_NODE(&lock->range_node);
-			}
-			list_del(&lock->lru_entry);
-			spin_unlock(&linfo->lock);
-			ocfs2_simple_drop_lockres(&linfo->dlmglue,
-						  &lock->lockres);
-			free_scoutfs_lock(lock);
-			return;
-		}
-		spin_unlock(&linfo->lock);
-	}
-}
-
-static void dec_lock_users(struct scoutfs_lock *lock)
-{
-	DECLARE_LOCK_INFO(lock->sb, linfo);
-
-	spin_lock(&linfo->lock);
-	lock->users--;
-	if (list_empty(&lock->lru_entry) && lock->users == 0) {
-		list_add_tail(&lock->lru_entry, &linfo->lru_list);
-		linfo->lru_nr++;
-	}
-	spin_unlock(&linfo->lock);
-}
-
-static struct ocfs2_super *get_ino_lock_osb(struct ocfs2_lock_res *lockres)
-{
-	struct scoutfs_lock *lock = lockres->l_priv;
-	struct super_block *sb = lock->sb;
-	DECLARE_LOCK_INFO(sb, linfo);
-
-	return &linfo->dlmglue;
-}
-
-static int ino_lock_downconvert(struct ocfs2_lock_res *lockres, int blocking)
-{
-	struct scoutfs_lock *lock = lockres->l_priv;
-	struct super_block *sb = lock->sb;
-
-	invalidate_caches(sb, blocking, lock);
-
-	return UNBLOCK_CONTINUE;
-}
-
-static void ino_lock_drop(struct ocfs2_lock_res *lockres)
-{
-	struct scoutfs_lock *lock = lockres->l_priv;
-	struct super_block *sb = lock->sb;
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-
-	/*
-	 * Locks get shut down near the end of our unmount process. By
-	 * now everything that needs to be synced or invalidated, has
-	 * been.
-	 */
-	if (!sbi->shutdown)
-		invalidate_caches(sb, DLM_LOCK_EX, lock);
-}
-
-static void lock_name_string(struct ocfs2_lock_res *lockres, char *buf,
-			     unsigned int len)
-{
-	struct scoutfs_lock *lock = lockres->l_priv;
-
-	snprintf(buf, len, LN_FMT, LN_ARG(&lock->lock_name));
-}
-
-static void count_ino_lock_event(struct ocfs2_lock_res *lockres,
-				 enum ocfs2_lock_events event)
-{
-	struct scoutfs_lock *lock = container_of(lockres, struct scoutfs_lock,
-						 lockres);
-	struct super_block *sb = lock->sb;
-
-	if (event == EVENT_DLM_DOWNCONVERT_WORK)
-		scoutfs_inc_counter(sb, lock_type_ino_downconvert);
-}
-
-static void count_idx_lock_event(struct ocfs2_lock_res *lockres,
-				 enum ocfs2_lock_events event)
-{
-	struct scoutfs_lock *lock = container_of(lockres, struct scoutfs_lock,
-						 lockres);
-	struct super_block *sb = lock->sb;
-
-	/*
-	 * Treat all indicies together. Later we can decode the
-	 * lockres name to get at specific indicies.
-	 */
-	if (event == EVENT_DLM_DOWNCONVERT_WORK)
-		scoutfs_inc_counter(sb, lock_type_idx_downconvert);
-}
-
-static struct ocfs2_lock_res_ops scoufs_ino_lops = {
-	.get_osb 		= get_ino_lock_osb,
-	.downconvert_worker 	= ino_lock_downconvert,
-	.drop_worker		= ino_lock_drop,
-	/* XXX: .check_downconvert that queries the item cache for dirty items */
-	.print			= lock_name_string,
-	.notify_event		= count_ino_lock_event,
-	.flags			= LOCK_TYPE_REQUIRES_REFRESH,
-};
-
-static struct ocfs2_lock_res_ops scoufs_ino_index_lops = {
-	.get_osb 		= get_ino_lock_osb,
-	.downconvert_worker 	= ino_lock_downconvert,
-	.drop_worker		= ino_lock_drop,
-	.notify_event		= count_idx_lock_event,
-	/* XXX: .check_downconvert that queries the item cache for dirty items */
-	.print			= lock_name_string,
-};
-
-static struct ocfs2_lock_res_ops scoutfs_global_lops = {
-	.get_osb 		= get_ino_lock_osb,
-	/* XXX: .check_downconvert that queries the item cache for dirty items */
-	.print			= lock_name_string,
-	.flags			= 0,
-};
-
-static struct ocfs2_lock_res_ops scoutfs_node_id_lops = {
-	.get_osb		= get_ino_lock_osb,
-	/* XXX: .check_downconvert that queries the item cache for dirty items */
-	.downconvert_worker 	= ino_lock_downconvert,
-	.drop_worker		= ino_lock_drop,
-	.print			= lock_name_string,
-	.flags			= 0,
-};
-
-static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
-					       struct scoutfs_lock_name *lock_name,
-					       struct ocfs2_lock_res_ops *type,
-					       struct scoutfs_key_buf *start,
-					       struct scoutfs_key_buf *end)
+static struct scoutfs_lock *lock_alloc(struct super_block *sb,
+				       struct scoutfs_lock_name *name,
+				       struct scoutfs_key_buf *start,
+				       struct scoutfs_key_buf *end)
 
 {
 	DECLARE_LOCK_INFO(sb, linfo);
@@ -439,6 +219,8 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 	if (lock == NULL)
 		return NULL;
 
+	scoutfs_inc_counter(sb, lock_alloc);
+
 	idr_preload(GFP_NOFS);
 	spin_lock(&linfo->lock);
 	id = idr_alloc(&linfo->debug_locks_idr, lock, 1, INT_MAX, GFP_NOWAIT);
@@ -447,38 +229,217 @@ static struct scoutfs_lock *alloc_scoutfs_lock(struct super_block *sb,
 	spin_unlock(&linfo->lock);
 	idr_preload_end();
 	if (id <= 0) {
-		free_scoutfs_lock(lock);
+		lock_free(linfo, lock);
 		return NULL;
 	}
 
 	RB_CLEAR_NODE(&lock->node);
 	RB_CLEAR_NODE(&lock->range_node);
+	INIT_LIST_HEAD(&lock->lru_head);
 
 	if (start) {
 		lock->start = scoutfs_key_dup(sb, start);
 		lock->end = scoutfs_key_dup(sb, end);
 		if (!lock->start || !lock->end) {
-			free_scoutfs_lock(lock);
+			lock_free(linfo, lock);
 			return NULL;
 		}
 	}
 
-	spin_lock_init(&lock->task_refs_lock);
-	lock->task_refs = RB_ROOT;
-	RB_CLEAR_NODE(&lock->node);
 	lock->sb = sb;
-	lock->lock_name = *lock_name;
-	INIT_LIST_HEAD(&lock->lru_entry);
-	ocfs2_lock_res_init_once(&lock->lockres);
-	BUG_ON(sizeof(struct scoutfs_lock_name) >= OCFS2_LOCK_ID_MAX_LEN);
-	/* kzalloc above ensures that l_name is NULL terminated */
-	memcpy(&lock->lockres.l_name[0], &lock->lock_name,
-	       sizeof(struct scoutfs_lock_name));
-	ocfs2_lock_res_init_common(&linfo->dlmglue, &lock->lockres, type, lock);
-	INIT_WORK(&lock->reclaim_work, scoutfs_lock_reclaim);
+	lock->name = *name;
 	init_waitqueue_head(&lock->waitq);
+	INIT_WORK(&lock->work, scoutfs_lock_work);
+	INIT_DELAYED_WORK(&lock->grace_work, scoutfs_lock_grace_work);
+	lock->granted_mode = DLM_LOCK_IV;
+	lock->bast_mode = DLM_LOCK_IV;
+	lock->work_prev_mode = DLM_LOCK_IV;
+	lock->work_mode = DLM_LOCK_IV;
+
+	trace_scoutfs_lock_alloc(sb, lock);
 
 	return lock;
+}
+
+static void lock_inc_count(unsigned int *counts, int mode)
+{
+	BUG_ON(mode < 0 || mode >= SCOUTFS_LOCK_NR_MODES);
+	counts[mode]++;
+}
+
+static void lock_dec_count(unsigned int *counts, int mode)
+{
+	BUG_ON(mode < 0 || mode >= SCOUTFS_LOCK_NR_MODES);
+	counts[mode]--;
+}
+
+/* only PR and EX modes read items to populate the cache. */
+static bool lock_mode_can_read(int mode)
+{
+	return mode == DLM_LOCK_PR || mode == DLM_LOCK_EX;
+}
+
+/*
+ * Returns true if a given user mode can be satisfied by a lock with the
+ * given granted mode.  This is directional.  A PR user is satisfied by
+ * an EX grant but not vice versa.
+ */
+static bool lock_modes_match(int granted, int user)
+{
+	return (granted == user) ||
+	       (granted == DLM_LOCK_EX && user == DLM_LOCK_PR);
+}
+
+/*
+ * Returns true if all the actively used modes are satisfied by a lock
+ * of the given granted mode.
+ */
+static bool lock_counts_match(int granted, unsigned int *counts)
+{
+	int mode;
+
+	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
+		if (counts[mode] && !lock_modes_match(granted, mode))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * An idle lock has nothing going on and could be safely unlocked and freed.
+ */
+static bool lock_idle(struct scoutfs_lock *lock)
+{
+	int mode;
+
+	if (lock->work_mode >= 0 || lock->grace_pending)
+		return false;
+
+	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
+		if (lock->waiters[mode] || lock->users[mode])
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Ensure forward progress on the lock after the caller has changed the lock.
+ *
+ * This is the core of the state transition engine that makes locking
+ * safe.  Each transition has to consider the users of the lock, pending
+ * bast transitions, it's current mode, what mode it should be, and what
+ * mode to leave it in during the transition.
+ *
+ * This can free the lock if it's idle!  Callers must not reference the
+ * lock after calling this.
+ */
+static void lock_process(struct lock_info *linfo, struct scoutfs_lock *lock)
+{
+	bool idle;
+	int mode;
+
+	assert_spin_locked(&linfo->lock);
+
+	/* nothing to do if we're shutting down, stops rearming */
+	if (linfo->shutdown)
+		return;
+
+	/* only idle locks are on the lru */
+	idle = lock_idle(lock);
+	if (list_empty(&lock->lru_head) && idle) {
+		list_add_tail(&lock->lru_head, &linfo->lru_list);
+		linfo->lru_nr++;
+
+	} else if (!list_empty(&lock->lru_head) && !idle) {
+		list_del_init(&lock->lru_head);
+		linfo->lru_nr--;
+	}
+
+	/* errored locks are torn down */
+	if (lock->error) {
+		wake_up(&lock->waitq);
+		goto out;
+	}
+
+	/*
+	 * Wake any waiters who might be able to use the lock now.
+	 * Notice that this ignores the presence of basts!  This lets us
+	 * recursively acquire locks in one task without having to track
+	 * per-task lock references.  It comes at the cost of fairness.
+	 * Spinning overlapping users can delay a bast down conversion
+	 * indefinitely.
+	 */
+	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
+		if (lock->waiters[mode] &&
+		    lock_modes_match(lock->granted_mode, mode)) {
+			wake_up(&lock->waitq);
+			break;
+		}
+	}
+
+	/*
+	 * Try to down convert a lock in response to a bast once users
+	 * are done with it.  We may have to wait for a grace period
+	 * to expire after an unlock.
+	 */
+	if (lock->work_mode < 0 &&
+	    lock->bast_mode >= 0 &&
+	    lock_counts_match(lock->bast_mode, lock->users) &&
+	    !lock->grace_pending) {
+
+		if (ktime_before(ktime_get(), lock->grace_deadline)) {
+			scoutfs_inc_counter(linfo->sb, lock_grace_enforced);
+			queue_delayed_work(linfo->workq, &lock->grace_work,
+					   GRACE_WORK_DELAY_JIFFIES);
+			lock->grace_pending = true;
+		} else {
+			lock->work_prev_mode = lock->granted_mode;
+			lock->work_mode = lock->bast_mode;
+			lock->granted_mode = lock->bast_mode;
+			lock->bast_mode = DLM_LOCK_IV;
+			queue_work(linfo->workq, &lock->work);
+		}
+	}
+
+	/*
+	 * Convert on behalf of waiters who aren't satisfied by the
+	 * current mode when it won't conflict with users or a pending
+	 * bast conversion.  The new mode may or may not match the
+	 * current granted mode so we may or may not need to block users
+	 * during the transition.
+	 *
+	 * Remember that the presence of waiters doesn't necessarily
+	 * mean that they're blocked.  Multiple lock attempts naturally
+	 * line up to add themselves to the waiters count before each
+	 * calls lock_wait() and is transitioned to a user.
+	 */
+	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
+		if (lock->work_mode < 0 &&
+		    lock->waiters[mode] &&
+		    !lock_modes_match(lock->granted_mode, mode) &&
+		    lock_counts_match(mode, lock->users) &&
+		    (lock->bast_mode < 0 ||
+		     lock_modes_match(lock->bast_mode, mode))) {
+
+			lock->work_prev_mode = lock->granted_mode;
+			lock->work_mode = mode;
+			if (!lock_modes_match(mode, lock->granted_mode))
+				lock->granted_mode = DLM_LOCK_NL;
+			queue_work(linfo->workq, &lock->work);
+			break;
+		}
+	}
+
+out:
+	/*
+	 * We can free the lock once it's idle and it's either never
+	 * been initially locked or has been unlocked, both of which we
+	 * indicate with IV.
+	 */
+	if (lock_idle(lock) && lock->granted_mode == DLM_LOCK_IV)
+		lock_free(linfo, lock);
 }
 
 static int cmp_lock_names(struct scoutfs_lock_name *a,
@@ -491,7 +452,7 @@ static int cmp_lock_names(struct scoutfs_lock_name *a,
 	       scoutfs_cmp_u64s(le64_to_cpu(a->second), le64_to_cpu(b->second));
 }
 
-static int insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
+static bool insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct rb_root *root = &linfo->lock_range_tree;
@@ -499,9 +460,6 @@ static int insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
 	struct rb_node *parent = NULL;
 	struct scoutfs_lock *lock;
 	int cmp;
-
-	if (!ins->start)
-		return 0;
 
 	while (*node) {
 		parent = *node;
@@ -511,11 +469,11 @@ static int insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
 						 lock->start, lock->end);
 		if (WARN_ON_ONCE(cmp == 0)) {
 			scoutfs_warn_sk(sb, "inserting lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT" overlaps with existing lock %p name "LN_FMT" start "SK_FMT" end "SK_FMT"\n",
-					ins, LN_ARG(&ins->lock_name),
+					ins, LN_ARG(&ins->name),
 					SK_ARG(ins->start), SK_ARG(ins->end),
-					lock, LN_ARG(&lock->lock_name),
+					lock, LN_ARG(&lock->name),
 					SK_ARG(lock->start), SK_ARG(lock->end));
-			return -EINVAL;
+			return false;
 		}
 
 		if (cmp < 0)
@@ -528,26 +486,22 @@ static int insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
 	rb_link_node(&ins->range_node, parent, node);
 	rb_insert_color(&ins->range_node, root);
 
-	return 0;
+	return true;
 }
 
-static struct scoutfs_lock *find_alloc_scoutfs_lock(struct super_block *sb,
-					struct scoutfs_lock_name *lock_name,
-					struct ocfs2_lock_res_ops *type,
-					struct scoutfs_key_buf *start,
-					struct scoutfs_key_buf *end)
+static struct scoutfs_lock *lock_rb_walk(struct super_block *sb,
+					 struct scoutfs_lock_name *name,
+					 struct scoutfs_lock *ins)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct scoutfs_lock *new = NULL;
 	struct scoutfs_lock *found;
 	struct scoutfs_lock *lock;
 	struct rb_node *parent;
 	struct rb_node **node;
 	int cmp;
-	int ret;
 
-search:
-	spin_lock(&linfo->lock);
+	assert_spin_locked(&linfo->lock);
+
 	node = &linfo->lock_tree.rb_node;
 	parent = NULL;
 	found = NULL;
@@ -555,7 +509,7 @@ search:
 		parent = *node;
 		lock = container_of(*node, struct scoutfs_lock, node);
 
-		cmp = cmp_lock_names(lock_name, &lock->lock_name);
+		cmp = cmp_lock_names(name, &lock->name);
 		if (cmp < 0) {
 			node = &(*node)->rb_left;
 		} else if (cmp > 0) {
@@ -567,216 +521,320 @@ search:
 		lock = NULL;
 	}
 
-	if (!found) {
-		if (!new) {
-			spin_unlock(&linfo->lock);
-			new = alloc_scoutfs_lock(sb, lock_name, type, start,
-						 end);
-			if (!new)
-				return NULL;
-
-			goto search;
-		}
-		found = new;
-		new = NULL;
-		found->refcnt = 1; /* Freed by shrinker or on umount */
-		found->sequence = ++linfo->seq_cnt;
-
-		ret = insert_range_node(sb, found);
-		if (ret < 0) {
-			spin_unlock(&linfo->lock);
-			free_scoutfs_lock(found);
-			return NULL;
-		}
-
-		trace_scoutfs_lock_rb_insert(sb, found);
-		rb_link_node(&found->node, parent, node);
-		rb_insert_color(&found->node, &linfo->lock_tree);
-		scoutfs_inc_counter(sb, lock_alloc);
-	}
-	found->refcnt++;
-	if (test_bit(SCOUTFS_LOCK_RECLAIM, &found->flags)) {
-		spin_unlock(&linfo->lock);
-		wait_event(found->waitq,
-			   test_bit(SCOUTFS_LOCK_DROPPED, &found->flags));
-		put_scoutfs_lock(sb, found);
-		goto search;
+	if (!found && ins) {
+		rb_link_node(&ins->node, parent, node);
+		rb_insert_color(&ins->node, &linfo->lock_tree);
+		found = ins;
 	}
 
-	if (!list_empty(&found->lru_entry)) {
-		list_del_init(&found->lru_entry);
-		linfo->lru_nr--;
-	}
-	found->users++;
-	spin_unlock(&linfo->lock);
-
-	free_scoutfs_lock(new);
 	return found;
 }
 
-static void scoutfs_lock_reclaim(struct work_struct *work)
+/*
+ * A dlm lock, conversion, or unlock call has finished.  We don't
+ * strictly serialize the arrival of basts and our dlm calls.  It's
+ * possible and safe for us to get a deadlock notification because we
+ * tried to convert in conflict with a received bast.  We ignore the
+ * result of the deadlock conversion and processing will retry and this
+ * time prefer the bast.
+ */
+static void scoutfs_lock_ast(void *arg)
 {
-	struct scoutfs_lock *lock = container_of(work, struct scoutfs_lock,
-						 reclaim_work);
-	struct lock_info *linfo = SCOUTFS_SB(lock->sb)->lock_info;
-
-	trace_scoutfs_lock_reclaim(lock->sb, lock);
-
-	/*
-	 * Drop the last ref on our lock here, allowing us to clean up
-	 * the dlm lock. We might race with another process in
-	 * find_alloc_scoutfs_lock(), hence the dropped flag telling
-	 * those processes to go ahead and drop the lock ref as well.
-	 */
-	BUG_ON(lock->users);
-
-	set_bit(SCOUTFS_LOCK_DROPPED, &lock->flags);
-	wake_up(&lock->waitq);
-
-	put_scoutfs_lock(linfo->sb, lock);
-}
-
-void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr)
-{
-	struct lock_info *linfo = SCOUTFS_SB(sb)->lock_info;
-	struct scoutfs_lock *lock;
-	struct scoutfs_lock *tmp;
-	unsigned long flags;
-
-	spin_lock_irqsave(&linfo->lock, flags);
-	list_for_each_entry_safe(lock, tmp, &linfo->lru_list, lru_entry) {
-		if (nr-- == 0)
-			break;
-
-		trace_shrink_lock_tree(linfo->sb, lock);
-
-		WARN_ON(lock->users);
-
-		set_bit(SCOUTFS_LOCK_RECLAIM, &lock->flags);
-		list_del_init(&lock->lru_entry);
-		linfo->lru_nr--;
-
-		queue_work(linfo->lock_reclaim_wq, &lock->reclaim_work);
-	}
-	spin_unlock_irqrestore(&linfo->lock, flags);
-}
-
-static int shrink_lock_tree(struct shrinker *shrink, struct shrink_control *sc)
-{
-	struct lock_info *linfo = container_of(shrink, struct lock_info,
-					       shrinker);
-	unsigned long nr;
-	int ret;
-
-	nr = sc->nr_to_scan;
-	if (nr)
-		scoutfs_free_unused_locks(linfo->sb, nr);
-
-	ret = min_t(unsigned long, linfo->lru_nr, INT_MAX);
-	trace_scoutfs_lock_shrink_exit(linfo->sb, sc->nr_to_scan, ret);
-	return ret;
-}
-
-static void free_lock_tree(struct super_block *sb)
-{
+	struct scoutfs_lock *lock = arg;
+	struct super_block *sb = lock->sb;
 	DECLARE_LOCK_INFO(sb, linfo);
-	struct rb_node *node = rb_first(&linfo->lock_tree);
+	int status = lock->lksb.sb_status;
 
-	while (node) {
-		struct scoutfs_lock *lock;
+	scoutfs_inc_counter(sb, lock_ast);
 
-		lock = rb_entry(node, struct scoutfs_lock, node);
-		node = rb_next(node);
-		put_scoutfs_lock(sb, lock);
+	spin_lock(&linfo->lock);
+
+	if (status == 0) {
+		if (lock_mode_can_read(lock->work_mode) &&
+		    !lock_mode_can_read(lock->work_prev_mode)) {
+			lock->refresh_gen =
+				atomic64_inc_return(&linfo->next_refresh_gen);
+		}
+		lock->granted_mode = lock->work_mode;
+
+	} else if (status == -DLM_EUNLOCK) {
+		lock->granted_mode = DLM_LOCK_IV;
+
+	} else if (status == -EDEADLK) {
+		/* dlm request conflicted with racing bast, try again */
+		scoutfs_inc_counter(sb, lock_ast_edeadlk);
+
+	} else if (!lock->error) {
+		scoutfs_inc_counter(sb, lock_ast_error);
+		lock->error = status;
 	}
+
+	lock->work_prev_mode = DLM_LOCK_IV;
+	lock->work_mode = DLM_LOCK_IV;
+
+	trace_scoutfs_lock_ast(sb, lock);
+	lock_process(linfo, lock);
+
+	spin_unlock(&linfo->lock);
 }
 
 /*
- * Acquire a coherent lock on the given range of keys.  While the lock
- * is held other lockers are serialized.  Cache coherency is maintained
- * by the locking infrastructure.  Lock acquisition causes writeout from
- * or invalidation of other caches.
+ * A lock on this node has blocked a lock request on another node.
  *
- * The caller provides the opaque lock structure used for storage and
- * their start and end pointers will be accessed while the lock is held.
+ * We can down convert to a PR if we had an EX and they're trying to get
+ * a PR but all other conflicts cause us to drop our lock and invalidate
+ * our cache.
+ */
+static void scoutfs_lock_bast(void *arg, int blocked_mode)
+{
+	struct scoutfs_lock *lock = arg;
+	struct super_block *sb = lock->sb;
+	DECLARE_LOCK_INFO(sb, linfo);
+
+	scoutfs_inc_counter(sb, lock_bast);
+
+	spin_lock(&linfo->lock);
+
+	if (lock->granted_mode == DLM_LOCK_EX && blocked_mode == DLM_LOCK_PR)
+		lock->bast_mode = DLM_LOCK_PR;
+	else
+		lock->bast_mode = DLM_LOCK_NL;
+
+	trace_scoutfs_lock_bast(sb, lock);
+	lock_process(linfo, lock);
+
+	spin_unlock(&linfo->lock);
+}
+
+/*
+ * The actual work of sending lock requests to the dlm.  There's only
+ * one of these per lock and the work_mode ensures that there's only one
+ * transition in flight at a time.
+ */
+static void scoutfs_lock_work(struct work_struct *work)
+{
+	struct scoutfs_lock *lock = container_of(work, struct scoutfs_lock,
+						 work);
+	struct super_block *sb = lock->sb;
+	DECLARE_LOCK_INFO(sb, linfo);
+	int dlm_flags;
+	int prev;
+	int mode;
+	int ret;
+
+	spin_lock(&linfo->lock);
+
+	/* don't try to call a released lockspace during shutdown */
+	if (linfo->shutdown) {
+		spin_unlock(&linfo->lock);
+		return;
+	}
+
+	trace_scoutfs_lock_work(sb, lock);
+	prev = lock->work_prev_mode;
+	mode = lock->work_mode;
+
+	spin_unlock(&linfo->lock);
+
+	if (lock->start) {
+		ret = lock_invalidate(sb, lock, prev, mode);
+		BUG_ON(ret);
+	}
+
+	scoutfs_inc_counter(sb, lock_dlm_call);
+
+	if (mode == DLM_LOCK_NL) {
+		ret = dlm_unlock(linfo->lockspace, lock->lksb.sb_lkid, 0,
+				 &lock->lksb, lock);
+	} else {
+		dlm_flags = DLM_LKF_NOORDER;
+		if (prev >= 0)
+			dlm_flags |= DLM_LKF_CONVERT;
+		ret = dlm_lock(linfo->lockspace, mode, &lock->lksb, dlm_flags,
+			       &lock->name, sizeof(lock->name), 0,
+			       scoutfs_lock_ast, lock, scoutfs_lock_bast);
+	}
+	/*
+	 * I don't think the lock error handling is correct yet.  It
+	 * probably doesn't try to unlock a lock that saw an error.
+	 */
+	if (ret)
+		scoutfs_inc_counter(sb, lock_dlm_call_error);
+	BUG_ON(ret);
+
+	spin_lock(&linfo->lock);
+
+	if (ret < 0) {
+		if (!lock->error)
+			lock->error = ret;
+		lock->work_prev_mode = DLM_LOCK_IV;
+		lock->work_mode = DLM_LOCK_IV;
+		lock_process(linfo, lock);
+	}
+
+	spin_unlock(&linfo->lock);
+}
+
+/*
+ * The grace period has elapsed since a down conversion attempt too soon
+ * after an unlock.  It can now be down converted.
+ */
+static void scoutfs_lock_grace_work(struct work_struct *work)
+{
+	struct scoutfs_lock *lock = container_of(work, struct scoutfs_lock,
+						 grace_work.work);
+	struct super_block *sb = lock->sb;
+	DECLARE_LOCK_INFO(sb, linfo);
+
+	BUG_ON(lock->grace_pending == false);
+
+	spin_lock(&linfo->lock);
+	trace_scoutfs_lock_grace_work(sb, lock);
+	scoutfs_inc_counter(linfo->sb, lock_grace_expired);
+	lock->grace_pending = false;
+	lock_process(linfo, lock);
+	spin_unlock(&linfo->lock);
+}
+
+/*
+ * Wait for a lock attempt to be resolved.  We return as an active user
+ * once our mode is satisfied by the lock or we can return errors.
+ */
+static bool lock_wait(struct lock_info *linfo, struct scoutfs_lock *lock,
+		      int mode, int flags, int *ret)
+{
+	struct super_block *sb = linfo->sb;
+	bool done;
+
+	spin_lock(&linfo->lock);
+
+	trace_scoutfs_lock_wait(sb, lock);
+
+	if (lock_modes_match(lock->granted_mode, mode)) {
+		/* the fast path where we can use the granted mode */
+		lock_dec_count(lock->waiters, mode);
+		lock_inc_count(lock->users, mode);
+		*ret = 0;
+		done = true;
+
+	} else if (linfo->shutdown) {
+		/* locking is going away */
+		*ret = -ESHUTDOWN;
+		done = true;
+
+	} else if (lock->error) {
+		/* something horrible has happened */
+		*ret = lock->error;
+		done = true;
+
+	} else if (flags & SCOUTFS_LKF_NONBLOCK) {
+		/* never wait for "nonblocking" callers */
+		scoutfs_inc_counter(sb, lock_nonblock_eagain);
+		*ret = -EAGAIN;
+		done = true;
+
+	} else {
+		/* still waiting :/ */
+		*ret = 0;
+		done = false;
+	}
+
+	lock_process(linfo, lock);
+
+	spin_unlock(&linfo->lock);
+
+	return done;
+}
+
+/*
+ * Acquire a coherent lock on the given range of keys.  On success the
+ * caller can use the given mode to interact with the item cache.  While
+ * holding the lock the cache won't be invalidated and other conflicting
+ * lock users will be serialized.  The item cache can be invalidated
+ * once the lock is unlocked.
  */
 static int lock_name_keys(struct super_block *sb, int mode, int flags,
-			 struct scoutfs_lock_name *lock_name,
-			 struct ocfs2_lock_res_ops *type,
-			 struct scoutfs_key_buf *start,
-			 struct scoutfs_key_buf *end,
-			 struct scoutfs_lock **ret_lock)
+			  struct scoutfs_lock_name *name,
+			  struct scoutfs_key_buf *start,
+			  struct scoutfs_key_buf *end,
+			  struct scoutfs_lock **ret_lock)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
-	struct task_ref *ref = NULL;
-	int lkm_flags;
+	struct scoutfs_lock *ins;
+	int wait_ret;
 	int ret;
+
+	scoutfs_inc_counter(sb, lock_lock);
 
 	*ret_lock = NULL;
 
-	if (WARN_ON_ONCE(!(flags & SCOUTFS_LKF_TRYLOCK) &&
-			 scoutfs_trans_held()))
-		return -EINVAL;
+	/* maybe catch _setup() order mistakes */
+	if (WARN_ON_ONCE(!linfo || linfo->lockspace == NULL))
+		return -ENOLCK;
 
-	lock = find_alloc_scoutfs_lock(sb, lock_name, type, start, end);
-	if (!lock)
-		return -ENOMEM;
+	/* have to lock before entering transactions */
+	if (WARN_ON_ONCE(scoutfs_trans_held()))
+		return -EDEADLK;
 
-	trace_scoutfs_lock_resource(sb, lock);
+	ins = NULL;
+retry:
+	spin_lock(&linfo->lock);
 
-	if (!(flags & SCOUTFS_LKF_NO_TASK_REF)) {
-		ref = find_task_ref(lock, current);
-		if (ref) {
-			/*
-			 * We found a ref, which means we have already locked
-			 * this resource. Check that the calling task isn't
-			 * trying to switch modes in the middle of a recursive
-			 * lock request.
-			 */
-			BUG_ON(!ocfs2_levels_compat(&lock->lockres, mode));
-			get_task_ref(ref);
-			dec_lock_users(lock);
-			put_scoutfs_lock(sb, lock);
-			ret = 0;
-			goto out;
-		}
+	/* don't create locks once we're shutdown */
+	if (linfo->shutdown) {
+		spin_unlock(&linfo->lock);
+		ret = -ESHUTDOWN;
+		goto out;
+	}
 
-		ref = new_task_ref(lock, current, mode);
-		if (!ref) {
+	lock = lock_rb_walk(sb, name, ins);
+	if (!lock) {
+		spin_unlock(&linfo->lock);
+		ins = lock_alloc(sb, name, start, end);
+		if (!ins) {
 			ret = -ENOMEM;
 			goto out;
 		}
+		goto retry;
+
+	} else if (lock == ins) {
+		if (start && !insert_range_node(sb, ins)) {
+			lock_free(linfo, ins);
+			spin_unlock(&linfo->lock);
+			ret = -EINVAL;
+			goto out;
+		}
+
+	} else if (ins) {
+		lock_free(linfo, ins);
 	}
 
-	lkm_flags = DLM_LKF_NOORDER;
-	if (flags & SCOUTFS_LKF_TRYLOCK)
-		lkm_flags |= DLM_LKF_NOQUEUE; /* maybe also NONBLOCK? */
+	lock_inc_count(lock->waiters, mode);
+	spin_unlock(&linfo->lock);
 
-	ret = ocfs2_cluster_lock(&linfo->dlmglue, &lock->lockres, mode,
-				 lkm_flags, 0);
-out:
+	ret = wait_event_interruptible(lock->waitq,
+				       lock_wait(linfo, lock, mode, flags,
+					         &wait_ret));
+	if (ret == 0)
+		ret = wait_ret;
 	if (ret) {
-		put_task_ref(lock, ref);
-		dec_lock_users(lock);
-		put_scoutfs_lock(sb, lock);
+		scoutfs_inc_counter(sb, lock_lock_error);
+		spin_lock(&linfo->lock);
+		lock_dec_count(lock->waiters, mode);
+		lock_process(linfo, lock);
+		spin_unlock(&linfo->lock);
 	} else {
-		trace_scoutfs_lock(sb, lock);
 		*ret_lock = lock;
 	}
-
+out:
 	return ret;
-}
-
-u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock)
-{
-	return ocfs2_lock_refresh_gen(&lock->lockres);
 }
 
 int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 		     struct scoutfs_lock **ret_lock)
 {
-	struct scoutfs_lock_name lock_name;
+	struct scoutfs_lock_name name;
 	struct scoutfs_inode_key start_ikey;
 	struct scoutfs_inode_key end_ikey;
 	struct scoutfs_key_buf start;
@@ -784,11 +842,11 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 
 	ino &= ~(u64)SCOUTFS_LOCK_INODE_GROUP_MASK;
 
-	lock_name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
-	lock_name.zone = SCOUTFS_FS_ZONE;
-	lock_name.type = SCOUTFS_INODE_TYPE;
-	lock_name.first = cpu_to_le64(ino);
-	lock_name.second = 0;
+	name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
+	name.zone = SCOUTFS_FS_ZONE;
+	name.type = SCOUTFS_INODE_TYPE;
+	name.first = cpu_to_le64(ino);
+	name.second = 0;
 
 	start_ikey.zone = SCOUTFS_FS_ZONE;
 	start_ikey.ino = cpu_to_be64(ino);
@@ -800,8 +858,7 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
 	end_ikey.type = ~0;
 	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
 
-	return lock_name_keys(sb, mode, flags, &lock_name, &scoufs_ino_lops,
-			      &start, &end, ret_lock);
+	return lock_name_keys(sb, mode, flags, &name, &start, &end, ret_lock);
 }
 
 /*
@@ -926,14 +983,13 @@ int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
 int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
 			struct scoutfs_lock **lock)
 {
-	struct scoutfs_lock_name lock_name;
+	struct scoutfs_lock_name name;
 
-	memset(&lock_name, 0, sizeof(lock_name));
-	lock_name.scope = SCOUTFS_LOCK_SCOPE_GLOBAL;
-	lock_name.type = type;
+	memset(&name, 0, sizeof(name));
+	name.scope = SCOUTFS_LOCK_SCOPE_GLOBAL;
+	name.type = type;
 
-	return lock_name_keys(sb, mode, flags, &lock_name, &scoutfs_global_lops,
-			      NULL, NULL, lock);
+	return lock_name_keys(sb, mode, flags, &name, NULL, NULL, lock);
 }
 
 /*
@@ -987,7 +1043,7 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock)
 {
-	struct scoutfs_lock_name lock_name;
+	struct scoutfs_lock_name name;
 	struct scoutfs_inode_index_key start_ikey;
 	struct scoutfs_inode_index_key end_ikey;
 	struct scoutfs_key_buf start;
@@ -996,17 +1052,16 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 	scoutfs_lock_get_index_item_range(type, major, ino,
 					  &start_ikey, &end_ikey);
 
-	lock_name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
-	lock_name.zone = start_ikey.zone;
-	lock_name.type = start_ikey.type;
-	lock_name.first = be64_to_le64(start_ikey.major);
-	lock_name.second = be64_to_le64(start_ikey.ino);
+	name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
+	name.zone = start_ikey.zone;
+	name.type = start_ikey.type;
+	name.first = be64_to_le64(start_ikey.major);
+	name.second = be64_to_le64(start_ikey.ino);
 
 	scoutfs_key_init(&start, &start_ikey, sizeof(start_ikey));
 	scoutfs_key_init(&end, &end_ikey, sizeof(end_ikey));
 
-	return lock_name_keys(sb, mode, 0, &lock_name,
-			      &scoufs_ino_index_lops, &start, &end, ret_lock);
+	return lock_name_keys(sb, mode, 0, &name, &start, &end, ret_lock);
 }
 
 /*
@@ -1023,17 +1078,17 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 			 u64 node_id, struct scoutfs_lock **lock)
 {
-	struct scoutfs_lock_name lock_name;
+	struct scoutfs_lock_name name;
 	struct scoutfs_orphan_key start_okey;
 	struct scoutfs_orphan_key end_okey;
 	struct scoutfs_key_buf start;
 	struct scoutfs_key_buf end;
 
-	lock_name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
-	lock_name.zone = SCOUTFS_NODE_ZONE;
-	lock_name.type = 0;
-	lock_name.first = cpu_to_le64(node_id);
-	lock_name.second = 0;
+	name.scope = SCOUTFS_LOCK_SCOPE_FS_ITEMS;
+	name.zone = SCOUTFS_NODE_ZONE;
+	name.type = 0;
+	name.first = cpu_to_le64(node_id);
+	name.second = 0;
 
 	start_okey.zone = SCOUTFS_NODE_ZONE;
 	start_okey.node_id = cpu_to_be64(node_id);
@@ -1047,119 +1102,90 @@ int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 	end_okey.ino = cpu_to_be64(~0ULL);
 	scoutfs_key_init(&end, &end_okey, sizeof(end_okey));
 
-	return lock_name_keys(sb, mode, flags, &lock_name,
-			      &scoutfs_node_id_lops, &start, &end, lock);
-}
-
-void scoutfs_unlock_flags(struct super_block *sb, struct scoutfs_lock *lock,
-			  int level, int flags)
-{
-	struct task_ref *ref;
-	DECLARE_LOCK_INFO(sb, linfo);
-
-	if (!lock)
-		return;
-
-	trace_scoutfs_unlock(sb, lock);
-
-	if (!(flags & SCOUTFS_LKF_NO_TASK_REF)) {
-		ref = find_task_ref(lock, current);
-		BUG_ON(!ref);
-		if (put_task_ref(lock, ref))
-			return;
-	}
-
-	ocfs2_cluster_unlock(&linfo->dlmglue, &lock->lockres, level);
-
-	dec_lock_users(lock);
-
-	put_scoutfs_lock(sb, lock);
-}
-
-void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
-		    int level)
-{
-	scoutfs_unlock_flags(sb, lock, level, 0);
+	return lock_name_keys(sb, mode, flags, &name, &start, &end, lock);
 }
 
 /*
- * The moment this is done we can have other mounts start asking
- * us to write back and invalidate, so do this very very late.
+ * As we unlock we start a grace period.  If a bast arrives before the
+ * grace period we'll wait for another full grace period we downconvert
+ * and invalidate the lock.  Each unlock resets the downconvert delay.
  */
-static int init_lock_info(struct super_block *sb)
+void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock, int mode)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct lock_info *linfo;
-	int ret;
-
-	linfo = kzalloc(sizeof(struct lock_info), GFP_KERNEL);
-	if (!linfo)
-		return -ENOMEM;
-
-	ret = ocfs2_init_super(&linfo->dlmglue, 0);
-	if (ret)
-		goto out;
-
-	spin_lock_init(&linfo->lock);
-	INIT_LIST_HEAD(&linfo->lru_list);
-	idr_init(&linfo->debug_locks_idr);
-	linfo->shrinker.shrink = shrink_lock_tree;
-	linfo->shrinker.seeks = DEFAULT_SEEKS;
-	register_shrinker(&linfo->shrinker);
-	linfo->sb = sb;
-	linfo->lock_tree = RB_ROOT;
-	linfo->lock_range_tree = RB_ROOT;
-
-	snprintf(linfo->ls_name, DLM_LOCKSPACE_LEN, "%llx",
-		 le64_to_cpu(sbi->super.hdr.fsid));
-
-	sbi->lock_info = linfo;
-
-	trace_init_lock_info(sb, linfo);
-out:
-	if (ret)
-		kfree(linfo);
-
-	return 0;
-}
-
-void scoutfs_lock_destroy(struct super_block *sb)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_LOCK_INFO(sb, linfo);
 
-	if (linfo) {
-		/* XXX does anything synchronize with open debugfs fds? */
-		debugfs_remove(linfo->debug_locks_dentry);
+	if (IS_ERR_OR_NULL(lock))
+		return;
 
-		unregister_shrinker(&linfo->shrinker);
-		if (linfo->lock_reclaim_wq)
-			destroy_workqueue(linfo->lock_reclaim_wq);
-		/*
-		 * Do this before uninitializing the dlm and after
-		 * draining the reclaim workqueue.
-		 */
-		free_lock_tree(sb);
-		idr_destroy(&linfo->debug_locks_idr);
+	scoutfs_inc_counter(sb, lock_unlock);
 
-		if (linfo->dlmglue_online) {
-			/*
-			 * fs/dlm has a harmless but unannotated
-			 * inversion between their connection and socket
-			 * locking that triggers during shutdown and
-			 * disables lockdep.
-			 */
-			lockdep_off();
-			ocfs2_dlm_shutdown(&linfo->dlmglue, 0);
-			lockdep_on();
-		}
+	spin_lock(&linfo->lock);
+	trace_scoutfs_lock_unlock(sb, lock);
 
-		sbi->lock_info = NULL;
-
-		trace_scoutfs_lock_destroy(sb, linfo);
-
-		kfree(linfo);
+	lock_dec_count(lock->users, mode);
+	lock->grace_deadline = ktime_add(ktime_get(), GRACE_UNLOCK_DEADLINE_KT);
+	if (cancel_delayed_work(&lock->grace_work)) {
+		scoutfs_inc_counter(linfo->sb, lock_grace_extended);
+		queue_delayed_work(linfo->workq, &lock->grace_work,
+				   GRACE_WORK_DELAY_JIFFIES);
 	}
+
+	lock_process(linfo, lock);
+	spin_unlock(&linfo->lock);
+}
+
+static int scoutfs_lock_shrink(struct shrinker *shrink,
+			       struct shrink_control *sc)
+{
+	struct lock_info *linfo = container_of(shrink, struct lock_info,
+					       shrinker);
+	struct super_block *sb = linfo->sb;
+	struct scoutfs_lock *lock;
+	struct scoutfs_lock *tmp;
+	unsigned long nr;
+	int ret;
+
+	nr = sc->nr_to_scan;
+	if (nr == 0)
+		goto out;
+
+	spin_lock(&linfo->lock);
+
+	list_for_each_entry_safe(lock, tmp, &linfo->lru_list, lru_head) {
+
+		if (nr-- == 0)
+			break;
+
+		trace_scoutfs_lock_shrink(sb, lock);
+		scoutfs_inc_counter(sb, lock_shrink);
+
+		WARN_ON_ONCE(!lock_idle(lock));
+
+		lock->work_prev_mode = lock->granted_mode;
+		lock->work_mode = DLM_LOCK_NL;
+		lock->granted_mode = DLM_LOCK_NL;
+		queue_work(linfo->workq, &lock->work);
+
+		list_del_init(&lock->lru_head);
+		linfo->lru_nr--;
+	}
+	spin_unlock(&linfo->lock);
+
+out:
+	ret = min_t(unsigned long, linfo->lru_nr, INT_MAX);
+	trace_scoutfs_lock_shrink_exit(sb, sc->nr_to_scan, ret);
+	return ret;
+}
+
+void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr)
+{
+	struct lock_info *linfo = SCOUTFS_SB(sb)->lock_info;
+	struct shrink_control sc = {
+		.gfp_mask = GFP_NOFS,
+		.nr_to_scan = INT_MAX,
+	};
+
+	linfo->shrinker.shrink(&linfo->shrinker, &sc);
 }
 
 /* _stop is always called no matter what start returns */
@@ -1203,22 +1229,24 @@ static void scoutfs_debug_locks_seq_stop(struct seq_file *m, void *v)
 	spin_unlock(&linfo->lock);
 }
 
-/* print an upper or lower case char depending on if the flag is set */
-#define locks_flag_char(lock, nr, c)	\
-	(test_bit(nr, &(lock)->flags) ? c : tolower(c))
-
-#define locks_flags(lock)					\
-	locks_flag_char(lock, SCOUTFS_LOCK_RECLAIM, 'R'),	\
-	locks_flag_char(lock, SCOUTFS_LOCK_DROPPED, 'D')
-
 static int scoutfs_debug_locks_seq_show(struct seq_file *m, void *v)
 {
 	struct scoutfs_lock *lock = v;
 
-	SK_PCPU(seq_printf(m, "name "LN_FMT" start "SK_FMT" end "SK_FMT" sequence %u refcnt %u users %u flags %c%c\n",
-			   LN_ARG(&lock->lock_name), SK_ARG(lock->start),
-			   SK_ARG(lock->end), lock->sequence, lock->refcnt,
-			   lock->users, locks_flags(lock)));
+	SK_PCPU(seq_printf(m, "name "LN_FMT" start "SK_FMT" end "SK_FMT" refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u dlmlksb: status %d lkid 0x%x flags 0x%x\n",
+			   LN_ARG(&lock->name), SK_ARG(lock->start),
+			   SK_ARG(lock->end), lock->refresh_gen, lock->error,
+			   lock->granted_mode, lock->bast_mode,
+			   lock->work_prev_mode, lock->work_mode,
+			   lock->waiters[DLM_LOCK_PR],
+			   lock->waiters[DLM_LOCK_EX],
+			   lock->waiters[DLM_LOCK_CW],
+			   lock->users[DLM_LOCK_PR],
+			   lock->users[DLM_LOCK_EX],
+			   lock->users[DLM_LOCK_CW],
+			   lock->lksb.sb_status,
+			   lock->lksb.sb_lkid,
+			   lock->lksb.sb_flags));
 
 	return 0;
 }
@@ -1250,16 +1278,153 @@ static const struct file_operations scoutfs_debug_locks_fops = {
 	.llseek =	seq_lseek,
 };
 
-int scoutfs_lock_setup(struct super_block *sb)
+/*
+ * We're going to be destroying the locks soon.  We shouldn't have any
+ * normal task holders that would have prevented unmount.  We can have
+ * internal threads blocked in locks.  We force all currently blocked
+ * and future lock calls to return -ESHUTDOWN.
+ */
+void scoutfs_lock_shutdown(struct super_block *sb)
 {
-	struct lock_info *linfo;
+	DECLARE_LOCK_INFO(sb, linfo);
+	struct scoutfs_lock *lock;
+	struct rb_node *node;
+
+	if (!linfo)
+		return;
+
+	trace_scoutfs_lock_shutdown(sb, linfo);
+
+	spin_lock(&linfo->lock);
+
+	linfo->shutdown = true;
+	for (node = rb_first(&linfo->lock_tree); node; node = rb_next(node)) {
+		lock = rb_entry(node, struct scoutfs_lock, node);
+		wake_up(&lock->waitq);
+	}
+
+	spin_unlock(&linfo->lock);
+}
+
+/*
+ * By the time we get here the caller should have called _shutdown() and
+ * then called into all the subsystems that held locks to drop them.
+ * There should be no active users of locks and all future lock calls
+ * should fail.
+ *
+ * Our job is to make sure nothing references the locks and free them.
+ */
+void scoutfs_lock_destroy(struct super_block *sb)
+{
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	DECLARE_LOCK_INFO(sb, linfo);
+	struct scoutfs_lock *lock;
+	struct rb_node *node;
+	int mode;
 	int ret;
 
-	ret = init_lock_info(sb);
-	if (ret)
-		return ret;
-	linfo = sbi->lock_info;
+	if (!linfo)
+		return;
+
+	BUG_ON(!linfo->shutdown);
+
+	trace_scoutfs_lock_destroy(sb, linfo);
+
+	/* stop the shrinker from queueing work */
+	unregister_shrinker(&linfo->shrinker);
+
+	/* make sure that no one's actively using locks */
+	spin_lock(&linfo->lock);
+	for (node = rb_first(&linfo->lock_tree); node; node = rb_next(node)) {
+		lock = rb_entry(node, struct scoutfs_lock, node);
+
+		for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
+			if (lock->waiters[mode] || lock->users[mode]) {
+				scoutfs_warn_sk(sb, "lock name "LN_FMT" start "SK_FMT" end "SK_FMT" has mode %d user after shutdown",
+						LN_ARG(&lock->name),
+						SK_ARG(lock->start),
+						SK_ARG(lock->end), mode);
+				break;
+			}
+		}
+
+		if (cancel_delayed_work(&lock->grace_work))
+			lock->grace_pending = false;
+
+	}
+	spin_unlock(&linfo->lock);
+
+	/* stop the dlm from calling our asts or basts to queue work */
+	if (linfo->lockspace) {
+		/*
+		 * fs/dlm has a harmless but unannotated inversion between their
+		 * connection and socket locking that triggers during shutdown
+		 * and disables lockdep.
+		 */
+		lockdep_off();
+		ret = dlm_release_lockspace(linfo->lockspace, 2);
+		lockdep_on();
+		if (ret)
+			scoutfs_warn(sb, "dlm lockspace leave failure: %d",
+				     ret);
+	}
+
+	if (linfo->workq) {
+		/* pending grace work queues normal work */
+		flush_workqueue(linfo->workq);
+		/* now all work won't queue itself */
+		destroy_workqueue(linfo->workq);
+	}
+
+	/* XXX does anything synchronize with open debugfs fds? */
+	debugfs_remove(linfo->debug_locks_dentry);
+
+	/* free our stale locks that now describe released dlm locks */
+	spin_lock(&linfo->lock);
+	node = rb_first(&linfo->lock_tree);
+	while (node) {
+		lock = rb_entry(node, struct scoutfs_lock, node);
+		node = rb_next(node);
+		lock_free(linfo, lock);
+	}
+	spin_unlock(&linfo->lock);
+
+	idr_destroy(&linfo->debug_locks_idr);
+	kfree(linfo);
+	sbi->lock_info = NULL;
+}
+
+int scoutfs_lock_setup(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	char name[DLM_LOCKSPACE_LEN];
+	struct lock_info *linfo;
+	int ret;
+
+	/* we use >= 0 to test iv and use modes as an array index */
+	BUILD_BUG_ON(DLM_LOCK_IV >= 0);
+	BUILD_BUG_ON(DLM_LOCK_NL >= SCOUTFS_LOCK_NR_MODES);
+	BUILD_BUG_ON(DLM_LOCK_PR >= SCOUTFS_LOCK_NR_MODES);
+	BUILD_BUG_ON(DLM_LOCK_EX >= SCOUTFS_LOCK_NR_MODES);
+	BUILD_BUG_ON(DLM_LOCK_CW >= SCOUTFS_LOCK_NR_MODES);
+
+	linfo = kzalloc(sizeof(struct lock_info), GFP_KERNEL);
+	if (!linfo)
+		return -ENOMEM;
+
+	linfo->sb = sb;
+	spin_lock_init(&linfo->lock);
+	linfo->lock_tree = RB_ROOT;
+	linfo->lock_range_tree = RB_ROOT;
+	linfo->shrinker.shrink = scoutfs_lock_shrink;
+	linfo->shrinker.seeks = DEFAULT_SEEKS;
+	register_shrinker(&linfo->shrinker);
+	INIT_LIST_HEAD(&linfo->lru_list);
+	idr_init(&linfo->debug_locks_idr);
+	atomic64_set(&linfo->next_refresh_gen, 0);
+
+	sbi->lock_info = linfo;
+	trace_scoutfs_lock_setup(sb, linfo);
 
 	linfo->debug_locks_dentry = debugfs_create_file("locks",
 					S_IFREG|S_IRUSR, sbi->debug_root, sb,
@@ -1269,20 +1434,22 @@ int scoutfs_lock_setup(struct super_block *sb)
 		goto out;
 	}
 
-	linfo->lock_reclaim_wq = alloc_workqueue("scoutfs_reclaim",
-						 WQ_UNBOUND|WQ_HIGHPRI, 0);
-	if (!linfo->lock_reclaim_wq) {
+	linfo->workq = alloc_workqueue("scoutfs_lock_work",
+				       WQ_UNBOUND|WQ_HIGHPRI, 0);
+	if (!linfo->workq) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	ret = ocfs2_dlm_init(&linfo->dlmglue, sb, "null",
-			     sbi->opts.cluster_name, linfo->ls_name,
-			     sbi->debug_root);
-	if (ret)
-		goto out;
-	linfo->dlmglue_online = true;
+	snprintf(name, DLM_LOCKSPACE_LEN, "scoutfs_fsid_%llx",
+		 le64_to_cpu(sbi->super.hdr.fsid));
 
+	ret = dlm_new_lockspace(name, sbi->opts.cluster_name,
+				DLM_LSFL_FS | DLM_LSFL_NEWEXCL, 8,
+				NULL, NULL, NULL, &linfo->lockspace);
+	if (ret)
+		scoutfs_warn(sb, "dlm lockspace [%s, %s] join failure: %d",
+			     sbi->opts.cluster_name, name, ret);
 out:
 	if (ret)
 		scoutfs_lock_destroy(sb);

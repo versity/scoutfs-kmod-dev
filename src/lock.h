@@ -3,40 +3,42 @@
 
 #include <linux/dlm.h>
 #include "key.h"
-#include "dlmglue.h"
 
 #define SCOUTFS_LKF_REFRESH_INODE	0x01 /* update stale inode from item */
-#define SCOUTFS_LKF_TRYLOCK		0x02 /* EAGAIN if contention */
-#define SCOUTFS_LKF_NO_TASK_REF  	0x04 /* don't create a task ref */
+#define SCOUTFS_LKF_NONBLOCK		0x02 /* only use already held locks */
 
-/* flags for scoutfs_lock->flags */
-enum {
-	SCOUTFS_LOCK_RECLAIM = 0, /* lock is queued for reclaim */
-	SCOUTFS_LOCK_DROPPED, /* lock is going away, drop reference */
-};
+#define SCOUTFS_LOCK_NR_MODES (DLM_LOCK_EX + 1)
 
+/*
+ * A few fields (start, end, refresh_gen, granted_mode) are referenced
+ * by code outside lock.c.
+ */
 struct scoutfs_lock {
 	struct super_block *sb;
-	struct scoutfs_lock_name lock_name;
+	struct scoutfs_lock_name name;
 	struct scoutfs_key_buf *start;
 	struct scoutfs_key_buf *end;
-	struct dlm_lksb lksb;
-	unsigned int sequence; /* for debugging and sanity checks */
 	struct rb_node node;
 	struct rb_node range_node;
-	unsigned int refcnt;
 	unsigned int debug_locks_id;
-	struct ocfs2_lock_res lockres;
-	struct list_head lru_entry;
-	struct work_struct reclaim_work;
-	unsigned int users; /* Tracks active users of this lock */
-	unsigned long flags;
+	u64 refresh_gen;
+	struct list_head lru_head;
 	wait_queue_head_t waitq;
-	struct rb_root task_refs;
-	spinlock_t task_refs_lock;
+	struct work_struct work;
+	struct dlm_lksb lksb;
+	ktime_t grace_deadline;
+	struct delayed_work grace_work;
+	bool grace_pending;
+
+	int error;
+	int granted_mode;
+	int bast_mode;
+	int work_prev_mode;
+	int work_mode;
+	unsigned int waiters[SCOUTFS_LOCK_NR_MODES];
+	unsigned int users[SCOUTFS_LOCK_NR_MODES];
 };
 
-u64 scoutfs_lock_refresh_gen(struct scoutfs_lock *lock);
 int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
 		       struct inode *inode, struct scoutfs_lock **ret_lock);
 int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
@@ -64,6 +66,7 @@ void scoutfs_unlock_flags(struct super_block *sb, struct scoutfs_lock *lock,
 void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr);
 
 int scoutfs_lock_setup(struct super_block *sb);
+void scoutfs_lock_shutdown(struct super_block *sb);
 void scoutfs_lock_destroy(struct super_block *sb);
 
 #endif

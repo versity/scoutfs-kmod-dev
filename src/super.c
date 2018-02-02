@@ -122,8 +122,7 @@ static void scoutfs_put_super(struct super_block *sb)
 
 	sbi->shutdown = true;
 
-	scoutfs_unlock_flags(sb, sbi->node_id_lock, DLM_LOCK_EX,
-			     SCOUTFS_LKF_NO_TASK_REF);
+	scoutfs_unlock(sb, sbi->node_id_lock, DLM_LOCK_EX);
 	sbi->node_id_lock = NULL;
 
 	scoutfs_shutdown_trans(sb);
@@ -133,6 +132,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_item_destroy(sb);
 
 	/* the server locks the listen address and compacts */
+	scoutfs_lock_shutdown(sb);
 	scoutfs_server_destroy(sb);
 	scoutfs_seg_destroy(sb);
 	scoutfs_lock_destroy(sb);

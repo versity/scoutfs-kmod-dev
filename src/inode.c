@@ -258,7 +258,7 @@ int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
 	struct scoutfs_inode_key ikey;
 	struct scoutfs_inode sinode;
 	SCOUTFS_DECLARE_KVEC(val);
-	const u64 refresh_gen = scoutfs_lock_refresh_gen(lock);
+	const u64 refresh_gen = lock->refresh_gen;
 	int ret;
 
 	/*
@@ -1272,7 +1272,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->data_version = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
 	ci->have_item = false;
-	atomic64_set(&ci->last_refreshed, scoutfs_lock_refresh_gen(lock));
+	atomic64_set(&ci->last_refreshed, lock->refresh_gen);
 	ci->flags = 0;
 	ci->ino_alloc.ino = 0;
 	ci->ino_alloc.nr = 0;

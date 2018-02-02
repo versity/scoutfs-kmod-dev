@@ -35,8 +35,6 @@
 #include "ioctl.h"
 #include "count.h"
 #include "bio.h"
-#include "dlmglue.h"
-#include "stackglue.h"
 #include "export.h"
 
 struct lock_info;
@@ -1046,7 +1044,12 @@ DECLARE_EVENT_CLASS(scoutfs_lock_info_class,
 	TP_printk(FSID_FMT" linfo %p", __entry->fsid, __entry->linfo)
 );
 
-DEFINE_EVENT(scoutfs_lock_info_class, init_lock_info,
+DEFINE_EVENT(scoutfs_lock_info_class, scoutfs_lock_setup,
+	TP_PROTO(struct super_block *sb, struct lock_info *linfo),
+	TP_ARGS(sb, linfo)
+);
+
+DEFINE_EVENT(scoutfs_lock_info_class, scoutfs_lock_shutdown,
 	TP_PROTO(struct super_block *sb, struct lock_info *linfo),
 	TP_ARGS(sb, linfo)
 );
@@ -1594,91 +1597,82 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 		__field(u8, name_type)
 		__field(u64, name_first)
 		__field(u64, name_second)
-		__field(unsigned int, seq)
-		__field(unsigned int, refcnt)
-		__field(unsigned int, users)
-		__field(unsigned char, level)
-		__field(unsigned char, blocking)
-		__field(unsigned int, cw)
-		__field(unsigned int, pr)
-		__field(unsigned int, ex)
+		__field(u64, refresh_gen)
+		__field(int, error)
+		__field(int, granted_mode)
+		__field(int, bast_mode)
+		__field(int, work_prev_mode)
+		__field(int, work_mode)
+		__field(unsigned int, waiters_cw)
+		__field(unsigned int, waiters_pr)
+		__field(unsigned int, waiters_ex)
+		__field(unsigned int, users_cw)
+		__field(unsigned int, users_pr)
+		__field(unsigned int, users_ex)
 	),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		__entry->name_scope = lck->lock_name.scope;
-		__entry->name_zone = lck->lock_name.zone;
-		__entry->name_type = lck->lock_name.type;
-		__entry->name_first = le64_to_cpu(lck->lock_name.first);
-		__entry->name_second = le64_to_cpu(lck->lock_name.second);
-		__entry->seq = lck->sequence;
-		__entry->refcnt = lck->refcnt;
-		__entry->users = lck->users;
-		/* racey, but safe refs of embedded struct */
-		__entry->level = lck->lockres.l_level;
-		__entry->blocking = lck->lockres.l_blocking;
-		__entry->cw = lck->lockres.l_cw_holders;
-		__entry->pr = lck->lockres.l_ro_holders;
-		__entry->ex = lck->lockres.l_ex_holders;
+		__entry->name_scope = lck->name.scope;
+		__entry->name_zone = lck->name.zone;
+		__entry->name_type = lck->name.type;
+		__entry->name_first = le64_to_cpu(lck->name.first);
+		__entry->name_second = le64_to_cpu(lck->name.second);
+
+		__entry->refresh_gen = lck->refresh_gen;
+		__entry->error = lck->error;
+		__entry->granted_mode = lck->granted_mode;
+		__entry->bast_mode = lck->bast_mode;
+		__entry->work_prev_mode = lck->work_prev_mode;
+		__entry->work_mode = lck->work_mode;
+		__entry->waiters_pr = lck->waiters[DLM_LOCK_PR];
+		__entry->waiters_ex = lck->waiters[DLM_LOCK_EX];
+		__entry->waiters_cw = lck->waiters[DLM_LOCK_CW];
+		__entry->users_pr = lck->users[DLM_LOCK_PR];
+		__entry->users_ex = lck->users[DLM_LOCK_EX];
+		__entry->users_cw = lck->users[DLM_LOCK_CW];
         ),
-        TP_printk("fsid "FSID_FMT" name %u.%u.%u.%llu.%llu seq %u refs %d users %d level %u blocking %u cw %u pr %u ex %u",
+        TP_printk("fsid "FSID_FMT" name %u.%u.%u.%llu.%llu refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u",
 		  __entry->fsid, __entry->name_scope, __entry->name_zone,
-		  __entry->name_type, __entry->name_first,
-		  __entry->name_second, __entry->seq, __entry->refcnt,
-		  __entry->users, __entry->level, __entry->blocking,
-		  __entry->cw, __entry->pr, __entry->ex)
+		  __entry->name_type, __entry->name_first, __entry->name_second,
+		  __entry->refresh_gen, __entry->error, __entry->granted_mode,
+		  __entry->bast_mode, __entry->work_prev_mode,
+		  __entry->work_mode, __entry->waiters_pr,
+		  __entry->waiters_ex, __entry->waiters_cw, __entry->users_pr,
+		  __entry->users_ex, __entry->users_cw)
 );
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_resource,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_unlock,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_ast,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_bast,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidate,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidate_ret,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_reclaim,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, shrink_lock_tree,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_rb_insert,
-       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
-       TP_ARGS(sb, lck)
-);
-
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_free,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_alloc,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_ast,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_bast,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_work,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_grace_work,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_wait,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_unlock,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_shrink,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );
@@ -1952,128 +1946,6 @@ DEFINE_EVENT(scoutfs_super_lifecycle_class, scoutfs_put_super,
 DEFINE_EVENT(scoutfs_super_lifecycle_class, scoutfs_kill_sb,
         TP_PROTO(struct super_block *sb),
         TP_ARGS(sb)
-);
-
-TRACE_EVENT(ocfs2_cluster_lock,
-	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres,
-		 int requested, unsigned int lkm_flags, unsigned int arg_flags),
-
-	TP_ARGS(osb, lockres, requested, lkm_flags, arg_flags),
-
-	TP_STRUCT__entry(
-		__string(lockspace, osb->cconn->cc_name)
-		__string(lockname, lockres->l_pretty_name)
-		__field(int, requested)
-		__field(unsigned int, lkm_flags)
-		__field(unsigned int, arg_flags)
-		__field(unsigned int, lockres_flags)
-		__field(int, lockres_level)
-		__field(int, blocking)
-		__field(unsigned int, cw_holders)
-		__field(unsigned int, pr_holders)
-		__field(unsigned int, ex_holders)
-	),
-
-	TP_fast_assign(
-		__assign_str(lockspace, osb->cconn->cc_name);
-		__assign_str(lockname, lockres->l_pretty_name);
-		__entry->requested = requested;
-		__entry->lkm_flags = lkm_flags;
-		__entry->arg_flags = arg_flags;
-		__entry->lockres_flags = lockres->l_flags;
-		__entry->lockres_level = lockres->l_level;
-		__entry->blocking = lockres->l_blocking;
-		__entry->cw_holders = lockres->l_cw_holders;
-		__entry->pr_holders = lockres->l_ro_holders;
-		__entry->ex_holders = lockres->l_ex_holders;
-	),
-
-	TP_printk("lockspace %s lock %s requested %d lkm_flags 0x%x arg_flags 0x%x lockres->level %d lockres->flags 0x%x lockres->blocking %d holders cw/pr/ex %u/%u/%u",
-		  __get_str(lockspace), __get_str(lockname), __entry->requested,
-		  __entry->lkm_flags, __entry->arg_flags,
-		  __entry->lockres_level, __entry->lockres_flags,
-		  __entry->blocking, __entry->cw_holders, __entry->pr_holders,
-		  __entry->ex_holders)
-);
-
-TRACE_EVENT(ocfs2_cluster_unlock,
-	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres,
-		 int level),
-
-	TP_ARGS(osb, lockres, level),
-
-	TP_STRUCT__entry(
-		__string(lockspace, osb->cconn->cc_name)
-		__string(lockname, lockres->l_pretty_name)
-		__field(int, level)
-		__field(unsigned int, lockres_flags)
-		__field(int, lockres_level)
-		__field(int, blocking)
-		__field(unsigned int, cw_holders)
-		__field(unsigned int, pr_holders)
-		__field(unsigned int, ex_holders)
-	),
-
-	TP_fast_assign(
-		__assign_str(lockspace, osb->cconn->cc_name);
-		__assign_str(lockname, lockres->l_pretty_name);
-		__entry->level = level;
-		__entry->lockres_flags = lockres->l_flags;
-		__entry->lockres_level = lockres->l_level;
-		__entry->blocking = lockres->l_blocking;
-		__entry->cw_holders = lockres->l_cw_holders;
-		__entry->pr_holders = lockres->l_ro_holders;
-		__entry->ex_holders = lockres->l_ex_holders;
-	),
-
-	TP_printk("lockspace %s lock %s level %d lockres->level %d lockres->flags 0x%x lockres->blocking %d holders cw/pr/ex: %u/%u/%u",
-		  __get_str(lockspace), __get_str(lockname), __entry->level,
-		  __entry->lockres_level, __entry->lockres_flags,
-		  __entry->blocking, __entry->cw_holders, __entry->pr_holders,
-		  __entry->ex_holders)
-);
-
-DECLARE_EVENT_CLASS(ocfs2_lock_res_class,
-	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres),
-
-	TP_ARGS(osb, lockres),
-
-	TP_STRUCT__entry(
-		__string(lockspace, osb->cconn->cc_name)
-		__string(lockname, lockres->l_pretty_name)
-		__field(unsigned int, lockres_flags)
-		__field(int, lockres_level)
-		__field(int, blocking)
-		__field(unsigned int, cw_holders)
-		__field(unsigned int, pr_holders)
-		__field(unsigned int, ex_holders)
-	),
-
-	TP_fast_assign(
-		__assign_str(lockspace, osb->cconn->cc_name);
-		__assign_str(lockname, lockres->l_pretty_name);
-		__entry->lockres_flags = lockres->l_flags;
-		__entry->lockres_level = lockres->l_level;
-		__entry->blocking = lockres->l_blocking;
-		__entry->cw_holders = lockres->l_cw_holders;
-		__entry->pr_holders = lockres->l_ro_holders;
-		__entry->ex_holders = lockres->l_ex_holders;
-	),
-
-	TP_printk("lockspace %s lock %s lockres->level %d lockres->flags 0x%x lockres->blocking %d holders cw/pr/ex: %u/%u/%u",
-		  __get_str(lockspace), __get_str(lockname),
-		  __entry->lockres_level, __entry->lockres_flags,
-		  __entry->blocking, __entry->cw_holders,
-		  __entry->pr_holders, __entry->ex_holders)
-);
-
-DEFINE_EVENT(ocfs2_lock_res_class, ocfs2_simple_drop_lockres,
-	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres),
-	TP_ARGS(osb, lockres)
-);
-DEFINE_EVENT(ocfs2_lock_res_class, ocfs2_unblock_lock,
-	TP_PROTO(struct ocfs2_super *osb, struct ocfs2_lock_res *lockres),
-	TP_ARGS(osb, lockres)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_fileid_class,

@@ -741,39 +741,23 @@ restart:
 
 /*
  * Return true if the lock protects the use of the key.  Some locks not
- * intended for item use don't have a key range and we wan't to safely
- * detect that.  We use the block 'rw' constants just because they're
- * convenient.  The level test is racey but it's a char.. how racy can
- * it be? :).
+ * intended for item use don't have a key range and we want to safely
+ * detect that.  The lock mode dereference is racy but the field always
+ * contains a single non-zero byte.
  */
 static bool lock_coverage(struct scoutfs_lock *lock,
-			  struct scoutfs_key_buf *key, int op_level)
+			  struct scoutfs_key_buf *key, int op_mode)
 {
-	signed char level;
+	signed char mode;
 
 	if (!lock || !lock->start || !lock->end)
 		return false;
 
-	level = ACCESS_ONCE(lock->lockres.l_level);
+	mode = ACCESS_ONCE(lock->granted_mode);
 
-	switch (op_level) {
-	case DLM_LOCK_CW:
-		if (level != DLM_LOCK_CW)
-			return false;
-		break;
-	case DLM_LOCK_PR:
-		if (level < DLM_LOCK_PR)
-			return false;
-		break;
-	case DLM_LOCK_EX:
-		if (level != DLM_LOCK_EX)
-			return false;
-		break;
-	default:
-		return false;
-	}
-
-	return scoutfs_key_compare_ranges(key, key,
+	return ((op_mode == mode) ||
+		(op_mode == DLM_LOCK_PR && mode == DLM_LOCK_EX)) &&
+		scoutfs_key_compare_ranges(key, key,
 					  lock->start, lock->end) == 0;
 }
 
@@ -1781,6 +1765,8 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
  * The caller wants us to write out any dirty items within the given
  * range.  We look for any dirty items within the range and if we find
  * any we issue a sync which writes out all the dirty items.
+ *
+ * Returns a sync error or the number of dirty items written.
  */
 int scoutfs_item_writeback(struct super_block *sb,
 			   struct scoutfs_key_buf *start,
@@ -1791,6 +1777,7 @@ int scoutfs_item_writeback(struct super_block *sb,
 	struct cached_item *item;
 	unsigned long flags;
 	bool sync = false;
+	int count = 0;
 	int ret = 0;
 
 	/* XXX think about racing with trans write */
@@ -1801,8 +1788,10 @@ int scoutfs_item_writeback(struct super_block *sb,
 		item = next_item(&cac->items, start);
 		if (item && !(item->dirty & ITEM_DIRTY))
 			item = next_dirty(item);
-		if (item && scoutfs_key_compare(item->key, end) <= 0)
+		if (item && scoutfs_key_compare(item->key, end) <= 0) {
 			sync = true;
+			count = cac->nr_dirty_items;
+		}
 	}
 
 	spin_unlock_irqrestore(&cac->lock, flags);
@@ -1812,12 +1801,14 @@ int scoutfs_item_writeback(struct super_block *sb,
 		ret = scoutfs_trans_sync(sb, 1);
 	}
 
-	return ret;
+	return ret ?: count;
 }
 
 /*
  * The caller wants us to drop any items within the range on the floor.
  * They should have ensured that items in this range won't be dirty.
+ *
+ * Returns errors or the count of the items invalidated.
  */
 int scoutfs_item_invalidate(struct super_block *sb,
 			    struct scoutfs_key_buf *start,
@@ -1830,6 +1821,7 @@ int scoutfs_item_invalidate(struct super_block *sb,
 	struct cached_item *item;
 	struct rb_node *node;
 	unsigned long flags;
+	int count = 0;
 	int ret;
 
 	trace_scoutfs_item_invalidate_range(sb, start, end);
@@ -1866,6 +1858,7 @@ int scoutfs_item_invalidate(struct super_block *sb,
 
 		WARN_ON_ONCE(item->dirty & ITEM_DIRTY);
 		erase_item(sb, cac, item);
+		count++;
 	}
 
 	remove_range(sb, &cac->ranges, rng);
@@ -1874,7 +1867,7 @@ int scoutfs_item_invalidate(struct super_block *sb,
 
 	ret = 0;
 out:
-	return ret;
+	return ret ?: count;
 }
 
 static struct cached_item *rb_next_item(struct cached_item *item)

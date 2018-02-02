@@ -932,10 +932,8 @@ static void scoutfs_server_func(struct work_struct *work)
 
 	init_waitqueue_head(&waitq);
 
-	ret = scoutfs_lock_global(sb, DLM_LOCK_EX,
-				  SCOUTFS_LKF_TRYLOCK,
-				  SCOUTFS_LOCK_TYPE_GLOBAL_SERVER,
-				  &lock);
+	ret = scoutfs_lock_global(sb, DLM_LOCK_EX, 0,
+				  SCOUTFS_LOCK_TYPE_GLOBAL_SERVER, &lock);
 	if (ret)
 		goto out;
 

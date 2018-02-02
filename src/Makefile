@@ -6,10 +6,10 @@ CFLAGS_super.o = -DSCOUTFS_GIT_DESCRIBE=\"$(SCOUTFS_GIT_DESCRIBE)\" \
 CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
  
 scoutfs-y += alloc.o bio.o btree.o client.o compact.o counters.o data.o dir.o \
-	     dlmglue.o export.o file.o kvec.o inode.o ioctl.o item.o key.o \
-	     lock.o manifest.o msg.o options.o per_task.o seg.o server.o \
-	     scoutfs_trace.o sock.o sort_priv.o stackglue.o super.o sysfs.o \
-	     trans.o triggers.o xattr.o
+	     export.o file.o kvec.o inode.o ioctl.o item.o key.o lock.o \
+	     manifest.o msg.o options.o per_task.o seg.o server.o \
+	     scoutfs_trace.o sock.o sort_priv.o super.o sysfs.o trans.o \
+	     triggers.o xattr.o
 
 #
 # The raw types aren't available in userspace headers.  Make sure all

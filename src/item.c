@@ -1310,8 +1310,10 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 		if (check_range(sb, &cac->ranges, range_end, range_end)) {
 			if (scoutfs_key_compare(range_end, last) >= 0)
 				break;
-			/* start reading from hole starting at range_end */
+			/* start reading after the last key we have cached */
+			scoutfs_key_inc(range_end);
 		} else {
+			/* start reading from the missing first */
 			scoutfs_key_copy(range_end, first);
 		}
 

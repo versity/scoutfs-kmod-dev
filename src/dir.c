@@ -545,7 +545,7 @@ static struct inode *lock_hold_create(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		return ERR_PTR(ret);
 
-	ret = scoutfs_alloc_ino(sb, &ino);
+	ret = scoutfs_alloc_ino(dir, &ino);
 	if (ret)
 		return ERR_PTR(ret);
 

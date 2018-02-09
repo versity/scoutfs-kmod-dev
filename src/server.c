@@ -304,20 +304,23 @@ static int process_alloc_inodes(struct server_connection *conn,
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_net_inode_alloc ial;
 	struct commit_waiter cw;
+	__le64 lecount;
 	u64 ino;
 	u64 nr;
 	int ret;
 
-	if (data_len != 0) {
+	if (data_len != sizeof(lecount)) {
 		ret = -EINVAL;
 		goto out;
 	}
+
+	memcpy(&lecount, data, data_len);
 
 	down_read(&server->commit_rwsem);
 
 	spin_lock(&sbi->next_ino_lock);
 	ino = le64_to_cpu(super->next_ino);
-	nr = min(100000ULL, ~0ULL - ino);
+	nr = min(le64_to_cpu(lecount), U64_MAX - ino);
 	le64_add_cpu(&super->next_ino, nr);
 	spin_unlock(&sbi->next_ino_lock);
 

@@ -903,32 +903,30 @@ TRACE_EVENT(scoutfs_inode_fill_pool,
 );
 
 TRACE_EVENT(scoutfs_alloc_ino,
-	TP_PROTO(struct super_block *sb, int ret, __u64 ino, __u64 pool_ino,
-		 __u64 nr, unsigned int in_flight),
+	TP_PROTO(struct super_block *sb, int ret, __u64 ino, __u64 next_ino,
+		 __u64 next_nr),
 
-	TP_ARGS(sb, ret, ino, pool_ino, nr, in_flight),
+	TP_ARGS(sb, ret, ino, next_ino, next_nr),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(int, ret)
 		__field(__u64, ino)
-		__field(__u64, pool_ino)
-		__field(__u64, nr)
-		__field(unsigned int, in_flight)
+		__field(__u64, next_ino)
+		__field(__u64, next_nr)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->ret = ret;
 		__entry->ino = ino;
-		__entry->pool_ino = pool_ino;
-		__entry->nr = nr;
-		__entry->in_flight = in_flight;
+		__entry->next_ino = next_ino;
+		__entry->next_nr = next_nr;
 	),
 
-	TP_printk(FSID_FMT" ret %d ino %llu pool ino %llu nr %llu req %u "
-		  "(racey)", __entry->fsid, __entry->ret, __entry->ino,
-		  __entry->pool_ino, __entry->nr, __entry->in_flight)
+	TP_printk(FSID_FMT" ret %d ino %llu next_ino %llu next_nr %llu",
+		  __entry->fsid, __entry->ret, __entry->ino, __entry->next_ino,
+		  __entry->next_nr)
 );
 
 TRACE_EVENT(scoutfs_evict_inode,

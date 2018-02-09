@@ -540,29 +540,29 @@ static int client_request(struct client_info *client, int type, void *data,
 	return ret;
 }
 
-int scoutfs_client_alloc_inodes(struct super_block *sb)
+/*
+ * Ask for a new run of allocated inode numbers.  The server can return
+ * fewer than @count.  It will success with nr == 0 if we've run out.
+ */
+int scoutfs_client_alloc_inodes(struct super_block *sb, u64 count,
+				u64 *ino, u64 *nr)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
 	struct scoutfs_net_inode_alloc ial;
-	u64 ino = 0;
-	u64 nr = 0;
+	__le64 lecount = cpu_to_le64(count);
 	int ret;
 
-	ret = client_request(client, SCOUTFS_NET_ALLOC_INODES, NULL, 0,
-			     &ial, sizeof(ial));
+	ret = client_request(client, SCOUTFS_NET_ALLOC_INODES,
+			     &lecount, sizeof(lecount), &ial, sizeof(ial));
 	if (ret == 0) {
-		ino = le64_to_cpu(ial.ino);
-		nr = le64_to_cpu(ial.nr);
+		*ino = le64_to_cpu(ial.ino);
+		*nr = le64_to_cpu(ial.nr);
 
-		/* catch wrapping */
-		if (ino + nr < ino)
+		if (*nr == 0)
+			ret = -ENOSPC;
+		else if (*ino + *nr < *ino)
 			ret = -EINVAL;
 	}
-
-	if (ret < 0)
-		scoutfs_inode_fill_pool(sb, 0, 0);
-	else
-		scoutfs_inode_fill_pool(sb, ino, nr);
 
 	return ret;
 }

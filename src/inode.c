@@ -47,17 +47,7 @@
  *  - describe data locking size problems
  */
 
-struct free_ino_pool {
-	wait_queue_head_t waitq;
-	spinlock_t lock;
-	u64 ino;
-	u64 nr;
-	bool in_flight;
-};
-
 struct inode_sb_info {
-	struct free_ino_pool pool;
-
 	spinlock_t writeback_lock;
 	struct rb_root writeback_inodes;
 };
@@ -82,6 +72,7 @@ static void scoutfs_inode_ctor(void *obj)
 	scoutfs_per_task_init(&ci->pt_data_lock);
 	init_rwsem(&ci->xattr_rwsem);
 	RB_CLEAR_NODE(&ci->writeback_node);
+	spin_lock_init(&ci->ino_alloc.lock);
 
 	inode_init_once(&ci->inode);
 }
@@ -563,8 +554,9 @@ struct inode *scoutfs_ilookup(struct super_block *sb, u64 ino)
 
 struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 {
-	struct inode *inode;
 	struct scoutfs_lock *lock = NULL;
+	struct scoutfs_inode_info *si;
+	struct inode *inode;
 	int ret;
 
 	ret = scoutfs_lock_ino(sb, DLM_LOCK_PR, 0, ino, &lock);
@@ -580,7 +572,10 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 
 	if (inode->i_state & I_NEW) {
 		/* XXX ensure refresh, instead clear in drop_inode? */
-		atomic64_set(&SCOUTFS_I(inode)->last_refreshed, 0);
+		si = SCOUTFS_I(inode);
+		atomic64_set(&si->last_refreshed, 0);
+		si->ino_alloc.ino = 0;
+		si->ino_alloc.nr = 0;
 
 		ret = scoutfs_inode_refresh(inode, lock, 0);
 		if (ret) {
@@ -1205,98 +1200,50 @@ u64 scoutfs_last_ino(struct super_block *sb)
 }
 
 /*
- * Network replies refill the pool, providing ino = ~0ULL nr = 0 when
- * there's no more inodes (which should never happen in practice.)
+ * Return an allocated and unused inode number.  Returns -ENOSPC if
+ * we're out of inode.
+ *
+ * Each parent directory has its own pool of free inode numbers.  Items
+ * are sorted by their inode numbers as they're stored in segments.
+ * This will tend to group together files that are created in a
+ * directory at the same time in segments.  Concurrent creation across
+ * different directories will be stored in their own regions.
+ *
+ * Inode numbers are never reclaimed.  If the inode is evicted or we're
+ * unmounted the pending inode numbers will be lost.  Asking for a
+ * relatively small number from the server each time will tend to
+ * minimize that loss while still being large enough for typical
+ * directory file counts.
  */
-void scoutfs_inode_fill_pool(struct super_block *sb, u64 ino, u64 nr)
+int scoutfs_alloc_ino(struct inode *parent, u64 *ino_ret)
 {
-	struct free_ino_pool *pool = &SCOUTFS_SB(sb)->inode_sb_info->pool;
-
-	trace_scoutfs_inode_fill_pool(sb, ino, nr);
-
-	spin_lock(&pool->lock);
-
-	pool->ino = ino;
-	pool->nr = nr;
-	pool->in_flight = false;
-
-	spin_unlock(&pool->lock);
-
-	wake_up(&pool->waitq);
-}
-
-static bool pool_in_flight(struct free_ino_pool *pool)
-{
-	bool in_flight;
-
-	spin_lock(&pool->lock);
-	in_flight = pool->in_flight;
-	spin_unlock(&pool->lock);
-
-	return in_flight;
-}
-
-/*
- * We have a pool of free inodes given to us by the server.  If it
- * empties we only ever have one request for new inodes in flight.  The
- * net layer calls us when it gets a reply.  If there's no more inodes
- * we'll get ino == ~0 and nr == 0.
- */
-int scoutfs_alloc_ino(struct super_block *sb, u64 *ino)
-{
-	struct free_ino_pool *pool = &SCOUTFS_SB(sb)->inode_sb_info->pool;
-	bool request;
+	struct scoutfs_inode_allocator *ia = &SCOUTFS_I(parent)->ino_alloc;
+	struct super_block *sb = parent->i_sb;
+	u64 ino;
+	u64 nr;
 	int ret;
 
-	*ino = 0;
+	spin_lock(&ia->lock);
 
-	spin_lock(&pool->lock);
-
-	while (pool->nr == 0 && pool->ino != ~0ULL) {
-		if (pool->in_flight) {
-			request = false;
-		} else {
-			pool->in_flight = true;
-			request = true;
-		}
-
-		spin_unlock(&pool->lock);
-
-		if (request) {
-			ret = scoutfs_client_alloc_inodes(sb);
-			if (ret) {
-				spin_lock(&pool->lock);
-				pool->in_flight = false;
-				spin_unlock(&pool->lock);
-				wake_up(&pool->waitq);
-				goto out;
-			}
-		}
-
-		ret = wait_event_interruptible(pool->waitq,
-					       !pool_in_flight(pool));
-		if (ret)
+	if (ia->nr == 0) {
+		spin_unlock(&ia->lock);
+		ret = scoutfs_client_alloc_inodes(sb, 10000, &ino, &nr);
+		if (ret < 0)
 			goto out;
-
-		spin_lock(&pool->lock);
+		spin_lock(&ia->lock);
+		if (ia->nr == 0) {
+			ia->ino = ino;
+			ia->nr = nr;
+		}
 	}
 
-	if (pool->nr == 0) {
-		*ino = 0;
-		ret = -ENOSPC;
-	} else {
-		*ino = pool->ino++;
-		pool->nr--;
-		ret = 0;
+	*ino_ret = ia->ino++;
+	ia->nr--;
 
-	}
-
-	spin_unlock(&pool->lock);
-
+	spin_unlock(&ia->lock);
+	ret = 0;
 out:
-
-	trace_scoutfs_alloc_ino(sb, ret, *ino, pool->ino, pool->nr,
-				pool->in_flight);
+	trace_scoutfs_alloc_ino(sb, ret, *ino_ret, ia->ino, ia->nr);
 	return ret;
 }
 
@@ -1327,6 +1274,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->have_item = false;
 	atomic64_set(&ci->last_refreshed, scoutfs_lock_refresh_gen(lock));
 	ci->flags = 0;
+	ci->ino_alloc.ino = 0;
+	ci->ino_alloc.nr = 0;
 
 	scoutfs_inode_set_meta_seq(inode);
 	scoutfs_inode_set_data_seq(inode);
@@ -1653,16 +1602,11 @@ out:
 int scoutfs_inode_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct free_ino_pool *pool;
 	struct inode_sb_info *inf;
 
 	inf = kzalloc(sizeof(struct inode_sb_info), GFP_KERNEL);
 	if (!inf)
 		return -ENOMEM;
-
-	pool = &inf->pool;
-	init_waitqueue_head(&pool->waitq);
-	spin_lock_init(&pool->lock);
 
 	spin_lock_init(&inf->writeback_lock);
 	inf->writeback_inodes = RB_ROOT;

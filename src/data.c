@@ -692,15 +692,19 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 
 				map->blknos[i] = 0;
 				scoutfs_inode_add_online_blocks(inode, -1);
+				/* XXX gets tricky with concurrent writes */
+				inode->i_blocks -= SCOUTFS_BLOCK_SECTORS;
 			}
 
 			if (offline && !test_bit(i, map->offline)) {
 				set_bit(i, map->offline);
 				scoutfs_inode_add_offline_blocks(inode, 1);
+				inode->i_blocks += SCOUTFS_BLOCK_SECTORS;
 
 			} else if (!offline && test_bit(i, map->offline)) {
 				clear_bit(i, map->offline);
 				scoutfs_inode_add_offline_blocks(inode, -1);
+				inode->i_blocks -= SCOUTFS_BLOCK_SECTORS;
 			}
 
 			modified = true;
@@ -983,10 +987,13 @@ static int find_alloc_block(struct super_block *sb, struct inode *inode,
 		goto out;
 
 	/* update the mapping */
-	if (test_and_clear_bit(map_ind, map->offline))
+	if (test_and_clear_bit(map_ind, map->offline)) {
 		scoutfs_inode_add_offline_blocks(inode, -1);
+		inode->i_blocks -= SCOUTFS_BLOCK_SECTORS;
+	}
 	map->blknos[map_ind] = blkno;
 	scoutfs_inode_add_online_blocks(inode, 1);
+	inode->i_blocks += SCOUTFS_BLOCK_SECTORS;
 
 	bytes = encode_mapping(map);
 	scoutfs_kvec_init(val, map->encoded, bytes);

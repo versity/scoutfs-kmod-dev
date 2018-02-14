@@ -13,6 +13,8 @@
 #define SCOUTFS_BLOCK_SIZE (1 << SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_BLOCK_MASK (SCOUTFS_BLOCK_SIZE - 1)
 #define SCOUTFS_BLOCKS_PER_PAGE (PAGE_SIZE / SCOUTFS_BLOCK_SIZE)
+#define SCOUTFS_BLOCK_SECTOR_SHIFT (SCOUTFS_BLOCK_SHIFT - 9)
+#define SCOUTFS_BLOCK_SECTORS (1 << SCOUTFS_BLOCK_SECTOR_SHIFT)
 
 /*
  * FS data is stored in segments, for now they're fixed size. They'll
@@ -464,7 +466,6 @@ struct scoutfs_timespec {
  */
 struct scoutfs_inode {
 	__le64 size;
-	__le64 blocks;
 	__le64 meta_seq;
 	__le64 data_seq;
 	__le64 data_version;

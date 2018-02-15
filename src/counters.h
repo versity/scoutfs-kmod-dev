@@ -37,6 +37,8 @@
 	EXPAND_COUNTER(dentry_revalidate_root)			\
 	EXPAND_COUNTER(dentry_revalidate_valid)			\
 	EXPAND_COUNTER(item_alloc)				\
+	EXPAND_COUNTER(item_batch_duplicate)			\
+	EXPAND_COUNTER(item_batch_inserted)			\
 	EXPAND_COUNTER(item_create)				\
 	EXPAND_COUNTER(item_delete)				\
 	EXPAND_COUNTER(item_free)				\
@@ -75,6 +77,7 @@
 	EXPAND_COUNTER(lock_unlock)				\
 	EXPAND_COUNTER(manifest_compact_migrate)		\
 	EXPAND_COUNTER(manifest_hard_stale_error)		\
+	EXPAND_COUNTER(manifest_read_excluded_key)		\
 	EXPAND_COUNTER(seg_alloc)				\
 	EXPAND_COUNTER(seg_free)				\
 	EXPAND_COUNTER(seg_shrink)				\

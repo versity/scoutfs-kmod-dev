@@ -800,7 +800,8 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->start,
+						    lock->end)) == 0);
 
 	trace_scoutfs_item_lookup_ret(sb, ret);
 	return ret;
@@ -963,7 +964,8 @@ int scoutfs_item_next(struct super_block *sb, struct scoutfs_key_buf *key,
 			/* populate missing cached range starting at pos */
 			spin_unlock_irqrestore(&cac->lock, flags);
 
-			ret = scoutfs_manifest_read_items(sb, pos, lock->end);
+			ret = scoutfs_manifest_read_items(sb, pos, lock->start,
+							  lock->end);
 
 			spin_lock_irqsave(&cac->lock, flags);
 			if (ret)
@@ -1099,7 +1101,8 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->start,
+						    lock->end)) == 0);
 
 	if (ret)
 		free_item(sb, item);
@@ -1224,8 +1227,12 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del_init(&item->entry);
-		if (insert_item(sb, cac, item, false, true))
+		if (insert_item(sb, cac, item, false, true)) {
+			scoutfs_inc_counter(sb, item_batch_duplicate);
 			list_add(&item->entry, list);
+		} else {
+			scoutfs_inc_counter(sb, item_batch_inserted);
+		}
 	}
 
 	spin_unlock_irqrestore(&cac->lock, flags);
@@ -1280,7 +1287,8 @@ int scoutfs_item_dirty(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->start,
+						    lock->end)) == 0);
 
 	trace_scoutfs_item_dirty_ret(sb, ret);
 	return ret;
@@ -1334,7 +1342,8 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->start,
+						    lock->end)) == 0);
 out:
 	scoutfs_kvec_kfree(up_val);
 
@@ -1382,7 +1391,8 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->start,
+						    lock->end)) == 0);
 
 	trace_scoutfs_item_delete_ret(sb, ret);
 	return ret;
@@ -1479,7 +1489,8 @@ int scoutfs_item_delete_save(struct super_block *sb,
 		spin_unlock_irqrestore(&cac->lock, flags);
 
 	} while (ret == -ENODATA &&
-		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->start,
+						    lock->end)) == 0);
 
 	free_item(sb, del);
 

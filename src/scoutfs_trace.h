@@ -1388,6 +1388,37 @@ DEFINE_EVENT(scoutfs_manifest_class, scoutfs_read_item_segment,
         TP_ARGS(sb, level, segno, seq, first, last)
 );
 
+TRACE_EVENT(scoutfs_read_item_keys,
+        TP_PROTO(struct super_block *sb,
+		 struct scoutfs_key_buf *key,
+		 struct scoutfs_key_buf *start,
+		 struct scoutfs_key_buf *end,
+		 struct scoutfs_key_buf *seg_start,
+		 struct scoutfs_key_buf *seg_end),
+        TP_ARGS(sb, key, start, end, seg_start, seg_end),
+        TP_STRUCT__entry(
+		__field(__u64, fsid)
+                __dynamic_array(char, key, scoutfs_key_str(NULL, key))
+                __dynamic_array(char, start, scoutfs_key_str(NULL, start))
+                __dynamic_array(char, end, scoutfs_key_str(NULL, end))
+                __dynamic_array(char, seg_start,
+				scoutfs_key_str(NULL, seg_start))
+                __dynamic_array(char, seg_end,
+				scoutfs_key_str(NULL, seg_end))
+        ),
+        TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		scoutfs_key_str(__get_dynamic_array(key), key);
+		scoutfs_key_str(__get_dynamic_array(start), start);
+		scoutfs_key_str(__get_dynamic_array(end), end);
+		scoutfs_key_str(__get_dynamic_array(seg_start), seg_start);
+		scoutfs_key_str(__get_dynamic_array(seg_end), seg_end);
+        ),
+        TP_printk("fsid "FSID_FMT" key %s start %s end %s seg_start %s seg_end %s",
+		  __entry->fsid, __get_str(key), __get_str(start),
+		  __get_str(end), __get_str(seg_start), __get_str(seg_end))
+);
+
 DECLARE_EVENT_CLASS(scoutfs_key_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
         TP_ARGS(sb, key),
@@ -1471,12 +1502,6 @@ DEFINE_EVENT(scoutfs_range_class, scoutfs_item_invalidate_range,
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_shrink_range,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
-		 struct scoutfs_key_buf *end),
-        TP_ARGS(sb, start, end)
-);
-
-DEFINE_EVENT(scoutfs_range_class, scoutfs_read_items,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),
         TP_ARGS(sb, start, end)

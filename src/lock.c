@@ -405,10 +405,10 @@ static void lock_process(struct lock_info *linfo, struct scoutfs_lock *lock)
 
 	/*
 	 * Convert on behalf of waiters who aren't satisfied by the
-	 * current mode when it won't conflict with users or a pending
-	 * bast conversion.  The new mode may or may not match the
-	 * current granted mode so we may or may not need to block users
-	 * during the transition.
+	 * current mode when it won't conflict with specific waiters,
+	 * matching users, or pending bast conversions.  The new mode
+	 * may or may not match the current granted mode so we may or
+	 * may not need to block users during the transition.
 	 *
 	 * Remember that the presence of waiters doesn't necessarily
 	 * mean that they're blocked.  Multiple lock attempts naturally
@@ -418,6 +418,8 @@ static void lock_process(struct lock_info *linfo, struct scoutfs_lock *lock)
 	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
 		if (lock->work_mode < 0 &&
 		    lock->waiters[mode] &&
+		    (lock->granted_mode < 0 ||
+		     !lock->waiters[lock->granted_mode]) &&
 		    !lock_modes_match(lock->granted_mode, mode) &&
 		    lock_counts_match(mode, lock->users) &&
 		    (lock->bast_mode < 0 ||

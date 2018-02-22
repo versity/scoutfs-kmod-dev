@@ -867,10 +867,9 @@ out:
 		destroy_workqueue(req_wq);
 	}
 
-	sock_release(conn->sock);
-
 	/* process_one_work explicitly allows freeing work in its func */
 	mutex_lock(&server->mutex);
+	sock_release(conn->sock);
 	list_del_init(&conn->head);
 	kfree(conn);
 	smp_mb();
@@ -920,7 +919,6 @@ static void scoutfs_server_func(struct work_struct *work)
 	struct socket *sock = NULL;
 	struct scoutfs_lock *lock = NULL;
 	struct server_connection *conn;
-	struct server_connection *conn_tmp;
 	struct pending_seq *ps;
 	struct pending_seq *ps_tmp;
 	DECLARE_WAIT_QUEUE_HEAD(waitq);
@@ -1043,7 +1041,7 @@ static void scoutfs_server_func(struct work_struct *work)
 
 	/* shutdown send and recv on all accepted sockets */
 	mutex_lock(&server->mutex);
-	list_for_each_entry_safe(conn, conn_tmp, &conn_list, head)
+	list_for_each_entry(conn, &conn_list, head)
 		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
 	mutex_unlock(&server->mutex);
 

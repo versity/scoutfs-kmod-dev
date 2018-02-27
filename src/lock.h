@@ -30,6 +30,9 @@ struct scoutfs_lock {
 	struct delayed_work grace_work;
 	bool grace_pending;
 
+	spinlock_t cov_list_lock;
+	struct list_head cov_list;
+
 	int error;
 	int granted_mode;
 	int bast_mode;
@@ -37,6 +40,12 @@ struct scoutfs_lock {
 	int work_mode;
 	unsigned int waiters[SCOUTFS_LOCK_NR_MODES];
 	unsigned int users[SCOUTFS_LOCK_NR_MODES];
+};
+
+struct scoutfs_lock_coverage {
+	spinlock_t cov_lock;
+	struct scoutfs_lock *lock;
+	struct list_head head;
 };
 
 int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
@@ -62,6 +71,15 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 		    int level);
 void scoutfs_unlock_flags(struct super_block *sb, struct scoutfs_lock *lock,
 			  int level, int flags);
+
+void scoutfs_lock_init_coverage(struct scoutfs_lock_coverage *cov);
+void scoutfs_lock_add_coverage(struct super_block *sb,
+			       struct scoutfs_lock *lock,
+			       struct scoutfs_lock_coverage *cov);
+bool scoutfs_lock_is_covered(struct super_block *sb,
+			     struct scoutfs_lock_coverage *cov);
+void scoutfs_lock_del_coverage(struct super_block *sb,
+			       struct scoutfs_lock_coverage *cov);
 
 void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr);
 

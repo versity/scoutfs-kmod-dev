@@ -92,41 +92,17 @@ static void scoutfs_lock_grace_work(struct work_struct *work);
 /*
  * invalidate cached data associated with an inode whose lock is going
  * away.
- *
- * Our inode granular locks mean that we have to invalidate all the
- * child dentries of a dir so that they can't satisfy lookup after we
- * re-acquire the lock.  We're invalidating the lock so there can't be
- * active users that could modify the entries in the dcache (lookup,
- * create, rename, unlink).  We have to make it through all the child
- * entries and remove them from the hash so that lookup can't find them.
  */
 static void invalidate_inode(struct super_block *sb, u64 ino)
 {
 	struct inode *inode;
-	struct dentry *parent;
-	struct dentry *child;
 
 	inode = scoutfs_ilookup(sb, ino);
-	if (!inode)
-		return;
-
-	if (S_ISREG(inode->i_mode))
-		truncate_inode_pages(inode->i_mapping, 0);
-
-	if (S_ISDIR(inode->i_mode) && (parent = d_find_alias(inode))) {
-
-		spin_lock(&parent->d_lock);
-		list_for_each_entry(child, &parent->d_subdirs, d_u.d_child){
-			spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
-			__d_drop(child);
-			spin_unlock(&child->d_lock);
-		}
-		spin_unlock(&parent->d_lock);
-
-		dput(parent);
+	if (inode) {
+		if (S_ISREG(inode->i_mode))
+			truncate_inode_pages(inode->i_mapping, 0);
+		iput(inode);
 	}
-
-	iput(inode);
 }
 
 /*
@@ -138,6 +114,8 @@ static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
 {
 	struct scoutfs_key_buf *start = lock->start;
 	struct scoutfs_key_buf *end = lock->end;
+	struct scoutfs_lock_coverage *cov;
+	struct scoutfs_lock_coverage *tmp;
 	u64 ino, last;
 	int ret;
 
@@ -156,6 +134,21 @@ static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
 	if (prev == DLM_LOCK_CW ||
             (prev == DLM_LOCK_PR && mode != DLM_LOCK_EX) ||
             (prev == DLM_LOCK_EX && mode != DLM_LOCK_PR)) {
+
+retry:
+		spin_lock(&lock->cov_list_lock);
+		list_for_each_entry_safe(cov, tmp, &lock->cov_list, head) {
+			if (!spin_trylock(&cov->cov_lock)) {
+				spin_unlock(&lock->cov_list_lock);
+				cpu_relax();
+				goto retry;
+			}
+			list_del_init(&cov->head);
+			cov->lock = NULL;
+			spin_unlock(&cov->cov_lock);
+		}
+		spin_unlock(&lock->cov_list_lock);
+
 		if (lock->name.zone == SCOUTFS_FS_ZONE) {
 			ino = le64_to_cpu(lock->name.first);
 			last = ino + SCOUTFS_LOCK_INODE_GROUP_NR - 1;
@@ -236,6 +229,9 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 	RB_CLEAR_NODE(&lock->node);
 	RB_CLEAR_NODE(&lock->range_node);
 	INIT_LIST_HEAD(&lock->lru_head);
+
+	spin_lock_init(&lock->cov_list_lock);
+	INIT_LIST_HEAD(&lock->cov_list);
 
 	if (start) {
 		lock->start = scoutfs_key_dup(sb, start);
@@ -1134,6 +1130,65 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock, int mode)
 
 	lock_process(linfo, lock);
 	spin_unlock(&linfo->lock);
+}
+
+void scoutfs_lock_init_coverage(struct scoutfs_lock_coverage *cov)
+{
+	spin_lock_init(&cov->cov_lock);
+	cov->lock = NULL;
+	INIT_LIST_HEAD(&cov->head);
+}
+
+/*
+ * Record that the given coverage struct is protected by the given lock.
+ * Once the lock is dropped the coverage list head will be removed and
+ * callers can use that to see that the cov isn't covered any more.  The
+ * cov might be on another lock so we're careful to remove it.
+ */
+void scoutfs_lock_add_coverage(struct super_block *sb,
+			       struct scoutfs_lock *lock,
+			       struct scoutfs_lock_coverage *cov)
+{
+	spin_lock(&cov->cov_lock);
+
+	if (cov->lock) {
+		spin_lock(&cov->lock->cov_list_lock);
+		list_del_init(&cov->head);
+		spin_unlock(&cov->lock->cov_list_lock);
+		cov->lock = NULL;
+	}
+
+	cov->lock = lock;
+	spin_lock(&cov->lock->cov_list_lock);
+	list_add(&cov->head, &lock->cov_list);
+	spin_unlock(&cov->lock->cov_list_lock);
+
+	spin_unlock(&cov->cov_lock);
+}
+
+bool scoutfs_lock_is_covered(struct super_block *sb,
+			     struct scoutfs_lock_coverage *cov)
+{
+	bool covered;
+
+	spin_lock(&cov->cov_lock);
+	covered = !list_empty_careful(&cov->head);
+	spin_unlock(&cov->cov_lock);
+
+	return covered;
+}
+
+void scoutfs_lock_del_coverage(struct super_block *sb,
+			       struct scoutfs_lock_coverage *cov)
+{
+	spin_lock(&cov->cov_lock);
+	if (cov->lock) {
+		spin_lock(&cov->lock->cov_list_lock);
+		list_del_init(&cov->head);
+		spin_unlock(&cov->lock->cov_list_lock);
+		cov->lock = NULL;
+	}
+	spin_unlock(&cov->cov_lock);
 }
 
 static int scoutfs_lock_shrink(struct shrinker *shrink,

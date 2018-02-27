@@ -31,6 +31,7 @@
 #include "kvec.h"
 #include "item.h"
 #include "lock.h"
+#include "counters.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -101,28 +102,35 @@ static unsigned int dentry_type(unsigned int type)
 }
 
 /*
- * Each dentry stores the values that are needed to build the keys of
- * the items that are removed on unlink so that we don't to search
- * through items on unlink.
+ * @readdir_pos  lets us remove items on final unlink without having to
+ * look them up.
+ *
+ * @lock_cov tells revalidation that the dentry is still locked and valid.
  */
 struct dentry_info {
 	u64 readdir_pos;
+	struct scoutfs_lock_coverage lock_cov;
 };
 
 static struct kmem_cache *dentry_info_cache;
 
 static void scoutfs_d_release(struct dentry *dentry)
 {
+	struct super_block *sb = dentry->d_sb;
 	struct dentry_info *di = dentry->d_fsdata;
 
 	if (di) {
+		scoutfs_lock_del_coverage(sb, &di->lock_cov);
 		kmem_cache_free(dentry_info_cache, di);
 		dentry->d_fsdata = NULL;
 	}
 }
 
+static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags);
+
 static const struct dentry_operations scoutfs_dentry_ops = {
 	.d_release = scoutfs_d_release,
+	.d_revalidate = scoutfs_d_revalidate,
 };
 
 static int alloc_dentry_info(struct dentry *dentry)
@@ -137,6 +145,8 @@ static int alloc_dentry_info(struct dentry *dentry)
 	if (!di)
 		return -ENOMEM;
 
+	scoutfs_lock_init_coverage(&di->lock_cov);
+
 	spin_lock(&dentry->d_lock);
 	if (!dentry->d_fsdata) {
 		dentry->d_fsdata = di;
@@ -150,7 +160,8 @@ static int alloc_dentry_info(struct dentry *dentry)
 	return 0;
 }
 
-static void update_dentry_info(struct dentry *dentry, u64 pos)
+static void update_dentry_info(struct super_block *sb, struct dentry *dentry,
+			       u64 pos, struct scoutfs_lock *lock)
 {
 	struct dentry_info *di = dentry->d_fsdata;
 
@@ -158,6 +169,7 @@ static void update_dentry_info(struct dentry *dentry, u64 pos)
 		return;
 
 	di->readdir_pos = pos;
+	scoutfs_lock_add_coverage(sb, lock, &di->lock_cov);
 }
 
 static u64 dentry_info_pos(struct dentry *dentry)
@@ -226,6 +238,116 @@ static struct scoutfs_key_buf *alloc_link_backref_key(struct super_block *sb,
 }
 
 /*
+ * Looks for the dirent item and fills the caller's dirent if it finds
+ * it.  Returns item lookup errors including -ENOENT if it's not found.
+ */
+static int lookup_dirent(struct super_block *sb, struct inode *dir,
+			 const char *name, unsigned name_len,
+			 struct scoutfs_dirent *dent,
+			 struct scoutfs_lock *lock)
+{
+	struct scoutfs_key_buf *key = NULL;
+	SCOUTFS_DECLARE_KVEC(val);
+	int ret;
+
+	key = alloc_dirent_key(sb, scoutfs_ino(dir), name, name_len);
+	if (!key) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	scoutfs_kvec_init(val, dent, sizeof(struct scoutfs_dirent));
+
+	ret = scoutfs_item_lookup_exact(sb, key, val,
+					sizeof(struct scoutfs_dirent), lock);
+out:
+	scoutfs_key_free(sb, key);
+	return ret;
+}
+
+static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+{
+	struct super_block *sb = dentry->d_sb;
+	struct dentry_info *di = dentry->d_fsdata;
+	struct scoutfs_lock *lock = NULL;
+	struct scoutfs_dirent dent;
+	struct dentry *parent = NULL;
+	struct inode *dir;
+	u64 dentry_ino;
+	int ret;
+
+	/* don't think this happens but we can find out */
+	if (IS_ROOT(dentry)) {
+		scoutfs_inc_counter(sb, dentry_revalidate_root);
+		if (!dentry->d_inode ||
+		    (scoutfs_ino(dentry->d_inode) != SCOUTFS_ROOT_INO)) {
+			ret = -EIO;
+		} else {
+			ret = 1;
+		}
+		goto out;
+	}
+
+	/* XXX what are the rules for _RCU? */
+	if (flags & LOOKUP_RCU) {
+		scoutfs_inc_counter(sb, dentry_revalidate_rcu);
+		ret = -ECHILD;
+		goto out;
+	}
+
+	if (WARN_ON_ONCE(di == NULL)) {
+		ret = 0;
+		goto out;
+	}
+
+	if (scoutfs_lock_is_covered(sb, &di->lock_cov)) {
+		scoutfs_inc_counter(sb, dentry_revalidate_locked);
+		ret = 1;
+		goto out;
+	}
+
+	parent = dget_parent(dentry);
+	if (!parent || !parent->d_inode) {
+		scoutfs_inc_counter(sb, dentry_revalidate_orphan);
+		ret = 0;
+		goto out;
+	}
+	dir = parent->d_inode;
+
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, dir, &lock);
+	if (ret)
+		goto out;
+
+	ret = lookup_dirent(sb, dir, dentry->d_name.name, dentry->d_name.len,
+			    &dent, lock);
+	if (ret == -ENOENT)
+		dent.ino = 0;
+	else if (ret < 0)
+		goto out;
+
+	dentry_ino = dentry->d_inode ? scoutfs_ino(dentry->d_inode) : 0;
+
+	if ((dentry_ino == le64_to_cpu(dent.ino))) {
+		update_dentry_info(sb, dentry, le64_to_cpu(dent.readdir_pos),
+				   lock);
+		scoutfs_inc_counter(sb, dentry_revalidate_valid);
+		ret = 1;
+	} else {
+		scoutfs_inc_counter(sb, dentry_revalidate_invalid);
+		ret = 0;
+	}
+
+out:
+	dput(parent);
+	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+
+	if (ret < 0 && ret != -ECHILD)
+		scoutfs_inc_counter(sb, dentry_revalidate_error);
+
+	return ret;
+}
+
+/*
  * Because of rename, locks are ordered by inode number.  To hold the
  * dir lock while calling iget, we might have to already hold a lesser
  * inode's lock while telling iget whether or not to lock.  Instead of
@@ -240,10 +362,8 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 				     unsigned int flags)
 {
 	struct super_block *sb = dir->i_sb;
-	struct scoutfs_key_buf *key = NULL;
-	struct scoutfs_dirent dent;
 	struct scoutfs_lock *dir_lock = NULL;
-	SCOUTFS_DECLARE_KVEC(val);
+	struct scoutfs_dirent dent;
 	struct inode *inode;
 	u64 ino = 0;
 	int ret;
@@ -257,28 +377,22 @@ static struct dentry *scoutfs_lookup(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out;
 
-	key = alloc_dirent_key(sb, scoutfs_ino(dir),
-			       dentry->d_name.name, dentry->d_name.len);
-	if (!key) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
 	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, dir, &dir_lock);
 	if (ret)
 		goto out;
 
-	scoutfs_kvec_init(val, &dent, sizeof(dent));
-
-	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent), dir_lock);
-	scoutfs_unlock(sb, dir_lock, DLM_LOCK_PR);
+	ret = lookup_dirent(sb, dir, dentry->d_name.name, dentry->d_name.len,
+			    &dent, dir_lock);
 	if (ret == -ENOENT) {
 		ino = 0;
 		ret = 0;
 	} else if (ret == 0) {
 		ino = le64_to_cpu(dent.ino);
-		update_dentry_info(dentry, le64_to_cpu(dent.readdir_pos));
+		update_dentry_info(sb, dentry, le64_to_cpu(dent.readdir_pos),
+				   dir_lock);
 	}
+	scoutfs_unlock(sb, dir_lock, DLM_LOCK_PR);
+
 out:
 	if (ret < 0)
 		inode = ERR_PTR(ret);
@@ -286,8 +400,6 @@ out:
 		inode = NULL;
 	else
 		inode = scoutfs_iget(sb, ino);
-
-	scoutfs_key_free(sb, key);
 
 	return d_splice_alias(inode, dentry);
 }
@@ -625,7 +737,7 @@ static int scoutfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	if (ret)
 		goto out;
 
-	update_dentry_info(dentry, pos);
+	update_dentry_info(sb, dentry, pos, dir_lock);
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -720,7 +832,7 @@ retry:
 			      inode->i_mode, dir_lock, inode_lock);
 	if (ret)
 		goto out;
-	update_dentry_info(dentry, pos);
+	update_dentry_info(sb, dentry, pos, dir_lock);
 
 	i_size_write(dir, dir_size);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -1021,7 +1133,7 @@ static int scoutfs_symlink(struct inode *dir, struct dentry *dentry,
 	if (ret)
 		goto out;
 
-	update_dentry_info(dentry, pos);
+	update_dentry_info(sb, dentry, pos, dir_lock);
 
 	i_size_write(dir, i_size_read(dir) + dentry->d_name.len);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
@@ -1507,7 +1619,7 @@ retry:
 	/* won't fail from here on out, update all the vfs structs */
 
 	/* the caller will use d_move to move the old_dentry into place */
-	update_dentry_info(old_dentry, new_pos);
+	update_dentry_info(sb, old_dentry, new_pos, new_dir_lock);
 
        i_size_write(old_dir, i_size_read(old_dir) - old_dentry->d_name.len);
        if (!new_inode)

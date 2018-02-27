@@ -29,6 +29,13 @@
 	EXPAND_COUNTER(data_write_begin)			\
 	EXPAND_COUNTER(data_write_end)				\
 	EXPAND_COUNTER(data_writepage)				\
+	EXPAND_COUNTER(dentry_revalidate_error)			\
+	EXPAND_COUNTER(dentry_revalidate_invalid)		\
+	EXPAND_COUNTER(dentry_revalidate_locked)		\
+	EXPAND_COUNTER(dentry_revalidate_orphan)		\
+	EXPAND_COUNTER(dentry_revalidate_rcu)			\
+	EXPAND_COUNTER(dentry_revalidate_root)			\
+	EXPAND_COUNTER(dentry_revalidate_valid)			\
 	EXPAND_COUNTER(item_alloc)				\
 	EXPAND_COUNTER(item_create)				\
 	EXPAND_COUNTER(item_delete)				\

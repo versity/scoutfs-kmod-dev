@@ -184,18 +184,21 @@ static inline const struct scoutfs_item_count SIC_RENAME(unsigned old_len,
 
 /*
  * Setting an xattr results in a dirty set of items with values for the
- * size of the xattr.  Any previously existing items from a larger xattr
- * are deleted which dirties their key but removes their value.  We
- * don't know the size of a possibly existing xattr so we assume max
- * parts.
+ * size of the xattr.  There's always at least one item with a value
+ * header.  Any previously existing items from a larger xattr are
+ * deleted which dirties their key but removes their value.  We don't
+ * know the size of a possibly existing xattr so we assume max parts.
  */
 static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned name_len,
 							    unsigned size)
 {
 	struct scoutfs_item_count cnt = {0,};
-	unsigned val_parts = DIV_ROUND_UP(size, SCOUTFS_XATTR_PART_SIZE);
+	unsigned val_parts;
 
 	__count_dirty_inode(&cnt);
+
+	val_parts = max_t(unsigned, 1,
+			  DIV_ROUND_UP(size, SCOUTFS_XATTR_PART_SIZE));
 
 	cnt.items += SCOUTFS_XATTR_MAX_PARTS;
 	cnt.keys += SCOUTFS_XATTR_MAX_PARTS *

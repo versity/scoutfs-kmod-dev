@@ -666,8 +666,11 @@ void scoutfs_compact_destroy(struct super_block *sb)
 	DECLARE_COMPACT_INFO(sb, ci);
 
 	if (ci) {
-		flush_work(&ci->work);
+		/* stop compaction from requeueing itself */
+		cancel_work_sync(&ci->work);
 		destroy_workqueue(ci->workq);
 		sbi->compact_info = NULL;
+
+		kfree(ci);
 	}
 }

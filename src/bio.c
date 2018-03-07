@@ -122,8 +122,6 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 			continue;
 		}
 
-		trace_scoutfs_bio_submit_added(sb, page, bio);
-
 		blkno += SCOUTFS_BLOCKS_PER_PAGE;
 		nr_blocks -= SCOUTFS_BLOCKS_PER_PAGE;
 	}

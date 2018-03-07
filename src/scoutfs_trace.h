@@ -148,27 +148,6 @@ TRACE_EVENT(scoutfs_bio_init_comp,
 	TP_printk("initing comp %p", __entry->comp)
 );
 
-TRACE_EVENT(scoutfs_bio_submit_added,
-	TP_PROTO(struct super_block *sb, void *page, void *bio),
-
-	TP_ARGS(sb, page, bio),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(void *, page)
-		__field(void *, bio)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->page = page;
-		__entry->bio = bio;
-	),
-
-	TP_printk(FSID_FMT" added page %p to bio %p", __entry->fsid,
-		  __entry->page, __entry->bio)
-);
-
 DECLARE_EVENT_CLASS(scoutfs_bio_class,
 	TP_PROTO(struct super_block *sb, void *bio, void *args, int in_flight),
 

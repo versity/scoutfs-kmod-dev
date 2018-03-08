@@ -269,9 +269,10 @@ static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
 	struct super_block *sb = dentry->d_sb;
 	struct dentry_info *di = dentry->d_fsdata;
+	struct dentry *parent = dget_parent(dentry);
 	struct scoutfs_lock *lock = NULL;
 	struct scoutfs_dirent dent;
-	struct dentry *parent = NULL;
+	bool is_covered = false;
 	struct inode *dir;
 	u64 dentry_ino;
 	int ret;
@@ -300,13 +301,13 @@ static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 		goto out;
 	}
 
-	if (scoutfs_lock_is_covered(sb, &di->lock_cov)) {
+	is_covered = scoutfs_lock_is_covered(sb, &di->lock_cov);
+	if (is_covered) {
 		scoutfs_inc_counter(sb, dentry_revalidate_locked);
 		ret = 1;
 		goto out;
 	}
 
-	parent = dget_parent(dentry);
 	if (!parent || !parent->d_inode) {
 		scoutfs_inc_counter(sb, dentry_revalidate_orphan);
 		ret = 0;
@@ -338,6 +339,8 @@ static int scoutfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 	}
 
 out:
+	trace_scoutfs_d_revalidate(sb, dentry, flags, parent, is_covered, ret);
+
 	dput(parent);
 	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 

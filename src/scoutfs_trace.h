@@ -36,6 +36,7 @@
 #include "count.h"
 #include "bio.h"
 #include "export.h"
+#include "dir.h"
 
 struct lock_info;
 
@@ -1885,6 +1886,45 @@ TRACE_EVENT(scoutfs_rename,
 		  __entry->fsid, __entry->old_dir_ino, __get_str(old_name),
 		  __entry->new_dir_ino, __get_str(new_name),
 		  __entry->new_inode_ino)
+);
+
+TRACE_EVENT(scoutfs_d_revalidate,
+	TP_PROTO(struct super_block *sb,
+		 struct dentry *dentry, int flags, struct dentry *parent,
+		 bool is_covered, int ret),
+
+	TP_ARGS(sb, dentry, flags, parent, is_covered, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__string(name, dentry->d_name.name)
+		__field(__u64, ino)
+		__field(__u64, parent_ino)
+		__field(int, flags)
+		__field(int, is_root)
+		__field(int, is_covered)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__assign_str(name, dentry->d_name.name)
+		__entry->ino = dentry->d_inode ?
+			       scoutfs_ino(dentry->d_inode) : 0;
+		__entry->parent_ino = parent->d_inode ?
+			       scoutfs_ino(parent->d_inode) : 0;
+		__entry->flags = flags;
+		__entry->is_root = IS_ROOT(dentry);
+		__entry->is_covered = is_covered;
+		__entry->ret = ret;
+	),
+
+	TP_printk("fsid "FSID_FMT" name %s ino %llu parent_ino %llu flags 0x%x s_root %u is_covered %u ret %d",
+		  __entry->fsid, __get_str(name), __entry->ino,
+		  __entry->parent_ino, __entry->flags,
+		  __entry->is_root,
+		  __entry->is_covered,
+		  __entry->ret)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_super_lifecycle_class,

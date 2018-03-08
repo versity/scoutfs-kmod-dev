@@ -1683,6 +1683,19 @@ static struct cached_item *next_dirty(struct cached_item *item)
 	return NULL;
 }
 
+static bool dirty_item_within(struct rb_root *root,
+			      struct scoutfs_key_buf *from,
+			      struct scoutfs_key_buf *end)
+{
+	struct cached_item *item;
+
+	item = next_item(root, from);
+	if (item && !(item->dirty & ITEM_DIRTY))
+		item = next_dirty(item);
+
+	return item && scoutfs_key_compare(item->key, end) <= 0;
+}
+
 bool scoutfs_item_has_dirty(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -1695,6 +1708,41 @@ bool scoutfs_item_has_dirty(struct super_block *sb)
 	spin_unlock_irqrestore(&cac->lock, flags);
 
 	return has;
+}
+
+/*
+ * Return true if the item cache covers the given range.  If dirty is
+ * provided then we only return true if there are dirty items in the
+ * range.
+ *
+ * If the start of the query range doesn't overlap a cached range then
+ * we see if the next cached range starts before the end of the query range.
+ */
+bool scoutfs_item_range_cached(struct super_block *sb,
+			       struct scoutfs_key_buf *start,
+			       struct scoutfs_key_buf *end, bool dirty)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_range *next;
+	struct cached_range *rng;
+	unsigned long flags;
+	bool cached = false;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	if (dirty) {
+		if (dirty_item_within(&cac->items, start, end))
+			cached = true;
+	} else {
+		rng = walk_ranges(&cac->ranges, start, NULL, &next);
+		if (rng || (next && scoutfs_key_compare(next->start, end) <= 0))
+			cached = true;
+	}
+
+	spin_unlock_irqrestore(&cac->lock, flags);
+
+	return cached;
 }
 
 /*
@@ -1774,7 +1822,6 @@ int scoutfs_item_writeback(struct super_block *sb,
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	struct cached_item *item;
 	unsigned long flags;
 	bool sync = false;
 	int count = 0;
@@ -1784,14 +1831,9 @@ int scoutfs_item_writeback(struct super_block *sb,
 
 	spin_lock_irqsave(&cac->lock, flags);
 
-	if (cac->nr_dirty_items) {
-		item = next_item(&cac->items, start);
-		if (item && !(item->dirty & ITEM_DIRTY))
-			item = next_dirty(item);
-		if (item && scoutfs_key_compare(item->key, end) <= 0) {
-			sync = true;
-			count = cac->nr_dirty_items;
-		}
+	if (cac->nr_dirty_items && dirty_item_within(&cac->items, start, end)) {
+		sync = true;
+		count = cac->nr_dirty_items;
 	}
 
 	spin_unlock_irqrestore(&cac->lock, flags);

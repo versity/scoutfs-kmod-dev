@@ -59,6 +59,9 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 void scoutfs_item_free_batch(struct super_block *sb, struct list_head *list);
 
 bool scoutfs_item_has_dirty(struct super_block *sb);
+bool scoutfs_item_range_cached(struct super_block *sb,
+			       struct scoutfs_key_buf *start,
+			       struct scoutfs_key_buf *end, bool dirty);
 bool scoutfs_item_dirty_fits_single(struct super_block *sb, u32 nr_items,
 			            u32 key_bytes, u32 val_bytes);
 int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg);

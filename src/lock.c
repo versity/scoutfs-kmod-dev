@@ -178,6 +178,7 @@ static void lock_free(struct lock_info *linfo, struct scoutfs_lock *lock)
 	trace_scoutfs_lock_free(sb, lock);
 	scoutfs_inc_counter(sb, lock_free);
 
+	BUG_ON(!linfo->shutdown && lock->granted_mode != DLM_LOCK_IV);
 	BUG_ON(delayed_work_pending(&lock->grace_work));
 
 	if (lock->debug_locks_id)
@@ -542,6 +543,8 @@ static void scoutfs_lock_ast(void *arg)
 	struct super_block *sb = lock->sb;
 	DECLARE_LOCK_INFO(sb, linfo);
 	int status = lock->lksb.sb_status;
+	bool cached;
+	bool dirty;
 
 	scoutfs_inc_counter(sb, lock_ast);
 
@@ -571,8 +574,41 @@ static void scoutfs_lock_ast(void *arg)
 	lock->work_mode = DLM_LOCK_IV;
 
 	trace_scoutfs_lock_ast(sb, lock);
-	lock_process(linfo, lock);
 
+	/*
+	 * Catch lock modes with cached items that violate the item
+	 * cache consistency rules.
+	 *
+	 * We can never have dirty items if we're calling the dlm and
+	 * changing lock modes.  We can't have cached items if we're not
+	 * in the two modes that allow caching.
+	 */
+	cached = lock->start && scoutfs_item_range_cached(sb, lock->start,
+							  lock->end, false);
+	dirty = lock->start && scoutfs_item_range_cached(sb, lock->start,
+							 lock->end, true);
+	if (WARN_ON_ONCE(dirty ||
+			 (cached && lock->granted_mode != DLM_LOCK_PR &&
+				    lock->granted_mode != DLM_LOCK_EX))) {
+		scoutfs_err_sk(sb, "lock item cache consistency violation, cached %u dirty %u: name "LN_FMT" start "SK_FMT" end "SK_FMT" refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u dlmlksb: status %d lkid 0x%x flags 0x%x\n",
+			   cached, dirty,
+			   LN_ARG(&lock->name), SK_ARG(lock->start),
+			   SK_ARG(lock->end), lock->refresh_gen, lock->error,
+			   lock->granted_mode, lock->bast_mode,
+			   lock->work_prev_mode, lock->work_mode,
+			   lock->waiters[DLM_LOCK_PR],
+			   lock->waiters[DLM_LOCK_EX],
+			   lock->waiters[DLM_LOCK_CW],
+			   lock->users[DLM_LOCK_PR],
+			   lock->users[DLM_LOCK_EX],
+			   lock->users[DLM_LOCK_CW],
+			   lock->lksb.sb_status,
+			   lock->lksb.sb_lkid,
+			   lock->lksb.sb_flags);
+		BUG();
+	}
+
+	lock_process(linfo, lock);
 	spin_unlock(&linfo->lock);
 }
 

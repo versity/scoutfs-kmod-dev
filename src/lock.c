@@ -343,37 +343,10 @@ static void lock_process(struct lock_info *linfo, struct scoutfs_lock *lock)
 	if (linfo->shutdown)
 		return;
 
-	/* only idle locks are on the lru */
-	idle = lock_idle(lock);
-	if (list_empty(&lock->lru_head) && idle) {
-		list_add_tail(&lock->lru_head, &linfo->lru_list);
-		linfo->lru_nr++;
-
-	} else if (!list_empty(&lock->lru_head) && !idle) {
-		list_del_init(&lock->lru_head);
-		linfo->lru_nr--;
-	}
-
 	/* errored locks are torn down */
 	if (lock->error) {
 		wake_up(&lock->waitq);
 		goto out;
-	}
-
-	/*
-	 * Wake any waiters who might be able to use the lock now.
-	 * Notice that this ignores the presence of basts!  This lets us
-	 * recursively acquire locks in one task without having to track
-	 * per-task lock references.  It comes at the cost of fairness.
-	 * Spinning overlapping users can delay a bast down conversion
-	 * indefinitely.
-	 */
-	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
-		if (lock->waiters[mode] &&
-		    lock_modes_match(lock->granted_mode, mode)) {
-			wake_up(&lock->waitq);
-			break;
-		}
 	}
 
 	/*
@@ -431,13 +404,40 @@ static void lock_process(struct lock_info *linfo, struct scoutfs_lock *lock)
 		}
 	}
 
+	/*
+	 * Wake any waiters who might be able to use the lock now.
+	 * Notice that this ignores the presence of basts!  This lets us
+	 * recursively acquire locks in one task without having to track
+	 * per-task lock references.  It comes at the cost of fairness.
+	 * Spinning overlapping users can delay a bast down conversion
+	 * indefinitely.
+	 */
+	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
+		if (lock->waiters[mode] &&
+		    lock_modes_match(lock->granted_mode, mode)) {
+			wake_up(&lock->waitq);
+			break;
+		}
+	}
+
 out:
+	/* only idle locks are on the lru */
+	idle = lock_idle(lock);
+	if (list_empty(&lock->lru_head) && idle) {
+		list_add_tail(&lock->lru_head, &linfo->lru_list);
+		linfo->lru_nr++;
+
+	} else if (!list_empty(&lock->lru_head) && !idle) {
+		list_del_init(&lock->lru_head);
+		linfo->lru_nr--;
+	}
+
 	/*
 	 * We can free the lock once it's idle and it's either never
 	 * been initially locked or has been unlocked, both of which we
 	 * indicate with IV.
 	 */
-	if (lock_idle(lock) && lock->granted_mode == DLM_LOCK_IV)
+	if (idle && lock->granted_mode == DLM_LOCK_IV)
 		lock_free(linfo, lock);
 }
 

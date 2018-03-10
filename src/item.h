@@ -3,12 +3,6 @@
 
 #include <linux/uio.h>
 
-/* behavioural flags for the item functions */
-enum {
-	SIF_EXCLUSIVE = (1 << 1),
-	SIF_REPLACE = (1 << 2),
-};
-
 struct scoutfs_segment;
 struct scoutfs_key_buf;
 
@@ -58,10 +52,6 @@ int scoutfs_item_add_batch(struct super_block *sb, struct list_head *list,
 int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 			      struct scoutfs_key_buf *start,
 			      struct scoutfs_key_buf *end);
-int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
-			   struct scoutfs_key_buf *first,
-			   struct scoutfs_key_buf *last, int sif,
-			   struct scoutfs_lock *lock);
 void scoutfs_item_free_batch(struct super_block *sb, struct list_head *list);
 
 bool scoutfs_item_has_dirty(struct super_block *sb);

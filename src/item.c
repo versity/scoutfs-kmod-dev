@@ -402,16 +402,14 @@ static void erase_item(struct super_block *sb, struct item_cache *cac,
 
 /*
  * Turn an item that the caller has found while holding the lock into a
- * deletion item.  The caller will free whatever we put in the deletion
- * value after releasing the lock.
+ * deletion item.
  */
 static void become_deletion_item(struct super_block *sb,
 				 struct item_cache *cac,
-				 struct cached_item *item,
-				 struct kvec *del_val)
+				 struct cached_item *item)
 {
 	clear_item_dirty(sb, cac, item);
-	scoutfs_kvec_clone(del_val, item->val);
+	scoutfs_kvec_kfree(item->val);
 	scoutfs_kvec_init_null(item->val);
 	item->deletion = 1;
 	mark_item_dirty(sb, cac, item);
@@ -1262,7 +1260,6 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct scoutfs_key_buf *range_end;
-	SCOUTFS_DECLARE_KVEC(del_val);
 	struct cached_item *exist;
 	struct cached_item *item;
 	struct cached_item *tmp;
@@ -1347,16 +1344,13 @@ int scoutfs_item_set_batch(struct super_block *sb, struct list_head *list,
 				}
 			}
 		}
-
 	}
 
 	/* delete everything in the range */
 	for (exist = item_for_next(&cac->items, first, NULL, last);
 	     exist; exist = next_item_node(&cac->items, exist, last)) {
 
-		scoutfs_kvec_init_null(del_val);
-		become_deletion_item(sb, cac, exist, del_val);
-		scoutfs_kvec_kfree(del_val);
+		become_deletion_item(sb, cac, exist);
 	}
 
 	/* insert the caller's items, overwriting any existing */
@@ -1498,21 +1492,18 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item;
-	SCOUTFS_DECLARE_KVEC(del_val);
 	unsigned long flags;
 	int ret;
 
 	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
 		return -EINVAL;
 
-	scoutfs_kvec_init_null(del_val);
-
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
 
 		item = find_item(sb, &cac->items, key);
 		if (item) {
-			become_deletion_item(sb, cac, item, del_val);
+			become_deletion_item(sb, cac, item);
 			ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, NULL)) {
 			ret = -ENOENT;
@@ -1525,8 +1516,6 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 	} while (ret == -ENODATA &&
 		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
 
-	scoutfs_kvec_kfree(del_val);
-
 	trace_scoutfs_item_delete_ret(sb, ret);
 	return ret;
 }
@@ -1538,14 +1527,12 @@ int scoutfs_item_delete_force(struct super_block *sb,
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
 	struct cached_item *item;
-	SCOUTFS_DECLARE_KVEC(del_val);
 	unsigned long flags;
 	int ret;
 
 	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_CW)))
 		return -EINVAL;
 
-	scoutfs_kvec_init_null(del_val);
 
 	item = alloc_item(sb, key, NULL);
 	if (!item)
@@ -1563,10 +1550,9 @@ int scoutfs_item_delete_force(struct super_block *sb,
 	scoutfs_inc_counter(sb, item_create);
 	mark_item_dirty(sb, cac, item);
 
-	become_deletion_item(sb, cac, item, del_val);
+	become_deletion_item(sb, cac, item);
 	spin_unlock_irqrestore(&cac->lock, flags);
 
-	scoutfs_kvec_kfree(del_val);
 
 	return ret;
 }
@@ -1581,21 +1567,17 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct item_cache *cac = sbi->item_cache;
-	SCOUTFS_DECLARE_KVEC(del_val);
 	struct cached_item *item;
 	unsigned long flags;
 
-	scoutfs_kvec_init_null(del_val);
 
 	spin_lock_irqsave(&cac->lock, flags);
 
 	item = find_item(sb, &cac->items, key);
 	if (item)
-		become_deletion_item(sb, cac, item, del_val);
+		become_deletion_item(sb, cac, item);
 
 	spin_unlock_irqrestore(&cac->lock, flags);
-
-	scoutfs_kvec_kfree(del_val);
 }
 
 /*

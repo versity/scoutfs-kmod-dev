@@ -224,6 +224,11 @@ static struct cached_item *next_item(struct rb_root *root,
 #define LEFT_DIRTY 0x2
 #define RIGHT_DIRTY 0x4
 
+static bool item_is_dirty(struct cached_item *item)
+{
+	return (item->dirty & ITEM_DIRTY) != 0;
+}
+
 /*
  * Return the given dirty bit if the item with the given node is dirty
  * or has dirty children.
@@ -333,7 +338,7 @@ static void mark_item_dirty(struct super_block *sb, struct item_cache *cac,
 	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
 		return;
 
-	if (item->dirty & ITEM_DIRTY)
+	if (item_is_dirty(item))
 		return;
 
 	item->dirty |= ITEM_DIRTY;
@@ -352,7 +357,7 @@ static void clear_item_dirty(struct super_block *sb, struct item_cache *cac,
 	if (WARN_ON_ONCE(RB_EMPTY_NODE(&item->node)))
 		return;
 
-	if (!(item->dirty & ITEM_DIRTY))
+	if (!item_is_dirty(item))
 		return;
 
 	item->dirty &= ~ITEM_DIRTY;
@@ -474,7 +479,7 @@ restart:
 	rb_link_node(&ins->node, parent, node);
 	rb_insert_augmented(&ins->node, root, &scoutfs_item_rb_cb);
 
-	BUG_ON(ins->dirty & ITEM_DIRTY);
+	BUG_ON(item_is_dirty(ins));
 	list_add_tail(&ins->entry, &cac->lru_list);
 	cac->lru_nr++;
 
@@ -1598,7 +1603,7 @@ void scoutfs_item_update_dirty(struct super_block *sb,
 
 	item = find_item(sb, &cac->items, key);
 
-	BUG_ON(!item || !(item->dirty & ITEM_DIRTY) ||
+	BUG_ON(!item || !item_is_dirty(item) ||
 	       scoutfs_kvec_length(val) > scoutfs_kvec_length(item->val));
 
 	delta = scoutfs_kvec_length(val) - scoutfs_kvec_length(item->val);
@@ -1621,7 +1626,7 @@ static struct cached_item *first_dirty(struct rb_node *node)
 
 		if (item->dirty & LEFT_DIRTY) {
 			node = item->node.rb_left;
-		} else if (item->dirty & ITEM_DIRTY) {
+		} else if (item_is_dirty(item)) {
 			ret = item;
 			break;
 		} else if (item->dirty & RIGHT_DIRTY) {
@@ -1659,7 +1664,7 @@ static struct cached_item *next_dirty(struct cached_item *item)
 
 		/* done if our next greatest parent itself is dirty */
 		item = container_of(parent, struct cached_item, node);
-		if (item->dirty & ITEM_DIRTY)
+		if (item_is_dirty(item))
 			return item;
 
 		/* continue to check right subtree */
@@ -1675,7 +1680,7 @@ static bool dirty_item_within(struct rb_root *root,
 	struct cached_item *item;
 
 	item = next_item(root, from);
-	if (item && !(item->dirty & ITEM_DIRTY))
+	if (item && !item_is_dirty(item))
 		item = next_dirty(item);
 
 	return item && scoutfs_key_compare(item->key, end) <= 0;
@@ -1883,7 +1888,7 @@ int scoutfs_item_invalidate(struct super_block *sb,
 		else
 			next = NULL;
 
-		WARN_ON_ONCE(item->dirty & ITEM_DIRTY);
+		WARN_ON_ONCE(item_is_dirty(item));
 		erase_item(sb, cac, item);
 		count++;
 	}
@@ -1984,7 +1989,7 @@ static struct cached_item *shrink_boundary(struct super_block *sb,
 				break;
 		}
 
-		if (next->dirty & ITEM_DIRTY) {
+		if (item_is_dirty(next)) {
 			scoutfs_inc_counter(sb, item_shrink_next_dirty);
 			break;
 		}
@@ -2140,7 +2145,7 @@ static int item_lru_shrink(struct shrinker *shrink, struct shrink_control *sc)
 						struct cached_item, entry))) {
 
 		/* can't have dirty items on the lru */
-		BUG_ON(item->dirty & ITEM_DIRTY);
+		BUG_ON(item_is_dirty(item));
 
 		/* if we're not in a range just shrink the item */
 		rng = walk_ranges(&cac->ranges, item->key, NULL, NULL);

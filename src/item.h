@@ -46,6 +46,12 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key_buf *key,
 int scoutfs_item_delete_force(struct super_block *sb,
 			      struct scoutfs_key_buf *key,
 			      struct scoutfs_lock *lock);
+int scoutfs_item_delete_save(struct super_block *sb,
+			     struct scoutfs_key_buf *key,
+			     struct list_head *list,
+			     struct scoutfs_lock *lock);
+int scoutfs_item_restore(struct super_block *sb, struct list_head *list,
+			 struct scoutfs_lock *lock);
 
 int scoutfs_item_add_batch(struct super_block *sb, struct list_head *list,
 			   struct scoutfs_key_buf *key, struct kvec *val);

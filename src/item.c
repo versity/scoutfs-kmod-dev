@@ -1558,6 +1558,124 @@ int scoutfs_item_delete_force(struct super_block *sb,
 	become_deletion_item(sb, cac, item);
 	spin_unlock_irqrestore(&cac->lock, flags);
 
+	return ret;
+}
+
+/*
+ * Delete an item and give it to the caller so that they can restore it
+ * later.
+ *
+ * The deleted items can be dirty or not.. we maintain an accurate dirty
+ * count as we remove the deleted items and leave their dirty flag set
+ * so that restore can mark them dirty again.
+ *
+ * Returns -ENOENT if the item didn't exist and couldn't be deleted.
+ */
+int scoutfs_item_delete_save(struct super_block *sb,
+			     struct scoutfs_key_buf *key,
+			     struct list_head *list,
+			     struct scoutfs_lock *lock)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *item;
+	struct cached_item *del;
+	unsigned long flags;
+	bool was_dirty;
+	int ret;
+
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
+		return -EINVAL;
+
+	del = alloc_item(sb, key, NULL);
+	if (!del)
+		return -ENOMEM;
+
+	do {
+		spin_lock_irqsave(&cac->lock, flags);
+
+		item = find_item(sb, &cac->items, key);
+		if (item) {
+			was_dirty = item_is_dirty(item);
+			unlink_item(sb, cac, item);
+			list_add_tail(&item->entry, list);
+			if (was_dirty)
+				item->dirty |= ITEM_DIRTY;
+
+			ret = insert_item(sb, cac, del, false, false);
+			BUG_ON(ret);
+			become_deletion_item(sb, cac, del);
+			del = NULL;
+			ret = 0;
+		} else if (check_range(sb, &cac->ranges, key, NULL)) {
+			ret = -ENOENT;
+		} else {
+			ret = -ENODATA;
+		}
+
+		spin_unlock_irqrestore(&cac->lock, flags);
+
+	} while (ret == -ENODATA &&
+		 (ret = scoutfs_manifest_read_items(sb, key, lock->end)) == 0);
+
+	free_item(sb, del);
+
+	return ret;
+}
+
+/*
+ * Restore a set of previousl saved items.  They're returned to the
+ * cached and marked dirty if they were dirty when they were saved.
+ * Restored items completely overwrite any existing cached items.
+ *
+ * The caller must have held locks covering the save and restore so that
+ * the cached ranges still exist.
+ */
+int scoutfs_item_restore(struct super_block *sb, struct list_head *list,
+			 struct scoutfs_lock *lock)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct item_cache *cac = sbi->item_cache;
+	struct cached_item *existing;
+	struct cached_item *item;
+	struct cached_item *tmp;
+	unsigned long flags;
+	bool was_dirty;
+	int mode;
+	int ret;
+
+	if (list_empty(list))
+		return 0;
+
+	spin_lock_irqsave(&cac->lock, flags);
+
+	/* make sure all the items are locked and cached */
+	list_for_each_entry(item, list, entry) {
+		mode = item_is_dirty(item) ? DLM_LOCK_EX : DLM_LOCK_PR;
+		if (WARN_ON_ONCE(!lock_coverage(lock, item->key, mode)) ||
+		    WARN_ON_ONCE(!check_range(sb, &cac->ranges, item->key,
+				 NULL))) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	list_for_each_entry_safe(item, tmp, list, entry) {
+		was_dirty = item_is_dirty(item);
+		item->dirty &= ~ITEM_DIRTY;
+		list_del_init(&item->entry);
+
+		existing = find_item(sb, &cac->items, item->key);
+		if (existing)
+			erase_item(sb, cac, existing);
+		insert_item(sb, cac, item, false, false);
+		if (was_dirty)
+			mark_item_dirty(sb, cac, item);
+	}
+
+	ret = 0;
+out:
+	spin_unlock_irqrestore(&cac->lock, flags);
 
 	return ret;
 }

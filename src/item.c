@@ -764,7 +764,7 @@ static bool lock_coverage(struct scoutfs_lock *lock,
 /*
  * Find an item with the given key and copy its value into the caller's
  * value vector.  The amount of bytes copied is returned which can be 0
- * or truncated if the caller's buffer isn't big enough.
+ * or truncated if the caller's buffer isn't big enough or if val is null.
  *
  * The end key limits how many keys after the search key can be read
  * and inserted into the cache.
@@ -789,7 +789,10 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 		item = find_item(sb, &cac->items, key);
 		if (item) {
 			item_referenced(cac, item);
-			ret = scoutfs_kvec_memcpy(val, item->val);
+			if (val)
+				ret = scoutfs_kvec_memcpy(val, item->val);
+			else
+				ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, NULL)) {
 			ret = -ENOENT;
 		} else {

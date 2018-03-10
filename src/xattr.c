@@ -242,14 +242,12 @@ out:
  * The confusing swiss army knife of creating, modifying, and deleting
  * xattrs.
  *
- * This always removes the old existing xattr.  If value is set then
- * we're replacing it with a new xattr.  The flags cause creation to
- * fail if the xattr already exists (_CREATE) or doesn't already exist
- * (_REPLACE).  xattrs can have a zero length value.
+ * This always removes the old existing xattr items.
  *
- * To modify xattrs built of individual items we use the batch
- * interface.  It provides atomic transitions from one group of items to
- * another.
+ * If the value pointer is set then we're replacing it with a new xattr.
+ * The flags cause creation to fail if the xattr already exists
+ * (_CREATE) or doesn't already exist (_REPLACE).  xattrs can have a
+ * zero length value.
  */
 static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 			     const void *value, size_t size, int flags)
@@ -258,8 +256,8 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_key_buf *last;
-	struct scoutfs_key_buf *key;
+	struct scoutfs_key_buf *last = NULL;
+	struct scoutfs_key_buf *key = NULL;
 	struct scoutfs_xattr_val_header vh;
 	size_t name_len = strlen(name);
 	SCOUTFS_DECLARE_KVEC(val);
@@ -267,16 +265,17 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	unsigned int bytes;
 	unsigned int off;
 	LIST_HEAD(ind_locks);
-	LIST_HEAD(list);
+	LIST_HEAD(saved);
 	u64 ind_seq;
-	u8 part;
-	int sif;
+	int part;
 	int ret;
 
 	trace_scoutfs_xattr_set(sb, name_len, value, size, flags);
 
 	if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN ||
-	    (value && size > SCOUTFS_XATTR_MAX_SIZE))
+	    (value && size > SCOUTFS_XATTR_MAX_SIZE) ||
+	    ((flags & XATTR_CREATE) && (flags & XATTR_REPLACE)) ||
+	    (flags & ~(XATTR_CREATE | XATTR_REPLACE)))
 		return -EINVAL;
 
 	if (unknown_prefix(name))
@@ -294,30 +293,19 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	if (ret)
 		goto out;
 
-	/* build up batch of new items for the new xattr */
-	if (value) {
-		for_each_xattr_item(key, val, &vh, (void *)value, size,
-				    part, off, bytes) {
-
-			ret = scoutfs_item_add_batch(sb, &list, key, val);
-			if (ret)
-				goto out;
-		}
+	/* see if we violate the flag constraints */
+	if ((flags & (XATTR_CREATE | XATTR_REPLACE))) {
+		set_xattr_key_part(key, 0);
+		ret = scoutfs_item_lookup(sb, key, NULL, lck);
+		if (ret == -ENOENT && (flags & XATTR_REPLACE))
+			ret = -ENODATA;
+		else if (ret == 0 && (flags & XATTR_CREATE))
+			ret = -EEXIST;
+		else if (ret == -ENOENT && (flags & XATTR_CREATE))
+			ret = 0;
+		if (ret < 0)
+			goto out;
 	}
-
-	/* XXX could add range deletion items around xattr items here */
-
-	/* reset key to first */
-	set_xattr_key_part(key, 0);
-
-	if (flags & XATTR_CREATE)
-		sif = SIF_EXCLUSIVE;
-	else if (flags & XATTR_REPLACE)
-		sif = SIF_REPLACE;
-	else
-		sif = 0;
-
-	down_write(&si->xattr_rwsem);
 
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
@@ -327,26 +315,61 @@ retry:
 	if (ret > 0)
 		goto retry;
 	if (ret)
-		goto unlock;
+		goto out;
 
-	ret = scoutfs_dirty_inode_item(inode, lck) ?:
-	      scoutfs_item_set_batch(sb, &list, key, last, sif, lck);
-	if (ret == 0) {
-		/* XXX do these want i_mutex or anything? */
-		inode_inc_iversion(inode);
-		inode->i_ctime = CURRENT_TIME;
-		scoutfs_update_inode_item(inode, lck, &ind_locks);
+	down_write(&si->xattr_rwsem);
+
+	ret = scoutfs_dirty_inode_item(inode, lck);
+	if (ret < 0)
+		goto release;
+
+	/* delete and save any existing xattr items */
+	for (part = 0; part < SCOUTFS_XATTR_MAX_PARTS; part++) {
+		set_xattr_key_part(key, part);
+		ret = scoutfs_item_delete_save(sb, key, &saved, lck);
+		if (ret == -ENOENT) {
+			ret = 0;
+			break;
+		}
+		if (ret < 0)
+			goto release;
 	}
 
-	scoutfs_release_trans(sb);
+	/* create items for the new xattr */
+	if (value) {
+		for_each_xattr_item(key, val, &vh, (void *)value, size,
+				    part, off, bytes) {
 
-unlock:
+			ret = scoutfs_item_create(sb, key, val, lck);
+			if (ret < 0) {
+				/* remove any previously created items */
+				while (--part >= 0) {
+					set_xattr_key_part(key, part);
+					scoutfs_item_delete_dirty(sb, key);
+				}
+				goto release;
+			}
+		}
+	}
+
+	/* XXX do these want i_mutex or anything? */
+	inode_inc_iversion(inode);
+	inode->i_ctime = CURRENT_TIME;
+	scoutfs_update_inode_item(inode, lck, &ind_locks);
+	ret = 0;
+
+release:
+	/* restore the old xattr if we modified it then errored */
+	if (ret < 0)
+		scoutfs_item_restore(sb, &saved, lck);
+
 	up_write(&si->xattr_rwsem);
+	scoutfs_release_trans(sb);
 
 out:
 	scoutfs_inode_index_unlock(sb, &ind_locks);
 	scoutfs_unlock(sb, lck, DLM_LOCK_EX);
-	scoutfs_item_free_batch(sb, &list);
+	scoutfs_item_free_batch(sb, &saved);
 	scoutfs_key_free(sb, key);
 	scoutfs_key_free(sb, last);
 
@@ -359,7 +382,7 @@ int scoutfs_setxattr(struct dentry *dentry, const char *name,
 	if (size == 0)
 		value = ""; /* set empty value */
 
-	return scoutfs_xattr_set(dentry, name, value, size, 0);
+	return scoutfs_xattr_set(dentry, name, value, size, flags);
 }
 
 int scoutfs_removexattr(struct dentry *dentry, const char *name)

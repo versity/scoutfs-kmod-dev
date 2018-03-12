@@ -128,9 +128,10 @@ void scoutfs_key_dec(struct scoutfs_key_buf *key)
  * formatting to represent the trailing bytes: runs of zeros compresesd
  * to _ and then hex output of non-zero bytes.
  */
-static int snprintf_key(char *buf, size_t size, struct scoutfs_key_buf *key,
-			unsigned min_len, unsigned fmt_len,
-			const char *fmt, ...)
+static int __printf(6, 7) snprintf_key(char *buf, size_t size,
+				       struct scoutfs_key_buf *key,
+				       unsigned min_len, unsigned fmt_len,
+				       const char *fmt, ...)
 
 {
 	va_list args;

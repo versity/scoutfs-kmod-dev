@@ -18,6 +18,7 @@ struct scoutfs_inode_info {
 	/* read or initialized for each inode instance */
 	u64 ino;
 	u64 next_readdir_pos;
+	u64 next_xattr_id;
 	u64 meta_seq;
 	u64 data_seq;
 	u64 data_version;

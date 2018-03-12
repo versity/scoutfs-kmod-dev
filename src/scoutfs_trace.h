@@ -1435,6 +1435,11 @@ DEFINE_EVENT(scoutfs_key_class, scoutfs_item_shrink,
         TP_ARGS(sb, key)
 );
 
+DEFINE_EVENT(scoutfs_key_class, scoutfs_xattr_get_next_key,
+        TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *key),
+        TP_ARGS(sb, key)
+);
+
 DECLARE_EVENT_CLASS(scoutfs_range_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_key_buf *start,
 		 struct scoutfs_key_buf *end),

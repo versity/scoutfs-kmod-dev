@@ -234,6 +234,7 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	ci->online_blocks = le64_to_cpu(cinode->online_blocks);
 	ci->offline_blocks = le64_to_cpu(cinode->offline_blocks);
 	ci->next_readdir_pos = le64_to_cpu(cinode->next_readdir_pos);
+	ci->next_xattr_id = le64_to_cpu(cinode->next_xattr_id);
 	ci->flags = le32_to_cpu(cinode->flags);
 
 	/*
@@ -667,6 +668,7 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->offline_blocks =
 		cpu_to_le64(scoutfs_inode_offline_blocks(inode));
 	cinode->next_readdir_pos = cpu_to_le64(ci->next_readdir_pos);
+	cinode->next_xattr_id = cpu_to_le64(ci->next_xattr_id);
 	cinode->flags = cpu_to_le32(ci->flags);
 }
 
@@ -1327,6 +1329,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->online_blocks = 0;
 	ci->offline_blocks = 0;
 	ci->next_readdir_pos = SCOUTFS_DIRENT_FIRST_POS;
+	ci->next_xattr_id = 0;
 	ci->have_item = false;
 	atomic64_set(&ci->last_refreshed, lock->refresh_gen);
 	ci->flags = 0;

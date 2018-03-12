@@ -362,22 +362,24 @@ struct scoutfs_orphan_key {
 	__be64 ino;
 } __packed;
 
-/* value is each item's part of the full xattr value for the off/len */
 struct scoutfs_xattr_key {
 	__u8 zone;
 	__be64 ino;
 	__u8 type;
-	__u8 name[0];
-} __packed;
-
-struct scoutfs_xattr_key_footer {
-	__u8 null;
+	__be32 name_hash;
+	__be64 id;
 	__u8 part;
 } __packed;
 
-struct scoutfs_xattr_val_header {
-	__le16 part_len;
-	__u8 last_part;
+/*
+ * The first xattr part item has a header that describes the xattr.  The
+ * name and value are then packed into the following bytes in the first
+ * part item and overflow into the values of the rest of the part items.
+ */
+struct scoutfs_xattr {
+	__u8 name_len;
+	__le16 val_len;
+	__u8 name[0];
 } __packed;
 
 /* size determines nr needed to store full target path in their values */
@@ -472,6 +474,7 @@ struct scoutfs_inode {
 	__le64 online_blocks;
 	__le64 offline_blocks;
 	__le64 next_readdir_pos;
+	__le64 next_xattr_id;
 	__le32 nlink;
 	__le32 uid;
 	__le32 gid;
@@ -529,12 +532,13 @@ enum {
 
 #define SCOUTFS_MAX_VAL_SIZE SCOUTFS_BLOCK_MAPPING_MAX_BYTES
 
-#define SCOUTFS_XATTR_MAX_NAME_LEN 255
-#define SCOUTFS_XATTR_MAX_SIZE 65536
-#define SCOUTFS_XATTR_PART_SIZE \
-	(SCOUTFS_MAX_VAL_SIZE - sizeof(struct scoutfs_xattr_val_header))
-#define SCOUTFS_XATTR_MAX_PARTS \
-	DIV_ROUND_UP(SCOUTFS_XATTR_MAX_SIZE, SCOUTFS_XATTR_PART_SIZE)
+#define SCOUTFS_XATTR_MAX_NAME_LEN	255
+#define SCOUTFS_XATTR_MAX_VAL_LEN	65535
+#define SCOUTFS_XATTR_MAX_PART_SIZE	512U
+
+#define SCOUTFS_XATTR_NR_PARTS(name_len, val_len)			\
+	DIV_ROUND_UP(sizeof(struct scoutfs_xattr) + name_len + val_len, \
+		     SCOUTFS_XATTR_MAX_PART_SIZE);
 
 /*
  * structures used by dlm

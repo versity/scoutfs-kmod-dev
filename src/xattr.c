@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016 Versity Software, Inc.  All rights reserved.
+ * Copyright (C) 2018 Versity Software, Inc.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/xattr.h>
+#include <linux/crc32c.h>
 
 #include "format.h"
 #include "inode.h"
@@ -27,109 +28,60 @@
 #include "scoutfs_trace.h"
 
 /*
- * In the simple case an xattr is stored in a single item whose key and
- * value contain the key and value from the xattr.
+ * Extended attributes are packed into multiple smaller file system
+ * items.  The common case only uses one item.
  *
- * But xattr values can be larger than our max item value length.  In
- * that case the rest of the xattr value is stored in additional items.
- * Each item key contains a footer struct after the name which
- * identifies the position of the item in the series that make up the
- * total xattr.
+ * The xattr keys contain the hash of the xattr name and a unique
+ * identifier used to differentiate xattrs whose names hash to the same
+ * value.  xattr lookup has to walk all the xattrs with the matching
+ * name hash to compare the names.
  *
- * That xattrs are then spread out across multiple items does mean that
- * we need locking other than the item cache locking which only protects
- * each item call, the i_mutex which isn't held on getxattr, and cluster
- * locking which doesn't serialize local matches on the same node.  We
- * use a rwsem in the inode.
+ * We use a rwsem in the inode to serialize modification of multiple
+ * items to make sure that we don't let readers race and see an
+ * inconsistent mix of the items that make up xattrs.
  *
  * XXX
  *  - add acl support and call generic xattr->handlers for SYSTEM
  */
 
-/*
- * We have a static full xattr name with all 1s so that we can construct
- * precise final keys for the range of items that cover all the xattrs
- * on an inode.  We could instead construct a smaller last key for the
- * next inode with a null name but that could be accidentally create
- * lock contention with that next inode.  We want lock ranges to be as
- * precise as possible.
- */
-static char last_xattr_name[SCOUTFS_XATTR_MAX_NAME_LEN];
-
-/* account for the footer after the name */
-static unsigned xattr_key_bytes(unsigned name_len)
+static u32 xattr_name_hash(const char *name, unsigned int name_len)
 {
-	return offsetof(struct scoutfs_xattr_key, name[name_len]) +
-	       sizeof(struct scoutfs_xattr_key_footer);
+	return crc32c(U32_MAX, name, name_len);
 }
 
-static unsigned xattr_key_name_len(struct scoutfs_key_buf *key)
+/* only compare names if the lens match, callers might not have both names */
+static u32 xattr_names_equal(const char *a_name, unsigned int a_len,
+			     const char *b_name, unsigned int b_len)
 {
-	return key->key_len - xattr_key_bytes(0);
+	return a_len == b_len && memcmp(a_name, b_name, a_len) == 0;
 }
 
-static struct scoutfs_xattr_key_footer *
-xattr_key_footer(struct scoutfs_key_buf *key)
+static unsigned int xattr_full_bytes(struct scoutfs_xattr *xat)
 {
-	return key->data + key->key_len -
-	       sizeof(struct scoutfs_xattr_key_footer);
+	return offsetof(struct scoutfs_xattr,
+		        name[xat->name_len + le16_to_cpu(xat->val_len)]);
 }
 
-static struct scoutfs_key_buf *alloc_xattr_key(struct super_block *sb,
-					       u64 ino, const char *name,
-					       unsigned int name_len, u8 part)
+static unsigned int xattr_nr_parts(struct scoutfs_xattr *xat)
 {
-	struct scoutfs_xattr_key_footer *foot;
-	struct scoutfs_xattr_key *xkey;
-	struct scoutfs_key_buf *key;
-
-	key = scoutfs_key_alloc(sb, xattr_key_bytes(name_len));
-	if (key) {
-		xkey = key->data;
-		foot = xattr_key_footer(key);
-
-		xkey->zone = SCOUTFS_FS_ZONE;
-		xkey->ino = cpu_to_be64(ino);
-		xkey->type = SCOUTFS_XATTR_TYPE;
-
-		if (name && name_len)
-			memcpy(xkey->name, name, name_len);
-
-		foot->null = '\0';
-		foot->part = part;
-	}
-
-	return key;
+	return SCOUTFS_XATTR_NR_PARTS(xat->name_len,
+				      le16_to_cpu(xat->val_len));
 }
 
-static void set_xattr_key_part(struct scoutfs_key_buf *key, u8 part)
+/* If no name is provided then the hash arg is used, caller can modify part */
+static void init_xattr_key(struct scoutfs_key_buf *key,
+			   struct scoutfs_xattr_key *xak, u64 ino,
+			   u32 name_hash, u64 id)
 {
-	struct scoutfs_xattr_key_footer *foot = xattr_key_footer(key);
+	xak->zone = SCOUTFS_FS_ZONE;
+	xak->ino = cpu_to_be64(ino);
+	xak->type = SCOUTFS_XATTR_TYPE;
+	xak->name_hash = cpu_to_be32(name_hash);
+	xak->id = cpu_to_be64(id);
+	xak->part = 0;
 
-	foot->part = part;
+	scoutfs_key_init(key, xak, sizeof(struct scoutfs_xattr_key));
 }
-
-/*
- * This walks the keys and values for the items that make up the xattr
- * items that describe the value in the caller's buffer.  The caller is
- * responsible for breaking out when it hits an existing final item that
- * hasn't consumed the buffer.
- *
- * Each iteration sets the val header in case the caller is writing
- * items.  If they're reading items they'll just overwrite it.
- */
-#define for_each_xattr_item(key, val, vh, buffer, size, part, off, bytes)    \
-	for (part = 0, off = 0;						     \
-	     ((off < size) || (part == 0 && size == 0)) &&		     \
-		(bytes = min_t(size_t, SCOUTFS_XATTR_PART_SIZE, size - off), \
-		 set_xattr_key_part(key, part),				     \
-		 (vh)->part_len = cpu_to_le16(bytes),			     \
-		 (vh)->last_part = off + bytes == size ? 1 : 0,		     \
-		 scoutfs_kvec_init(val, vh,				     \
-			           sizeof(struct scoutfs_xattr_val_header),  \
-				   buffer + off, bytes),		     \
-		 1);							     \
-	     part++, off += bytes)
 
 static int unknown_prefix(const char *name)
 {
@@ -140,6 +92,182 @@ static int unknown_prefix(const char *name)
 }
 
 /*
+ * Find the next xattr and copy the key, xattr header, and as much of
+ * the name and value into the callers buffer as we can.  Returns the
+ * number of bytes copied which include the header, name, and value and
+ * can be limited by the xattr length or the callers buffer.  The caller
+ * is responsible for comparing their lengths, the header, and the
+ * returned length before safely using the xattr.
+ *
+ * If a name is provided then we'll iterate over items with a matching
+ * name_hash until we find a matching name.  If we don't find a matching
+ * name then we return -ENOENT.
+ *
+ * If a name isn't provided then we'll return the next xattr from the
+ * given name_hash and id position.
+ *
+ * Returns -ENOENT if it didn't find a next item.
+ */
+static int get_next_xattr(struct inode *inode, struct scoutfs_xattr_key *xak,
+			  struct scoutfs_xattr *xat, unsigned int bytes,
+			  const char *name, unsigned int name_len,
+			  u64 name_hash, u64 id, struct scoutfs_lock *lock)
+{
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_xattr_key last_xak;
+	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf key;
+	SCOUTFS_DECLARE_KVEC(val);
+	u8 last_part;
+	int total;
+	u8 part;
+	int ret;
+
+	/* need to be able to see the name we're looking for */
+	if (WARN_ON_ONCE(name_len > 0 && bytes < offsetof(struct scoutfs_xattr,
+							  name[name_len])))
+		return -EINVAL;
+
+	if (name_len)
+		name_hash = xattr_name_hash(name, name_len);
+
+	init_xattr_key(&key, xak, scoutfs_ino(inode), name_hash, id);
+	init_xattr_key(&last, &last_xak, scoutfs_ino(inode), U32_MAX, U64_MAX);
+
+	last_part = 0;
+	part = 0;
+	total = 0;
+
+	for (;;) {
+		xak->part = part;
+		scoutfs_kvec_init(val, (void *)xat + total, bytes - total);
+		ret = scoutfs_item_next(sb, &key, &last, val, lock);
+		if (ret < 0) {
+			/* XXX corruption, ran out of parts */
+			if (ret == -ENOENT && part > 0)
+				ret = -EIO;
+			break;
+		}
+
+		trace_scoutfs_xattr_get_next_key(sb, &key);
+
+		/* XXX corruption */
+		if (xak->part != part) {
+			ret = -EIO;
+			break;
+		}
+
+		/*
+		 * XXX corruption: We should have seen a valid header in
+		 * the first part and if the next xattr name fits in our
+		 * buffer then the item must have included it.
+		 */
+		if (part == 0 &&
+		    (ret < sizeof(struct scoutfs_xattr) ||
+		     (xat->name_len <= name_len &&
+		      ret < offsetof(struct scoutfs_xattr,
+				     name[xat->name_len])) ||
+		     xat->name_len > SCOUTFS_XATTR_MAX_NAME_LEN ||
+		     le16_to_cpu(xat->val_len) > SCOUTFS_XATTR_MAX_VAL_LEN)) {
+			ret = -EIO;
+			break;
+		}
+
+		if (part == 0 && name_len) {
+			/* ran out of names that could match */
+			if (be32_to_cpu(xak->name_hash) != name_hash) {
+				ret = -ENOENT;
+				break;
+			}
+
+			/* keep looking for our name */
+			if (!xattr_names_equal(name, name_len,
+					       xat->name, xat->name_len)) {
+				part = 0;
+				be64_add_cpu(&xak->id, 1);
+				continue;
+			}
+
+			/* use the matching name we found */
+			last_part = xattr_nr_parts(xat) - 1;
+		}
+
+		total += ret;
+		if (total == bytes || part == last_part) {
+			/* copied as much as we could */
+			ret = total;
+			break;
+		}
+		part++;
+	}
+
+	return ret;
+}
+
+/*
+ * Create all the items associated with the given xattr.  If this
+ * returns an error it will have already cleaned up any items it created
+ * before seeing the error.
+ */
+static int create_xattr_items(struct inode *inode, u64 id,
+			      struct scoutfs_xattr *xat, unsigned int bytes,
+			      struct scoutfs_lock *lock)
+{
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_xattr_key xak;
+	struct scoutfs_key_buf key;
+	SCOUTFS_DECLARE_KVEC(val);
+	unsigned int part_bytes;
+	int total;
+	int ret;
+
+	init_xattr_key(&key, &xak, scoutfs_ino(inode),
+		       xattr_name_hash(xat->name, xat->name_len), id);
+
+	total = 0;
+	ret = 0;
+	while (total < bytes) {
+		part_bytes = min(bytes - total, SCOUTFS_XATTR_MAX_PART_SIZE);
+		scoutfs_kvec_init(val, (void *)xat + total, part_bytes);
+
+		ret = scoutfs_item_create(sb, &key, val, lock);
+		if (ret) {
+			while (xak.part-- > 0)
+				scoutfs_item_delete_dirty(sb, &key);
+			break;
+		}
+
+		total += part_bytes;
+		xak.part++;
+	}
+
+	return ret;
+}
+
+/*
+ * Delete and save the items that make up the given xattr.  If this
+ * returns an error then the deleted and saved items are left on the
+ * list for the caller to restore.
+ */
+static int delete_xattr_items(struct inode *inode, u64 name_hash, u64 id,
+			      u8 nr_parts, struct list_head *list,
+			      struct scoutfs_lock *lock)
+{
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_xattr_key xak;
+	struct scoutfs_key_buf key;
+	int ret;
+
+	init_xattr_key(&key, &xak, scoutfs_ino(inode), name_hash, id);
+
+	do {
+		ret = scoutfs_item_delete_save(sb, &key, list, lock);
+	} while (ret == 0 && ++xak.part < nr_parts);
+
+	return ret;
+}
+
+/*
  * Copy the value for the given xattr name into the caller's buffer, if it
  * fits.  Return the bytes copied or -ERANGE if it doesn't fit.
  */
@@ -147,18 +275,13 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 			 size_t size)
 {
 	struct inode *inode = dentry->d_inode;
-	struct super_block *sb = inode->i_sb;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
-	struct scoutfs_xattr_val_header vh;
-	struct scoutfs_key_buf *key = NULL;
-	struct scoutfs_key_buf *last = NULL;
-	SCOUTFS_DECLARE_KVEC(val);
-	struct scoutfs_lock *lck;
-	unsigned int total;
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_xattr *xat = NULL;
+	struct scoutfs_lock *lck = NULL;
+	struct scoutfs_xattr_key xak;
 	unsigned int bytes;
-	unsigned int off;
 	size_t name_len;
-	u8 part;
 	int ret;
 
 	if (unknown_prefix(name))
@@ -168,16 +291,11 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN)
 		return -ENODATA;
 
-	/* honestly, userspace, just alloc a max size buffer */
-	if (size == 0)
-		return SCOUTFS_XATTR_MAX_SIZE;
-
-	key = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0);
-	last = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0xff);
-	if (!key || !last) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	/* only need enough for caller's name and value sizes */
+	bytes = sizeof(struct scoutfs_xattr) + name_len + size;
+	xat = kmalloc(bytes, GFP_NOFS);
+	if (!xat)
+		return -ENOMEM;
 
 	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &lck);
 	if (ret)
@@ -185,56 +303,40 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 
 	down_read(&si->xattr_rwsem);
 
-	total = 0;
-	vh.last_part = 0;
-
-	for_each_xattr_item(key, val, &vh, buffer, size, part, off, bytes) {
-
-		ret = scoutfs_item_lookup(sb, key, val, lck);
-		if (ret < 0) {
-			if (ret == -ENOENT)
-				ret = -ENODATA;
-			break;
-		}
-
-		/* XXX corruption: no header, more val than header len */
-		ret -= sizeof(struct scoutfs_xattr_val_header);
-		if (ret < 0 || ret > le16_to_cpu(vh.part_len)) {
-			ret = -EIO;
-			break;
-		}
-
-		/* not enough buffer if we didn't copy the part */
-		if (ret < le16_to_cpu(vh.part_len)) {
-			ret = -ERANGE;
-			break;
-		}
-
-		total += ret;
-
-		/* XXX corruption: total xattr val too long */
-		if (total > SCOUTFS_XATTR_MAX_SIZE) {
-			ret = -EIO;
-			break;
-		}
-
-		/* done if we fully copied last part */
-		if (vh.last_part) {
-			ret = total;
-			break;
-		}
-	}
-
-	/* not enough buffer if we didn't see last */
-	if (ret >= 0 && !vh.last_part)
-		ret = -ERANGE;
+	ret = get_next_xattr(inode, &xak, xat, bytes,
+			     name, name_len, 0, 0, lck);
 
 	up_read(&si->xattr_rwsem);
 	scoutfs_unlock(sb, lck, DLM_LOCK_PR);
 
+	if (ret < 0) {
+		if (ret == -ENOENT)
+			ret = -ENODATA;
+		goto out;
+	}
+
+	/* the caller just wants to know the size */
+	if (size == 0) {
+		ret = le16_to_cpu(xat->val_len);
+		goto out;
+	}
+
+	/* the caller's buffer wasn't big enough */
+	if (size < le16_to_cpu(xat->val_len)) {
+		ret = -ERANGE;
+		goto out;
+	}
+
+	/* XXX corruption, the items didn't match the header */
+	if (ret < xattr_full_bytes(xat)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	ret = le16_to_cpu(xat->val_len);
+	memcpy(buffer, &xat->name[xat->name_len], ret);
 out:
-	scoutfs_key_free(sb, key);
-	scoutfs_key_free(sb, last);
+	kfree(xat);
 	return ret;
 }
 
@@ -244,46 +346,47 @@ out:
  *
  * This always removes the old existing xattr items.
  *
- * If the value pointer is set then we're replacing it with a new xattr.
- * The flags cause creation to fail if the xattr already exists
- * (_CREATE) or doesn't already exist (_REPLACE).  xattrs can have a
- * zero length value.
+ * If the value pointer is set then we're adding a new xattr.  The flags
+ * cause creation to fail if the xattr already exists (_CREATE) or
+ * doesn't already exist (_REPLACE).  xattrs can have a zero length
+ * value.
  */
 static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 			     const void *value, size_t size, int flags)
-
 {
 	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_key_buf *last = NULL;
-	struct scoutfs_key_buf *key = NULL;
-	struct scoutfs_xattr_val_header vh;
-	size_t name_len = strlen(name);
-	SCOUTFS_DECLARE_KVEC(val);
+	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_lock *lck = NULL;
-	unsigned int bytes;
-	unsigned int off;
+	size_t name_len = strlen(name);
+	struct scoutfs_xattr_key xak;
 	LIST_HEAD(ind_locks);
 	LIST_HEAD(saved);
+	u8 found_parts;
+	unsigned int bytes;
 	u64 ind_seq;
-	int part;
+	u64 id;
 	int ret;
 
 	trace_scoutfs_xattr_set(sb, name_len, value, size, flags);
 
-	if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN ||
-	    (value && size > SCOUTFS_XATTR_MAX_SIZE) ||
-	    ((flags & XATTR_CREATE) && (flags & XATTR_REPLACE)) ||
+	/* mirror the syscall's errors for large names and values */
+	if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN)
+		return -ERANGE;
+	if (value && size > SCOUTFS_XATTR_MAX_VAL_LEN)
+		return -E2BIG;
+
+	if (((flags & XATTR_CREATE) && (flags & XATTR_REPLACE)) ||
 	    (flags & ~(XATTR_CREATE | XATTR_REPLACE)))
 		return -EINVAL;
 
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;
 
-	key = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0);
-	last = alloc_xattr_key(sb, scoutfs_ino(inode), name, name_len, 0xff);
-	if (!key || !last) {
+	bytes = sizeof(struct scoutfs_xattr) + name_len + size;
+	xat = kmalloc(bytes, GFP_NOFS);
+	if (!xat) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -293,64 +396,70 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	if (ret)
 		goto out;
 
-	/* see if we violate the flag constraints */
-	if ((flags & (XATTR_CREATE | XATTR_REPLACE))) {
-		set_xattr_key_part(key, 0);
-		ret = scoutfs_item_lookup(sb, key, NULL, lck);
-		if (ret == -ENOENT && (flags & XATTR_REPLACE))
-			ret = -ENODATA;
-		else if (ret == 0 && (flags & XATTR_CREATE))
-			ret = -EEXIST;
-		else if (ret == -ENOENT && (flags & XATTR_CREATE))
-			ret = 0;
-		if (ret < 0)
-			goto out;
+	down_write(&si->xattr_rwsem);
+
+	/* find an existing xattr to delete */
+	ret = get_next_xattr(inode, &xak, xat,
+			     sizeof(struct scoutfs_xattr) + name_len,
+			     name, name_len, 0, 0, lck);
+	if (ret < 0 && ret != -ENOENT)
+		goto unlock;
+
+	/* check existence constraint flags */
+	if (ret == -ENOENT && (flags & XATTR_REPLACE)) {
+		ret = -ENODATA;
+		goto unlock;
+	} else if (ret >= 0 && (flags & XATTR_CREATE)) {
+		ret = -EEXIST;
+		goto unlock;
+	}
+
+	/* not an error to delete something that doesn't exist */
+	if (ret == -ENOENT && !value) {
+		ret = 0;
+		goto unlock;
+	}
+
+	/* found fields in xak will also be used */
+	found_parts = ret >= 0 ? xattr_nr_parts(xat) : 0;
+
+	/* prepare our xattr */
+	if (value) {
+		id = si->next_xattr_id++;
+		xat->name_len = name_len;
+		xat->val_len = cpu_to_le16(size);
+		memcpy(xat->name, name, name_len);
+		memcpy(&xat->name[xat->name_len], value, size);
 	}
 
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 	      scoutfs_inode_index_prepare(sb, &ind_locks, inode, false) ?:
 	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
-						SIC_XATTR_SET(name_len, size));
+						SIC_XATTR_SET(found_parts,
+							      value != NULL,
+							      name_len, size));
 	if (ret > 0)
 		goto retry;
 	if (ret)
-		goto out;
-
-	down_write(&si->xattr_rwsem);
+		goto unlock;
 
 	ret = scoutfs_dirty_inode_item(inode, lck);
 	if (ret < 0)
 		goto release;
 
-	/* delete and save any existing xattr items */
-	for (part = 0; part < SCOUTFS_XATTR_MAX_PARTS; part++) {
-		set_xattr_key_part(key, part);
-		ret = scoutfs_item_delete_save(sb, key, &saved, lck);
-		if (ret == -ENOENT) {
-			ret = 0;
-			break;
-		}
-		if (ret < 0)
-			goto release;
+	ret = 0;
+	if (found_parts)
+		ret = delete_xattr_items(inode, be32_to_cpu(xak.name_hash),
+					 be64_to_cpu(xak.id), found_parts,
+					 &saved, lck);
+	if (value && ret == 0)
+		ret = create_xattr_items(inode, id, xat, bytes, lck);
+	if (ret < 0) {
+		scoutfs_item_restore(sb, &saved, lck);
+		goto release;
 	}
-
-	/* create items for the new xattr */
-	if (value) {
-		for_each_xattr_item(key, val, &vh, (void *)value, size,
-				    part, off, bytes) {
-
-			ret = scoutfs_item_create(sb, key, val, lck);
-			if (ret < 0) {
-				/* remove any previously created items */
-				while (--part >= 0) {
-					set_xattr_key_part(key, part);
-					scoutfs_item_delete_dirty(sb, key);
-				}
-				goto release;
-			}
-		}
-	}
+	scoutfs_item_free_batch(sb, &saved);
 
 	/* XXX do these want i_mutex or anything? */
 	inode_inc_iversion(inode);
@@ -359,19 +468,13 @@ retry:
 	ret = 0;
 
 release:
-	/* restore the old xattr if we modified it then errored */
-	if (ret < 0)
-		scoutfs_item_restore(sb, &saved, lck);
-
-	up_write(&si->xattr_rwsem);
 	scoutfs_release_trans(sb);
-
-out:
 	scoutfs_inode_index_unlock(sb, &ind_locks);
+unlock:
+	up_write(&si->xattr_rwsem);
 	scoutfs_unlock(sb, lck, DLM_LOCK_EX);
-	scoutfs_item_free_batch(sb, &saved);
-	scoutfs_key_free(sb, key);
-	scoutfs_key_free(sb, last);
+out:
+	kfree(xat);
 
 	return ret;
 }
@@ -395,26 +498,22 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
-	struct scoutfs_xattr_key_footer *foot;
-	struct scoutfs_xattr_key *xkey;
-	struct scoutfs_key_buf *key;
-	struct scoutfs_key_buf *last;
-	struct scoutfs_lock *lck;
+	struct scoutfs_xattr *xat = NULL;
+	struct scoutfs_lock *lck = NULL;
+	struct scoutfs_xattr_key xak;
+	unsigned int bytes;
 	ssize_t total;
-	int name_len;
+	u32 name_hash;
+	u64 id;
 	int ret;
 
-	key = alloc_xattr_key(sb, scoutfs_ino(inode),
-			      NULL, SCOUTFS_XATTR_MAX_NAME_LEN, 0);
-	last = alloc_xattr_key(sb, scoutfs_ino(inode), last_xattr_name,
-			       SCOUTFS_XATTR_MAX_NAME_LEN, 0xff);
-	if (!key || !last) {
+	/* need a buffer large enough for all possible names */
+	bytes = sizeof(struct scoutfs_xattr) + SCOUTFS_XATTR_MAX_NAME_LEN;
+	xat = kmalloc(bytes, GFP_NOFS);
+	if (!xat) {
 		ret = -ENOMEM;
 		goto out;
 	}
-
-	xkey = key->data;
-	xkey->name[0] = '\0';
 
 	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &lck);
 	if (ret)
@@ -422,34 +521,20 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 	down_read(&si->xattr_rwsem);
 
+	name_hash = 0;
+	id = 0;
 	total = 0;
+
 	for (;;) {
-		ret = scoutfs_item_next(sb, key, last, NULL, lck);
+		ret = get_next_xattr(inode, &xak, xat, bytes,
+				     NULL, 0, name_hash, id, lck);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = total;
 			break;
 		}
 
-		/* not used until we verify key len */
-		foot = xattr_key_footer(key);
-
-		/* XXX corruption */
-		if (key->key_len < xattr_key_bytes(1) ||
-		    foot->null != '\0' || foot->part != 0) {
-			ret = -EIO;
-			break;
-		}
-
-		name_len = xattr_key_name_len(key);
-
-		/* XXX corruption? */
-		if (name_len > SCOUTFS_XATTR_MAX_NAME_LEN) {
-			ret = -EIO;
-			break;
-		}
-
-		total += name_len + 1;
+		total += xat->name_len + 1;
 
 		if (size) {
 			if (total > size) {
@@ -457,26 +542,27 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 				break;
 			}
 
-			memcpy(buffer, xkey->name, name_len);
-			buffer += name_len;
+			memcpy(buffer, xat->name, xat->name_len);
+			buffer += xat->name_len;
 			*(buffer++) = '\0';
 		}
 
-		set_xattr_key_part(key, 0xff);
+		name_hash = be32_to_cpu(xak.name_hash);
+		id = be64_to_cpu(xak.id) + 1;
 	}
 
 	up_read(&si->xattr_rwsem);
 	scoutfs_unlock(sb, lck, DLM_LOCK_PR);
 out:
-	scoutfs_key_free(sb, key);
-	scoutfs_key_free(sb, last);
+	kfree(xat);
 
 	return ret;
 }
 
 /*
  * Delete all the xattr items associated with this inode.  The caller
- * holds a transaction.
+ * holds a transaction.  The inode is dead so we don't need the xattr
+ * rwsem.
  *
  * XXX This isn't great because it reads in all the items so that it can
  * create deletion items for each.  It would be better to have the
@@ -485,53 +571,37 @@ out:
  */
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
 {
-	struct scoutfs_key_buf *key;
-	struct scoutfs_key_buf *last;
+	struct scoutfs_xattr_key last_xak;
+	struct scoutfs_xattr_key xak;
+	struct scoutfs_key_buf last;
+	struct scoutfs_key_buf key;
 	struct scoutfs_lock *lck;
 	int ret;
 
-	key = alloc_xattr_key(sb, ino, NULL, SCOUTFS_XATTR_MAX_NAME_LEN, 0);
-	last = alloc_xattr_key(sb, ino, last_xattr_name,
-			       SCOUTFS_XATTR_MAX_NAME_LEN, 0xff);
-	if (!key || !last) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	init_xattr_key(&key, &xak, ino, 0, 0);
+	init_xattr_key(&last, &last_xak, ino, U32_MAX, U64_MAX);
 
 	/* while we read to delete we need to writeback others */
 	ret = scoutfs_lock_ino(sb, DLM_LOCK_EX, 0, ino, &lck);
 	if (ret)
 		goto out;
 
-	/* the inode is dead so we don't need the xattr sem */
-
 	for (;;) {
-		ret = scoutfs_item_next(sb, key, last, NULL, lck);
+		ret = scoutfs_item_next(sb, &key, &last, NULL, lck);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		ret = scoutfs_item_delete(sb, key, lck);
+		ret = scoutfs_item_delete(sb, &key, lck);
 		if (ret)
 			break;
 
-		/* don't need to increment past deleted key */
+		xak.part++;
 	}
 
 	scoutfs_unlock(sb, lck, DLM_LOCK_EX);
-
 out:
-	scoutfs_key_free(sb, key);
-	scoutfs_key_free(sb, last);
-
 	return ret;
-}
-
-int scoutfs_xattr_init(void)
-{
-	memset(last_xattr_name, 0xff, sizeof(last_xattr_name));
-
-	return 0;
 }

@@ -183,30 +183,35 @@ static inline const struct scoutfs_item_count SIC_RENAME(unsigned old_len,
 }
 
 /*
- * Setting an xattr results in a dirty set of items with values for the
- * size of the xattr.  There's always at least one item with a value
- * header.  Any previously existing items from a larger xattr are
- * deleted which dirties their key but removes their value.  We don't
- * know the size of a possibly existing xattr so we assume max parts.
+ * Creating an xattr results in a dirty set of items with values that
+ * store the xattr header, name, and value.  There's always at least one
+ * item with the header and name.  Any previously existing items are
+ * deleted which dirties their key but removes their value.  The two
+ * sets of items are indexed by different ids so their items don't
+ * overlap.
  */
-static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned name_len,
+static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned old_parts,
+							    bool creating,
+							    unsigned name_len,
 							    unsigned size)
 {
 	struct scoutfs_item_count cnt = {0,};
-	unsigned val_parts;
+	unsigned int new_parts;
 
 	__count_dirty_inode(&cnt);
 
-	val_parts = max_t(unsigned, 1,
-			  DIV_ROUND_UP(size, SCOUTFS_XATTR_PART_SIZE));
+	if (old_parts) {
+		cnt.items += old_parts;
+		cnt.keys += old_parts * sizeof(struct scoutfs_xattr_key);
+	}
 
-	cnt.items += SCOUTFS_XATTR_MAX_PARTS;
-	cnt.keys += SCOUTFS_XATTR_MAX_PARTS *
-		    (offsetof(struct scoutfs_xattr_key, name[name_len]) +
-		     sizeof(struct scoutfs_xattr_key_footer));
-	cnt.vals += val_parts *
-		    (sizeof(struct scoutfs_xattr_val_header) +
-		     SCOUTFS_XATTR_PART_SIZE);
+	if (creating) {
+		new_parts = SCOUTFS_XATTR_NR_PARTS(name_len, size)
+
+		cnt.items += new_parts;
+		cnt.keys += new_parts * sizeof(struct scoutfs_xattr_key);
+		cnt.vals += sizeof(struct scoutfs_xattr) + name_len + size;
+	}
 
 	return cnt;
 }

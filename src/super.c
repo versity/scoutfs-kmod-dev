@@ -26,7 +26,6 @@
 #include "format.h"
 #include "inode.h"
 #include "dir.h"
-#include "xattr.h"
 #include "msg.h"
 #include "counters.h"
 #include "triggers.h"
@@ -437,7 +436,6 @@ static int __init scoutfs_module_init(void)
 	}
 	ret = scoutfs_inode_init() ?:
 	      scoutfs_dir_init() ?:
-	      scoutfs_xattr_init() ?:
 	      register_filesystem(&scoutfs_fs_type);
 out:
 	if (ret)

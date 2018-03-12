@@ -264,13 +264,13 @@ static int pr_inode(char *buf, struct scoutfs_key_buf *key, size_t size)
 static int pr_xattr(char *buf, struct scoutfs_key_buf *key, size_t size)
 {
 	struct scoutfs_xattr_key *xkey = key->data;
-	int len = (int)key->key_len -
-		  offsetof(struct scoutfs_xattr_key, name[1]);
 
 	return snprintf_key(buf, size, key,
 			    sizeof(struct scoutfs_xattr_key), key->key_len,
-			    "fs.%llu.xat.%.*s",
-			    be64_to_cpu(xkey->ino), len, xkey->name);
+			    "fs.%llu.xat.%08x.%llu.%u",
+			    be64_to_cpu(xkey->ino),
+			    be32_to_cpu(xkey->name_hash),
+			    be64_to_cpu(xkey->id), xkey->part);
 }
 
 static int pr_dirent(char *buf, struct scoutfs_key_buf *key, size_t size)

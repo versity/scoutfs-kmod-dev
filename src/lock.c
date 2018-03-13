@@ -355,6 +355,7 @@ static void lock_process(struct lock_info *linfo, struct scoutfs_lock *lock)
 	 * to expire after an unlock.
 	 */
 	if (lock->work_mode < 0 &&
+	    lock->granted_mode >= 0 &&
 	    lock->bast_mode >= 0 &&
 	    lock_counts_match(lock->bast_mode, lock->users) &&
 	    !lock->grace_pending) {
@@ -613,11 +614,14 @@ static void scoutfs_lock_ast(void *arg)
 }
 
 /*
- * A lock on this node has blocked a lock request on another node.
+ * A lock on this node has blocked a lock request on another node.  We
+ * translate the dlm's communication of the blocking mode to the mode
+ * that we should convert our lock to.  We can only either downconvert
+ * to a matching PR or unlock.
  *
- * We can down convert to a PR if we had an EX and they're trying to get
- * a PR but all other conflicts cause us to drop our lock and invalidate
- * our cache.
+ * These are truly asynchronous and can arrive multiple times, at any time.
+ * We're careful to only set the bast mode here and let lock processing
+ * sort out the state machine.
  */
 static void scoutfs_lock_bast(void *arg, int blocked_mode)
 {

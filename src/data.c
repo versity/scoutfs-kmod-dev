@@ -612,13 +612,14 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 				u64 ino, u64 iblock, u64 last, bool offline,
 				struct scoutfs_lock *lock)
 {
+	DECLARE_DATA_INFO(sb, datinf);
 	struct scoutfs_key_buf last_key;
 	struct scoutfs_key_buf key;
 	struct scoutfs_block_mapping_key last_bmk;
 	struct scoutfs_block_mapping_key bmk;
 	struct block_mapping *map;
 	SCOUTFS_DECLARE_KVEC(val);
-	bool holding;
+	bool holding = false;
 	bool dirtied;
 	bool modified;
 	u64 blkno;
@@ -642,6 +643,13 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 		init_mapping_key(&key, &bmk, ino, iblock);
 		scoutfs_kvec_init(val, map->encoded, sizeof(map->encoded));
 
+		ret = scoutfs_hold_trans(sb, SIC_TRUNC_BLOCK());
+		if (ret)
+			break;
+		holding = true;
+
+		down_write(&datinf->alloc_rwsem);
+
 		ret = scoutfs_item_next(sb, &key, &last_key, val, lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
@@ -657,7 +665,6 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 		iblock = max(iblock, be64_to_cpu(bmk.base) <<
 				     SCOUTFS_BLOCK_MAPPING_SHIFT);
 
-		holding = false;
 		dirtied = false;
 		modified = false;
 		for_each_block(i, iblock, last) {
@@ -668,13 +675,6 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 			if (!blkno &&
 			    !!offline == !!test_bit(i, map->offline))
 				continue;
-
-			if (!holding) {
-				ret = scoutfs_hold_trans(sb, SIC_TRUNC_BLOCK());
-				if (ret)
-					break;
-				holding = true;
-			}
 
 			if (!dirtied) {
 				/* dirty item with full size encoded */
@@ -721,13 +721,17 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 			}
 		}
 
-		if (holding) {
-			scoutfs_release_trans(sb);
-			holding = false;
-		}
+		up_write(&datinf->alloc_rwsem);
+		scoutfs_release_trans(sb);
+		holding = false;
 
 		if (ret)
 			break;
+	}
+
+	if (holding) {
+		up_write(&datinf->alloc_rwsem);
+		scoutfs_release_trans(sb);
 	}
 
 	kfree(map);

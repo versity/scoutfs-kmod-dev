@@ -526,26 +526,30 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 {
 	struct scoutfs_key_buf *ent_key = NULL;
 	struct scoutfs_key_buf *lb_key = NULL;
+	struct scoutfs_dirent *dent = NULL;
 	struct scoutfs_key_buf rdir_key;
 	struct scoutfs_readdir_key rkey;
-	struct scoutfs_dirent dent;
 	SCOUTFS_DECLARE_KVEC(val);
 	bool del_ent = false;
 	bool del_rdir = false;
 	int ret;
 
+	ent_key = alloc_dirent_key(sb, dir_ino, name, name_len);
+	dent = kmalloc(offsetof(struct scoutfs_dirent, name[name_len]),
+		       GFP_NOFS);
+	if (!ent_key || !dent) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
 	/* initialize the dent */
-	dent.ino = cpu_to_le64(ino);
-	dent.readdir_pos = cpu_to_le64(pos);
-	dent.type = mode_to_type(mode);
+	dent->ino = cpu_to_le64(ino);
+	dent->readdir_pos = cpu_to_le64(pos);
+	dent->type = mode_to_type(mode);
+	memcpy(dent->name, name, name_len);
 
 	/* dirent item for lookup */
-	ent_key = alloc_dirent_key(sb, dir_ino, name, name_len);
-	if (!ent_key)
-		return -ENOMEM;
-
-	scoutfs_kvec_init(val, &dent, sizeof(dent));
-
+	scoutfs_kvec_init(val, dent, sizeof(struct scoutfs_dirent));
 	ret = scoutfs_item_create(sb, ent_key, val, dir_lock);
 	if (ret)
 		goto out;
@@ -553,7 +557,8 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 pos,
 
 	/* readdir item for .. readdir */
 	init_readdir_key(&rdir_key, &rkey, dir_ino, pos);
-	scoutfs_kvec_init(val, &dent, sizeof(dent), (char *)name, name_len);
+	scoutfs_kvec_init(val, dent, offsetof(struct scoutfs_dirent,
+					      name[name_len]));
 
 	ret = scoutfs_item_create(sb, &rdir_key, val, dir_lock);
 	if (ret)
@@ -578,6 +583,7 @@ out:
 
 	scoutfs_key_free(sb, ent_key);
 	scoutfs_key_free(sb, lb_key);
+	kfree(dent);
 
 	return ret;
 }

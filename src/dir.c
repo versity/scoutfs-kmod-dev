@@ -258,8 +258,7 @@ static int lookup_dirent(struct super_block *sb, struct inode *dir,
 
 	scoutfs_kvec_init(val, dent, sizeof(struct scoutfs_dirent));
 
-	ret = scoutfs_item_lookup_exact(sb, key, val,
-					sizeof(struct scoutfs_dirent), lock);
+	ret = scoutfs_item_lookup_exact(sb, key, val, lock);
 out:
 	scoutfs_key_free(sb, key);
 	return ret;
@@ -999,8 +998,7 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 		if (op == SYM_CREATE)
 			ret = scoutfs_item_create(sb, &key, val, lock);
 		else if (op == SYM_LOOKUP)
-			ret = scoutfs_item_lookup_exact(sb, &key, val, bytes,
-							lock);
+			ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 		else if (op == SYM_DELETE)
 			ret = scoutfs_item_delete(sb, &key, lock);
 		if (ret)
@@ -1445,7 +1443,7 @@ static int verify_entry(struct super_block *sb, u64 dir_ino, const char *name,
 
 	scoutfs_kvec_init(val, &dent, sizeof(dent));
 
-	ret = scoutfs_item_lookup_exact(sb, key, val, sizeof(dent), lock);
+	ret = scoutfs_item_lookup_exact(sb, key, val, lock);
 	if (ret == 0 && le64_to_cpu(dent.ino) != ino)
 		ret = -ENOENT;
 	else if (ret == -ENOENT && ino == 0)

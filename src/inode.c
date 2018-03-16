@@ -286,8 +286,7 @@ int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
 
 	mutex_lock(&si->item_mutex);
 	if (atomic64_read(&si->last_refreshed) < refresh_gen) {
-		ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode),
-						lock);
+		ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 		if (ret == 0) {
 			load_inode(inode, &sinode);
 			atomic64_set(&si->last_refreshed, refresh_gen);
@@ -1415,7 +1414,7 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	scoutfs_inode_init_key(&key, &ikey, ino);
 	scoutfs_kvec_init(val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val, sizeof(sinode), lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;

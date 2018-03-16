@@ -809,21 +809,22 @@ int scoutfs_item_lookup(struct super_block *sb, struct scoutfs_key_buf *key,
 
 /*
  * This requires that the item at the specified key has a value of the
- * same length as the specified value.  Callers are asserting that
+ * same length as the caller's value buffer.  Callers are asserting that
  * mismatched size are corruption so it returns -EIO if the sizes don't
  * match.  This isn't the fast path so we don't mind the copying
  * overhead that comes from only detecting the size mismatch after the
  * copy by reusing the more permissive _lookup().
  *
- * The end key limits how many keys after the search key can be read
- * and inserted into the cache.
+ * The end key limits how many keys after the search key can be read and
+ * inserted into the cache.
  *
  * Returns 0 or -errno.
  */
 int scoutfs_item_lookup_exact(struct super_block *sb,
 			      struct scoutfs_key_buf *key, struct kvec *val,
-			      int size, struct scoutfs_lock *lock)
+			      struct scoutfs_lock *lock)
 {
+	int size = scoutfs_kvec_length(val);
 	int ret;
 
 	ret = scoutfs_item_lookup(sb, key, val, lock);

@@ -362,9 +362,7 @@ static int set_segno_free(struct super_block *sb, u64 segno)
 	init_free_key(&key, &fbk, sbi->node_id, segno,
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val,
-					sizeof(struct scoutfs_free_bits),
-					lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 	if (ret && ret != -ENOENT)
 		goto out;
 
@@ -443,9 +441,7 @@ static int clear_segno_free(struct super_block *sb, u64 segno)
 	init_free_key(&key, &fbk, sbi->node_id, segno,
 		      SCOUTFS_FREE_BITS_SEGNO_TYPE);
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val,
-					sizeof(struct scoutfs_free_bits),
-					lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 	if (ret) {
 		/* XXX corruption, caller saw item.. should still exist */
 		if (ret == -ENOENT)
@@ -497,9 +493,7 @@ static int set_blkno_free(struct super_block *sb, u64 blkno)
 	init_free_key(&key, &fbk, sbi->node_id, blkno,
 		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val,
-					sizeof(struct scoutfs_free_bits),
-					lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 	if (ret && ret != -ENOENT)
 		goto out;
 
@@ -558,9 +552,7 @@ static int clear_blkno_free(struct super_block *sb, u64 blkno)
 	init_free_key(&key, &fbk, sbi->node_id, blkno,
 		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
-	ret = scoutfs_item_lookup_exact(sb, &key, val,
-					sizeof(struct scoutfs_free_bits),
-					lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 	if (ret) {
 		/* XXX corruption, bits should have existed */
 		if (ret == -ENOENT)
@@ -856,8 +848,7 @@ static int find_free_blkno(struct super_block *sb, u64 blkno, u64 *blkno_ret)
 		      SCOUTFS_FREE_BITS_BLKNO_TYPE);
 	scoutfs_kvec_init(val, &frb, sizeof(struct scoutfs_free_bits));
 
-	ret = scoutfs_item_lookup_exact(sb, &key, val,
-					sizeof(struct scoutfs_free_bits), lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, val, lock);
 	if (ret < 0)
 		goto out;
 

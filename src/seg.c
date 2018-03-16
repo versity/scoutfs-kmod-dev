@@ -410,20 +410,6 @@ out:
 	return ret;
 }
 
-static void kvec_from_pages(struct scoutfs_segment *seg,
-			    struct kvec *kvec, u32 off, u16 len)
-{
-	u32 first;
-
-	first = min_t(int, len, PAGE_SIZE - (off & ~PAGE_MASK));
-
-	if (first == len)
-		scoutfs_kvec_init(kvec, off_ptr(seg, off), len);
-	else
-		scoutfs_kvec_init(kvec, off_ptr(seg, off), first,
-			          off_ptr(seg, off + first), len - first);
-}
-
 static u32 item_bytes(u8 nr_links, u16 key_len, u16 val_len)
 {
 	return offsetof(struct scoutfs_segment_item, skip_links[nr_links]) +
@@ -440,9 +426,9 @@ static inline void *item_key_ptr(struct scoutfs_segment_item *item)
 	return (void *)item + item_bytes(item->nr_links, 0, 0);
 }
 
-static inline int item_val_off(struct scoutfs_segment_item *item, int item_off)
+static inline void *item_val_ptr(struct scoutfs_segment_item *item)
 {
-	return item_key_off(item, item_off) + le16_to_cpu(item->key_len);
+	return item_key_ptr(item) + le16_to_cpu(item->key_len);
 }
 
 static void item_ptrs(struct scoutfs_segment *seg, int off,
@@ -454,7 +440,7 @@ static void item_ptrs(struct scoutfs_segment *seg, int off,
 		scoutfs_key_init(key, item_key_ptr(item),
 				 le16_to_cpu(item->key_len));
 	if (val)
-		kvec_from_pages(seg, val, item_val_off(item, off),
+		scoutfs_kvec_init(val, item_val_ptr(item),
 				le16_to_cpu(item->val_len));
 }
 

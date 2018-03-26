@@ -650,6 +650,12 @@ bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg
 			links[i] = &sblk->skip_links[i];
 	}
 
+	trace_scoutfs_seg_append_item(sb, le64_to_cpu(sblk->segno),
+				      le64_to_cpu(sblk->seq),
+				      le32_to_cpu(sblk->nr_items),
+				      le32_to_cpu(sblk->total_bytes),
+				      key, val_len);
+
 	/*
 	 * It's very bad data corruption if we write out of order items
 	 * to a segment.  It'll mislead the key search during read and

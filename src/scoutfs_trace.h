@@ -1667,6 +1667,39 @@ DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_free,
         TP_ARGS(seg)
 );
 
+TRACE_EVENT(scoutfs_seg_append_item,
+	TP_PROTO(struct super_block *sb, u64 segno, u64 seq, u32 nr_items,
+		 u32 total_bytes, struct scoutfs_key *key, u16 val_len),
+
+	TP_ARGS(sb, segno, seq, nr_items, total_bytes, key, val_len),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, segno)
+		__field(__u64, seq)
+		__field(__u32, nr_items)
+		__field(__u32, total_bytes)
+		__field_struct(struct scoutfs_key, key)
+		__field(__u16, val_len)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->segno = segno;
+		__entry->seq = seq;
+		__entry->nr_items = nr_items;
+		__entry->total_bytes = total_bytes;
+		__entry->key = *key;
+		__entry->val_len = val_len;
+	),
+
+	TP_printk("fsid "FSID_FMT" segno %llu seq %llu nr_items %u total_bytes %u key "SK_FMT" val_len %u",
+		  __entry->fsid, __entry->segno, __entry->seq,
+		  __entry->nr_items, __entry->total_bytes,
+		  SK_ARG(&__entry->key),
+		  __entry->val_len)
+);
+
 DECLARE_EVENT_CLASS(scoutfs_net_class,
         TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
 		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),

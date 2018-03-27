@@ -27,6 +27,7 @@
 #include "key.h"
 #include "counters.h"
 #include "triggers.h"
+#include "msg.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -664,7 +665,9 @@ bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg
 	off = le32_to_cpu(sblk->last_item_off);
 	if (off) {
 		item = off_ptr(seg, off);
-		BUG_ON(scoutfs_key_compare(key, &item->key) <= 0);
+		scoutfs_bug_on(sb, scoutfs_key_compare(key, &item->key) <= 0,
+			       "key "SK_FMT" item->key "SK_FMT,
+			       SK_ARG(key), SK_ARG(&item->key));
 	}
 
 	nr_links = skip_next_nr(le32_to_cpu(sblk->nr_items));

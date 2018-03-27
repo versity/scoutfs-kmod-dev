@@ -1343,7 +1343,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key *key,
 		 (ret = scoutfs_manifest_read_items(sb, key, &lock->start,
 						    &lock->end)) == 0);
 
-	trace_scoutfs_item_delete_ret(sb, ret);
+	trace_scoutfs_item_delete(sb, key, ret);
 	return ret;
 }
 
@@ -1404,12 +1404,16 @@ int scoutfs_item_delete_save(struct super_block *sb,
 	bool was_dirty;
 	int ret;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX))) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	del = alloc_item(sb, key, NULL);
-	if (!del)
-		return -ENOMEM;
+	if (!del) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
@@ -1440,7 +1444,8 @@ int scoutfs_item_delete_save(struct super_block *sb,
 						    &lock->end)) == 0);
 
 	free_item(sb, del);
-
+out:
+	trace_scoutfs_item_delete_save(sb, key, ret);
 	return ret;
 }
 

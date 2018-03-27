@@ -227,22 +227,34 @@ TRACE_EVENT(scoutfs_dec_end_io,
 		  __entry->args, __entry->in_flight, __entry->err)
 );
 
-TRACE_EVENT(scoutfs_item_delete_ret,
-	TP_PROTO(struct super_block *sb, int ret),
+DECLARE_EVENT_CLASS(scoutfs_key_ret_class,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
 
-	TP_ARGS(sb, ret),
+	TP_ARGS(sb, key, ret),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
+		__field_struct(struct scoutfs_key, key)
 		__field(int, ret)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
+		__entry->key = *key;
 		__entry->ret = ret;
 	),
 
-	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+	TP_printk("fsid "FSID_FMT" key "SK_FMT" ret %d",
+		  __entry->fsid, SK_ARG(&__entry->key), __entry->ret)
+);
+
+DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_delete,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
+	TP_ARGS(sb, key, ret)
+);
+DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_delete_save,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
+	TP_ARGS(sb, key, ret)
 );
 
 TRACE_EVENT(scoutfs_item_dirty_ret,

@@ -15,4 +15,12 @@ void __printf(4, 5) scoutfs_msg(struct super_block *sb, const char *prefix,
 #define scoutfs_info(sb, fmt, args...) \
 	scoutfs_msg(sb, KERN_INFO, "", fmt, ##args)
 
+#define scoutfs_bug_on(sb, cond, fmt, args...)				\
+do {									\
+	if (cond) {							\
+		scoutfs_err(sb, "(" __stringify(cond) "), " fmt, ##args); \
+		BUG();							\
+	}								\
+} while (0)								\
+
 #endif

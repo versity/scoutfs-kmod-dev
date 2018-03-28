@@ -598,7 +598,8 @@ out:
  * inclusive.
  *
  * If 'offline' is given then blocks are freed an offline mapping is
- * left behind.
+ * left behind.  Only blocks that have been allocated can be marked
+ * offline.
  *
  * This is the low level extent item manipulation code.  We hold and
  * release the transaction so the caller doesn't have to deal with
@@ -621,7 +622,6 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 	SCOUTFS_DECLARE_KVEC(val);
 	bool holding = false;
 	bool dirtied;
-	bool modified;
 	u64 blkno;
 	int bytes;
 	int ret = 0;
@@ -666,14 +666,13 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 				     SCOUTFS_BLOCK_MAPPING_SHIFT);
 
 		dirtied = false;
-		modified = false;
 		for_each_block(i, iblock, last) {
 
 			blkno = map->blknos[i];
 
 			/* don't need to do anything.. */
 			if (!blkno &&
-			    !!offline == !!test_bit(i, map->offline))
+			    !(!offline && test_bit(i, map->offline)))
 				continue;
 
 			if (!dirtied) {
@@ -684,33 +683,34 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 				dirtied = true;
 			}
 
-			/* free if allocated */
-			if (blkno) {
-				ret = set_blkno_free(sb, blkno);
-				if (ret)
-					break;
-
-				map->blknos[i] = 0;
-				scoutfs_inode_add_online_blocks(inode, -1);
-				/* XXX gets tricky with concurrent writes */
-				inode->i_blocks -= SCOUTFS_BLOCK_SECTORS;
-			}
-
-			if (offline && !test_bit(i, map->offline)) {
-				set_bit(i, map->offline);
-				scoutfs_inode_add_offline_blocks(inode, 1);
-				inode->i_blocks += SCOUTFS_BLOCK_SECTORS;
-
-			} else if (!offline && test_bit(i, map->offline)) {
+			/* truncating offline block */
+			if (!offline && test_bit(i, map->offline)) {
 				clear_bit(i, map->offline);
 				scoutfs_inode_add_offline_blocks(inode, -1);
 				inode->i_blocks -= SCOUTFS_BLOCK_SECTORS;
 			}
 
-			modified = true;
+			/* nothing more to do if unallocated */
+			if (!blkno)
+				continue;
+
+			/* free the allocated block, maybe marking offline */
+			ret = set_blkno_free(sb, blkno);
+			if (ret)
+				break;
+
+			map->blknos[i] = 0;
+			scoutfs_inode_add_online_blocks(inode, -1);
+			inode->i_blocks -= SCOUTFS_BLOCK_SECTORS;
+
+			if (offline) {
+				set_bit(i, map->offline);
+				scoutfs_inode_add_offline_blocks(inode, 1);
+				inode->i_blocks += SCOUTFS_BLOCK_SECTORS;
+			}
 		}
 
-		if (modified) {
+		if (dirtied) {
 			/* update how ever much of the item we finished */
 			bytes = encode_mapping(map);
 			if (bytes) {

@@ -285,33 +285,53 @@ static int alloc_manifest_ref(struct super_block *sb, struct list_head *ref_list
 }
 
 /*
- * Return the previous entry if it's in the right level and it overlaps
- * with the start key by having a last key that's >=.  If no such entry
- * exists it just returns the next entry after the key and doesn't test
- * it at all.  If this returns 0 then the caller has to put the iref.
+ * Give the caller the next entry that overlaps with the given key at th
+ * egiven level.  We first check the previous entry before the key to
+ * see if it overlaps.  If it does then we return it.  If it doesn't
+ * then we return the raw next entry after the key.  The caller has to
+ * test it.
+ *
+ * If a start key is provided then the caller is working with cache
+ * ranges.  If we find a previous entry that doesn't contain the key
+ * then we see if we should shrink the range to make sure that it
+ * doesn't include this segment whose items we're not using.
+ *
+ * Returns 0 with the iref pointing to the btree item with the entry,
+ * callers has to put the iref when they're done.
  */
 static int btree_prev_overlap_or_next(struct super_block *sb,
 				      struct scoutfs_btree_root *root,
-				      void *key, unsigned key_len,
+				      void *bkey, unsigned bkey_len,
+				      struct scoutfs_key *key,
 				      struct scoutfs_key *start, u8 level,
 				      struct scoutfs_btree_item_ref *iref)
 {
 	struct scoutfs_manifest_entry ment;
 	int ret;
 
-	ret = scoutfs_btree_prev(sb, root, key, key_len, iref);
+	ret = scoutfs_btree_prev(sb, root, bkey, bkey_len, iref);
 	if (ret < 0 && ret != -ENOENT)
 		return ret;
 
 	if (ret == 0) {
 		init_ment_iref(&ment, iref);
+
+		/* shrink range so it doesn't cover skipped prev */
+		if (start && ment.level == level &&
+		    scoutfs_key_compare(&ment.last, key) < 0 &&
+		    scoutfs_key_compare(&ment.last, start) >= 0) {
+			*start = ment.last;
+			scoutfs_key_inc(start);
+		}
+
+		/* skip prev that doesn't contain the key */
 		if (ment.level != level ||
-		    scoutfs_key_compare(&ment.last, start) < 0)
+		    scoutfs_key_compare(&ment.last, key) < 0)
 			ret = -ENOENT;
 	}
 	if (ret == -ENOENT) {
 		scoutfs_btree_put_iref(iref);
-		ret = scoutfs_btree_next(sb, root, key, key_len, iref);
+		ret = scoutfs_btree_next(sb, root, bkey, bkey_len, iref);
 	}
 
 	return ret;
@@ -381,19 +401,26 @@ static int get_zero_refs(struct super_block *sb,
 
 /*
  * Get references to all segments in non-zero levels that contain the
- * caller's search key.   The item ranges of segments at each non-zero
- * level don't overlap so we can iterate through the key space in each
- * segment starting with the search key.  In each level we need the
- * first existing segment that intersects with the range, even if it
- * doesn't contain the key.  The key might fall between segments at that
- * level.  If a segment is entirely outside of the caller's range then
- * we can't trust its contents.
+ * caller's key.   The item ranges of segments at each non-zero level
+ * don't overlap so we can iterate through the key space in each segment
+ * starting with the search key.  In each level we need the first
+ * existing segment that intersects with the range, even if it doesn't
+ * contain the key.  The key might fall between segments at that level.
+ *
+ * The caller can provide the range of items that they're going to
+ * consider authoritative for the range of segments that we give them.
+ * We have to shrink this range if we give them segments that don't
+ * cover the range.  This includes implicitly negative cached space
+ * that's created by using the segment after the hole between segments.
+ * If a segment is entirely outside of the caller's range then we can't
+ * trust its contents.
  *
  * This can return -ESTALE if it reads through stale btree blocks.
  */
 static int get_nonzero_refs(struct super_block *sb,
 			    struct scoutfs_btree_root *root,
 			    struct scoutfs_key *key,
+			    struct scoutfs_key *start,
 			    struct scoutfs_key *end,
 			    struct list_head *ref_list)
 {
@@ -403,11 +430,15 @@ static int get_nonzero_refs(struct super_block *sb,
 	int ret;
 	int i;
 
+	if (WARN_ON_ONCE(!!start != !!end) ||
+	    WARN_ON_ONCE(start && scoutfs_key_compare(start, end) > 0))
+		return -EINVAL;
+
 	for (i = 1; ; i++) {
 		init_btree_key(&mkey, i, 0, key);
 
 		ret = btree_prev_overlap_or_next(sb, root, &mkey, sizeof(mkey),
-						 key, i, &iref);
+						 key, start, i, &iref);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -418,12 +449,20 @@ static int get_nonzero_refs(struct super_block *sb,
 		scoutfs_btree_put_iref(&iref);
 
 		if (ment.level != i ||
-		    scoutfs_key_compare(&ment.first, end) > 0)
+		    (end && scoutfs_key_compare(&ment.first, end) > 0))
 			continue;
 
 		ret = alloc_manifest_ref(sb, ref_list, &ment);
 		if (ret)
 			break;
+
+		if (start && scoutfs_key_compare(&ment.first, start) > 0 &&
+		    scoutfs_key_compare(&ment.first, key) <= 0)
+			*start = ment.first;
+
+		if (end && scoutfs_key_compare(&ment.last, end) < 0 &&
+		    scoutfs_key_compare(&ment.last, key) >= 0)
+			*end = ment.last;
 	}
 
 	return ret;
@@ -551,22 +590,10 @@ retry_stale:
 	if (ret)
 		goto out;
 
-	/* get non-zero segments that intersect with the missed key */
-	ret = get_nonzero_refs(sb, &root, key, &seg_end, &ref_list);
+	/* get non-zero segments that intersect with the key, shrinks range */
+	ret = get_nonzero_refs(sb, &root, key, &seg_start, &seg_end, &ref_list);
 	if (ret)
 		goto out;
-
-	/* clamp start and end to the segment boundaries, including key */
-	list_for_each_entry(ref, &ref_list, entry) {
-
-		if (scoutfs_key_compare(&ref->first, &seg_start) > 0 &&
-		    scoutfs_key_compare(&ref->first, key) <= 0)
-			seg_start = ref->first;
-
-		if (scoutfs_key_compare(&ref->last, &seg_end) < 0 &&
-		    scoutfs_key_compare(&ref->last, key) >= 0)
-			seg_end = ref->last;
-	}
 
 	trace_scoutfs_read_item_keys(sb, key, start, end, &seg_start, &seg_end);
 
@@ -747,7 +774,6 @@ int scoutfs_manifest_next_key(struct super_block *sb, struct scoutfs_key *key,
 			      struct scoutfs_key *next_key)
 {
 	struct scoutfs_key item_key;
-	struct scoutfs_key end;
 	struct scoutfs_btree_root root;
 	struct scoutfs_segment *seg;
 	struct manifest_ref *ref;
@@ -764,10 +790,8 @@ retry_stale:
 	if (ret)
 		goto out;
 
-	scoutfs_key_set_ones(&end);
-
-	ret = get_zero_refs(sb, &root, key, &end, &ref_list) ?:
-	      get_nonzero_refs(sb, &root, key, &end, &ref_list);
+	ret = get_zero_refs(sb, &root, key, key, &ref_list) ?:
+	      get_nonzero_refs(sb, &root, key, NULL, NULL, &ref_list);
 	if (ret)
 		goto out;
 
@@ -975,7 +999,7 @@ again:
 	init_btree_key(&mkey, level + 1, 0, &ment.first);
 	ret = btree_prev_overlap_or_next(sb, &super->manifest.root,
 					 &mkey, sizeof(mkey), &ment.first,
-					 level + 1, &over_iref);
+					 NULL, level + 1, &over_iref);
 	sticky = false;
 	for (i = 0; ret == 0 && i < SCOUTFS_MANIFEST_FANOUT + 1; i++) {
 		init_ment_iref(&over, &over_iref);

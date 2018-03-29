@@ -10,5 +10,6 @@ cscope.*
 *.spec
 *.sw[po]
 rpmbuild/
+rpms/
 
 scoutfs-*.git*/

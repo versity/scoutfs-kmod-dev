@@ -1296,24 +1296,27 @@ TRACE_EVENT(scoutfs_orphan_inode,
 );
 
 TRACE_EVENT(scoutfs_delete_inode,
-	TP_PROTO(struct super_block *sb, u64 ino, umode_t mode),
+	TP_PROTO(struct super_block *sb, u64 ino, umode_t mode, u64 size),
 
-	TP_ARGS(sb, ino, mode),
+	TP_ARGS(sb, ino, mode, size),
 
 	TP_STRUCT__entry(
 		__field(dev_t, dev)
 		__field(__u64, ino)
 		__field(umode_t, mode)
+		__field(__u64, size)
 	),
 
 	TP_fast_assign(
 		__entry->dev = sb->s_dev;
 		__entry->ino = ino;
 		__entry->mode = mode;
+		__entry->size = size;
 	),
 
-	TP_printk("dev %d,%d ino %llu, mode 0x%x", MAJOR(__entry->dev),
-		  MINOR(__entry->dev), __entry->ino, __entry->mode)
+	TP_printk("dev %d,%d ino %llu, mode 0x%x size %llu",
+		  MAJOR(__entry->dev), MINOR(__entry->dev), __entry->ino,
+		  __entry->mode, __entry->size)
 );
 
 TRACE_EVENT(scoutfs_scan_orphans,

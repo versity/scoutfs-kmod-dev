@@ -1400,6 +1400,7 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	struct kvec val;
 	umode_t mode;
 	u64 ind_seq;
+	u64 size;
 	int ret;
 
 	ret = scoutfs_lock_ino(sb, DLM_LOCK_EX, 0, ino, &lock);
@@ -1424,14 +1425,27 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	}
 
 	mode = le32_to_cpu(sinode.mode);
-	trace_scoutfs_delete_inode(sb, ino, mode);
+	size = le64_to_cpu(sinode.size);
+	trace_scoutfs_delete_inode(sb, ino, mode, size);
 
-	/* XXX the trans reservation count is obviously bonkers :) */
+	/* remove data items in their own transactions */
+	if (S_ISREG(mode)) {
+		ret = scoutfs_data_truncate_items(sb, NULL, ino, 0, ~0ULL,
+						  false, lock);
+		if (ret)
+			goto out;
+	}
+
+	ret = scoutfs_xattr_drop(sb, ino, lock);
+	if (ret)
+		goto out;
+
+	/* then delete the small known number of remaining inode items */
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 	      prepare_index_deletion(sb, &ind_locks, ino, mode, &sinode) ?:
 	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
-						SIC_DIRTY_INODE());
+						SIC_DROP_INODE(mode, size));
 	if (ret > 0)
 		goto retry;
 	if (ret)
@@ -1439,24 +1453,16 @@ retry:
 
 	release = true;
 
-	/* first remove index items to try to avoid indexing partial deletion */
 	ret = remove_index_items(sb, ino, &sinode, &ind_locks);
 	if (ret)
 		goto out;
 
-#if 0
-	ret = scoutfs_xattr_drop(sb, ino);
-	if (ret)
-		goto out;
+	if (S_ISLNK(mode)) {
+		ret = scoutfs_symlink_drop(sb, ino, lock, size);
+		if (ret)
+			goto out;
+	}
 
-	if (S_ISLNK(mode))
-		ret = scoutfs_symlink_drop(sb, ino, i_size);
-	else if (S_ISREG(mode))
-		ret = scoutfs_truncate_extent_items(sb, ino, 0, ~0ULL, false);
-	if (ret)
-		goto out;
-
-#endif
 	ret = scoutfs_item_delete(sb, &key, lock);
 	if (ret)
 		goto out;

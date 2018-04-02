@@ -554,46 +554,56 @@ out:
 }
 
 /*
- * Delete all the xattr items associated with this inode.  The caller
- * holds a transaction.  The inode is dead so we don't need the xattr
- * rwsem.
+ * Delete all the xattr items associated with this inode.  The inode is
+ * dead so we don't need the xattr rwsem.
  *
  * XXX This isn't great because it reads in all the items so that it can
  * create deletion items for each.  It would be better to have the
  * caller create range deletion items for all the items covered by the
  * inode.  That wouldn't require reading at all.
  */
-int scoutfs_xattr_drop(struct super_block *sb, u64 ino)
+int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
+		       struct scoutfs_lock *lock)
 {
 	struct scoutfs_key last;
 	struct scoutfs_key key;
-	struct scoutfs_lock *lck;
+	unsigned int items = 16;
+	bool holding = false;
 	int ret;
 
 	init_xattr_key(&key, ino, 0, 0);
 	init_xattr_key(&last, ino, U32_MAX, U64_MAX);
 
-	/* while we read to delete we need to writeback others */
-	ret = scoutfs_lock_ino(sb, DLM_LOCK_EX, 0, ino, &lck);
-	if (ret)
-		goto out;
-
 	for (;;) {
-		ret = scoutfs_item_next(sb, &key, &last, NULL, lck);
+		ret = scoutfs_item_next(sb, &key, &last, NULL, lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		ret = scoutfs_item_delete(sb, &key, lck);
+		if (!holding) {
+			ret = scoutfs_hold_trans(sb, SIC_EXACT(items, 0));
+			if (ret)
+				break;
+			holding = true;
+		}
+
+		ret = scoutfs_item_delete(sb, &key, lock);
 		if (ret)
 			break;
 
-		key.skx_part++;
+		if (--items == 0) {
+			scoutfs_release_trans(sb);
+			holding = false;
+			items = 16;
+		}
+
+		/* don't need to inc, next won't see deleted item */
 	}
 
-	scoutfs_unlock(sb, lck, DLM_LOCK_EX);
-out:
+	if (holding)
+		scoutfs_release_trans(sb);
+
 	return ret;
 }

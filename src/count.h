@@ -117,6 +117,24 @@ static inline const struct scoutfs_item_count SIC_MKNOD(unsigned name_len)
 	return cnt;
 }
 
+/*
+ * Dropping the inode deletes all its items.  Potentially enormous numbers
+ * of items (data mapping, xattrs) are deleted in their own transactions.
+ */
+static inline const struct scoutfs_item_count SIC_DROP_INODE(int mode,
+							     u64 size)
+{
+	struct scoutfs_item_count cnt = {0,};
+
+	if (S_ISLNK(mode))
+		__count_sym_target(&cnt, size);
+	__count_dirty_inode(&cnt);
+	__count_orphan(&cnt);
+
+	cnt.vals = 0;
+	return cnt;
+}
+
 static inline const struct scoutfs_item_count SIC_LINK(unsigned name_len)
 {
 	struct scoutfs_item_count cnt = {0,};

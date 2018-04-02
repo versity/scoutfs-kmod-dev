@@ -22,6 +22,18 @@ struct scoutfs_item_count {
 	signed vals;
 };
 
+/* The caller knows exactly what they're doing. */
+static inline const struct scoutfs_item_count SIC_EXACT(signed items,
+							signed vals)
+{
+	struct scoutfs_item_count cnt = {
+		.items = items,
+		.vals = vals,
+	};
+
+	return cnt;
+}
+
 /*
  * Allocating an inode creates a new set of indexed items.
  */

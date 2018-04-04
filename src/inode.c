@@ -1272,7 +1272,9 @@ int scoutfs_alloc_ino(struct inode *parent, u64 *ino_ret)
 
 	if (ia->nr == 0) {
 		spin_unlock(&ia->lock);
-		ret = scoutfs_client_alloc_inodes(sb, 10000, &ino, &nr);
+		ret = scoutfs_client_alloc_inodes(sb,
+					SCOUTFS_LOCK_INODE_GROUP_NR * 10,
+					&ino, &nr);
 		if (ret < 0)
 			goto out;
 		spin_lock(&ia->lock);

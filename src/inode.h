@@ -102,11 +102,13 @@ void scoutfs_inode_set_data_seq(struct inode *inode);
 void scoutfs_inode_inc_data_version(struct inode *inode);
 void scoutfs_inode_add_online_blocks(struct inode *inode, u64 val);
 void scoutfs_inode_add_offline_blocks(struct inode *inode, u64 val);
+void scoutfs_inode_add_onoff(struct inode *inode, s64 on, s64 off);
 u64 scoutfs_inode_meta_seq(struct inode *inode);
 u64 scoutfs_inode_data_seq(struct inode *inode);
 u64 scoutfs_inode_data_version(struct inode *inode);
 u64 scoutfs_inode_online_blocks(struct inode *inode);
 u64 scoutfs_inode_offline_blocks(struct inode *inode);
+void scoutfs_inode_get_onoff(struct inode *inode, s64 *on, s64 *off);
 int scoutfs_complete_truncate(struct inode *inode, struct scoutfs_lock *lock);
 
 int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,

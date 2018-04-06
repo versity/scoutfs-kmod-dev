@@ -30,6 +30,7 @@
 	EXPAND_COUNTER(corrupt_dirent_backref_name_len)		\
 	EXPAND_COUNTER(corrupt_dirent_name_len)			\
 	EXPAND_COUNTER(corrupt_dirent_readdir_name_len)		\
+	EXPAND_COUNTER(corrupt_inode_block_counts)		\
 	EXPAND_COUNTER(corrupt_symlink_inode_size)		\
 	EXPAND_COUNTER(corrupt_symlink_missing_item)		\
 	EXPAND_COUNTER(corrupt_symlink_not_null_term)		\

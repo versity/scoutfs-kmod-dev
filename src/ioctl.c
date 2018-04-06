@@ -464,8 +464,7 @@ static long scoutfs_ioc_stat_more(struct file *file, unsigned long arg)
 	stm.meta_seq = scoutfs_inode_meta_seq(inode);
 	stm.data_seq = scoutfs_inode_data_seq(inode);
 	stm.data_version = scoutfs_inode_data_version(inode);
-	stm.online_blocks = scoutfs_inode_online_blocks(inode);
-	stm.offline_blocks = scoutfs_inode_offline_blocks(inode);
+	scoutfs_inode_get_onoff(inode, &stm.online_blocks, &stm.offline_blocks);
 
 	if (copy_to_user((void __user *)arg, &stm, stm.valid_bytes))
 		return -EFAULT;

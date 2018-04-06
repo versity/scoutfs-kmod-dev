@@ -500,32 +500,32 @@ void scoutfs_inode_inc_data_version(struct inode *inode)
 	preempt_enable();
 }
 
-static void add_seq_value(struct scoutfs_inode_info *si, u64 *si_u64, u64 val)
-{
-	preempt_disable();
-	write_seqcount_begin(&si->seqcount);
-	*si_u64 += val;
-	write_seqcount_end(&si->seqcount);
-	preempt_enable();
-}
-
-void scoutfs_inode_add_online_blocks(struct inode *inode, u64 val)
+void scoutfs_inode_add_onoff(struct inode *inode, s64 on, s64 off)
 {
 	struct scoutfs_inode_info *si;
 
-	if (inode) {
+	if (inode && (on || off)) {
 		si = SCOUTFS_I(inode);
-		add_seq_value(si, &SCOUTFS_I(inode)->online_blocks, val);
-	}
-}
+		preempt_disable();
+		write_seqcount_begin(&si->seqcount);
 
-void scoutfs_inode_add_offline_blocks(struct inode *inode, u64 val)
-{
-	struct scoutfs_inode_info *si;
+		/* inode and extents out of sync, bad callers */
+		if (((s64)si->online_blocks + on < 0) ||
+		    ((s64)si->offline_blocks + off < 0)) {
+			scoutfs_corruption(inode->i_sb, SC_INODE_BLOCK_COUNTS,
+				corrupt_inode_block_counts,
+				"ino %llu size %llu online %llu + %lld offline %llu + %lld",
+				scoutfs_ino(inode), i_size_read(inode),
+				si->online_blocks, on, si->offline_blocks, off);
+		}
 
-	if (inode) {
-		si = SCOUTFS_I(inode);
-		add_seq_value(si, &SCOUTFS_I(inode)->offline_blocks, val);
+		si->online_blocks += on;
+		si->offline_blocks += off;
+		/* XXX not sure if this is right */
+		inode->i_blocks += (on + off) * SCOUTFS_BLOCK_SECTORS;
+
+		write_seqcount_end(&si->seqcount);
+		preempt_enable();
 	}
 }
 
@@ -577,6 +577,19 @@ u64 scoutfs_inode_offline_blocks(struct inode *inode)
 
 	return read_seqcount_u64(inode, &si->offline_blocks);
 }
+
+void scoutfs_inode_get_onoff(struct inode *inode, s64 *on, s64 *off)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+	unsigned int seq;
+
+	do {
+		seq = read_seqcount_begin(&si->seqcount);
+		*on = SCOUTFS_I(inode)->online_blocks;
+		*off = SCOUTFS_I(inode)->offline_blocks;
+	} while (read_seqcount_retry(&si->seqcount, seq));
+}
+
 static int scoutfs_iget_test(struct inode *inode, void *arg)
 {
 	struct scoutfs_inode_info *ci = SCOUTFS_I(inode);
@@ -644,6 +657,10 @@ out:
 static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 {
 	struct scoutfs_inode_info *ci = SCOUTFS_I(inode);
+	u64 online_blocks;
+	u64 offline_blocks;
+
+	scoutfs_inode_get_onoff(inode, &online_blocks, &offline_blocks);
 
 	cinode->size = cpu_to_le64(i_size_read(inode));
 	cinode->nlink = cpu_to_le32(inode->i_nlink);
@@ -661,9 +678,8 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->meta_seq = cpu_to_le64(scoutfs_inode_meta_seq(inode));
 	cinode->data_seq = cpu_to_le64(scoutfs_inode_data_seq(inode));
 	cinode->data_version = cpu_to_le64(scoutfs_inode_data_version(inode));
-	cinode->online_blocks = cpu_to_le64(scoutfs_inode_online_blocks(inode));
-	cinode->offline_blocks =
-		cpu_to_le64(scoutfs_inode_offline_blocks(inode));
+	cinode->online_blocks = cpu_to_le64(online_blocks);
+	cinode->offline_blocks = cpu_to_le64(offline_blocks);
 	cinode->next_readdir_pos = cpu_to_le64(ci->next_readdir_pos);
 	cinode->next_xattr_id = cpu_to_le64(ci->next_xattr_id);
 	cinode->flags = cpu_to_le32(ci->flags);

@@ -564,20 +564,6 @@ u64 scoutfs_inode_data_version(struct inode *inode)
 	return read_seqcount_u64(inode, &si->data_version);
 }
 
-u64 scoutfs_inode_online_blocks(struct inode *inode)
-{
-	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
-
-	return read_seqcount_u64(inode, &si->online_blocks);
-}
-
-u64 scoutfs_inode_offline_blocks(struct inode *inode)
-{
-	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
-
-	return read_seqcount_u64(inode, &si->offline_blocks);
-}
-
 void scoutfs_inode_get_onoff(struct inode *inode, s64 *on, s64 *off)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);

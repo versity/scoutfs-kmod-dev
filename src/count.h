@@ -225,23 +225,6 @@ static inline const struct scoutfs_item_count SIC_WRITE_BEGIN(void)
 }
 
 /*
- * Truncating a block mapping item's worth of blocks can modify both
- * free blkno and free segno items per block.  Then the largest possible
- * mapping item.
- */
-static inline const struct scoutfs_item_count SIC_TRUNC_BLOCK(void)
-{
-	struct scoutfs_item_count cnt = {0,};
-	unsigned nr_free = (2 * SCOUTFS_BLOCK_MAPPING_BLOCKS);
-
-	cnt.items += 1 + nr_free;
-	cnt.vals += SCOUTFS_BLOCK_MAPPING_MAX_BYTES +
-		    (nr_free * sizeof(struct scoutfs_free_bits));
-
-	return cnt;
-}
-
-/*
  * Truncating an extent can:
  *  - delete existing file extent,
  *  - create two surrounding file extents,

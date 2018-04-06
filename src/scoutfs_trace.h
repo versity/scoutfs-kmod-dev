@@ -526,32 +526,6 @@ TRACE_EVENT(scoutfs_data_truncate_items,
 		  __entry->iblock, __entry->last, __entry->offline)
 );
 
-TRACE_EVENT(scoutfs_data_set_segno_free,
-	TP_PROTO(struct super_block *sb, __u64 segno, __u64 base,
-		 unsigned int bit, int ret),
-
-	TP_ARGS(sb, segno, base, bit, ret),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(__u64, segno)
-		__field(__u64, base)
-		__field(unsigned int, bit)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->segno = segno;
-		__entry->base = base;
-		__entry->bit = bit;
-		__entry->ret = ret;
-	),
-
-	TP_printk(FSID_FMT" segno %llu base %llu bit %u ret %d", __entry->fsid,
-		  __entry->segno, __entry->base, __entry->bit, __entry->ret)
-);
-
 TRACE_EVENT(scoutfs_sync_fs,
 	TP_PROTO(struct super_block *sb, int wait),
 

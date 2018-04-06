@@ -79,10 +79,6 @@ struct scoutfs_key {
 #define skii_major	_sk_second
 #define skii_ino	_sk_third
 
-/* node free bit map  */
-#define skf_node_id	_sk_first
-#define skf_base	_sk_second
-
 /* node free extent */
 #define sknf_node_id	_sk_first
 #define sknf_major	_sk_second
@@ -109,10 +105,6 @@ struct scoutfs_key {
 /* symlink target */
 #define sks_ino		_sk_first
 #define sks_nr		_sk_second
-
-/* file data mapping */
-#define skm_ino		_sk_first
-#define skm_base	_sk_second
 
 /* file extent */
 #define skfe_ino	_sk_first
@@ -312,10 +304,8 @@ struct scoutfs_segment_block {
 #define SCOUTFS_INODE_INDEX_NR			3 /* don't forget to update */
 
 /* node zone */
-#define SCOUTFS_FREE_BITS_SEGNO_TYPE		1
-#define SCOUTFS_FREE_BITS_BLKNO_TYPE		2
-#define SCOUTFS_FREE_EXTENT_BLKNO_TYPE		3
-#define SCOUTFS_FREE_EXTENT_BLOCKS_TYPE		4
+#define SCOUTFS_FREE_EXTENT_BLKNO_TYPE		1
+#define SCOUTFS_FREE_EXTENT_BLOCKS_TYPE		2
 
 /* fs zone */
 #define SCOUTFS_INODE_TYPE			1
@@ -324,60 +314,10 @@ struct scoutfs_segment_block {
 #define SCOUTFS_READDIR_TYPE			4
 #define SCOUTFS_LINK_BACKREF_TYPE		5
 #define SCOUTFS_SYMLINK_TYPE			6
-#define SCOUTFS_BLOCK_MAPPING_TYPE		7
+#define SCOUTFS_FILE_EXTENT_TYPE		7
 #define SCOUTFS_ORPHAN_TYPE			8
-#define SCOUTFS_FILE_EXTENT_TYPE		9
 
 #define SCOUTFS_MAX_TYPE			16 /* power of 2 is efficient */
-
-/* each mapping item describes a fixed number of blocks */
-#define SCOUTFS_BLOCK_MAPPING_SHIFT	6
-#define SCOUTFS_BLOCK_MAPPING_BLOCKS	(1 << SCOUTFS_BLOCK_MAPPING_SHIFT)
-#define SCOUTFS_BLOCK_MAPPING_MASK	(SCOUTFS_BLOCK_MAPPING_BLOCKS - 1)
-
-/*
- * The mapping item value is a byte stream that encodes the value of the
- * mapped blocks.  The first byte contains the last index that contains
- * a mapped block in its low bits.  The high bits contain the control
- * bits for the first (and possibly only) mapped block.
- *
- * From then on we consume the control bits in the current control byte
- * for each mapped block.  Each block has two bits that describe the
- * block: zero, incremental from previous block, delta encoded, and
- * offline.  If we run out of control bits then we consume the next byte
- * in the stream for additional control bits.  If we have a delta
- * encoded block then we consume its encoded bytes from the byte stream.
- */
-
-#define SCOUTFS_BLOCK_ENC_ZERO		0
-#define SCOUTFS_BLOCK_ENC_INC		1
-#define SCOUTFS_BLOCK_ENC_DELTA		2
-#define SCOUTFS_BLOCK_ENC_OFFLINE	3
-#define SCOUTFS_BLOCK_ENC_MASK		3
-
-#define SCOUTFS_ZIGZAG_MAX_BYTES	(DIV_ROUND_UP(64, 7))
-
-/*
- * the largest block mapping has: nr byte, ctl bytes for all blocks, and
- * worst case zigzag encodings for all blocks.
- */
-#define SCOUTFS_BLOCK_MAPPING_MAX_BYTES			\
-	(1 + (SCOUTFS_BLOCK_MAPPING_BLOCKS / 4) +		\
-	 (SCOUTFS_BLOCK_MAPPING_BLOCKS * SCOUTFS_ZIGZAG_MAX_BYTES))
-
-/* free bit bitmaps contain a segment's worth of blocks */
-#define SCOUTFS_FREE_BITS_SHIFT	\
-	SCOUTFS_SEGMENT_BLOCK_SHIFT
-#define SCOUTFS_FREE_BITS_BITS	\
-	(1 << SCOUTFS_FREE_BITS_SHIFT)
-#define SCOUTFS_FREE_BITS_MASK	\
-	(SCOUTFS_FREE_BITS_BITS - 1)
-#define SCOUTFS_FREE_BITS_U64S \
-	DIV_ROUND_UP(SCOUTFS_FREE_BITS_BITS, 64)
-
-struct scoutfs_free_bits {
-	__le64 bits[SCOUTFS_FREE_BITS_U64S];
-} __packed;
 
 /*
  * File extents have more data than easily fits in the key so we move

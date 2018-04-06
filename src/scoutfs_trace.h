@@ -36,6 +36,7 @@
 #include "bio.h"
 #include "export.h"
 #include "dir.h"
+#include "extents.h"
 
 struct lock_info;
 
@@ -2084,6 +2085,50 @@ TRACE_EVENT(scoutfs_btree_read_error,
 
 	TP_printk("fsid "FSID_FMT" blkno %llu seq %llu",
 		  __entry->fsid, __entry->blkno, __entry->seq)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_extent_class,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+
+	TP_ARGS(sb, ext),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field_struct(struct scoutfs_extent, ext)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = SCOUTFS_SB(sb) ? FSID_ARG(sb) : 0;
+		__entry->ext = *ext;
+	),
+
+	TP_printk("fsid "FSID_FMT" ext "SE_FMT,
+		  __entry->fsid, SE_ARG(&__entry->ext))
+);
+
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_insert,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_delete,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_next_input,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_next_output,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_add,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_remove,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

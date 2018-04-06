@@ -31,6 +31,8 @@
 	EXPAND_COUNTER(corrupt_dirent_name_len)			\
 	EXPAND_COUNTER(corrupt_dirent_readdir_name_len)		\
 	EXPAND_COUNTER(corrupt_inode_block_counts)		\
+	EXPAND_COUNTER(corrupt_extent_add_cleanup)		\
+	EXPAND_COUNTER(corrupt_extent_rem_cleanup)		\
 	EXPAND_COUNTER(corrupt_symlink_inode_size)		\
 	EXPAND_COUNTER(corrupt_symlink_missing_item)		\
 	EXPAND_COUNTER(corrupt_symlink_not_null_term)		\
@@ -48,6 +50,11 @@
 	EXPAND_COUNTER(dentry_revalidate_root)			\
 	EXPAND_COUNTER(dentry_revalidate_valid)			\
 	EXPAND_COUNTER(dir_backref_excessive_retries)		\
+	EXPAND_COUNTER(extent_add)				\
+	EXPAND_COUNTER(extent_delete)				\
+	EXPAND_COUNTER(extent_insert)				\
+	EXPAND_COUNTER(extent_next)				\
+	EXPAND_COUNTER(extent_remove)				\
 	EXPAND_COUNTER(item_alloc)				\
 	EXPAND_COUNTER(item_batch_duplicate)			\
 	EXPAND_COUNTER(item_batch_inserted)			\

@@ -424,10 +424,6 @@ static int __init scoutfs_module_init(void)
 	scoutfs_key_init();
 	scoutfs_init_counters();
 
-	ret = scoutfs_data_test();
-	if (ret)
-		return ret;
-
 	ret = scoutfs_sysfs_init();
 	if (ret)
 		return ret;

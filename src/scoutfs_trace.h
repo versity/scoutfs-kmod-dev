@@ -2131,6 +2131,47 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_remove,
 	TP_ARGS(sb, ext)
 );
 
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_truncate_next,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_truncate_remove,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_truncate_offline,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_bulk_alloc,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block_cursor,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block_free,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_block_next,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_block_intersection,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_fiemap_extent,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

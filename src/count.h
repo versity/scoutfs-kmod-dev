@@ -201,19 +201,25 @@ static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned old_parts,
 }
 
 /*
- * write_begin can add local free segment items, modify another to
- * alloc, add a free blkno item, and modify dirty the mapping.
+ * write_begin can have to allocate all the blocks in the page and can
+ * have to add a big allocation from the server to do so:
+ *  - merge added free extents from the server
+ *  - remove a free extent per block
+ *  - remove an offline extent for every other block
+ *  - add a file extent per block
  */
 static inline const struct scoutfs_item_count SIC_WRITE_BEGIN(void)
 {
 	struct scoutfs_item_count cnt = {0,};
-	unsigned nr_free = SCOUTFS_BULK_ALLOC_COUNT + 1 + 1;
+	unsigned nr_free = (SCOUTFS_BULK_ALLOC_COUNT +
+			    SCOUTFS_BLOCKS_PER_PAGE) * 3;
+	unsigned nr_file = (DIV_ROUND_UP(SCOUTFS_BLOCKS_PER_PAGE, 2) +
+			    SCOUTFS_BLOCKS_PER_PAGE) * 3;
 
 	__count_dirty_inode(&cnt);
 
-	cnt.items += 1 + nr_free;
-	cnt.vals += SCOUTFS_BLOCK_MAPPING_MAX_BYTES +
-		    (nr_free * sizeof(struct scoutfs_free_bits));
+	cnt.items += nr_free + nr_file;
+	cnt.vals += nr_file * sizeof(struct scoutfs_file_extent);
 
 	return cnt;
 }
@@ -231,6 +237,26 @@ static inline const struct scoutfs_item_count SIC_TRUNC_BLOCK(void)
 	cnt.items += 1 + nr_free;
 	cnt.vals += SCOUTFS_BLOCK_MAPPING_MAX_BYTES +
 		    (nr_free * sizeof(struct scoutfs_free_bits));
+
+	return cnt;
+}
+
+/*
+ * Truncating an extent can:
+ *  - delete existing file extent,
+ *  - create two surrounding file extents,
+ *  - add an offline file extent,
+ *  - delete two existing free extents
+ *  - create a merged free extent
+ */
+static inline const struct scoutfs_item_count SIC_TRUNC_EXTENT(void)
+{
+	struct scoutfs_item_count cnt = {0,};
+	unsigned int nr_file = 1 + 2 + 1;
+	unsigned int nr_free = (2 + 1) * 2;
+
+	cnt.items += nr_file + nr_free;
+	cnt.vals += nr_file * sizeof(struct scoutfs_file_extent);
 
 	return cnt;
 }

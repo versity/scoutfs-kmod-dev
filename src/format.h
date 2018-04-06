@@ -83,6 +83,11 @@ struct scoutfs_key {
 #define skf_node_id	_sk_first
 #define skf_base	_sk_second
 
+/* node free extent */
+#define sknf_node_id	_sk_first
+#define sknf_major	_sk_second
+#define sknf_minor	_sk_third
+
 /* node orphan inode */
 #define sko_node_id	_sk_first
 #define sko_ino		_sk_second
@@ -108,6 +113,10 @@ struct scoutfs_key {
 /* file data mapping */
 #define skm_ino		_sk_first
 #define skm_base	_sk_second
+
+/* file extent */
+#define skfe_ino	_sk_first
+#define skfe_last	_sk_second
 
 /*
  * The btree still uses memcmp() to compare keys.  We should fix that
@@ -305,6 +314,8 @@ struct scoutfs_segment_block {
 /* node zone */
 #define SCOUTFS_FREE_BITS_SEGNO_TYPE		1
 #define SCOUTFS_FREE_BITS_BLKNO_TYPE		2
+#define SCOUTFS_FREE_EXTENT_BLKNO_TYPE		3
+#define SCOUTFS_FREE_EXTENT_BLOCKS_TYPE		4
 
 /* fs zone */
 #define SCOUTFS_INODE_TYPE			1
@@ -315,6 +326,7 @@ struct scoutfs_segment_block {
 #define SCOUTFS_SYMLINK_TYPE			6
 #define SCOUTFS_BLOCK_MAPPING_TYPE		7
 #define SCOUTFS_ORPHAN_TYPE			8
+#define SCOUTFS_FILE_EXTENT_TYPE		9
 
 #define SCOUTFS_MAX_TYPE			16 /* power of 2 is efficient */
 
@@ -366,6 +378,18 @@ struct scoutfs_segment_block {
 struct scoutfs_free_bits {
 	__le64 bits[SCOUTFS_FREE_BITS_U64S];
 } __packed;
+
+/*
+ * File extents have more data than easily fits in the key so we move
+ * the non-indexed fields into the value.
+ */
+struct scoutfs_file_extent {
+	__le64 blkno;
+	__le64 len;
+	__u8 flags;
+} __packed;
+
+#define SEF_OFFLINE	0x1
 
 /*
  * The first xattr part item has a header that describes the xattr.  The
@@ -510,7 +534,6 @@ enum {
 	SCOUTFS_DT_WHT,
 };
 
-#define SCOUTFS_MAX_VAL_SIZE SCOUTFS_BLOCK_MAPPING_MAX_BYTES
 
 #define SCOUTFS_XATTR_MAX_NAME_LEN	255
 #define SCOUTFS_XATTR_MAX_VAL_LEN	65535
@@ -519,6 +542,8 @@ enum {
 #define SCOUTFS_XATTR_NR_PARTS(name_len, val_len)			\
 	DIV_ROUND_UP(sizeof(struct scoutfs_xattr) + name_len + val_len, \
 		     SCOUTFS_XATTR_MAX_PART_SIZE);
+
+#define SCOUTFS_MAX_VAL_SIZE	SCOUTFS_XATTR_MAX_PART_SIZE
 
 /*
  * structures used by dlm

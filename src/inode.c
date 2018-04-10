@@ -524,6 +524,10 @@ void scoutfs_inode_add_onoff(struct inode *inode, s64 on, s64 off)
 		/* XXX not sure if this is right */
 		inode->i_blocks += (on + off) * SCOUTFS_BLOCK_SECTORS;
 
+		trace_scoutfs_online_offline_blocks(inode, on, off,
+						    si->online_blocks,
+						    si->offline_blocks);
+
 		write_seqcount_end(&si->seqcount);
 		preempt_enable();
 	}

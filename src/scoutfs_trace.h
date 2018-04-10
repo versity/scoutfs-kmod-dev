@@ -2146,6 +2146,33 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_fiemap_extent,
 	TP_ARGS(sb, ext)
 );
 
+TRACE_EVENT(scoutfs_online_offline_blocks,
+	TP_PROTO(struct inode *inode, s64 on_delta, s64 off_delta,
+		 u64 on_now, u64 off_now),
+
+	TP_ARGS(inode, on_delta, off_delta, on_now, off_now),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__s64, on_delta)
+		__field(__s64, off_delta)
+		__field(__u64, on_now)
+		__field(__u64, off_now)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(inode->i_sb);
+		__entry->on_delta = on_delta;
+		__entry->off_delta = off_delta;
+		__entry->on_now = on_now;
+		__entry->off_now = off_now;
+	),
+
+	TP_printk("fsid "FSID_FMT" on_delta %lld off_delta %lld on_now %llu off_now %llu ",
+		  __entry->fsid, __entry->on_delta, __entry->off_delta,
+		  __entry->on_now, __entry->off_now)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

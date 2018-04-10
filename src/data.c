@@ -456,38 +456,24 @@ static struct task_cursor *get_cursor(struct data_info *datinf)
 	return curs;
 }
 
-static int bulk_alloc(struct super_block *sb)
+static int get_server_extent(struct super_block *sb, u64 len)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_extent ext;
-	u64 *segnos = NULL;
-	int ret = 0;
-	int i;
+	u64 start;
+	int ret;
 
-	segnos = scoutfs_client_bulk_alloc(sb);
-	if (IS_ERR(segnos)) {
-		ret = PTR_ERR(segnos);
+	ret = scoutfs_client_alloc_extent(sb, len, &start);
+	if (ret)
 		goto out;
-	}
 
-	for (i = 0; segnos[i]; i++) {
-		scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
-				    sbi->node_id,
-				    segnos[i] << SCOUTFS_SEGMENT_BLOCK_SHIFT,
-				    SCOUTFS_SEGMENT_BLOCKS, 0, 0);
-		trace_scoutfs_data_bulk_alloc(sb, &ext);
-		ret = scoutfs_extent_add(sb, data_extent_io, &ext,
-					 sbi->node_id_lock);
-		if (ret)
-			break;
-	}
+	scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
+			    sbi->node_id, start, len, 0, 0);
+	trace_scoutfs_data_get_server_extent(sb, &ext);
+	ret = scoutfs_extent_add(sb, data_extent_io, &ext, sbi->node_id_lock);
+	/* XXX don't free extent on error, crash recovery with server */
 
 out:
-	if (!IS_ERR_OR_NULL(segnos))
-		kfree(segnos);
-
-	/* XXX don't orphan segnos on error, crash recovery with server */
-
 	return ret;
 }
 
@@ -500,8 +486,10 @@ out:
  * that track large extents.  Each new allocating task will get a new
  * extent.
  */
-/* XXX initially tied to segment size, should be a lot larger */
-#define LARGE_EXTENT_BLOCKS SCOUTFS_SEGMENT_BLOCKS
+#define CURSOR_BLOCKS		(1 * 1024 * 1024 / BLOCK_SIZE)
+#define CURSOR_BLOCKS_MASK	(CURSOR_BLOCKS - 1)
+#define CURSOR_BLOCKS_SEARCH	(CURSOR_BLOCKS + CURSOR_BLOCKS - 1)
+#define CURSOR_BLOCKS_ALLOC	(CURSOR_BLOCKS * 64)
 static int find_alloc_block(struct super_block *sb, struct inode *inode,
 			    u64 iblock, bool was_offline,
 			    struct scoutfs_lock *lock)
@@ -543,16 +531,26 @@ static int find_alloc_block(struct super_block *sb, struct inode *inode,
 	}
 
 	/* try to find a new large extent, possibly asking for more */
-	while (curs->blkno == 0) {
+	if (curs->blkno == 0) {
 		scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
-				    sbi->node_id, 0, 2 * LARGE_EXTENT_BLOCKS,
+				    sbi->node_id, 0, CURSOR_BLOCKS_SEARCH,
 				    0, 0);
 		ret = scoutfs_extent_next(sb, data_extent_io, &ext,
 					  sbi->node_id_lock);
-		if (ret && ret != -ENOENT)
+		if (ret == -ENOENT) {
+			/* try to get allocation from the server if we're out */
+			ret = get_server_extent(sb, CURSOR_BLOCKS_ALLOC);
+			if (ret == 0)
+				ret = scoutfs_extent_next(sb, data_extent_io,
+							  &ext,
+							  sbi->node_id_lock);
+		}
+		if (ret) {
+			/* XXX should try to look for smaller free extents :/ */
+			if (ret == -ENOENT)
+				ret = -ENOSPC;
 			goto out;
-
-		/* XXX should try to look for smaller free extents :/ */
+		}
 
 		/*
 		 * set our cursor to the aligned start of a large extent
@@ -561,18 +559,9 @@ static int find_alloc_block(struct super_block *sb, struct inode *inode,
 		 * constantly setting cursors to the start of a large
 		 * free extent that keeps have its start allocated.
 		 */
-		if (ret == 0) {
-			trace_scoutfs_data_alloc_block_free(sb, &ext);
-			curs->blkno = ALIGN(ext.start, LARGE_EXTENT_BLOCKS);
-			break;
-		}
-
-		/* try to get allocation from the server if we're out */
-		ret = bulk_alloc(sb);
-		if (ret < 0)
-			goto out;
+		trace_scoutfs_data_alloc_block_free(sb, &ext);
+		curs->blkno = ALIGN(ext.start, CURSOR_BLOCKS);
 	}
-
 
 	/* remove the free block we're using */
 	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
@@ -603,9 +592,9 @@ static int find_alloc_block(struct super_block *sb, struct inode *inode,
 	scoutfs_inode_add_onoff(inode, 1, was_offline ? -1ULL : 0);
 
 	/* set cursor to next block, clearing if we finish a large extent */
-	BUILD_BUG_ON(!is_power_of_2(LARGE_EXTENT_BLOCKS));
+	BUILD_BUG_ON(!is_power_of_2(CURSOR_BLOCKS));
 	curs->blkno++;
-	if ((curs->blkno & (LARGE_EXTENT_BLOCKS - 1)) == 0)
+	if ((curs->blkno & CURSOR_BLOCKS_MASK) == 0)
 		curs->blkno = 0;
 
 	ret = 0;

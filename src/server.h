@@ -9,6 +9,7 @@ void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
 int scoutfs_client_get_compaction(struct super_block *sb, void *curs);
 int scoutfs_client_finish_compaction(struct super_block *sb, void *curs,
 				     void *list);
+int scoutfs_server_free_segno(struct super_block *sb, u64 segno);
 
 int scoutfs_server_setup(struct super_block *sb);
 void scoutfs_server_destroy(struct super_block *sb);

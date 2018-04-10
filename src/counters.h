@@ -101,6 +101,13 @@
 	EXPAND_COUNTER(seg_free)				\
 	EXPAND_COUNTER(seg_shrink)				\
 	EXPAND_COUNTER(seg_stale_read)				\
+	EXPAND_COUNTER(server_alloc_segno)			\
+	EXPAND_COUNTER(server_extent_alloc)			\
+	EXPAND_COUNTER(server_extent_alloc_error)		\
+	EXPAND_COUNTER(server_free_extent)			\
+	EXPAND_COUNTER(server_free_pending_extent)		\
+	EXPAND_COUNTER(server_free_pending_error)		\
+	EXPAND_COUNTER(server_free_segno)			\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\
 	EXPAND_COUNTER(trans_commit_item_flush)			\

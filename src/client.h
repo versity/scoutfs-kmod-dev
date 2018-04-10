@@ -3,6 +3,7 @@
 
 int scoutfs_client_alloc_inodes(struct super_block *sb, u64 count,
 				u64 *ino, u64 *nr);
+int scoutfs_client_alloc_extent(struct super_block *sb, u64 len, u64 *start);
 int scoutfs_client_alloc_segno(struct super_block *sb, u64 *segno);
 int scoutfs_client_record_segment(struct super_block *sb,
 				  struct scoutfs_segment *seg, u8 level);

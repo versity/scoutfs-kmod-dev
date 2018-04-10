@@ -211,8 +211,7 @@ static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned old_parts,
 static inline const struct scoutfs_item_count SIC_WRITE_BEGIN(void)
 {
 	struct scoutfs_item_count cnt = {0,};
-	unsigned nr_free = (SCOUTFS_BULK_ALLOC_COUNT +
-			    SCOUTFS_BLOCKS_PER_PAGE) * 3;
+	unsigned nr_free = (1 + SCOUTFS_BLOCKS_PER_PAGE) * 3;
 	unsigned nr_file = (DIV_ROUND_UP(SCOUTFS_BLOCKS_PER_PAGE, 2) +
 			    SCOUTFS_BLOCKS_PER_PAGE) * 3;
 

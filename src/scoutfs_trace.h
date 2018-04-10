@@ -2117,7 +2117,7 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_truncate_offline,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_bulk_alloc,
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_server_extent,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );
@@ -2142,6 +2142,30 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_block_intersection,
 	TP_ARGS(sb, ext)
 );
 DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_fiemap_extent,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_extent_next,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_extent_allocated,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_segno_next,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_segno_allocated,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_free_pending_extent,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_extent_io,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );
@@ -2171,6 +2195,33 @@ TRACE_EVENT(scoutfs_online_offline_blocks,
 	TP_printk("fsid "FSID_FMT" on_delta %lld off_delta %lld on_now %llu off_now %llu ",
 		  __entry->fsid, __entry->on_delta, __entry->off_delta,
 		  __entry->on_now, __entry->off_now)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_segno_class,
+	TP_PROTO(struct super_block *sb, u64 segno),
+
+	TP_ARGS(sb, segno),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__s64, segno)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->segno = segno;
+	),
+
+	TP_printk("fsid "FSID_FMT" segno %llu",
+		  __entry->fsid, __entry->segno)
+);
+DEFINE_EVENT(scoutfs_segno_class, scoutfs_alloc_segno,
+	TP_PROTO(struct super_block *sb, u64 segno),
+	TP_ARGS(sb, segno)
+);
+DEFINE_EVENT(scoutfs_segno_class, scoutfs_free_segno,
+	TP_PROTO(struct super_block *sb, u64 segno),
+	TP_ARGS(sb, segno)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

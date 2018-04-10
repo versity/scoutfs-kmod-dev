@@ -494,7 +494,7 @@ void scoutfs_compact_add_segno(struct super_block *sb, void *data, u64 segno)
 
 /*
  * Commit the result of a compaction based on the state of the cursor.
- * The net caller stops the manifest from being written while we're
+ * The server caller stops the manifest from being written while we're
  * making changes.  We lock the manifest to atomically make our changes.
  *
  * The erorr handling is sketchy here because calling the manifest from
@@ -513,7 +513,7 @@ int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
 	/* free unused segnos that were allocated for the compaction */
 	for (i = 0; i < curs->nr_segnos; i++) {
 		if (curs->segnos[i]) {
-			ret = scoutfs_alloc_free(sb, curs->segnos[i]);
+			ret = scoutfs_server_free_segno(sb, curs->segnos[i]);
 			BUG_ON(ret);
 		}
 	}
@@ -523,7 +523,7 @@ int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
 	/* delete input segments, probably freeing their segnos */
 	list_for_each_entry(cseg, &curs->csegs, entry) {
 		if (!cseg->part_of_move) {
-			ret = scoutfs_alloc_free(sb, cseg->segno);
+			ret = scoutfs_server_free_segno(sb, cseg->segno);
 			BUG_ON(ret);
 		}
 

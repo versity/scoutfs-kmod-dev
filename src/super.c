@@ -74,8 +74,7 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	kst->f_bfree = le64_to_cpu(nstatfs.bfree);
 	kst->f_type = SCOUTFS_SUPER_MAGIC;
 	kst->f_bsize = SCOUTFS_BLOCK_SIZE;
-	kst->f_blocks = le64_to_cpu(nstatfs.total_segs) *
-			SCOUTFS_SEGMENT_BLOCKS;
+	kst->f_blocks = le64_to_cpu(nstatfs.total_blocks);
 	kst->f_bavail = kst->f_bfree;
 
 	kst->f_ffree = kst->f_bfree * 16;

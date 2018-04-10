@@ -20,6 +20,7 @@
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <linux/sort.h>
+#include <linux/log2.h>
 
 #include "format.h"
 #include "counters.h"
@@ -67,6 +68,10 @@ struct server_info {
 	/* server tracks seq use */
 	spinlock_t seq_lock;
 	struct list_head pending_seqs;
+
+	/* server tracks pending frees to be applied during commit */
+	struct rw_semaphore alloc_rwsem;
+	struct list_head pending_frees;
 };
 
 struct server_request {
@@ -92,6 +97,350 @@ struct commit_waiter {
 	struct llist_node node;
 	int ret;
 };
+
+static void init_extent_btree_key(struct scoutfs_extent_btree_key *ebk,
+				  u8 type, u64 major, u64 minor)
+{
+	ebk->type = type;
+	ebk->major = cpu_to_be64(major);
+	ebk->minor = cpu_to_be64(minor);
+}
+
+static int init_extent_from_btree_key(struct scoutfs_extent *ext, u8 type,
+				      struct scoutfs_extent_btree_key *ebk,
+				      unsigned int key_bytes)
+{
+	u64 start;
+	u64 len;
+
+	/* btree _next doesn't have last key limit */
+	if (ebk->type != type)
+		return -ENOENT;
+
+	if (key_bytes != sizeof(struct scoutfs_extent_btree_key) ||
+	    (ebk->type != SCOUTFS_FREE_EXTENT_BLKNO_TYPE &&
+	     ebk->type != SCOUTFS_FREE_EXTENT_BLOCKS_TYPE))
+		return -EIO; /* XXX corruption, bad key */
+
+	start = be64_to_cpu(ebk->major);
+	len = be64_to_cpu(ebk->minor);
+	if (ebk->type == SCOUTFS_FREE_EXTENT_BLOCKS_TYPE)
+		swap(start, len);
+	start -= len - 1;
+
+	return scoutfs_extent_init(ext, ebk->type, 0, start, len, 0, 0);
+}
+
+/*
+ * This is called by the extent core on behalf of the server who holds
+ * the appropriate locks to protect the many btree items that can be
+ * accessed on behalf of one extent operation.
+ */
+static int server_extent_io(struct super_block *sb, int op,
+			    struct scoutfs_extent *ext, void *data)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_extent_btree_key ebk;
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	bool mirror = false;
+	u8 mirror_type;
+	u8 mirror_op = 0;
+	int ret;
+	int err;
+
+	trace_scoutfs_server_extent_io(sb, ext);
+
+	if (WARN_ON_ONCE(ext->type != SCOUTFS_FREE_EXTENT_BLKNO_TYPE &&
+			 ext->type != SCOUTFS_FREE_EXTENT_BLOCKS_TYPE))
+		return -EINVAL;
+
+	if (ext->type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE &&
+	    (op == SEI_INSERT || op == SEI_DELETE)) {
+		mirror = true;
+		mirror_type = SCOUTFS_FREE_EXTENT_BLOCKS_TYPE;
+		mirror_op = op == SEI_INSERT ? SEI_DELETE : SEI_INSERT;
+	}
+
+	init_extent_btree_key(&ebk, ext->type, ext->start + ext->len - 1,
+			      ext->len);
+	if (ext->type == SCOUTFS_FREE_EXTENT_BLOCKS_TYPE)
+		swap(ebk.major, ebk.minor);
+
+	if (op == SEI_NEXT) {
+		ret = scoutfs_btree_next(sb, &super->alloc_root,
+					 &ebk, sizeof(ebk), &iref);
+		if (ret == 0) {
+			ret = init_extent_from_btree_key(ext, ext->type,
+							 iref.key,
+							 iref.key_len);
+			scoutfs_btree_put_iref(&iref);
+		}
+
+	} else if (op == SEI_INSERT) {
+		ret = scoutfs_btree_insert(sb, &super->alloc_root,
+					   &ebk, sizeof(ebk), NULL, 0);
+
+	} else if (op == SEI_DELETE) {
+		ret = scoutfs_btree_delete(sb, &super->alloc_root,
+					   &ebk, sizeof(ebk));
+
+	} else {
+		ret = WARN_ON_ONCE(-EINVAL);
+	}
+
+	if (ret == 0 && mirror) {
+		swap(ext->type, mirror_type);
+		ret = server_extent_io(sb, op, ext, data);
+		swap(ext->type, mirror_type);
+		if (ret) {
+			err = server_extent_io(sb, mirror_op, ext, data);
+			BUG_ON(err);
+		}
+	}
+
+	return ret;
+}
+
+/*
+ * Allocate an extent of the given length in the first smallest free
+ * extent that contains it.  We allocate in multiples of segment blocks
+ * and expose that to callers today.
+ *
+ * This doesn't have the cursor that segment allocation does.  It's
+ * possible that a recently freed segment can merge to form a larger
+ * free extent that can be very quickly allocated to a node.  The hope is
+ * that doesn't happen very often.
+ */
+static int alloc_extent(struct super_block *sb, u64 len, u64 *start)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_extent ext;
+	int ret;
+
+	*start = 0;
+
+	down_write(&server->alloc_rwsem);
+
+	if (len & (SCOUTFS_SEGMENT_BLOCKS - 1)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE, 0,
+			    0, len, 0, 0);
+	ret = scoutfs_extent_next(sb, server_extent_io, &ext, NULL);
+	if (ret) {
+		if (ret == -ENOENT)
+			ret = -ENOSPC;
+		goto out;
+	}
+
+	trace_scoutfs_server_alloc_extent_next(sb, &ext);
+
+	ext.type = SCOUTFS_FREE_EXTENT_BLKNO_TYPE;
+	ext.len = len;
+
+	ret = scoutfs_extent_remove(sb, server_extent_io, &ext, NULL);
+	if (ret)
+		goto out;
+
+	trace_scoutfs_server_alloc_extent_allocated(sb, &ext);
+	le64_add_cpu(&super->free_blocks, -ext.len);
+
+	*start = ext.start;
+	ret = 0;
+
+out:
+	up_write(&server->alloc_rwsem);
+
+	if (ret)
+		scoutfs_inc_counter(sb, server_extent_alloc_error);
+	else
+		scoutfs_inc_counter(sb, server_extent_alloc);
+
+	return ret;
+}
+
+struct pending_free_extent {
+	struct list_head head;
+	u64 start;
+	u64 len;
+};
+
+/*
+ * Now that the transaction's done we can apply all the pending frees.
+ * The list entries are totally unsorted so this is the first time that
+ * we can discover corruption from duplicated frees, etc.  This can also
+ * fail on normal transient io or memory errors.
+ *
+ * We can't unwind if this fails.  The caller can freak out or keep
+ * trying forever.
+ */
+static int apply_pending_frees(struct super_block *sb)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+	struct pending_free_extent *pfe;
+	struct pending_free_extent *tmp;
+	struct scoutfs_extent ext;
+	int ret;
+
+	down_write(&server->alloc_rwsem);
+
+	list_for_each_entry_safe(pfe, tmp, &server->pending_frees, head) {
+		scoutfs_inc_counter(sb, server_free_pending_extent);
+		scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE, 0,
+				    pfe->start, pfe->len, 0, 0);
+		trace_scoutfs_server_free_pending_extent(sb, &ext);
+		ret = scoutfs_extent_add(sb, server_extent_io, &ext, NULL);
+		if (ret) {
+			scoutfs_inc_counter(sb, server_free_pending_error);
+			break;
+		}
+
+		le64_add_cpu(&super->free_blocks, pfe->len);
+		list_del_init(&pfe->head);
+		kfree(pfe);
+	}
+
+	up_write(&server->alloc_rwsem);
+
+	return 0;
+}
+
+/*
+ * If there are still pending frees to destroy it means the server didn't
+ * shut down cleanly and that's not well supported today so we want to
+ * have it holler if this happens.  In the future we'd cleanly support
+ * forced shutdown that had been told that it's OK to throw away dirty
+ * state.
+ */
+static int destroy_pending_frees(struct super_block *sb)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+	struct pending_free_extent *pfe;
+	struct pending_free_extent *tmp;
+
+	WARN_ON_ONCE(!list_empty(&server->pending_frees));
+
+	down_write(&server->alloc_rwsem);
+
+	list_for_each_entry_safe(pfe, tmp, &server->pending_frees, head) {
+		list_del_init(&pfe->head);
+		kfree(pfe);
+	}
+
+	up_write(&server->alloc_rwsem);
+
+	return 0;
+}
+
+/*
+ * We can't satisfy allocations with freed extents until the removed
+ * references to the freed extents have been committed.  We add freed
+ * extents to a list that is only applied to the persistent indexes as
+ * the transaction is being committed and the current transaction won't
+ * try to allocate any more extents.  If we didn't do this then we could
+ * write to referenced data as part of the commit that frees it.  If the
+ * commit was interrupted the stable data could have been overwritten.
+ */
+static int free_extent(struct super_block *sb, u64 start, u64 len)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+	struct pending_free_extent *pfe;
+	int ret;
+
+	scoutfs_inc_counter(sb, server_free_extent);
+
+	down_write(&server->alloc_rwsem);
+
+	pfe = kmalloc(sizeof(struct pending_free_extent), GFP_NOFS);
+	if (!pfe) {
+		ret = -ENOMEM;
+	} else {
+		pfe->start = start;
+		pfe->len = len;
+		list_add_tail(&pfe->head, &server->pending_frees);
+		ret = 0;
+	}
+
+	up_write(&server->alloc_rwsem);
+
+	return ret;
+}
+
+/*
+ * This is called by the compaction code which is running in the server.
+ * The server caller has held all the locks, etc.
+ */
+int scoutfs_server_free_segno(struct super_block *sb, u64 segno)
+{
+	scoutfs_inc_counter(sb, server_free_segno);
+	trace_scoutfs_free_segno(sb, segno);
+	return free_extent(sb, segno << SCOUTFS_SEGMENT_BLOCK_SHIFT,
+			   SCOUTFS_SEGMENT_BLOCKS);
+}
+
+/*
+ * Allocate a segment on behalf of compaction or a node wanting to write
+ * a level 0 segment.  It has to be aligned to the segment size because
+ * we address segments with aligned segment numbers instead of block
+ * offsets.
+ *
+ * We can use a simple cursor sweep of the index by start because all
+ * server extents are multiples of the segment size.  Sweeping through
+ * the volume tries to spread out new segment writes and make it more
+ * rare to write to a recently freed segment which can cause a client to
+ * have to re-read the manifest.
+ */
+static int alloc_segno(struct super_block *sb, u64 *segno)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_extent ext;
+	u64 curs;
+	int ret;
+
+	down_write(&server->alloc_rwsem);
+
+	curs = ALIGN(le64_to_cpu(super->alloc_cursor), SCOUTFS_SEGMENT_BLOCKS);
+	*segno = 0;
+
+	do {
+		scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE, 0,
+				    curs, 1, 0, 0);
+		ret = scoutfs_extent_next(sb, server_extent_io, &ext, NULL);
+	} while (ret == -ENOENT && curs && (curs = 0, 1));
+	if (ret) {
+		if (ret == -ENOENT)
+			ret = -ENOSPC;
+		goto out;
+	}
+
+	trace_scoutfs_server_alloc_segno_next(sb, &ext);
+
+	/* use cursor if within extent, otherwise start of next extent */
+	if (ext.start < curs)
+		ext.start = curs;
+	ext.len = SCOUTFS_SEGMENT_BLOCKS;
+
+	ret = scoutfs_extent_remove(sb, server_extent_io, &ext, NULL);
+	if (ret)
+		goto out;
+
+	super->alloc_cursor = cpu_to_le64(ext.start + ext.len);
+
+	*segno = ext.start >> SCOUTFS_SEGMENT_BLOCK_SHIFT;
+
+	trace_scoutfs_server_alloc_segno_allocated(sb, &ext);
+	trace_scoutfs_alloc_segno(sb, *segno);
+	scoutfs_inc_counter(sb, server_alloc_segno);
+
+out:
+	up_write(&server->alloc_rwsem);
+	return ret;
+}
 
 /*
  * Trigger a server shutdown by shutting down the listening socket.  The
@@ -188,9 +537,9 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 		goto out;
 	}
 
-	ret = scoutfs_alloc_apply_pending(sb);
+	ret = apply_pending_frees(sb);
 	if (ret) {
-		scoutfs_err(sb, "server error freeing segments: %d", ret);
+		scoutfs_err(sb, "server error freeing extents: %d", ret);
 		goto out;
 	}
 
@@ -336,6 +685,50 @@ out:
 	return send_reply(conn, id, type, ret, &ial, sizeof(ial));
 }
 
+/*
+ * Give the client an extent allocation of len blocks.  We leave the
+ * details to the extent allocator.
+ */
+static int process_alloc_extent(struct server_connection *conn,
+			       u64 id, u8 type, void *data, unsigned data_len)
+{
+	struct server_info *server = conn->server;
+	struct super_block *sb = server->sb;
+	struct commit_waiter cw;
+	__le64 lestart;
+	__le64 lelen;
+	u64 start;
+	int ret;
+
+	if (data_len != sizeof(lelen)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	memcpy(&lelen, data, data_len);
+
+	down_read(&server->commit_rwsem);
+	ret = alloc_extent(sb, le64_to_cpu(lelen), &start);
+	if (ret == -ENOSPC) {
+		start = 0;
+		ret = 0;
+	}
+	if (ret == 0) {
+		lestart = cpu_to_le64(start);
+		queue_commit_work(server, &cw);
+	}
+	up_read(&server->commit_rwsem);
+
+	if (ret == 0)
+		ret = wait_for_commit(server, &cw, id, type);
+out:
+	return send_reply(conn, id, type, ret, &lestart, sizeof(lestart));
+}
+
+/*
+ * We still special case segno allocation because it's aligned and we'd
+ * like to keep that detail in the server.
+ */
 static int process_alloc_segno(struct server_connection *conn,
 			       u64 id, u8 type, void *data, unsigned data_len)
 {
@@ -352,7 +745,7 @@ static int process_alloc_segno(struct server_connection *conn,
 	}
 
 	down_read(&server->commit_rwsem);
-	ret = scoutfs_alloc_segno(sb, &segno);
+	ret = alloc_segno(sb, &segno);
 	if (ret == 0) {
 		lesegno = cpu_to_le64(segno);
 		queue_commit_work(server, &cw);
@@ -607,14 +1000,15 @@ static int process_statfs(struct server_connection *conn, u64 id, u8 type,
 	if (data_len == 0) {
 		/* uuid and total_segs are constant, so far */
 		memcpy(nstatfs.uuid, super->uuid, sizeof(nstatfs.uuid));
-		nstatfs.total_segs = super->total_segs;
 
 		spin_lock(&sbi->next_ino_lock);
 		nstatfs.next_ino = super->next_ino;
 		spin_unlock(&sbi->next_ino_lock);
 
-		/* alloc locks the bfree calculation */
-		nstatfs.bfree = cpu_to_le64(scoutfs_alloc_bfree(sb));
+		down_read(&server->alloc_rwsem);
+		nstatfs.total_blocks = super->total_blocks;
+		nstatfs.bfree = super->free_blocks;
+		up_read(&server->alloc_rwsem);
 		ret = 0;
 	} else {
 		ret = -EINVAL;
@@ -657,7 +1051,7 @@ int scoutfs_client_get_compaction(struct super_block *sb, void *curs)
 
 	/* allow for expansion slop from sticky and alignment */
 	for (i = 0; i < nr + SCOUTFS_COMPACTION_SLOP; i++) {
-		ret = scoutfs_alloc_segno(sb, &segno);
+		ret = alloc_segno(sb, &segno);
 		if (ret < 0)
 			break;
 		scoutfs_compact_add_segno(sb, curs, segno);
@@ -728,6 +1122,7 @@ static void scoutfs_server_process_func(struct work_struct *work)
 	struct server_connection *conn = req->conn;
 	static process_func_t process_funcs[] = {
 		[SCOUTFS_NET_ALLOC_INODES]	= process_alloc_inodes,
+		[SCOUTFS_NET_ALLOC_EXTENT]	= process_alloc_extent,
 		[SCOUTFS_NET_ALLOC_SEGNO]	= process_alloc_segno,
 		[SCOUTFS_NET_RECORD_SEGMENT]	= process_record_segment,
 		[SCOUTFS_NET_BULK_ALLOC]	= process_bulk_alloc,
@@ -994,7 +1389,6 @@ static void scoutfs_server_func(struct work_struct *work)
 	/* finally start up the server subsystems before accepting */
 	ret = scoutfs_btree_setup(sb) ?:
 	      scoutfs_manifest_setup(sb) ?:
-	      scoutfs_alloc_setup(sb) ?:
 	      scoutfs_compact_setup(sb);
 	if (ret)
 		goto shutdown;
@@ -1067,7 +1461,7 @@ shutdown:
 
 	/* shut down all the server subsystems */
 	scoutfs_compact_destroy(sb);
-	scoutfs_alloc_destroy(sb);
+	destroy_pending_frees(sb);
 	scoutfs_manifest_destroy(sb);
 	scoutfs_btree_destroy(sb);
 
@@ -1108,6 +1502,8 @@ int scoutfs_server_setup(struct super_block *sb)
 	seqcount_init(&server->stable_seqcount);
 	spin_lock_init(&server->seq_lock);
 	INIT_LIST_HEAD(&server->pending_seqs);
+	init_rwsem(&server->alloc_rwsem);
+	INIT_LIST_HEAD(&server->pending_frees);
 
 	server->wq = alloc_workqueue("scoutfs_server", WQ_NON_REENTRANT, 0);
 	if (!server->wq) {

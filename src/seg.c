@@ -28,6 +28,7 @@
 #include "counters.h"
 #include "triggers.h"
 #include "msg.h"
+#include "server.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -298,7 +299,7 @@ out:
  */
 int scoutfs_seg_free_segno(struct super_block *sb, struct scoutfs_segment *seg)
 {
-	return scoutfs_alloc_free(sb, seg->segno);
+	return scoutfs_server_free_segno(sb, seg->segno);
 }
 
 /*

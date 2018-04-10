@@ -556,6 +556,25 @@ int scoutfs_client_alloc_inodes(struct super_block *sb, u64 count,
 	return ret;
 }
 
+int scoutfs_client_alloc_extent(struct super_block *sb, u64 len, u64 *start)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+	__le64 lelen = cpu_to_le64(len);
+	__le64 lestart;
+	int ret;
+
+	ret = client_request(client, SCOUTFS_NET_ALLOC_EXTENT,
+			     &lelen, sizeof(lelen), &lestart, sizeof(lestart));
+	if (ret == 0) {
+		if (lestart == 0)
+			ret = -ENOSPC;
+		else
+			*start = le64_to_cpu(lestart);
+	}
+
+	return ret;
+}
+
 int scoutfs_client_alloc_segno(struct super_block *sb, u64 *segno)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;

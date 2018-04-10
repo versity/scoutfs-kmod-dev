@@ -604,11 +604,12 @@ static bool valid_referenced_block(struct scoutfs_super_block *super,
  * dirtying, and allocate new blocks.
  *
  * Btree blocks don't have rigid cache consistency.  We can be following
- * a new root to read refs into previously stale cached blocks.  If we
- * hit a cached block that doesn't match the ref (or indeed a corrupt
- * block) we return -ESTALE which tells the caller to deal with this
- * error: either find a new root or return a hard error if the block is
- * really corrupt.
+ * block references into cached blocks that are now stale or can be
+ * following a stale root into blocks that have been overwritten.  If we
+ * hit a block that looks stale we first invalidate the cache and retry,
+ * returning -ESTALE if it still looks wrong.  The caller can retry the
+ * read from a more current root or decide that this is a persistent
+ * error.
  *
  * btree callers serialize concurrent writers in a btree but not between
  * btrees.  We have to lock around the shared btree_info.  Callers do
@@ -626,6 +627,7 @@ static int get_ref_block(struct super_block *sb, int flags,
 	struct scoutfs_btree_block *bt = NULL;
 	struct scoutfs_btree_block *new;
 	struct buffer_head *bh;
+	bool retried = false;
 	u64 blkno;
 	u64 seq;
 	int ret;
@@ -633,6 +635,7 @@ static int get_ref_block(struct super_block *sb, int flags,
 
 	/* always get the current block, either to return or cow from */
 	if (ref && ref->blkno) {
+retry:
 		bh = sb_bread(sb, le64_to_cpu(ref->blkno));
 		if (!bh) {
 			ret = -EIO;
@@ -643,13 +646,19 @@ static int get_ref_block(struct super_block *sb, int flags,
 		if (!valid_referenced_block(super, ref, bt, bh) ||
 		    scoutfs_trigger(sb, BTREE_STALE_READ)) {
 
+			scoutfs_inc_counter(sb, btree_stale_read);
+
 			lock_buffer(bh);
 			clear_buffer_uptodate(bh);
 			unlock_buffer(bh);
 			put_bh(bh);
 			bt = NULL;
 
-			scoutfs_inc_counter(sb, btree_stale_read);
+			if (!retried) {
+				retried = true;
+				goto retry;
+			}
+
 			ret = -ESTALE;
 			goto out;
 		}

@@ -76,6 +76,7 @@ struct manifest_ref {
 	int found_ctr;
 	int off;
 	u8 level;
+	bool retried;
 
 	struct scoutfs_key first;
 	struct scoutfs_key last;
@@ -469,9 +470,11 @@ static int get_nonzero_refs(struct super_block *sb,
 }
 
 /*
- * See if the caller is a remote btree reader who has read a stale btree
- * block and should keep trying.  If they see repeated errors on the
- * same root then we assume that it's persistent corruption.
+ * If we saw persistent stale blocks or segment reads while walking the
+ * manifest then we might be trying to read through an old stale root
+ * that has been overwritten.  We can ask for a new root and try again.
+ * If we don't get a new root and the errors persist then the we've hit
+ * corruption.
  */
 static int handle_stale_btree(struct super_block *sb,
 			      struct scoutfs_btree_root *root,
@@ -605,8 +608,12 @@ retry_stale:
 	/* sort by segment to issue advancing reads */
 	list_sort(NULL, &ref_list, cmp_ment_ref_segno);
 
+resubmit:
 	/* submit reads for all the segments */
 	list_for_each_entry(ref, &ref_list, entry) {
+		/* don't resubmit if we've read */
+		if (ref->seg)
+			continue;
 
 		trace_scoutfs_read_item_segment(sb, ref->level, ref->segno,
 						ref->seq, &ref->first,
@@ -624,9 +631,16 @@ retry_stale:
 	/* always wait for submitted segments */
 	list_for_each_entry(ref, &ref_list, entry) {
 		if (!ref->seg)
-			break;
+			continue;
 
 		err = scoutfs_seg_wait(sb, ref->seg, ref->segno, ref->seq);
+		if (err == -ESTALE && !ref->retried) {
+			ref->retried = true;
+			err = 0;
+			scoutfs_seg_put(ref->seg);
+			ref->seg = NULL;
+			goto resubmit;
+		}
 		if (err && !ret)
 			ret = err;
 	}

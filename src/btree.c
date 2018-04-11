@@ -324,6 +324,25 @@ static bool first_block_in_half(struct scoutfs_btree_ring *bring)
 	return block == 0 || block == (le64_to_cpu(bring->nr_blocks) / 2);
 }
 
+/* Set next_block to the start of the other half */
+static void advance_to_next_half(struct scoutfs_btree_ring *bring)
+{
+	u64 block = le64_to_cpu(bring->next_block);
+	u64 half = le64_to_cpu(bring->nr_blocks) / 2;
+	u64 offset;
+
+	if (block >= half) {
+		offset = le64_to_cpu(bring->nr_blocks) - block;
+		block = 0;
+	} else {
+		offset = half - block;
+		block = half;
+	}
+
+	bring->next_block = cpu_to_le64(block);
+	le64_add_cpu(&bring->next_seq, offset);
+}
+
 static size_t super_root_offsets[] = {
 	offsetof(struct scoutfs_super_block, alloc_root),
 	offsetof(struct scoutfs_super_block, manifest.root),
@@ -333,6 +352,19 @@ static size_t super_root_offsets[] = {
 	for (i = 0; i < ARRAY_SIZE(super_root_offsets) &&		\
 		    (root = ((void *)super + super_root_offsets[i]), 1);\
 	     i++)
+
+static bool all_roots_migrated(struct scoutfs_super_block *super)
+{
+	struct scoutfs_btree_root *root;
+	int i;
+
+	for_each_super_root(super, i, root) {
+		if (root->migration_key_len)
+			return false;
+	}
+
+	return true;
+}
 
 static int cmp_hdr_item_key(void *priv, const void *a_ptr, const void *b_ptr)
 {
@@ -711,10 +743,16 @@ retry:
 		bti->old_dirtied++;
 
 	/* wrap next block and increase next seq */
+	le64_add_cpu(&bring->next_block, 1);
+	le64_add_cpu(&bring->next_seq, 1);
+
 	if (le64_to_cpu(bring->next_block) == le64_to_cpu(bring->nr_blocks))
 		bring->next_block = 0;
-	else
-		le64_add_cpu(&bring->next_block, 1);
+
+	/* advance to the next half when asked and migration made it safe */
+	if (all_roots_migrated(super) &&
+	    scoutfs_trigger(sb, BTREE_ADVANCE_RING_HALF))
+		advance_to_next_half(bring);
 
 	/* reset the migration keys if we've just entered a new half */
 	if (first_block_in_half(bring)) {
@@ -724,8 +762,6 @@ retry:
 			root->migration_key_len = cpu_to_le16(1);
 		}
 	}
-
-	le64_add_cpu(&bring->next_seq, 1);
 
 	mutex_unlock(&bti->mutex);
 

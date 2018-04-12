@@ -26,6 +26,7 @@
 #include "sort_priv.h"
 #include "counters.h"
 #include "triggers.h"
+#include "options.h"
 
 #include "scoutfs_trace.h"
 
@@ -184,9 +185,9 @@ static inline unsigned int all_len_bytes(unsigned key_len, unsigned val_len)
  * 2 * min_used <= (bs - parent_min_free - hdr)
  * min_used <= (bs - parent_min_free - hdr) / 2
  */
-static inline unsigned int min_used_bytes(void)
+static inline int min_used_bytes(int block_size)
 {
-	return (SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block) -
+	return (block_size - sizeof(struct scoutfs_btree_block) -
 		SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES) / 2;
 }
 
@@ -852,7 +853,9 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
 	bool put_parent = false;
 	int ret;
 
-	if (right->level)
+	if (scoutfs_option_bool(sb, Opt_btree_force_tiny_blocks))
+		all_bytes = SCOUTFS_BLOCK_SIZE - SCOUTFS_BTREE_TINY_BLOCK_SIZE;
+	else if (right->level)
 		all_bytes = SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES;
 	else
 		all_bytes = all_len_bytes(key_len, val_len);
@@ -913,12 +916,20 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 	struct scoutfs_btree_ring *bring = &SCOUTFS_SB(sb)->super.bring;
 	struct scoutfs_btree_block *sib;
 	struct scoutfs_btree_ref *ref;
+	unsigned int min_used;
 	unsigned int sib_pos;
 	bool move_right;
 	int to_move;
 	int ret;
 
-	if (used_total(bt) >= min_used_bytes())
+	BUILD_BUG_ON(min_used_bytes(SCOUTFS_BTREE_TINY_BLOCK_SIZE) < 0);
+
+	if (scoutfs_option_bool(sb, Opt_btree_force_tiny_blocks))
+		min_used = min_used_bytes(SCOUTFS_BTREE_TINY_BLOCK_SIZE);
+	else
+		min_used = min_used_bytes(SCOUTFS_BLOCK_SIZE);
+
+	if (used_total(bt) >= min_used)
 		return 0;
 
 	/* move items right into our block if we have a left sibling */
@@ -935,10 +946,10 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 	if (ret)
 		return ret;
 
-	if (used_total(sib) < min_used_bytes())
+	if (used_total(sib) < min_used)
 		to_move = used_total(sib);
 	else
-		to_move = min_used_bytes() - used_total(bt);
+		to_move = min_used - used_total(bt);
 
 	move_items(bt, sib, move_right, to_move);
 

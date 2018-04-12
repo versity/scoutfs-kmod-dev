@@ -34,12 +34,17 @@ static const match_table_t tokens = {
 
 struct options_sb_info {
 	struct dentry *debugfs_dir;
+	u32 btree_force_tiny_blocks;
 };
 
 u32 scoutfs_option_u32(struct super_block *sb, int token)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct options_sb_info *osi = sbi->options;
+
 	switch(token) {
-		default: break;
+		case Opt_btree_force_tiny_blocks:
+			return osi->btree_force_tiny_blocks;
 	}
 
 	WARN_ON_ONCE(1);
@@ -105,6 +110,13 @@ int scoutfs_options_setup(struct super_block *sb)
 
 	osi->debugfs_dir = debugfs_create_dir("options", sbi->debug_root);
 	if (!osi->debugfs_dir) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	if (!debugfs_create_bool("btree_force_tiny_blocks", 0644,
+				 osi->debugfs_dir,
+				 &osi->btree_force_tiny_blocks)) {
 		ret = -ENOMEM;
 		goto out;
 	}

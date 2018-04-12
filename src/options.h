@@ -7,6 +7,11 @@
 enum {
 	Opt_listen = 0,
 	Opt_cluster,
+	/*
+	 * For debugging we can quickly create huge trees by limiting
+	 * the number of items in each block as though the blocks were tiny.
+	 */
+	Opt_btree_force_tiny_blocks,
 	Opt_err,
 };
 

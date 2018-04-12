@@ -121,15 +121,9 @@ struct scoutfs_key_be {
 	__u8	_sk_fourth;
 }__packed;
 
-/*
- * Assert that we'll be able to represent all possible keys with 8 64bit
- * primary sort values.
- */
-#define SCOUTFS_BTREE_GREATEST_KEY_LEN 32
-/* level >0 segments can have a full key and some metadata */
-#define SCOUTFS_BTREE_MAX_KEY_LEN 320
-/* level 0 segments can have two full keys in the value :/ */
-#define SCOUTFS_BTREE_MAX_VAL_LEN 768
+/* chose reasonable max key and value lens that have room for some u64s */
+#define SCOUTFS_BTREE_MAX_KEY_LEN 40
+#define SCOUTFS_BTREE_MAX_VAL_LEN 64
 
 /*
  * The min number of free bytes we must leave in a parent as we descend

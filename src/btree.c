@@ -142,11 +142,10 @@ enum {
 /*
  * This greatest key value is stored down the right spine of the tree
  * and has to be sorted by memcmp() greater than all possible keys in
- * all btrees.  We give it room for a decent number of big-endian
- * primary sort values.
+ * all btrees.
  */
-static char max_key[SCOUTFS_BTREE_GREATEST_KEY_LEN] = {
-	[0 ... (SCOUTFS_BTREE_GREATEST_KEY_LEN - 1)] = 0xff,
+static char max_key[SCOUTFS_BTREE_MAX_KEY_LEN] = {
+	[0 ... (SCOUTFS_BTREE_MAX_KEY_LEN - 1)] = 0xff,
 };
 
 /* number of contiguous bytes used by the item header, key, and value */
@@ -1262,9 +1261,7 @@ static bool invalid_item(void *key, unsigned key_len, unsigned val_len)
 {
 	return WARN_ON_ONCE(key_len == 0) ||
 	       WARN_ON_ONCE(key_len > SCOUTFS_BTREE_MAX_KEY_LEN) ||
-	       WARN_ON_ONCE(val_len > SCOUTFS_BTREE_MAX_VAL_LEN) ||
-	       WARN_ON_ONCE(key_len > SCOUTFS_BTREE_GREATEST_KEY_LEN &&
-			    cmp_keys(key, key_len, max_key, sizeof(max_key)) > 0);
+	       WARN_ON_ONCE(val_len > SCOUTFS_BTREE_MAX_VAL_LEN);
 }
 
 /*

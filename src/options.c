@@ -14,6 +14,8 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/types.h>
+#include <linux/slab.h>
+#include <linux/debugfs.h>
 
 #include <linux/parser.h>
 #include <linux/inet.h>
@@ -22,18 +24,27 @@
 
 #include "msg.h"
 #include "options.h"
-
-enum {
-	Opt_listen = 0,
-	Opt_cluster,
-	Opt_err,
-};
+#include "super.h"
 
 static const match_table_t tokens = {
 	{Opt_listen, "listen=%s"},
 	{Opt_cluster, "cluster=%s"},
 	{Opt_err, NULL}
 };
+
+struct options_sb_info {
+	struct dentry *debugfs_dir;
+};
+
+u32 scoutfs_option_u32(struct super_block *sb, int token)
+{
+	switch(token) {
+		default: break;
+	}
+
+	WARN_ON_ONCE(1);
+	return 0;
+}
 
 int scoutfs_parse_options(struct super_block *sb, char *options,
 			  struct mount_options *parsed)
@@ -78,4 +89,42 @@ int scoutfs_parse_options(struct super_block *sb, char *options,
 	}
 
 	return 0;
+}
+
+int scoutfs_options_setup(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct options_sb_info *osi;
+	int ret;
+
+	osi = kzalloc(sizeof(struct options_sb_info), GFP_KERNEL);
+	if (!osi)
+		return -ENOMEM;
+
+	sbi->options = osi;
+
+	osi->debugfs_dir = debugfs_create_dir("options", sbi->debug_root);
+	if (!osi->debugfs_dir) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = 0;
+out:
+	if (ret)
+		scoutfs_options_destroy(sb);
+	return ret;
+}
+
+void scoutfs_options_destroy(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct options_sb_info *osi = sbi->options;
+
+	if (osi) {
+		if (osi->debugfs_dir)
+			debugfs_remove_recursive(osi->debugfs_dir);
+		kfree(osi);
+		sbi->options = NULL;
+	}
 }

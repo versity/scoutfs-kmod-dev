@@ -137,6 +137,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_lock_destroy(sb);
 
 	scoutfs_destroy_triggers(sb);
+	scoutfs_options_destroy(sb);
 	debugfs_remove(sbi->debug_root);
 	scoutfs_destroy_counters(sb);
 	scoutfs_destroy_sysfs(sb);
@@ -331,6 +332,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_setup_counters(sb) ?:
 	      scoutfs_read_supers(sb, &SCOUTFS_SB(sb)->super) ?:
 	      scoutfs_debugfs_setup(sb) ?:
+	      scoutfs_options_setup(sb) ?:
 	      scoutfs_setup_triggers(sb) ?:
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:

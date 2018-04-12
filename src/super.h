@@ -21,6 +21,7 @@ struct server_info;
 struct inode_sb_info;
 struct btree_info;
 struct sysfs_info;
+struct options_sb_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -64,6 +65,7 @@ struct scoutfs_sb_info {
 	struct scoutfs_triggers *triggers;
 
 	struct mount_options opts;
+	struct options_sb_info *options;
 
 	struct dentry *debug_root;
 

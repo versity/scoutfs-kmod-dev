@@ -47,6 +47,7 @@ struct server_info {
 
 	struct mutex mutex;
 	bool shutting_down;
+	bool bind_warned;
 	struct task_struct *listen_task;
 	struct socket *listen_sock;
 
@@ -906,8 +907,20 @@ static void scoutfs_server_func(struct work_struct *work)
 		goto out;
 
 	addrlen = sizeof(sin);
-	ret = kernel_bind(sock, (struct sockaddr *)&sin, addrlen) ?:
-	      kernel_getsockname(sock, (struct sockaddr *)&sin, &addrlen);
+	ret = kernel_bind(sock, (struct sockaddr *)&sin, addrlen);
+	if (ret) {
+		if (!server->bind_warned) {
+			scoutfs_err(sb, "server failed to bind to "SIN_FMT", errno %d%s.  Retrying indefinitely..",
+				    SIN_ARG(&sin), ret,
+				    ret == -EADDRNOTAVAIL ? " (Bad address?)"
+							  : "");
+			server->bind_warned = true;
+		}
+		goto out;
+	}
+	server->bind_warned = false;
+
+	kernel_getsockname(sock, (struct sockaddr *)&sin, &addrlen);
 	if (ret)
 		goto out;
 

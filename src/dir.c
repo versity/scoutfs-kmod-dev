@@ -1206,8 +1206,10 @@ int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
 
 	ent = kmalloc(offsetof(struct scoutfs_link_backref_entry,
 			       dent.name[SCOUTFS_NAME_LEN]), GFP_KERNEL);
-	if (!ent)
-		return -ENOMEM;
+	if (!ent) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	INIT_LIST_HEAD(&ent->head);
 
@@ -1223,8 +1225,6 @@ int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
 	ret = scoutfs_item_next(sb, &key, &last_key, &val, lock);
 	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
 	lock = NULL;
-
-	trace_scoutfs_dir_add_next_linkref(sb, ino, dir_ino, dir_pos, ret);
 	if (ret < 0)
 		goto out;
 
@@ -1241,7 +1241,12 @@ int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
 	ent->name_len = len;
 	ret = 0;
 out:
-	if (list_empty(&ent->head))
+	trace_scoutfs_dir_add_next_linkref(sb, ino, dir_ino, dir_pos, ret,
+					   ent ? ent->dir_ino : 0,
+					   ent ? ent->dir_pos : 0,
+					   ent ? ent->name_len : 0);
+
+	if (ent && list_empty(&ent->head))
 		kfree(ent);
 	return ret;
 }
@@ -1306,19 +1311,14 @@ void scoutfs_dir_free_backref_path(struct super_block *sb,
 int scoutfs_dir_get_backref_path(struct super_block *sb, u64 ino, u64 dir_ino,
 				 u64 dir_pos, struct list_head *list)
 {
+	int retries = 10;
 	u64 par_ino;
 	int ret;
-	int iters = 0;
 
 retry:
-	/*
-	 * Debugging for SCOUT-107, can be removed later when we're
-	 * confident we won't hit an endless loop here again.
-	 */
-	if (WARN_ONCE(++iters >= 4000, "scoutfs: Excessive retries in "
-		      "dir_get_backref_path. ino %llu dir_ino %llu pos %llu\n",
-		      ino, dir_ino, dir_pos)) {
-		ret = -EINVAL;
+	if (retries-- == 0) {
+		scoutfs_inc_counter(sb, dir_backref_excessive_retries);
+		ret = -ELOOP;
 		goto out;
 	}
 

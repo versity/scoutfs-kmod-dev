@@ -1060,9 +1060,11 @@ TRACE_EVENT(scoutfs_advance_dirty_super,
 
 TRACE_EVENT(scoutfs_dir_add_next_linkref,
 	TP_PROTO(struct super_block *sb, __u64 ino, __u64 dir_ino,
-		 __u64 dir_pos, int ret),
+		 __u64 dir_pos, int ret, __u64 found_dir_ino,
+		 __u64 found_dir_pos, unsigned int name_len),
 
-	TP_ARGS(sb, ino, dir_ino, dir_pos, ret),
+	TP_ARGS(sb, ino, dir_ino, dir_pos, ret, found_dir_pos, found_dir_ino,
+		name_len),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
@@ -1070,6 +1072,9 @@ TRACE_EVENT(scoutfs_dir_add_next_linkref,
 		__field(__u64, dir_ino)
 		__field(__u64, dir_pos)
 		__field(int, ret)
+		__field(__u64, found_dir_ino)
+		__field(__u64, found_dir_pos)
+		__field(unsigned int, name_len)
 	),
 
 	TP_fast_assign(
@@ -1078,11 +1083,15 @@ TRACE_EVENT(scoutfs_dir_add_next_linkref,
 		__entry->dir_ino = dir_ino;
 		__entry->dir_pos = dir_pos;
 		__entry->ret = ret;
+		__entry->found_dir_ino = dir_ino;
+		__entry->found_dir_pos = dir_pos;
+		__entry->name_len = name_len;
 	),
 
-	TP_printk(FSID_FMT" ino %llu dir_ino %llu dis_pos %llu ret %d",
-		  __entry->fsid, __entry->ino, __entry->dir_ino,
-		  __entry->dir_ino, __entry->ret)
+	TP_printk("fsid "FSID_FMT" ino %llu dir_ino %llu dir_pos %llu ret %d found_dir_ino %llu found_dir_pos %llu name_len %u",
+		  __entry->fsid, __entry->ino, __entry->dir_pos,
+		  __entry->dir_ino, __entry->ret, __entry->found_dir_pos,
+		  __entry->found_dir_ino, __entry->name_len)
 );
 
 TRACE_EVENT(scoutfs_compact_func,

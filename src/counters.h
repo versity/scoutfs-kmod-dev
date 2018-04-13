@@ -36,6 +36,7 @@
 	EXPAND_COUNTER(dentry_revalidate_rcu)			\
 	EXPAND_COUNTER(dentry_revalidate_root)			\
 	EXPAND_COUNTER(dentry_revalidate_valid)			\
+	EXPAND_COUNTER(dir_backref_excessive_retries)		\
 	EXPAND_COUNTER(item_alloc)				\
 	EXPAND_COUNTER(item_batch_duplicate)			\
 	EXPAND_COUNTER(item_batch_inserted)			\

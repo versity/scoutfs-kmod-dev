@@ -490,7 +490,7 @@ static int handle_stale_btree(struct super_block *sb,
 		return -EIO;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int cmp_ment_ref_segno(void *priv, struct list_head *A,

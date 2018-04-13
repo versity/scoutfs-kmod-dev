@@ -158,10 +158,8 @@ static void scoutfs_client_recv_func(struct work_struct *work)
 						  recv_work);
 	struct waiting_sender *sender;
 	struct scoutfs_net_header nh;
-	void *rx_alloc = NULL;
-	int result = 0;
+	void *rx = NULL;
 	u16 data_len;
-	void *rx;
 	int ret;
 
 	for (;;) {
@@ -176,32 +174,12 @@ static void scoutfs_client_recv_func(struct work_struct *work)
 						&client->sockname,
 						&client->peername, &nh);
 
-		/* see if we have a waiting sender */
-		spin_lock(&client->recv_lock);
-		sender = walk_sender_tree(client, le64_to_cpu(nh.id), NULL);
-		spin_unlock(&client->recv_lock);
-
-		if (sender) {
-			if (sender->rx_size < data_len) {
-				/* protocol mismatch is fatal */
-				rx = NULL;
-				result = -EIO;
-			} else {
-				rx = sender->rx;
-				result = 0;
-			}
-		} else {
-			rx = NULL;
-		}
-
+		/* receive the payload */
+		kfree(rx);
+		rx = kmalloc(data_len, GFP_NOFS);
 		if (!rx) {
-			kfree(rx_alloc);
-			rx_alloc = kmalloc(data_len, GFP_NOFS);
-			if (!rx_alloc) {
-				ret = -ENOMEM;
-				break;
-			}
-			rx = rx_alloc;
+			ret = -ENOMEM;
+			break;
 		}
 
 		/* recv failure can be server crashing, not fatal */
@@ -210,14 +188,21 @@ static void scoutfs_client_recv_func(struct work_struct *work)
 			break;
 		}
 
+		/* give the payload to a sender if there is one */
+		spin_lock(&client->recv_lock);
+		sender = walk_sender_tree(client, le64_to_cpu(nh.id), NULL);
 		if (sender) {
-			/* lock to keep sender around until after we wake */
-			spin_lock(&client->recv_lock);
-			sender->result = result;
+			/* protocol mismatch is fatal */
+			if (sender->rx_size < data_len) {
+				sender->result = -EIO;
+			} else {
+				memcpy(sender->rx, rx, data_len);
+				sender->result = 0;
+			}
 			smp_mb(); /* store result before waking */
 			wake_up_process(sender->task);
-			spin_unlock(&client->recv_lock);
 		}
+		spin_unlock(&client->recv_lock);
 	}
 
 	/* make senders reconnect if we see an rx error */
@@ -227,7 +212,7 @@ static void scoutfs_client_recv_func(struct work_struct *work)
 		client->recv_shutdown = true;
 	}
 
-	kfree(rx_alloc);
+	kfree(rx);
 }
 
 static void reset_connect_timeouts(struct client_info *client)
@@ -513,10 +498,14 @@ static int client_request(struct client_info *client, int type, void *data,
 			sent_to_gen = client->sock_gen;
 		}
 
-		/* XXX would need to protect erase during rx if interruptible */
 		mutex_unlock(&client->send_mutex);
 
-		wait_event(client->waitq, sender_should_wake(client, &sender));
+		ret = wait_event_interruptible(client->waitq,
+					sender_should_wake(client, &sender));
+		if (ret < 0 && sender.result == -EINPROGRESS) {
+			sender.result = ret;
+			ret = 0;
+		}
 
 		mutex_lock(&client->send_mutex);
 
@@ -529,7 +518,7 @@ static int client_request(struct client_info *client, int type, void *data,
 
 	mutex_unlock(&client->send_mutex);
 
-	/* safe to remove, we only finish after canceling recv or we're woke */
+	/* only we remove senders, recv only uses senders under the lock */
 	spin_lock(&client->recv_lock);
 	rb_erase(&sender.node, &client->sender_root);
 	spin_unlock(&client->recv_lock);

@@ -19,7 +19,6 @@
 #include <linux/in.h>
 #include <net/sock.h>
 #include <net/tcp.h>
-#include <linux/sort.h>
 #include <asm/barrier.h>
 
 #include "format.h"
@@ -605,97 +604,6 @@ int scoutfs_client_record_segment(struct super_block *sb,
 
 	return client_request(client, SCOUTFS_NET_RECORD_SEGMENT, &net_ment,
 			      sizeof(net_ment), NULL, 0);
-}
-
-static int sort_cmp_u64s(const void *A, const void *B)
-{
-	const u64 *a = A;
-	const u64 *b = B;
-
-	return *a < *b ? -1  : *a > *b ? 1 : 0;
-}
-
-static void sort_swap_u64s(void *A, void *B, int size)
-{
-	u64 *a = A;
-	u64 *b = B;
-
-	swap(*a, *b);
-}
-
-/*
- * Returns a 0-terminated allocated array of segnos, the caller is
- * responsible for freeing it.
- *
- * This double alloc is silly.  But the caller does have an easier time
- * with native u64s.  We'll probably clean this up.
- */
-u64 *scoutfs_client_bulk_alloc(struct super_block *sb)
-{
-	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-	struct scoutfs_net_segnos *ns = NULL;
-	u64 *segnos = NULL;
-	size_t size;
-	unsigned nr;
-	u64 prev;
-	int ret;
-	int i;
-
-	size = offsetof(struct scoutfs_net_segnos,
-			segnos[SCOUTFS_BULK_ALLOC_COUNT]);
-	ns = kmalloc(size, GFP_NOFS);
-	if (!ns) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	ret = client_request(client, SCOUTFS_NET_BULK_ALLOC, NULL, 0, ns, size);
-	if (ret)
-		goto out;
-
-	nr = le16_to_cpu(ns->nr);
-	if (nr == 0) {
-		ret = -ENOSPC;
-		goto out;
-	}
-
-	if (nr > SCOUTFS_BULK_ALLOC_COUNT) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	segnos = kmalloc_array(nr + 1, sizeof(*segnos), GFP_NOFS);
-	if (segnos == NULL) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	for (i = 0; i < nr; i++)
-		segnos[i] = le64_to_cpu(ns->segnos[i]);
-	segnos[nr] = 0;
-
-	/* sort segnos for the caller so they can merge easily */
-	sort(segnos, nr, sizeof(segnos[0]), sort_cmp_u64s, sort_swap_u64s);
-
-	/* make sure they're all non-zero and unique */
-	prev = 0;
-	for (i = 0; i < nr; i++) {
-		if (segnos[i] == prev) {
-			ret = -EINVAL;
-			goto out;
-		}
-		prev = segnos[i];
-	}
-
-	ret = 0;
-out:
-	kfree(ns);
-	if (ret) {
-		kfree(segnos);
-		segnos = ERR_PTR(ret);
-	}
-
-	return segnos;
 }
 
 int scoutfs_client_advance_seq(struct super_block *sb, u64 *seq)

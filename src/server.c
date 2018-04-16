@@ -19,7 +19,6 @@
 #include <linux/in.h>
 #include <net/sock.h>
 #include <net/tcp.h>
-#include <linux/sort.h>
 #include <linux/log2.h>
 
 #include "format.h"
@@ -27,7 +26,6 @@
 #include "inode.h"
 #include "btree.h"
 #include "manifest.h"
-#include "alloc.h"
 #include "seg.h"
 #include "compact.h"
 #include "scoutfs_trace.h"
@@ -811,58 +809,6 @@ out:
 	return send_reply(conn, id, type, ret, NULL, 0);
 }
 
-static int process_bulk_alloc(struct server_connection *conn, u64 id, u8 type,
-			      void *data, unsigned data_len)
-{
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
-	struct scoutfs_net_segnos *ns = NULL;
-	struct commit_waiter cw;
-	size_t size;
-	u64 segno;
-	int ret;
-	int i;
-
-	if (data_len != 0) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	size = offsetof(struct scoutfs_net_segnos,
-			segnos[SCOUTFS_BULK_ALLOC_COUNT]);
-	ns = kmalloc(size, GFP_NOFS);
-	if (!ns) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	down_read(&server->commit_rwsem);
-
-	ns->nr = cpu_to_le16(SCOUTFS_BULK_ALLOC_COUNT);
-	for (i = 0; i < SCOUTFS_BULK_ALLOC_COUNT; i++) {
-		ret = scoutfs_alloc_segno(sb, &segno);
-		if (ret) {
-			while (i-- > 0)
-				scoutfs_alloc_free(sb,
-					le64_to_cpu(ns->segnos[i]));
-			break;
-		}
-
-		ns->segnos[i] = cpu_to_le64(segno);
-	}
-
-	if (ret == 0)
-		queue_commit_work(server, &cw);
-	up_read(&server->commit_rwsem);
-
-	if (ret == 0)
-		ret = wait_for_commit(server, &cw, id, type);
-out:
-	ret = send_reply(conn, id, type, ret, ns, size);
-	kfree(ns);
-	return ret;
-}
-
 struct pending_seq {
 	struct list_head head;
 	u64 seq;
@@ -1125,7 +1071,6 @@ static void scoutfs_server_process_func(struct work_struct *work)
 		[SCOUTFS_NET_ALLOC_EXTENT]	= process_alloc_extent,
 		[SCOUTFS_NET_ALLOC_SEGNO]	= process_alloc_segno,
 		[SCOUTFS_NET_RECORD_SEGMENT]	= process_record_segment,
-		[SCOUTFS_NET_BULK_ALLOC]	= process_bulk_alloc,
 		[SCOUTFS_NET_ADVANCE_SEQ]	= process_advance_seq,
 		[SCOUTFS_NET_GET_LAST_SEQ]	= process_get_last_seq,
 		[SCOUTFS_NET_GET_MANIFEST_ROOT]	= process_get_manifest_root,

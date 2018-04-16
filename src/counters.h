@@ -12,8 +12,6 @@
  * other places by this macro.  Don't forget to update LAST_COUNTER.
  */
 #define EXPAND_EACH_COUNTER					\
-	EXPAND_COUNTER(alloc_alloc)				\
-	EXPAND_COUNTER(alloc_free)				\
 	EXPAND_COUNTER(btree_read_error)			\
 	EXPAND_COUNTER(btree_stale_read)			\
 	EXPAND_COUNTER(btree_write_error)			\
@@ -117,7 +115,7 @@
 	EXPAND_COUNTER(trans_level0_seg_writes)
 
 
-#define FIRST_COUNTER	alloc_alloc
+#define FIRST_COUNTER	btree_read_error
 #define LAST_COUNTER	trans_level0_seg_writes
 
 #undef EXPAND_COUNTER

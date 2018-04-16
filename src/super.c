@@ -34,7 +34,6 @@
 #include "manifest.h"
 #include "seg.h"
 #include "bio.h"
-#include "alloc.h"
 #include "compact.h"
 #include "data.h"
 #include "lock.h"

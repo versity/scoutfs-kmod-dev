@@ -22,7 +22,6 @@
 #include "compact.h"
 #include "manifest.h"
 #include "counters.h"
-#include "alloc.h"
 #include "server.h"
 #include "scoutfs_trace.h"
 

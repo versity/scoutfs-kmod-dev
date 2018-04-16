@@ -23,7 +23,6 @@
 #include "kvec.h"
 #include "cmp.h"
 #include "manifest.h"
-#include "alloc.h"
 #include "key.h"
 #include "counters.h"
 #include "triggers.h"

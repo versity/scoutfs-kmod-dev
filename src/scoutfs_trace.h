@@ -1087,54 +1087,6 @@ TRACE_EVENT(scoutfs_compact_func,
 	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
 );
 
-TRACE_EVENT(scoutfs_alloc_free,
-	TP_PROTO(struct super_block *sb, __u64 segno, __u64 index, int nr,
-		 int ret),
-
-	TP_ARGS(sb, segno, index, nr, ret),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(__u64, segno)
-		__field(__u64, index)
-		__field(int, nr)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->segno = segno;
-		__entry->index = index;
-		__entry->nr = nr;
-		__entry->ret = ret;
-	),
-
-	TP_printk(FSID_FMT" freeing segno %llu ind %llu nr %d ret %d",
-		  __entry->fsid, __entry->segno, __entry->index, __entry->nr,
-		  __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_alloc_segno,
-	TP_PROTO(struct super_block *sb, __u64 segno, int ret),
-
-	TP_ARGS(sb, segno, ret),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(__u64, segno)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->segno = segno;
-		__entry->ret = ret;
-	),
-
-	TP_printk(FSID_FMT" segno %llu ret %d", __entry->fsid, __entry->segno,
-		  __entry->ret)
-);
-
 TRACE_EVENT(scoutfs_write_begin,
 	TP_PROTO(struct super_block *sb, u64 ino, loff_t pos, unsigned len),
 

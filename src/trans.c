@@ -392,6 +392,16 @@ bool scoutfs_trans_held(void)
 	return rsv && rsv->magic == SCOUTFS_RESERVATION_MAGIC;
 }
 
+/*
+ * Record a transaction holder's individual contribution to the dirty
+ * items in the current transaction.  We're making sure that the
+ * reservation matches the possible item manipulations while they hold
+ * the reservation.
+ *
+ * It is possible and legitimate for an individual contribution to be
+ * negative if they delete dirty items.  The item cache makes sure that
+ * the total dirty item count doesn't fall below zero.
+ */
 void scoutfs_trans_track_item(struct super_block *sb, signed items,
 			      signed vals)
 {
@@ -405,6 +415,10 @@ void scoutfs_trans_track_item(struct super_block *sb, signed items,
 
 	rsv->actual.items += items;
 	rsv->actual.vals += vals;
+
+	trace_scoutfs_trans_track_item(sb, items, vals, rsv->actual.items,
+				       rsv->actual.vals, rsv->reserved.items,
+				       rsv->reserved.vals);
 
 	WARN_ON_ONCE(rsv->actual.items > rsv->reserved.items);
 	WARN_ON_ONCE(rsv->actual.vals > rsv->reserved.vals);

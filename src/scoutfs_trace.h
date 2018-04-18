@@ -660,6 +660,39 @@ TRACE_EVENT(scoutfs_trans_acquired_hold,
 		  __entry->tri_items, __entry->tri_vals)
 );
 
+TRACE_EVENT(scoutfs_trans_track_item,
+	TP_PROTO(struct super_block *sb, int delta_items, int delta_vals,
+		 int act_items, int act_vals, int res_items, int res_vals),
+
+	TP_ARGS(sb, delta_items, delta_vals, act_items, act_vals, res_items,
+		res_vals),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, delta_items)
+		__field(int, delta_vals)
+		__field(int, act_items)
+		__field(int, act_vals)
+		__field(int, res_items)
+		__field(int, res_vals)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->delta_items = delta_items;
+		__entry->delta_vals = delta_vals;
+		__entry->act_items = act_items;
+		__entry->act_vals = act_vals;
+		__entry->res_items = res_items;
+		__entry->res_vals = res_vals;
+	),
+
+	TP_printk("fsid "FSID_FMT" delta_items %d delta_vals %d act_items %d act_vals %d res_items %d res_vals %d",
+		  __entry->fsid, __entry->delta_items, __entry->delta_vals,
+		  __entry->act_items, __entry->act_vals, __entry->res_items,
+		  __entry->res_vals)
+);
+
 TRACE_EVENT(scoutfs_ioc_release_ret,
 	TP_PROTO(struct super_block *sb, int ret),
 

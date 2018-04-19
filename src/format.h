@@ -330,6 +330,7 @@ struct scoutfs_file_extent {
 } __packed;
 
 #define SEF_OFFLINE	0x1
+#define SEF_UNWRITTEN	0x2
 
 /*
  * The first xattr part item has a header that describes the xattr.  The

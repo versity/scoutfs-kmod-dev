@@ -262,6 +262,10 @@ out:
  * offline.  Attempts to use the blocks in the future will trigger
  * recall from the archive.
  *
+ * If the file's online blocks drop to 0 then we also truncate any
+ * blocks beyond i_size.  This honors the intent of fully releasing a file
+ * without the user needing to know to release past i_size or truncate.
+ *
  * XXX permissions?
  * XXX a lot of this could be generic file write prep
  */
@@ -273,6 +277,9 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	struct scoutfs_lock *lock = NULL;
 	loff_t start;
 	loff_t end_inc;
+	u64 online;
+	u64 offline;
+	u64 isize;
 	int ret;
 
 	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
@@ -323,6 +330,19 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 					  args.block,
 					  args.block + args.count - 1, true,
 					  lock);
+	if (ret == 0) {
+		scoutfs_inode_get_onoff(inode, &online, &offline);
+		isize = i_size_read(inode);
+		if (online == 0 && isize) {
+			start = (isize + SCOUTFS_BLOCK_SIZE - 1)
+					>> SCOUTFS_BLOCK_SHIFT;
+			ret = scoutfs_data_truncate_items(sb, inode,
+							  scoutfs_ino(inode),
+							  start, U64_MAX,
+							  false, lock);
+		}
+	}
+
 out:
 	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 	mutex_unlock(&inode->i_mutex);

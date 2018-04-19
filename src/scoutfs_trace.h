@@ -421,7 +421,41 @@ TRACE_EVENT(scoutfs_get_block,
 		  __entry->create, __entry->ret, __entry->blkno, __entry->size)
 );
 
-TRACE_EVENT(scoutfs_data_find_alloc_block_ret,
+TRACE_EVENT(scoutfs_data_alloc_block,
+	TP_PROTO(struct super_block *sb, struct inode *inode, u64 iblock,
+		 bool was_offline, u64 online_blocks, u64 offline_blocks,
+		 u64 len),
+
+	TP_ARGS(sb, inode, iblock, was_offline, online_blocks, offline_blocks,
+		len),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(__u64, iblock)
+		__field(__u8, was_offline)
+		__field(__u64, online_blocks)
+		__field(__u64, offline_blocks)
+		__field(__u64, len)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = scoutfs_ino(inode);
+		__entry->iblock = iblock;
+		__entry->was_offline = was_offline;
+		__entry->online_blocks = online_blocks;
+		__entry->offline_blocks = offline_blocks;
+		__entry->len = len;
+	),
+
+	TP_printk("fsid "FSID_FMT" ino %llu iblock %llu was_offline %u online_blocks %llu offline_blocks %llu len %llu",
+		  __entry->fsid, __entry->ino, __entry->iblock,
+		  __entry->was_offline, __entry->online_blocks,
+		  __entry->offline_blocks, __entry->len)
+);
+
+TRACE_EVENT(scoutfs_data_alloc_block_ret,
 	TP_PROTO(struct super_block *sb, int ret),
 
 	TP_ARGS(sb, ret),
@@ -437,27 +471,6 @@ TRACE_EVENT(scoutfs_data_find_alloc_block_ret,
 	),
 
 	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_data_find_alloc_block_found_seg,
-	TP_PROTO(struct super_block *sb, __u64 segno, __u64 blkno),
-
-	TP_ARGS(sb, segno, blkno),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(__u64, segno)
-		__field(__u64, blkno)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->segno = segno;
-		__entry->blkno = blkno;
-	),
-
-	TP_printk(FSID_FMT" found free segno %llu blkno %llu", __entry->fsid,
-		  __entry->segno, __entry->blkno)
 );
 
 TRACE_EVENT(scoutfs_data_find_alloc_block_curs,
@@ -2106,15 +2119,7 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_server_extent,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block_cursor,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block_free,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block,
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block_next,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );

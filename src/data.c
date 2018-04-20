@@ -56,27 +56,12 @@
  *  - need trans around each bulk alloc
  */
 
-/* more than enough for a few tasks per core on moderate hardware */
-#define NR_CURSORS		4096
-#define CURSOR_HASH_HEADS	(PAGE_SIZE / sizeof(void *) / 2)
-#define CURSOR_HASH_BITS	ilog2(CURSOR_HASH_HEADS)
-
 struct data_info {
 	struct rw_semaphore alloc_rwsem;
-	struct list_head cursor_lru;
-	struct hlist_head cursor_hash[CURSOR_HASH_HEADS];
 };
 
 #define DECLARE_DATA_INFO(sb, name) \
 	struct data_info *name = SCOUTFS_SB(sb)->data_info
-
-struct task_cursor {
-	u64 blkno;
-	struct hlist_node hnode;
-	struct list_head list_head;
-	struct task_struct *task;
-	pid_t pid;
-};
 
 static void init_file_extent_key(struct scoutfs_key *key, u64 ino, u64 last)
 {
@@ -388,78 +373,6 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 
 	return ret;
 }
-
-static inline struct hlist_head *cursor_head(struct data_info *datinf,
-					     struct task_struct *task,
-					     pid_t pid)
-{
-	unsigned h = hash_ptr(task, CURSOR_HASH_BITS) ^
-		     hash_long(pid, CURSOR_HASH_BITS);
-
-	return &datinf->cursor_hash[h];
-}
-
-#if 0
-static struct task_cursor *search_head(struct hlist_head *head,
-				       struct task_struct *task, pid_t pid)
-{
-	struct task_cursor *curs;
-
-	hlist_for_each_entry(curs, head, hnode) {
-		if (curs->task == task && curs->pid == pid)
-			return curs;
-	}
-
-	return NULL;
-}
-
-static void destroy_cursors(struct data_info *datinf)
-{
-	struct task_cursor *curs;
-	struct hlist_node *tmp;
-	int i;
-
-	for (i = 0; i < CURSOR_HASH_HEADS; i++) {
-		hlist_for_each_entry_safe(curs, tmp, &datinf->cursor_hash[i],
-					  hnode) {
-			hlist_del_init(&curs->hnode);
-			kfree(curs);
-		}
-	}
-}
-
-/*
- * These cheesy cursors are only meant to encourage nice IO patterns for
- * concurrent tasks either streaming large file writes or creating lots
- * of small files.  It will do very poorly in many other situations.  To
- * do better we'd need to go further down the road to delalloc and take
- * more surrounding context into account.
- */
-static struct task_cursor *get_cursor(struct data_info *datinf)
-{
-	struct task_struct *task = current;
-	pid_t pid = current->pid;
-	struct hlist_head *head;
-	struct task_cursor *curs;
-
-	head = cursor_head(datinf, task, pid);
-	curs = search_head(head, task, pid);
-	if (!curs) {
-		curs = list_last_entry(&datinf->cursor_lru,
-				       struct task_cursor, list_head);
-		trace_scoutfs_data_get_cursor(curs, task, pid);
-		hlist_del_init(&curs->hnode);
-		curs->task = task;
-		curs->pid = pid;
-		hlist_add_head(&curs->hnode, head);
-		curs->blkno = 0;
-	}
-
-	list_move(&curs->list_head, &datinf->cursor_lru);
-
-	return curs;
-}
-#endif
 
 static int get_server_extent(struct super_block *sb, u64 len)
 {
@@ -987,36 +900,13 @@ const struct file_operations scoutfs_file_fops = {
 int scoutfs_data_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct hlist_head *head;
 	struct data_info *datinf;
-	struct task_cursor *curs;
-	int i;
 
 	datinf = kzalloc(sizeof(struct data_info), GFP_KERNEL);
 	if (!datinf)
 		return -ENOMEM;
 
 	init_rwsem(&datinf->alloc_rwsem);
-	INIT_LIST_HEAD(&datinf->cursor_lru);
-
-	for (i = 0; i < CURSOR_HASH_HEADS; i++)
-		INIT_HLIST_HEAD(&datinf->cursor_hash[i]);
-
-	/* just allocate all of these up front */
-	for (i = 0; i < NR_CURSORS; i++) {
-		curs = kzalloc(sizeof(struct task_cursor), GFP_KERNEL);
-		if (!curs) {
-			kfree(datinf);
-			return -ENOMEM;
-		}
-
-		curs->pid = i;
-
-		head = cursor_head(datinf, curs->task, curs->pid);
-		hlist_add_head(&curs->hnode, head);
-
-		list_add(&curs->list_head, &datinf->cursor_lru);
-	}
 
 	sbi->data_info = datinf;
 

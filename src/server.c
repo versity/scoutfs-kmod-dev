@@ -61,6 +61,7 @@ struct server_info {
 	wait_queue_head_t compaction_waitq;
 
 	/* server remembers the stable manifest root for clients */
+	seqcount_t stable_seqcount;
 	struct scoutfs_btree_root stable_manifest_root;
 
 	/* server tracks seq use */
@@ -166,8 +167,11 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 
 		scoutfs_btree_write_complete(sb);
 
+		write_seqcount_begin(&server->stable_seqcount);
 		server->stable_manifest_root =
 			SCOUTFS_SB(sb)->super.manifest.root;
+		write_seqcount_end(&server->stable_seqcount);
+
 		scoutfs_advance_dirty_super(sb);
 	} else {
 		ret = 0;
@@ -530,15 +534,15 @@ static int process_get_manifest_root(struct server_connection *conn, u64 id,
 				     u8 type, void *data, unsigned data_len)
 {
 	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
 	struct scoutfs_btree_root root;
+	unsigned int start;
 	int ret;
 
 	if (data_len == 0) {
-		scoutfs_manifest_lock(sb);
-		memcpy(&root, &server->stable_manifest_root,
-		       sizeof(struct scoutfs_btree_root));
-		scoutfs_manifest_unlock(sb);
+		do {
+			start = read_seqcount_begin(&server->stable_seqcount);
+			root = server->stable_manifest_root;
+		} while (read_seqcount_retry(&server->stable_seqcount, start));
 		ret = 0;
 	} else {
 		ret = -EINVAL;
@@ -1062,6 +1066,7 @@ int scoutfs_server_setup(struct super_block *sb)
 	init_llist_head(&server->commit_waiters);
 	INIT_WORK(&server->commit_work, scoutfs_server_commit_func);
 	init_waitqueue_head(&server->compaction_waitq);
+	seqcount_init(&server->stable_seqcount);
 	spin_lock_init(&server->seq_lock);
 	INIT_LIST_HEAD(&server->pending_seqs);
 

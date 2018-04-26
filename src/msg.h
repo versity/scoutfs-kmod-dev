@@ -1,6 +1,7 @@
 #ifndef _SCOUTFS_MSG_H_
 #define _SCOUTFS_MSG_H_
 
+#include <linux/bitops.h>
 #include "key.h"
 
 void __printf(4, 5) scoutfs_msg(struct super_block *sb, const char *prefix,
@@ -20,6 +21,27 @@ do {									\
 	if (cond) {							\
 		scoutfs_err(sb, "(" __stringify(cond) "), " fmt, ##args); \
 		BUG();							\
+	}								\
+} while (0)								\
+
+/*
+ * Each message is only generated once per volume.  Remounting resets
+ * the messages.
+ */
+#define scoutfs_corruption(sb, which, counter, fmt, args...)		\
+do {									\
+	__typeof__(sb) _sb = (sb);					\
+	struct scoutfs_sb_info *_sbi = SCOUTFS_SB(_sb);			\
+	unsigned int _bit = (which);					\
+									\
+	if (WARN_ON_ONCE(_bit >= SC_NR_SOURCES))			\
+		break;							\
+									\
+	scoutfs_inc_counter(_sb, counter);				\
+	if (!test_and_set_bit(_bit, _sbi->corruption_messages_once)) {	\
+		scoutfs_err(_sb, "corruption (see scoutfs-corruption(5)): " \
+			    #which ": " fmt, ##args);			\
+		dump_stack();						\
 	}								\
 } while (0)								\
 

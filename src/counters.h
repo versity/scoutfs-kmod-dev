@@ -23,6 +23,12 @@
 	EXPAND_COUNTER(compact_stale_error)			\
 	EXPAND_COUNTER(compact_sticky_upper)			\
 	EXPAND_COUNTER(compact_sticky_written)			\
+	EXPAND_COUNTER(corrupt_dirent_backref_name_len)		\
+	EXPAND_COUNTER(corrupt_dirent_name_len)			\
+	EXPAND_COUNTER(corrupt_dirent_readdir_name_len)		\
+	EXPAND_COUNTER(corrupt_symlink_inode_size)		\
+	EXPAND_COUNTER(corrupt_symlink_missing_item)		\
+	EXPAND_COUNTER(corrupt_symlink_not_null_term)		\
 	EXPAND_COUNTER(data_end_writeback_page)			\
 	EXPAND_COUNTER(data_invalidatepage)			\
 	EXPAND_COUNTER(data_readpage)				\

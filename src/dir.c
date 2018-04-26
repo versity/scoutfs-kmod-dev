@@ -258,8 +258,11 @@ static int lookup_dirent(struct super_block *sb, u64 dir_ino, const char *name,
 			break;
 
 		ret -= sizeof(struct scoutfs_dirent);
-		/* XXX corruption */
 		if (ret < 1 || ret > SCOUTFS_NAME_LEN) {
+			scoutfs_corruption(sb, SC_DIRENT_NAME_LEN,
+					   corrupt_dirent_name_len,
+					   "dir_ino %llu hash %llu key "SK_FMT" len %d",
+					   dir_ino, hash, SK_ARG(&key), ret);
 			ret = -EIO;
 			goto out;
 		}
@@ -504,8 +507,12 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 		}
 
 		name_len = ret - sizeof(struct scoutfs_dirent);
-		/* XXX corruption */
 		if (name_len < 1 || name_len > SCOUTFS_NAME_LEN) {
+			scoutfs_corruption(sb, SC_DIRENT_READDIR_NAME_LEN,
+					   corrupt_dirent_readdir_name_len,
+					   "dir_ino %llu pos %llu key "SK_FMT" len %d",
+					   scoutfs_ino(inode), file->f_pos,
+					   SK_ARG(&key), name_len);
 			ret = -EIO;
 			goto out;
 		}
@@ -1034,8 +1041,11 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 
 	size = i_size_read(inode);
 
-	/* XXX corruption */
 	if (size == 0 || size > SCOUTFS_SYMLINK_MAX_SIZE) {
+		scoutfs_corruption(sb, SC_SYMLINK_INODE_SIZE,
+				   corrupt_symlink_inode_size,
+				   "ino %llu size %llu",
+				   scoutfs_ino(inode), (u64)size);
 		ret = -EIO;
 		goto out;
 	}
@@ -1055,9 +1065,20 @@ static void *scoutfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	ret = symlink_item_ops(sb, SYM_LOOKUP, scoutfs_ino(inode), inode_lock,
 			       path, size);
 
-	/* XXX corruption: missing items or not null term */
-	if (ret == -ENOENT || (ret == 0 && path[size - 1]))
+	if (ret == -ENOENT) {
+		scoutfs_corruption(sb, SC_SYMLINK_MISSING_ITEM,
+				   corrupt_symlink_missing_item,
+				   "ino %llu size %llu", scoutfs_ino(inode),
+				   size);
 		ret = -EIO;
+
+	} else if (ret == 0 && path[size - 1]) {
+		scoutfs_corruption(sb, SC_SYMLINK_NOT_NULL_TERM,
+				   corrupt_symlink_not_null_term,
+				   "ino %llu last %u",
+				   scoutfs_ino(inode), path[size - 1]);
+		ret = -EIO;
+	}
 
 out:
 	if (ret < 0) {
@@ -1229,8 +1250,11 @@ int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
 		goto out;
 
 	len = ret - sizeof(struct scoutfs_dirent);
-	/* XXX corruption */
 	if (len < 1 || len > SCOUTFS_NAME_LEN) {
+		scoutfs_corruption(sb, SC_DIRENT_BACKREF_NAME_LEN,
+				   corrupt_dirent_backref_name_len,
+				   "ino %llu dir_ino %llu pos %llu key "SK_FMT" len %d",
+				   ino, dir_ino, dir_pos, SK_ARG(&key), len);
 		ret = -EIO;
 		goto out;
 	}

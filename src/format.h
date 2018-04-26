@@ -649,6 +649,12 @@ struct scoutfs_fid {
  * Identifiers for sources of corruption that can generate messages.
  */
 enum {
+	SC_DIRENT_NAME_LEN = 0,
+	SC_DIRENT_BACKREF_NAME_LEN,
+	SC_DIRENT_READDIR_NAME_LEN,
+	SC_SYMLINK_INODE_SIZE,
+	SC_SYMLINK_MISSING_ITEM,
+	SC_SYMLINK_NOT_NULL_TERM,
 	SC_NR_SOURCES,
 };
 

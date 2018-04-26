@@ -611,6 +611,7 @@ static bool valid_referenced_block(struct scoutfs_super_block *super,
 	__le32 existing;
 	u32 calc;
 
+	smp_rmb(); /* load checked before crc */
 	if (!buffer_scoutfs_checked(bh)) {
 		lock_buffer(bh);
 		if (!buffer_scoutfs_checked(bh)) {
@@ -619,11 +620,13 @@ static bool valid_referenced_block(struct scoutfs_super_block *super,
 			calc = crc32c(~0, bt, SCOUTFS_BLOCK_SIZE);
 			bt->crc = existing;
 
-			set_buffer_scoutfs_checked(bh);
 			if (calc == le32_to_cpu(existing))
 				set_buffer_scoutfs_valid_crc(bh);
 			else
 				clear_buffer_scoutfs_valid_crc(bh);
+
+			smp_wmb(); /* store crc before checked */
+			set_buffer_scoutfs_checked(bh);
 		}
 		unlock_buffer(bh);
 	}
@@ -683,6 +686,9 @@ retry:
 
 			lock_buffer(bh);
 			clear_buffer_uptodate(bh);
+			clear_buffer_scoutfs_valid_crc(bh);
+			smp_wmb(); /* store crc before checked */
+			clear_buffer_scoutfs_checked(bh);
 			unlock_buffer(bh);
 			put_bh(bh);
 			bt = NULL;

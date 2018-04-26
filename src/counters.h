@@ -23,6 +23,8 @@
 	EXPAND_COUNTER(compact_stale_error)			\
 	EXPAND_COUNTER(compact_sticky_upper)			\
 	EXPAND_COUNTER(compact_sticky_written)			\
+	EXPAND_COUNTER(corrupt_btree_block_level)		\
+	EXPAND_COUNTER(corrupt_btree_no_child_ref)		\
 	EXPAND_COUNTER(corrupt_dirent_backref_name_len)		\
 	EXPAND_COUNTER(corrupt_dirent_name_len)			\
 	EXPAND_COUNTER(corrupt_dirent_readdir_name_len)		\

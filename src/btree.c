@@ -27,6 +27,7 @@
 #include "counters.h"
 #include "triggers.h"
 #include "options.h"
+#include "msg.h"
 
 #include "scoutfs_trace.h"
 
@@ -1145,6 +1146,15 @@ restart:
 
 		/* XXX more aggressive block verification, before ref updates? */
 		if (bt->level != level) {
+			scoutfs_corruption(sb, SC_BTREE_BLOCK_LEVEL,
+					   corrupt_btree_block_level,
+					   "root_height %u root_blkno %llu root_seq %llu blkno %llu seq %llu level %u expected %u",
+					   root->height,
+					   le64_to_cpu(root->ref.blkno),
+					   le64_to_cpu(root->ref.seq),
+					   le64_to_cpu(bt->blkno),
+					   le64_to_cpu(bt->seq), bt->level,
+					   level);
 			ret = -EIO;
 			break;
 		}
@@ -1177,6 +1187,15 @@ restart:
 		/* Find the next child block for the search key. */
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (pos >= nr) {
+			scoutfs_corruption(sb, SC_BTREE_NO_CHILD_REF,
+					   corrupt_btree_block_level,
+					   "root_height %u root_blkno %llu root_seq %llu blkno %llu seq %llu level %u nr %u pos %u cmp %d",
+					   root->height,
+					   le64_to_cpu(root->ref.blkno),
+					   le64_to_cpu(root->ref.seq),
+					   le64_to_cpu(bt->blkno),
+					   le64_to_cpu(bt->seq), bt->level,
+					   nr, pos, cmp);
 			ret = -EIO;
 			break;
 		}

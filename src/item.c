@@ -35,10 +35,13 @@
  * negative lookups cache hits for items that don't exist without having
  * to constantly perform expensive segment searches.
  *
- * Deletions are recorded with items in the rbtree which record the key
- * of the deletion.  They're removed once they're written to a level0
- * segment.  While they're present in the cache we have to be careful to
- * clobber them in creation and skip them in lookups.
+ * Deletions of persistent items are recorded with items in the rbtree
+ * which record the key of the deletion.  They're removed once they're
+ * written to a level0 segment.  While they're present in the cache we
+ * have to be careful to clobber them in creation and skip them in
+ * lookups.  We only need deletion items for keys that exist in
+ * segments.  We can immediately free non-persistent items when they're
+ * deleted.
  */
 
 static bool invalid_key_val(struct scoutfs_key *key, struct kvec *val)
@@ -68,13 +71,19 @@ struct item_cache {
  * The entry list_head typically stores clean items on an lru for shrinking.
  * It's also briefly used to track items in a batch after they're
  * allocated but before they're inserted for the first time.
+ *
+ * The persistent bit indicates that the item's key is present in
+ * segments.   If we delete persistent items we have to write a deletion
+ * item to delete to remove the existing item.  We can free deleted items
+ * that aren't persistent without writing them.
  */
 struct cached_item {
 	struct rb_node node;
 	struct list_head entry;
 
 	long dirty;
-	unsigned deletion:1;
+	unsigned deletion:1,
+		 persistent:1;
 
 	struct scoutfs_key key;
 	void *val;
@@ -419,13 +428,22 @@ static void erase_item(struct super_block *sb, struct item_cache *cac,
 }
 
 /*
- * Turn an item that the caller has found while holding the lock into a
- * deletion item.
+ * Delete an item from the cache.  If it wasn't persistent we can just
+ * free the item.  The caller must not try to use the item after calling
+ * this.
+ *
+ * If it was persistent we have to write a deletion item so that
+ * compaction will remove the old item.  We only need the key for the
+ * deletion item so we can free the value.
  */
-static void become_deletion_item(struct super_block *sb,
-				 struct item_cache *cac,
-				 struct cached_item *item)
+static void delete_item(struct super_block *sb, struct item_cache *cac,
+			struct cached_item *item)
 {
+	if (!item->persistent) {
+		erase_item(sb, cac, item);
+		return;
+	}
+
 	/* uses val_len to update item accounting */
 	clear_item_dirty(sb, cac, item);
 
@@ -445,9 +463,11 @@ static void become_deletion_item(struct super_block *sb,
  * We distinguish between callers seeing trying to insert a new logical
  * item and others trying to populate the cache.
  *
- * New logical item creaters have made sure the items are participating
+ * New logical item creators have made sure the items are participating
  * in consistent locking.  It's safe for them to clobber dirty deletion
- * items with a new version of the item.
+ * items with a new version of the item.  The newly inserted item needs
+ * to retain the persistence of the item it replaces so that if it is later
+ * deleted it will still write a deletion item.
  *
  * Cache readers can only populate items that weren't present already.
  * In particular, they absolutely cannot replace dirty old inode index items
@@ -487,6 +507,8 @@ restart:
 
 			/* sadly there's no augmented replace */
 			erase_item(sb, cac, item);
+			if (item->persistent)
+				ins->persistent = 1;
 			goto restart;
 		}
 	}
@@ -1059,6 +1081,15 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key *key,
 	return ret;
 }
 
+/*
+ * "force" an item creation without first reading to see if the item
+ * exist.  The caller is asserting that they know it's correct to
+ * overwrite a possibly existing item with this newly created item.
+ *
+ * Because this can be overwriting an existing item we need to be sure
+ * that we write a deletion item if it's deleted so we force its
+ * persistent flag.
+ */
 int scoutfs_item_create_force(struct super_block *sb,
 			      struct scoutfs_key *key,
 			      struct kvec *val, struct scoutfs_lock *lock)
@@ -1078,6 +1109,8 @@ int scoutfs_item_create_force(struct super_block *sb,
 	item = alloc_item(sb, key, val);
 	if (!item)
 		return -ENOMEM;
+
+	item->persistent = 1;
 
 	spin_lock_irqsave(&cac->lock, flags);
 
@@ -1174,6 +1207,7 @@ int scoutfs_item_insert_batch(struct super_block *sb, struct list_head *list,
 
 	list_for_each_entry_safe(item, tmp, list, entry) {
 		list_del_init(&item->entry);
+		item->persistent = 1;
 		if (insert_item(sb, cac, item, false, true)) {
 			scoutfs_inc_counter(sb, item_batch_duplicate);
 			list_add(&item->entry, list);
@@ -1329,7 +1363,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key *key,
 
 		item = find_item(sb, &cac->items, key);
 		if (item) {
-			become_deletion_item(sb, cac, item);
+			delete_item(sb, cac, item);
 			ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, NULL)) {
 			ret = -ENOENT;
@@ -1347,6 +1381,14 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key *key,
 	return ret;
 }
 
+/*
+ * "force" a deletion by creating a deletion item without first reading
+ * the existing item.
+ *
+ * The caller knows that there is an existing item but doesn't want to
+ * pay the cost of reading it before writing a deletion item.  We mark
+ * the allocated deletion item persistent to ensure that it's written.
+ */
 int scoutfs_item_delete_force(struct super_block *sb,
 			      struct scoutfs_key *key,
 			      struct scoutfs_lock *lock)
@@ -1364,6 +1406,8 @@ int scoutfs_item_delete_force(struct super_block *sb,
 	if (!item)
 		return -ENOMEM;
 
+	item->persistent = 1;
+
 	spin_lock_irqsave(&cac->lock, flags);
 	ret = insert_item(sb, cac, item, true, false);
 	if (ret) {
@@ -1375,7 +1419,7 @@ int scoutfs_item_delete_force(struct super_block *sb,
 	scoutfs_inc_counter(sb, item_create);
 	mark_item_dirty(sb, cac, item);
 
-	become_deletion_item(sb, cac, item);
+	delete_item(sb, cac, item);
 	spin_unlock_irqrestore(&cac->lock, flags);
 
 	return ret;
@@ -1426,9 +1470,10 @@ int scoutfs_item_delete_save(struct super_block *sb,
 			if (was_dirty)
 				item->dirty |= ITEM_DIRTY;
 
+			del->persistent = item->persistent;
 			ret = insert_item(sb, cac, del, false, false);
 			BUG_ON(ret);
-			become_deletion_item(sb, cac, del);
+			delete_item(sb, cac, del);
 			del = NULL;
 			ret = 0;
 		} else if (check_range(sb, &cac->ranges, key, NULL)) {
@@ -1523,7 +1568,7 @@ void scoutfs_item_delete_dirty(struct super_block *sb,
 
 	item = find_item(sb, &cac->items, key);
 	if (item)
-		become_deletion_item(sb, cac, item);
+		delete_item(sb, cac, item);
 
 	spin_unlock_irqrestore(&cac->lock, flags);
 }
@@ -1739,7 +1784,11 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 		else
 			scoutfs_inc_counter(sb, trans_write_item);
 
+		/* non-persistent should have been freed (safe to write) */
+		WARN_ON_ONCE(item->deletion && !item->persistent);
+
 		clear_item_dirty(sb, cac, item);
+		item->persistent = 1;
 
 		del = item;
 		item = next_dirty(item);

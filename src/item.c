@@ -1734,6 +1734,11 @@ int scoutfs_item_dirty_seg(struct super_block *sb, struct scoutfs_segment *seg)
 		/* trans reservation should have limited dirty */
 		BUG_ON(!appended);
 
+		if (item->deletion)
+			scoutfs_inc_counter(sb, trans_write_deletion_item);
+		else
+			scoutfs_inc_counter(sb, trans_write_item);
+
 		clear_item_dirty(sb, cac, item);
 
 		del = item;

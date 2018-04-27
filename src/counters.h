@@ -115,11 +115,12 @@
 	EXPAND_COUNTER(trans_commit_sync_fs)			\
 	EXPAND_COUNTER(trans_commit_timer)			\
 	EXPAND_COUNTER(trans_level0_seg_write_bytes)		\
-	EXPAND_COUNTER(trans_level0_seg_writes)
-
+	EXPAND_COUNTER(trans_level0_seg_writes)			\
+	EXPAND_COUNTER(trans_write_item)			\
+	EXPAND_COUNTER(trans_write_deletion_item)
 
 #define FIRST_COUNTER	btree_read_error
-#define LAST_COUNTER	trans_level0_seg_writes
+#define LAST_COUNTER	trans_write_deletion_item
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

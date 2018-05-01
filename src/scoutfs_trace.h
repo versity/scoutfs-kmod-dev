@@ -2065,6 +2065,27 @@ TRACE_EVENT(scoutfs_get_name,
 		  __get_str(name))
 );
 
+TRACE_EVENT(scoutfs_btree_read_error,
+	TP_PROTO(struct super_block *sb, struct scoutfs_btree_ref *ref),
+
+	TP_ARGS(sb, ref),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, blkno)
+		__field(__u64, seq)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->blkno = le64_to_cpu(ref->blkno);
+		__entry->seq = le64_to_cpu(ref->seq);
+	),
+
+	TP_printk("fsid "FSID_FMT" blkno %llu seq %llu",
+		  __entry->fsid, __entry->blkno, __entry->seq)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

@@ -674,6 +674,8 @@ static int get_ref_block(struct super_block *sb, int flags,
 retry:
 		bh = sb_bread(sb, le64_to_cpu(ref->blkno));
 		if (!bh) {
+			trace_scoutfs_btree_read_error(sb, ref);
+			scoutfs_inc_counter(sb, btree_read_error);
 			ret = -EIO;
 			goto out;
 		}
@@ -1671,8 +1673,10 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 	ret = 0;
 	for_each_dirty_bh(bti, bh, tmp) {
 		wait_on_buffer(bh);
-		if (!buffer_uptodate(bh))
+		if (!buffer_uptodate(bh)) {
+			scoutfs_inc_counter(sb, btree_write_error);
 			ret = -EIO;
+		}
 	}
 
 out:

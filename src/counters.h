@@ -14,7 +14,9 @@
 #define EXPAND_EACH_COUNTER					\
 	EXPAND_COUNTER(alloc_alloc)				\
 	EXPAND_COUNTER(alloc_free)				\
+	EXPAND_COUNTER(btree_read_error)			\
 	EXPAND_COUNTER(btree_stale_read)			\
+	EXPAND_COUNTER(btree_write_error)			\
 	EXPAND_COUNTER(compact_operations)			\
 	EXPAND_COUNTER(compact_segment_moved)			\
 	EXPAND_COUNTER(compact_segment_read)			\

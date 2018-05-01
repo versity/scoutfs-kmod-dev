@@ -94,6 +94,19 @@ struct commit_waiter {
 };
 
 /*
+ * Trigger a server shutdown by shutting down the listening socket.  The
+ * server thread will break out of accept and exit.
+ */
+static void shut_down_server(struct server_info *server)
+{
+	mutex_lock(&server->mutex);
+	server->shutting_down = true;
+	if (server->listen_sock)
+		kernel_sock_shutdown(server->listen_sock, SHUT_RDWR);
+	mutex_unlock(&server->mutex);
+}
+
+/*
  * This is called while still holding the rwsem that prevents commits so
  * that the caller can be sure to be woken by the next commit after they
  * queue and release the lock.
@@ -120,9 +133,22 @@ static void queue_commit_work(struct server_info *server,
 	queue_work(server->wq, &server->commit_work);
 }
 
-static int wait_for_commit(struct commit_waiter *cw)
+/*
+ * Commit errors are fatal and shut down the server.  This is called
+ * from request processing which shutdown will wait for.
+ */
+static int wait_for_commit(struct server_info *server,
+			   struct commit_waiter *cw, u64 id, u8 type)
 {
+	struct super_block *sb = server->sb;
+
 	wait_for_completion(&cw->comp);
+	if (cw->ret < 0) {
+		scoutfs_err(sb, "commit error %d processing req id %llu type %u",
+				cw->ret, id, type);
+
+		shut_down_server(server);
+	}
 	return cw->ret;
 }
 
@@ -157,26 +183,39 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 
 	down_write(&server->commit_rwsem);
 
-	if (scoutfs_btree_has_dirty(sb)) {
-		ret = scoutfs_alloc_apply_pending(sb) ?:
-		      scoutfs_btree_write_dirty(sb) ?:
-		      scoutfs_write_dirty_super(sb);
-
-		/* we'd need to loop or something */
-		BUG_ON(ret);
-
-		scoutfs_btree_write_complete(sb);
-
-		write_seqcount_begin(&server->stable_seqcount);
-		server->stable_manifest_root =
-			SCOUTFS_SB(sb)->super.manifest.root;
-		write_seqcount_end(&server->stable_seqcount);
-
-		scoutfs_advance_dirty_super(sb);
-	} else {
+	if (!scoutfs_btree_has_dirty(sb)) {
 		ret = 0;
+		goto out;
 	}
 
+	ret = scoutfs_alloc_apply_pending(sb);
+	if (ret) {
+		scoutfs_err(sb, "server error freeing segments: %d", ret);
+		goto out;
+	}
+
+	ret = scoutfs_btree_write_dirty(sb);
+	if (ret) {
+		scoutfs_err(sb, "server error writing btree blocks: %d", ret);
+		goto out;
+	}
+
+	ret = scoutfs_write_dirty_super(sb);
+	if (ret) {
+		scoutfs_err(sb, "server error writing super block: %d", ret);
+		goto out;
+	}
+
+	scoutfs_btree_write_complete(sb);
+
+	write_seqcount_begin(&server->stable_seqcount);
+	server->stable_manifest_root = SCOUTFS_SB(sb)->super.manifest.root;
+	write_seqcount_end(&server->stable_seqcount);
+
+	scoutfs_advance_dirty_super(sb);
+	ret = 0;
+
+out:
 	node = llist_del_all(&server->commit_waiters);
 
 	/* waiters always wait on completion, cw could be free after complete */
@@ -292,7 +331,7 @@ static int process_alloc_inodes(struct server_connection *conn,
 	ial.ino = cpu_to_le64(ino);
 	ial.nr = cpu_to_le64(nr);
 
-	ret = wait_for_commit(&cw);
+	ret = wait_for_commit(server, &cw, id, type);
 out:
 	return send_reply(conn, id, type, ret, &ial, sizeof(ial));
 }
@@ -321,7 +360,7 @@ static int process_alloc_segno(struct server_connection *conn,
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0)
-		ret = wait_for_commit(&cw);
+		ret = wait_for_commit(server, &cw, id, type);
 out:
 	return send_reply(conn, id, type, ret, &lesegno, sizeof(lesegno));
 }
@@ -371,7 +410,7 @@ retry:
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0) {
-		ret = wait_for_commit(&cw);
+		ret = wait_for_commit(server, &cw, id, type);
 		if (ret == 0)
 			scoutfs_compact_kick(sb);
 	}
@@ -424,7 +463,7 @@ static int process_bulk_alloc(struct server_connection *conn, u64 id, u8 type,
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0)
-		ret = wait_for_commit(&cw);
+		ret = wait_for_commit(server, &cw, id, type);
 out:
 	ret = send_reply(conn, id, type, ret, ns, size);
 	kfree(ns);
@@ -493,7 +532,7 @@ static int process_advance_seq(struct server_connection *conn, u64 id, u8 type,
 	spin_unlock(&server->seq_lock);
 	queue_commit_work(server, &cw);
 	up_read(&server->commit_rwsem);
-	ret = wait_for_commit(&cw);
+	ret = wait_for_commit(server, &cw, id, type);
 
 out:
 	return send_reply(conn, id, type, ret, &next_seq, sizeof(next_seq));
@@ -629,7 +668,7 @@ int scoutfs_client_get_compaction(struct super_block *sb, void *curs)
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0)
-		ret = wait_for_commit(&cw);
+		ret = wait_for_commit(server, &cw, U64_MAX, 1);
 
 	return ret;
 }
@@ -668,7 +707,7 @@ int scoutfs_client_finish_compaction(struct super_block *sb, void *curs,
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0)
-		ret = wait_for_commit(&cw);
+		ret = wait_for_commit(server, &cw, U64_MAX, 2);
 
 	scoutfs_compact_kick(sb);
 
@@ -1088,12 +1127,7 @@ void scoutfs_server_destroy(struct super_block *sb)
 	struct server_info *server = sbi->server_info;
 
 	if (server) {
-		/* break server thread out of blocking socket calls */
-		mutex_lock(&server->mutex);
-		server->shutting_down = true;
-		if (server->listen_sock)
-			kernel_sock_shutdown(server->listen_sock, SHUT_RDWR);
-		mutex_unlock(&server->mutex);
+		shut_down_server(server);
 
 		/* wait for server work to wait for everything to shut down */
 		cancel_delayed_work_sync(&server->dwork);

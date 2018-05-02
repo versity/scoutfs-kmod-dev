@@ -1402,8 +1402,6 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	if (!linfo)
 		return;
 
-	BUG_ON(!linfo->shutdown);
-
 	trace_scoutfs_lock_destroy(sb, linfo);
 
 	/* stop the shrinker from queueing work */

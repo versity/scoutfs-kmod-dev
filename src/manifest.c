@@ -971,8 +971,7 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 			if (next.seq < ment.seq)
 				ment = next;
 
-			scoutfs_key_inc(&next.first);
-			init_btree_key(&mkey, next.level, next.seq,
+			init_btree_key(&mkey, next.level, next.seq + 1,
 				       &next.first);
 		}
 

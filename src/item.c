@@ -1046,15 +1046,17 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key *key,
 	unsigned long flags;
 	int ret;
 
-	if (invalid_key_val(key, val))
-		return -EINVAL;
-
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
-		return -EINVAL;
+	if (invalid_key_val(key, val) ||
+	    WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX))) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	item = alloc_item(sb, key, val);
-	if (!item)
-		return -ENOMEM;
+	if (!item) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
@@ -1078,6 +1080,8 @@ int scoutfs_item_create(struct super_block *sb, struct scoutfs_key *key,
 	if (ret)
 		free_item(sb, item);
 
+out:
+	trace_scoutfs_item_create(sb, key, ret);
 	return ret;
 }
 
@@ -1355,8 +1359,10 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key *key,
 	unsigned long flags;
 	int ret;
 
-	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!lock_coverage(lock, key, DLM_LOCK_EX))) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	do {
 		spin_lock_irqsave(&cac->lock, flags);
@@ -1377,6 +1383,7 @@ int scoutfs_item_delete(struct super_block *sb, struct scoutfs_key *key,
 		 (ret = scoutfs_manifest_read_items(sb, key, &lock->start,
 						    &lock->end)) == 0);
 
+out:
 	trace_scoutfs_item_delete(sb, key, ret);
 	return ret;
 }

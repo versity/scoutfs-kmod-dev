@@ -249,6 +249,10 @@ DECLARE_EVENT_CLASS(scoutfs_key_ret_class,
 		  __entry->fsid, SK_ARG(&__entry->key), __entry->ret)
 );
 
+DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_create,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
+	TP_ARGS(sb, key, ret)
+);
 DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_delete,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
 	TP_ARGS(sb, key, ret)

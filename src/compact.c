@@ -250,8 +250,12 @@ retry:
 	 * all the duplicate items that they find.  When we're
 	 * compacting to the last level we can remove them by retrying
 	 * the search after we've advanced past them.
+	 *
+	 * If we're filling the remaining items in a sticky merge into
+	 * the upper level then we have to preserve the deletion items.
 	 */
 	if ((curs->lower_level == curs->last_level) &&
+	    (!curs->sticky || lower) &&
 	    ((*item_flags) & SCOUTFS_ITEM_FLAG_DELETION))
 		goto retry;
 

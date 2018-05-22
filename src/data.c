@@ -35,6 +35,7 @@
 #include "lock.h"
 #include "file.h"
 #include "extents.h"
+#include "msg.h"
 
 /*
  * scoutfs uses extent items to track file data block mappings and free
@@ -236,7 +237,6 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 	s64 offline_delta = 0;
 	s64 online_delta = 0;
 	s64 ret;
-	int err;
 
 	scoutfs_extent_init(&next, SCOUTFS_FILE_EXTENT_TYPE, ino,
 			    iblock, 1, 0, 0);
@@ -302,19 +302,17 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 
 	ret = 1;
 out:
-	if (ret < 0) {
-		err = 0;
-		if (add_rem)
-			err |= scoutfs_extent_add(sb, data_extent_io, &rem,
-						  lock);
-		if (rem_fr)
-			err |= scoutfs_extent_remove(sb, data_extent_io, &fr,
-						     sbi->node_id_lock);
-		BUG_ON(err); /* inconsistency, could save/restore */
+	scoutfs_extent_cleanup(ret < 0 && add_rem, scoutfs_extent_add, sb,
+			       data_extent_io, &rem, lock,
+			       SC_DATA_EXTENT_TRUNC_CLEANUP,
+			       corrupt_data_extent_trunc_cleanup, &rem);
+	scoutfs_extent_cleanup(ret < 0 && rem_fr, scoutfs_extent_remove, sb,
+			       data_extent_io, &fr, sbi->node_id_lock,
+			       SC_DATA_EXTENT_TRUNC_CLEANUP,
+			       corrupt_data_extent_trunc_cleanup, &rem);
 
-	} else if (ret > 0) {
+	if (ret > 0)
 		ret = rem.start + rem.len;
-	}
 
 	return ret;
 }
@@ -435,7 +433,6 @@ static int alloc_block(struct super_block *sb, struct inode *inode, u64 iblock,
 	u64 offline;
 	u64 online;
 	u64 len;
-	int err;
 	int ret;
 
 	down_write(&datinf->alloc_rwsem);
@@ -471,6 +468,10 @@ static int alloc_block(struct super_block *sb, struct inode *inode, u64 iblock,
 
 	trace_scoutfs_data_alloc_block_next(sb, &ext);
 
+	/* initialize the new mapped block extent, referenced by cleanup */
+	scoutfs_extent_init(&blk, SCOUTFS_FILE_EXTENT_TYPE, ino,
+			    iblock, 1, ext.start, 0);
+
 	/* remove the free extent we're using */
 	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
 			    sbi->node_id, ext.start, len, 0, 0);
@@ -490,8 +491,6 @@ static int alloc_block(struct super_block *sb, struct inode *inode, u64 iblock,
 	}
 
 	/* add the block that the caller is writing */
-	scoutfs_extent_init(&blk, SCOUTFS_FILE_EXTENT_TYPE, ino,
-			    iblock, 1, ext.start, 0);
 	ret = scoutfs_extent_add(sb, data_extent_io, &blk, lock);
 	if (ret)
 		goto out;
@@ -510,19 +509,18 @@ static int alloc_block(struct super_block *sb, struct inode *inode, u64 iblock,
 	scoutfs_inode_add_onoff(inode, 1, was_offline ? -1ULL : 0);
 	ret = 0;
 out:
-	if (ret) {
-		err = 0;
-		if (rem_blk)
-			err |= scoutfs_extent_remove(sb, data_extent_io, &blk,
-						  lock);
-		if (add_ofl)
-			err |= scoutfs_extent_add(sb, data_extent_io, &ofl,
-						  lock);
-		if (add_fr)
-			err |= scoutfs_extent_add(sb, data_extent_io, &fr,
-						  sbi->node_id_lock);
-		BUG_ON(err); /* inconsistency */
-	}
+	scoutfs_extent_cleanup(ret < 0 && rem_blk, scoutfs_extent_remove, sb,
+			       data_extent_io, &blk, lock,
+			       SC_DATA_EXTENT_ALLOC_CLEANUP,
+			       corrupt_data_extent_alloc_cleanup, &blk);
+	scoutfs_extent_cleanup(ret < 0 && add_ofl, scoutfs_extent_add, sb,
+			       data_extent_io, &ofl, lock,
+			       SC_DATA_EXTENT_ALLOC_CLEANUP,
+			       corrupt_data_extent_alloc_cleanup, &blk);
+	scoutfs_extent_cleanup(ret < 0 && add_fr, scoutfs_extent_add, sb,
+			       data_extent_io, &fr, sbi->node_id_lock,
+			       SC_DATA_EXTENT_ALLOC_CLEANUP,
+			       corrupt_data_extent_alloc_cleanup, &blk);
 
 	up_write(&datinf->alloc_rwsem);
 

@@ -190,9 +190,14 @@ static int server_extent_io(struct super_block *sb, int op,
 		swap(ext->type, mirror_type);
 		ret = server_extent_io(sb, op, ext, data);
 		swap(ext->type, mirror_type);
-		if (ret) {
+		if (ret < 0) {
 			err = server_extent_io(sb, mirror_op, ext, data);
-			BUG_ON(err);
+			if (err)
+				scoutfs_corruption(sb,
+						 SC_SERVER_EXTENT_CLEANUP,
+						 corrupt_server_extent_cleanup,
+						 "op %u ext "SE_FMT" ret %d",
+						 op, SE_ARG(ext), err);
 		}
 	}
 

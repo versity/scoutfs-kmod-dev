@@ -199,30 +199,6 @@ out:
 }
 
 /*
- * The process of modifying an extent creates and deletes many
- * intermediate extents.  If we hit an error we need to undo the
- * process.  If we then hit an error we can be left with inconsistent
- * extent items.
- *
- * We could fix this for extents that are stored in the item cache
- * because it has tools for ensuring that operations can't fail.
- * Extents that are stored in the btree currently can't avoid errors.
- * We'd have to predirty blocks, allow deletion to fall below thresholds
- * if merging saw an error, and preallocate blocks to be used for
- * splitting/growth.  It'd probably be worth it.
- */
-#define extent_cleanup(cond, ext_func, sb, iof, clean, data, which, ctr, ext) \
-do {									      \
-	__typeof__(sb) _sb = (sb);					      \
-	int _ret;							      \
-									      \
-	if ((cond) && (_ret = ext_func(_sb, iof, clean, data)) < 0)	      \
-		scoutfs_corruption(_sb, which, ctr,			      \
-				   "ext "SE_FMT" clean "SE_FMT" ret %d",      \
-				   SE_ARG(ext), SE_ARG(clean), _ret);	      \
-} while (0)
-
-/*
  * Add a new extent.  It can not overlap with any existing extents.  It
  * may be merged with neighbouring extents.
  */
@@ -265,15 +241,12 @@ int scoutfs_extent_add(struct super_block *sb, scoutfs_extent_io_t iof,
 	/* finally insert our new (possibly merged) extent */
 	ret = extent_insert(sb, iof, &ext, data);
 out:
-	extent_cleanup(ret < 0 && ins_right,
-		       extent_insert, sb, iof, &right, data,
-		       SC_EXTENT_ADD_CLEANUP, corrupt_extent_add_cleanup,
-		       add);
-	extent_cleanup(ret < 0 && ins_left,
-		       extent_insert, sb, iof, &left, data,
-		       SC_EXTENT_ADD_CLEANUP, corrupt_extent_add_cleanup,
-		       add);
-
+	scoutfs_extent_cleanup(ret < 0 && ins_right, extent_insert, sb, iof,
+			       &right, data, SC_EXTENT_ADD_CLEANUP,
+			       corrupt_extent_add_cleanup, add);
+	scoutfs_extent_cleanup(ret < 0 && ins_left, extent_insert, sb, iof,
+			       &left, data, SC_EXTENT_ADD_CLEANUP,
+			       corrupt_extent_add_cleanup, add);
 	return ret;
 }
 
@@ -332,12 +305,11 @@ int scoutfs_extent_remove(struct super_block *sb, scoutfs_extent_io_t iof,
 	}
 
 out:
-	extent_cleanup(ret < 0 && del_left,
-		       extent_delete, sb, iof, &left, data,
-		       SC_EXTENT_REM_CLEANUP, corrupt_extent_rem_cleanup, rem);
-	extent_cleanup(ret < 0 && ins_ext,
-		       extent_insert, sb, iof, &ext, data,
-		       SC_EXTENT_REM_CLEANUP, corrupt_extent_rem_cleanup, rem);
-
+	scoutfs_extent_cleanup(ret < 0 && del_left, extent_delete, sb, iof,
+			       &left, data, SC_EXTENT_REM_CLEANUP,
+			       corrupt_extent_rem_cleanup, rem);
+	scoutfs_extent_cleanup(ret < 0 && ins_ext, extent_insert, sb, iof,
+			       &ext, data, SC_EXTENT_REM_CLEANUP,
+			       corrupt_extent_rem_cleanup, rem);
 	return ret;
 }

@@ -758,8 +758,8 @@ retry:
 	if (le64_to_cpu(bring->next_block) == le64_to_cpu(bring->nr_blocks))
 		bring->next_block = 0;
 
-	/* advance to the next half when asked and migration made it safe */
-	if (all_roots_migrated(super) &&
+	/* force advancing if migration's done and we didn't just wrap */
+	if (all_roots_migrated(super) && !first_block_in_half(bring) &&
 	    scoutfs_trigger(sb, BTREE_ADVANCE_RING_HALF))
 		advance_to_next_half(bring);
 

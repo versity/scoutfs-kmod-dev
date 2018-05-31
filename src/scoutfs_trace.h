@@ -1759,6 +1759,51 @@ DEFINE_EVENT(scoutfs_net_class, scoutfs_client_recv_reply,
         TP_ARGS(sb, name, peer, nh)
 );
 
+DECLARE_EVENT_CLASS(scoutfs_work_class,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret),
+        TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, data)
+		__field(int, ret)
+        ),
+        TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->data = data;
+		__entry->ret = ret;
+        ),
+	TP_printk("fsid "FSID_FMT" data %llu ret %d",
+		  __entry->fsid, __entry->data, __entry->ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_commit_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_commit_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_recv_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_recv_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_workqueue_destroy,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+
 TRACE_EVENT(scoutfs_item_next_range_check,
         TP_PROTO(struct super_block *sb, int cached,
 		 struct scoutfs_key *key, struct scoutfs_key *pos,

@@ -533,6 +533,8 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 	struct llist_node *node;
 	int ret;
 
+	trace_scoutfs_server_commit_work_enter(sb, 0, 0);
+
 	down_write(&server->commit_rwsem);
 
 	if (!scoutfs_btree_has_dirty(sb)) {
@@ -577,6 +579,7 @@ out:
 	}
 
 	up_write(&server->commit_rwsem);
+	trace_scoutfs_server_commit_work_exit(sb, 0, ret);
 }
 
 /*
@@ -1126,6 +1129,8 @@ static void scoutfs_server_recv_func(struct work_struct *work)
 	struct kvec kv;
 	int ret;
 
+	trace_scoutfs_server_recv_work_enter(sb, 0, 0);
+
 	req_wq = alloc_workqueue("scoutfs_server_requests",
 				 WQ_NON_REENTRANT, 0);
 	if (!req_wq) {
@@ -1221,6 +1226,8 @@ out:
 	smp_mb();
 	wake_up_process(server->listen_task);
 	mutex_unlock(&server->mutex);
+
+	trace_scoutfs_server_recv_work_exit(sb, 0, ret);
 }
 
 /*
@@ -1273,6 +1280,8 @@ static void scoutfs_server_func(struct work_struct *work)
 	int addrlen;
 	int optval;
 	int ret;
+
+	trace_scoutfs_server_work_enter(sb, 0, 0);
 
 	init_waitqueue_head(&waitq);
 
@@ -1431,6 +1440,8 @@ out:
 
 	/* always requeues, cancel_delayed_work_sync cancels on shutdown */
 	queue_delayed_work(server->wq, &server->dwork, HZ / 2);
+
+	trace_scoutfs_server_work_exit(sb, 0, ret);
 }
 
 int scoutfs_server_setup(struct super_block *sb)
@@ -1480,6 +1491,7 @@ void scoutfs_server_destroy(struct super_block *sb)
 		/* recv work/compaction could have left commit_work queued */
 		cancel_work_sync(&server->commit_work);
 
+		trace_scoutfs_server_workqueue_destroy(sb, 0, 0);
 		destroy_workqueue(server->wq);
 
 		kfree(server);

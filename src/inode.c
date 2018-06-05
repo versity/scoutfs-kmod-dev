@@ -241,7 +241,7 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	 * i_blocks is initialized from online and offline and is then
 	 * maintained as blocks come and go.
 	 */
-	inode->i_blocks = (ci->online_blocks = + ci->offline_blocks)
+	inode->i_blocks = (ci->online_blocks + ci->offline_blocks)
 				<< SCOUTFS_BLOCK_SECTOR_SHIFT;
 
 	set_item_info(ci, cinode);

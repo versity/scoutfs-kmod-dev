@@ -325,19 +325,22 @@ out:
  * left behind.  Only blocks that have been allocated can be marked
  * offline.
  *
- * This is the low level extent item manipulation code.  We hold and
- * release the transaction so the caller doesn't have to deal with
- * partial progress.
- *
  * If the inode is provided then we update its tracking of the online
  * and offline blocks.  If it's not provided then the inode is being
- * destroyed and we don't have to keep it updated.
+ * destroyed and isn't reachable, we don't need to update it.
+ *
+ * The caller is in charge of locking the inode and extents, but we may
+ * have to modify far more items than fit in a transaction so we're in
+ * charge of batching updates into transactions.  If the inode is
+ * provided then we're responsible for updating its item as we go.
  */
 int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 				u64 ino, u64 iblock, u64 last, bool offline,
 				struct scoutfs_lock *lock)
 {
+	struct scoutfs_item_count cnt = SIC_TRUNC_EXTENT(inode);
 	DECLARE_DATA_INFO(sb, datinf);
+	LIST_HEAD(ind_locks);
 	s64 ret = 0;
 
 	WARN_ON_ONCE(inode && !mutex_is_locked(&inode->i_mutex));
@@ -352,15 +355,30 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 		return -EINVAL;
 
 	while (iblock <= last) {
-		ret = scoutfs_hold_trans(sb, SIC_TRUNC_EXTENT());
+		if (inode)
+			ret = scoutfs_inode_index_lock_hold(inode, &ind_locks,
+							    true, cnt);
+		else
+			ret = scoutfs_hold_trans(sb, cnt);
 		if (ret)
 			break;
 
+		if (inode)
+			ret = scoutfs_dirty_inode_item(inode, lock);
+		else
+			ret = 0;
+
 		down_write(&datinf->alloc_rwsem);
-		ret = truncate_one_extent(sb, inode, ino, iblock, last,
-					  offline, lock);
+		if (ret == 0)
+			ret = truncate_one_extent(sb, inode, ino, iblock, last,
+						  offline, lock);
 		up_write(&datinf->alloc_rwsem);
+
+		if (inode)
+			scoutfs_update_inode_item(inode, lock, &ind_locks);
 		scoutfs_release_trans(sb);
+		if (inode)
+			scoutfs_inode_index_unlock(sb, &ind_locks);
 
 		if (ret <= 0)
 			break;

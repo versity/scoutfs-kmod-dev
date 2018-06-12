@@ -231,11 +231,15 @@ static inline const struct scoutfs_item_count SIC_WRITE_BEGIN(void)
  *  - delete two existing free extents
  *  - create a merged free extent
  */
-static inline const struct scoutfs_item_count SIC_TRUNC_EXTENT(void)
+static inline const struct scoutfs_item_count
+SIC_TRUNC_EXTENT(struct inode *inode)
 {
 	struct scoutfs_item_count cnt = {0,};
 	unsigned int nr_file = 1 + 2 + 1;
 	unsigned int nr_free = (2 + 1) * 2;
+
+	if (inode)
+		__count_dirty_inode(&cnt);
 
 	cnt.items += nr_file + nr_free;
 	cnt.vals += nr_file * sizeof(struct scoutfs_file_extent);

@@ -19,6 +19,7 @@
 #include <linux/buffer_head.h>
 #include <linux/hash.h>
 #include <linux/log2.h>
+#include <linux/falloc.h>
 
 #include "format.h"
 #include "super.h"
@@ -821,6 +822,230 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 }
 
 /*
+ * Update one extent on behalf of fallocate.
+ *
+ * The caller has searched for the next extent that intersects with the
+ * region including first_block and last_block.  The next extent will be
+ * zeroed if it wasn't found.  We don't know the state of the offsets
+ * past the next extent.
+ *
+ * The caller has held transactions and acquired locks.  We only ever
+ * make one extent modification here.
+ *
+ * If this returns 0 then the caller's extent is clobbered.  It is set
+ * to the newly fallocated extent so that the caller can continue with
+ * the fallocate operation.
+ */
+static int fallocate_one_extent(struct super_block *sb, u64 ino, u64 start,
+				u64 len, u8 flags, u8 rem_flags,
+				struct scoutfs_lock *lock)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_extent fal;
+	struct scoutfs_extent rem;
+	struct scoutfs_extent fr;
+	bool add_rem = false;
+	bool add_fr = false;
+	int ret;
+
+	if (WARN_ON_ONCE(len == 0) ||
+	    WARN_ON_ONCE(start + len < start)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* find a sufficiently large free extent */
+	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
+			    sbi->node_id, 0, len, 0, 0);
+	ret = scoutfs_extent_next(sb, data_extent_io, &fr,
+				  sbi->node_id_lock);
+	if (ret == -ENOENT) {
+		/* try to get allocation from the server if we're out */
+		ret = get_server_extent(sb, SERVER_ALLOC_BLOCKS);
+		if (ret == 0)
+			ret = scoutfs_extent_next(sb, data_extent_io, &fr,
+						  sbi->node_id_lock);
+		/* XXX try to find smaller free extents */
+	}
+	if (ret < 0) {
+		if (ret == -ENOENT)
+			ret = -ENOSPC;
+		goto out;
+	}
+
+	/* trim our allocation from the length indexed extent */
+	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
+			    sbi->node_id, fr.start, min(fr.len, len), 0, 0);
+
+	ret = scoutfs_extent_init(&fal, SCOUTFS_FILE_EXTENT_TYPE, ino,
+				  start, fr.len, fr.start, flags);
+	if (WARN_ON_ONCE(ret))
+		goto out;
+
+	ret = scoutfs_extent_remove(sb, data_extent_io, &fr, sbi->node_id_lock);
+	if (ret)
+		goto out;
+	add_fr = true;
+
+	/* remove a region of the existing extent */
+	if (rem_flags) {
+		scoutfs_extent_init(&rem, SCOUTFS_FILE_EXTENT_TYPE, ino,
+				    fal.start, fal.len, 0, rem_flags);
+		ret = scoutfs_extent_remove(sb, data_extent_io, &rem, lock);
+		if (ret)
+			goto out;
+		add_rem = true;
+	}
+
+	ret = scoutfs_extent_add(sb, data_extent_io, &fal, lock);
+out:
+	scoutfs_extent_cleanup(ret < 0 && add_rem, scoutfs_extent_add, sb,
+			       data_extent_io, &rem, lock,
+			       SC_DATA_EXTENT_FALLOCATE_CLEANUP,
+			       corrupt_data_extent_fallocate_cleanup, &fal);
+	scoutfs_extent_cleanup(ret < 0 && add_fr, scoutfs_extent_add, sb,
+			       data_extent_io, &fr, sbi->node_id_lock,
+			       SC_DATA_EXTENT_FALLOCATE_CLEANUP,
+			       corrupt_data_extent_alloc_cleanup, &fal);
+	return ret;
+}
+
+/*
+ * Modify the extents that map the blocks that store the len byte region
+ * starting at offset.
+ *
+ * The caller has only prevented freezing by entering a fs write
+ * context.  We're responsible for all other locking and consistency.
+ */
+long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+{
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	const u64 ino = scoutfs_ino(inode);
+	struct scoutfs_lock *lock = NULL;
+	DECLARE_DATA_INFO(sb, datinf);
+	struct scoutfs_extent ext;
+	LIST_HEAD(ind_locks);
+	u64 last_block;
+	u64 iblock;
+	u64 blocks;
+	loff_t end;
+	u8 rem_flags;
+	u8 flags;
+	int ret;
+
+	mutex_lock(&inode->i_mutex);
+
+	/* XXX support more flags */
+        if (mode & ~(FALLOC_FL_KEEP_SIZE)) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	/* catch wrapping */
+	if (offset + len < offset) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (len == 0) {
+		ret = 0;
+		goto out;
+	}
+
+	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
+				 inode, &lock);
+	if (ret)
+		goto out;
+
+	inode_dio_wait(inode);
+
+	if (!(mode & FALLOC_FL_KEEP_SIZE) &&
+	    (offset + len > i_size_read(inode))) {
+                ret = inode_newsize_ok(inode, offset + len);
+                if (ret)
+                        goto out;
+        }
+
+	iblock = offset >> SCOUTFS_BLOCK_SHIFT;
+	last_block = (offset + len - 1) >> SCOUTFS_BLOCK_SHIFT;
+
+	for (; iblock <= last_block; iblock = ext.start + ext.len) {
+
+		scoutfs_extent_init(&ext, SCOUTFS_FILE_EXTENT_TYPE,
+				    ino, iblock, 1, 0, 0);
+		ret = scoutfs_extent_next(sb, data_extent_io, &ext, lock);
+		if (ret < 0 && ret != -ENOENT)
+			goto out;
+
+		blocks = last_block - iblock + 1;
+		flags = SEF_UNWRITTEN;
+		rem_flags = 0;
+
+		if (ret == -ENOENT || ext.start > last_block) {
+			/* no next extent or past us, all remaining blocks */
+
+		} else if (iblock < ext.start) {
+			/* sparse region until next extent */
+			blocks = min(blocks, ext.start - iblock);
+
+		} else if (ext.map > 0) {
+			/* skip past an allocated extent */
+			blocks = min(blocks, (ext.start + ext.len) - iblock);
+			iblock += blocks;
+			blocks = 0;
+
+		} else {
+			/* allocating a portion of an unallocated extent */
+			blocks = min(blocks, (ext.start + ext.len) - iblock);
+			flags |= ext.flags;
+			rem_flags = ext.flags;
+			/* XXX corruption; why'd we store map == flags == 0? */
+			if (rem_flags == 0) {
+				ret = -EIO;
+				goto out;
+			}
+		}
+
+		ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, false,
+						    SIC_FALLOCATE_ONE());
+		if (ret)
+			goto out;
+
+		if (blocks > 0) {
+			down_write(&datinf->alloc_rwsem);
+			ret = fallocate_one_extent(sb, ino, iblock, blocks,
+						   flags, rem_flags, lock);
+			up_write(&datinf->alloc_rwsem);
+		}
+
+		if (ret == 0 && !(mode & FALLOC_FL_KEEP_SIZE)) {
+			end = (iblock + blocks) << SCOUTFS_BLOCK_SHIFT;
+			if (end == 0 || end > offset + len)
+				end = offset + len;
+			if (end > i_size_read(inode))
+				i_size_write(inode, end);
+			scoutfs_update_inode_item(inode, lock, &ind_locks);
+		}
+		scoutfs_release_trans(sb);
+		scoutfs_inode_index_unlock(sb, &ind_locks);
+
+		if (ret)
+			goto out;
+
+		iblock += blocks;
+	}
+	ret = 0;
+out:
+	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
+	mutex_unlock(&inode->i_mutex);
+
+	trace_scoutfs_data_fallocate(sb, ino, mode, offset, len, ret);
+	return ret;
+}
+
+
+/*
  * Return all the file's extents whose blocks overlap with the caller's
  * byte region.  We set _LAST on the last extent and _UNKNOWN on offline
  * extents.
@@ -910,6 +1135,7 @@ const struct file_operations scoutfs_file_fops = {
 	.unlocked_ioctl	= scoutfs_ioctl,
 	.fsync		= scoutfs_file_fsync,
 	.llseek		= scoutfs_file_llseek,
+	.fallocate	= scoutfs_fallocate,
 };
 
 

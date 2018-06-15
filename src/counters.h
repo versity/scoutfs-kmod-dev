@@ -27,6 +27,7 @@
 	EXPAND_COUNTER(corrupt_btree_no_child_ref)		\
 	EXPAND_COUNTER(corrupt_data_extent_trunc_cleanup)	\
 	EXPAND_COUNTER(corrupt_data_extent_alloc_cleanup)	\
+	EXPAND_COUNTER(corrupt_data_extent_fallocate_cleanup)	\
 	EXPAND_COUNTER(corrupt_dirent_backref_name_len)		\
 	EXPAND_COUNTER(corrupt_dirent_name_len)			\
 	EXPAND_COUNTER(corrupt_dirent_readdir_name_len)		\

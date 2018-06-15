@@ -247,4 +247,25 @@ SIC_TRUNC_EXTENT(struct inode *inode)
 	return cnt;
 }
 
+/*
+ * Fallocating an extent can, at most:
+ *  - allocate from the server: delete two free and insert merged
+ *  - free an allocated extent: delete one and create two split
+ *  - remove an unallocated file extent: delete one and create two split
+ *  - add an fallocated flie extent: delete two and inset one merged
+ */
+static inline const struct scoutfs_item_count SIC_FALLOCATE_ONE(void)
+{
+	struct scoutfs_item_count cnt = {0,};
+	unsigned int nr_free = ((1 + 2) * 2) * 2;
+	unsigned int nr_file = (1 + 2) * 2;
+
+	__count_dirty_inode(&cnt);
+
+	cnt.items += nr_free + nr_file;
+	cnt.vals += nr_file * sizeof(struct scoutfs_file_extent);
+
+	return cnt;
+}
+
 #endif

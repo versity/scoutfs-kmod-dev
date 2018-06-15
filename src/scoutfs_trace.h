@@ -370,6 +370,35 @@ TRACE_EVENT(scoutfs_erase_item,
 	TP_printk(FSID_FMT" erasing item %p", __entry->fsid, __entry->item)
 );
 
+TRACE_EVENT(scoutfs_data_fallocate,
+	TP_PROTO(struct super_block *sb, u64 ino, int mode, loff_t offset,
+		 loff_t len, int ret),
+
+	TP_ARGS(sb, ino, mode, offset, len, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(int, mode)
+		__field(__u64, offset)
+		__field(__u64, len)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->mode = mode;
+		__entry->offset = offset;
+		__entry->len = len;
+		__entry->ret = ret;
+	),
+
+	TP_printk("fsid "FSID_FMT" ino %llu mode 0x%x offset %llu len %llu ret %d",
+		__entry->fsid, __entry->ino, __entry->mode, __entry->offset,
+		__entry->len, __entry->ret)
+);
+
 TRACE_EVENT(scoutfs_data_fiemap,
 	TP_PROTO(struct super_block *sb, __u64 off, int i, __u64 blkno),
 

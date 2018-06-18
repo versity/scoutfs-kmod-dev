@@ -427,7 +427,8 @@ int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
 		if (ret)
 			goto out;
 
-		truncate = i_size_read(inode) > attr_size;
+		/* truncating to current size truncates extents past size */
+		truncate = i_size_read(inode) >= attr_size;
 
 		ret = set_inode_size(inode, lock, attr_size, truncate);
 		if (ret)

@@ -259,8 +259,8 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 
 	trace_scoutfs_data_truncate_remove(sb, &rem);
 
-	/* nothing to do if the extent's already offline */
-	if (offline && (rem.flags & SEF_OFFLINE)) {
+	/* nothing to do if the extent's already offline and unallocated */
+	if ((offline && (rem.flags & SEF_OFFLINE)) && !rem.map) {
 		ret = 1;
 		goto out;
 	}
@@ -276,7 +276,7 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 		rem_fr = true;
 	}
 
-	/* remove the mapping */
+	/* remove the extent */
 	ret = scoutfs_extent_remove(sb, data_extent_io, &rem, lock);
 	if (ret)
 		goto out;
@@ -294,9 +294,9 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 
 	if (rem.map && !(rem.flags & SEF_UNWRITTEN))
 		online_delta += -rem.len;
-	if (rem.flags & SEF_OFFLINE)
+	if (!offline && (rem.flags & SEF_OFFLINE))
 		offline_delta += -rem.len;
-	if (offline)
+	if (offline && !(rem.flags & SEF_OFFLINE))
 		offline_delta += ofl.len;
 
 	scoutfs_inode_add_onoff(inode, online_delta, offline_delta);
@@ -413,69 +413,75 @@ out:
 }
 
 /*
- * Allocate a single block for the logical block offset in the file.
- * The caller tells us if the block was offline or not.  We modify the
- * extent items and the caller will search for the resulting extent.
+ * The caller is writing to a logical block that doesn't have an
+ * allocated extent.
  *
- * If we're writing to the final block of the file then we try to
- * preallocate unwritten blocks past i_size for future extending writes
- * to use.  We only base this decision on the file size.  Truncating
- * down the size, unlink, or releasing all blocks in the file will
- * remove these preallocated blocks.  Truncating past them will preserve
- * them and treat them as 0.
+ * We always allocate an extent starting at the logical block.  The
+ * caller has considered overlapping and following extents and has given
+ * us a maximum length that we could safely allocate.  Preallocation
+ * heuristics decide to use this length or only a single block.
  *
- * This assumes that there can't be existing unwritten extents in the
- * inode that would overlap with our allocations.  Writes are serialized
- * and the caller only calls us if an extent doesn't exist.  Unwritten
- * extents are only created adjacent to i_size extensions.  The only way
- * to pull i_size back behind unwritten extents is to truncate and it
- * frees them.  Corrupt disk images could have fragmented unwritten
- * extents past i_size in inodes and that'd manifest as errors inserting
- * overlapping new allocations. 
+ * If the caller passes in an existing extent then we remove the
+ * allocated region from the existing extent.  We then add a single
+ * block extent for the caller to write into.  Then if we allocated
+ * multiple blocks we add an unwritten extent for the rest of the blocks
+ * in the extent.
+ *
+ * Preallocation is used if we're strictly contiguously extending
+ * writes.  That is, if the logical block offset equals the number of
+ * online blocks.  We try to preallocate the number of blocks existing
+ * so that small files don't waste inordinate amounts of space and large
+ * files will eventually see large extents.  This only works for
+ * contiguous single stream writes or stages of files from the first
+ * block.  It doesn't work for concurrent stages, releasing behind
+ * staging, sparse files, multi-node writes, etc.  fallocate() is always
+ * a better tool to use.
+ *
+ * On success we update the caller's extent to the single block
+ * allocated extent for the logical block for use in block mapping.
  */
-#define MAX_UNWRITTEN_BLOCKS	((u64)SCOUTFS_SEGMENT_BLOCKS)
-#define SERVER_ALLOC_BLOCKS	(MAX_UNWRITTEN_BLOCKS * 32)
-static int alloc_block(struct super_block *sb, struct inode *inode, u64 iblock,
-		       bool was_offline, struct scoutfs_lock *lock)
+#define MAX_STREAMING_PREALLOC_BLOCKS	((u64)SCOUTFS_SEGMENT_BLOCKS)
+#define SERVER_ALLOC_BLOCKS		(MAX_STREAMING_PREALLOC_BLOCKS * 32)
+static int alloc_block(struct super_block *sb, struct inode *inode,
+		       struct scoutfs_extent *ext, u64 iblock, u64 len,
+		       struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	DECLARE_DATA_INFO(sb, datinf);
 	const u64 ino = scoutfs_ino(inode);
 	struct scoutfs_extent unwr;
-	struct scoutfs_extent ext;
-	struct scoutfs_extent ofl;
+	struct scoutfs_extent old;
 	struct scoutfs_extent blk;
 	struct scoutfs_extent fr;
-	bool add_ofl = false;
+	bool add_old = false;
 	bool add_fr = false;
 	bool rem_blk = false;
 	u64 offline;
 	u64 online;
-	u64 len;
 	int ret;
 
 	down_write(&datinf->alloc_rwsem);
 
 	scoutfs_inode_get_onoff(inode, &online, &offline);
 
-	/* exponentially prealloc unwritten extents to a limit */
-	if (iblock > 1 && iblock == (online + offline))
-		len = min(iblock, MAX_UNWRITTEN_BLOCKS);
+	/* strictly contiguous extending writes will try to preallocate */ 
+	if (iblock > 1 && iblock == online)
+		len = min3(len, iblock, MAX_STREAMING_PREALLOC_BLOCKS);
 	else
 		len = 1;
 
-	trace_scoutfs_data_alloc_block(sb, inode, iblock, was_offline,
-				       online, offline, len);
+	trace_scoutfs_data_alloc_block(sb, inode, ext, iblock, len,
+				       online, offline);
 
-	scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
+	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
 			    sbi->node_id, 0, len, 0, 0);
-	ret = scoutfs_extent_next(sb, data_extent_io, &ext,
+	ret = scoutfs_extent_next(sb, data_extent_io, &fr,
 				  sbi->node_id_lock);
 	if (ret == -ENOENT) {
 		/* try to get allocation from the server if we're out */
 		ret = get_server_extent(sb, SERVER_ALLOC_BLOCKS);
 		if (ret == 0)
-			ret = scoutfs_extent_next(sb, data_extent_io, &ext,
+			ret = scoutfs_extent_next(sb, data_extent_io, &fr,
 						  sbi->node_id_lock);
 	}
 	if (ret) {
@@ -485,28 +491,28 @@ static int alloc_block(struct super_block *sb, struct inode *inode, u64 iblock,
 		goto out;
 	}
 
-	trace_scoutfs_data_alloc_block_next(sb, &ext);
+	trace_scoutfs_data_alloc_block_next(sb, &fr);
 
 	/* initialize the new mapped block extent, referenced by cleanup */
 	scoutfs_extent_init(&blk, SCOUTFS_FILE_EXTENT_TYPE, ino,
-			    iblock, 1, ext.start, 0);
+			    iblock, 1, fr.start, 0);
 
 	/* remove the free extent we're using */
 	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
-			    sbi->node_id, ext.start, len, 0, 0);
+			    sbi->node_id, fr.start, len, 0, 0);
 	ret = scoutfs_extent_remove(sb, data_extent_io, &fr, sbi->node_id_lock);
 	if (ret)
 		goto out;
 	add_fr = true;
 
-	/* remove an offline block extent */
-	if (was_offline) {
-		scoutfs_extent_init(&ofl, SCOUTFS_FILE_EXTENT_TYPE, ino,
-				    iblock, 1, 0, SEF_OFFLINE);
-		ret = scoutfs_extent_remove(sb, data_extent_io, &ofl, lock);
+	/* remove an existing offline or unwritten block extent */
+	if (ext->flags) {
+		scoutfs_extent_init(&old, SCOUTFS_FILE_EXTENT_TYPE, ino,
+				    iblock, len, 0, ext->flags);
+		ret = scoutfs_extent_remove(sb, data_extent_io, &old, lock);
 		if (ret)
 			goto out;
-		add_ofl = true;
+		add_old = true;
 	}
 
 	/* add the block that the caller is writing */
@@ -518,22 +524,23 @@ static int alloc_block(struct super_block *sb, struct inode *inode, u64 iblock,
 	/* and maybe add the remaining unwritten extent */
 	if (len > 1) {
 		scoutfs_extent_init(&unwr, SCOUTFS_FILE_EXTENT_TYPE, ino,
-				    iblock + 1, len - 1, ext.start + 1,
-				    SEF_UNWRITTEN);
+				    iblock + 1, len - 1, fr.start + 1,
+				    ext->flags | SEF_UNWRITTEN);
 		ret = scoutfs_extent_add(sb, data_extent_io, &unwr, lock);
 		if (ret)
 			goto out;
 	}
 
-	scoutfs_inode_add_onoff(inode, 1, was_offline ? -1ULL : 0);
+	scoutfs_inode_add_onoff(inode, 1,
+				(ext->flags & SEF_OFFLINE) ? -1ULL : 0);
 	ret = 0;
 out:
 	scoutfs_extent_cleanup(ret < 0 && rem_blk, scoutfs_extent_remove, sb,
 			       data_extent_io, &blk, lock,
 			       SC_DATA_EXTENT_ALLOC_CLEANUP,
 			       corrupt_data_extent_alloc_cleanup, &blk);
-	scoutfs_extent_cleanup(ret < 0 && add_ofl, scoutfs_extent_add, sb,
-			       data_extent_io, &ofl, lock,
+	scoutfs_extent_cleanup(ret < 0 && add_old, scoutfs_extent_add, sb,
+			       data_extent_io, &old, lock,
 			       SC_DATA_EXTENT_ALLOC_CLEANUP,
 			       corrupt_data_extent_alloc_cleanup, &blk);
 	scoutfs_extent_cleanup(ret < 0 && add_fr, scoutfs_extent_add, sb,
@@ -543,21 +550,22 @@ out:
 
 	up_write(&datinf->alloc_rwsem);
 
-	trace_scoutfs_data_alloc_block_ret(sb, ret);
+	trace_scoutfs_data_alloc_block_ret(sb, ext, ret);
+	if (ret == 0)
+		*ext = blk;
 	return ret;
 }
 
 /*
- * Remove the unwritten flag from an existing extent.  We don't have to
- * wait for dirty block IO to complete before clearing the unwritten
- * flag in metadata because we have strict synchronization between data
- * and metadata.  All dirty data in the current transaction is written
- * before the metadata in the transaction that references it is
- * committed.
+ * A caller is writing into unwritten allocated space.  This can also be
+ * called for staging writes so we clear both the unwritten and offline
+ * flags.  We record the extent as online as allocating writes would.
  *
- * The extent is unwritten so it can't be offline nor online.  We remove
- * the unwritten flag, possibly splitting and merging.  We record the
- * extent as online now as initial block allocation would.
+ * We don't have to wait for dirty block IO to complete before clearing
+ * the unwritten flag in metadata because we have strict synchronization
+ * between data and metadata.  All dirty data in the current transaction
+ * is written before the metadata in the transaction that references it
+ * is committed.
  */
 static int convert_unwritten(struct super_block *sb, struct inode *inode,
 			     struct scoutfs_extent *ext, u64 start, u64 len,
@@ -577,18 +585,20 @@ static int convert_unwritten(struct super_block *sb, struct inode *inode,
 	if (ret)
 		goto out;
 
-	conv.flags &= ~SEF_UNWRITTEN;
+	conv.flags &= ~(SEF_UNWRITTEN | SEF_OFFLINE);
 	ret = scoutfs_extent_add(sb, data_extent_io, &conv, lock);
 	if (ret) {
-		conv.flags |= SEF_UNWRITTEN;
+		conv.flags = ext->flags;
 		err = scoutfs_extent_add(sb, data_extent_io, &conv, lock);
 		BUG_ON(err);
 		goto out;
 	}
 
+	scoutfs_inode_add_onoff(inode, len,
+				(ext->flags & SEF_OFFLINE) ? -len : 0);
+	*ext = conv;
 	ret = 0;
 out:
-	scoutfs_inode_add_onoff(inode, len, 0);
 	return ret;
 }
 
@@ -597,18 +607,23 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_lock *lock = NULL;
 	struct scoutfs_extent ext;
-	struct scoutfs_lock *lock;
+	u64 next_iblock = 0;
 	u64 offset;
+	u64 len;
 	int ret;
 
 	WARN_ON_ONCE(create && !mutex_is_locked(&inode->i_mutex));
 
+	/* make sure caller holds a cluster lock */
 	lock = scoutfs_per_task_get(&si->pt_data_lock);
-	if (WARN_ON_ONCE(!lock))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!lock) ||
+	    WARN_ON_ONCE(!create && si->staging)) {
+		ret = -EINVAL;
+		goto out;
+	}
 
-restart:
 	/* look for the extent that overlaps our iblock */
 	scoutfs_extent_init(&ext, SCOUTFS_FILE_EXTENT_TYPE,
 			    scoutfs_ino(inode), iblock, 1, 0, 0);
@@ -616,8 +631,12 @@ restart:
 	if (ret && ret != -ENOENT)
 		goto out;
 
-	if (ret == 0)
+	if (ret == 0) {
 		trace_scoutfs_data_get_block_next(sb, &ext);
+		/* remember start of next to limit preallocation */
+		if (ext.start > iblock)
+			next_iblock = ext.start;
+	}
 
 	/* didn't find an extent or it's past our iblock */
 	if (ret == -ENOENT || ext.start > iblock)
@@ -635,31 +654,37 @@ restart:
 	/* convert unwritten to written */
 	if (create && (ext.flags & SEF_UNWRITTEN)) {
 		ret = convert_unwritten(sb, inode, &ext, iblock, 1, lock);
-		if (ret)
-			goto out;
-		goto restart;
+		if (ret == 0)
+			set_buffer_new(bh);
+		goto out;
 	}
 
-	/* try to allocate if we're writing */
+	/* allocate an extent from our logical block */
 	if (create && !ext.map) {
-		ret = alloc_block(sb, inode, iblock, ext.flags & SEF_OFFLINE,
-				  lock);
-		if (ret)
-			goto out;
-		set_buffer_new(bh);
-		/* restart the search now that it's been allocated */
-		goto restart;
+		/* limit possible alloc to this extent, next, or logical max */
+		if (ext.len > 0)
+			len = ext.len - (iblock - ext.start);
+		else if (next_iblock > iblock)
+			len = ext.start - iblock;
+		else
+			len = SCOUTFS_BLOCK_MAX - iblock;
+
+		ret = alloc_block(sb, inode, &ext, iblock, len, lock);
+		if (ret == 0)
+			set_buffer_new(bh);
+	} else {
+		ret = 0;
 	}
 
-	/* map the bh and set the size to as much of the extent as we can */
-	if (ext.map) {
+out:
+	/* map usable extent, else leave bh unmapped for sparse reads */
+	if (ret == 0 && ext.map && !(ext.flags & SEF_UNWRITTEN)) {
 		offset = iblock - ext.start;
 		map_bh(bh, inode->i_sb, ext.map + offset);
 		bh->b_size = min_t(u64, bh->b_size,
 				   (ext.len - offset) << SCOUTFS_BLOCK_SHIFT);
 	}
-	ret = 0;
-out:
+
 	trace_scoutfs_get_block(sb, scoutfs_ino(inode), iblock, create,
 				ret, bh->b_blocknr, bh->b_size);
 	return ret;

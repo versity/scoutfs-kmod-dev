@@ -555,20 +555,28 @@ int scoutfs_client_alloc_inodes(struct super_block *sb, u64 count,
 	return ret;
 }
 
-int scoutfs_client_alloc_extent(struct super_block *sb, u64 len, u64 *start)
+/*
+ * Ask the server for an extent of at most @blocks blocks.  It can return
+ * smaller extents.
+ */
+int scoutfs_client_alloc_extent(struct super_block *sb, u64 blocks, u64 *start,
+				u64 *len)
+
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-	__le64 lelen = cpu_to_le64(len);
-	__le64 lestart;
+	__le64 leblocks = cpu_to_le64(blocks);
+	struct scoutfs_net_extent nex;
 	int ret;
 
 	ret = client_request(client, SCOUTFS_NET_ALLOC_EXTENT,
-			     &lelen, sizeof(lelen), &lestart, sizeof(lestart));
+			     &leblocks, sizeof(leblocks), &nex, sizeof(nex));
 	if (ret == 0) {
-		if (lestart == 0)
+		if (nex.len == 0) {
 			ret = -ENOSPC;
-		else
-			*start = le64_to_cpu(lestart);
+		} else {
+			*start = le64_to_cpu(nex.start);
+			*len = le64_to_cpu(nex.len);
+		}
 	}
 
 	return ret;

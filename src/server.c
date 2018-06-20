@@ -218,7 +218,8 @@ static int server_extent_io(struct super_block *sb, int op,
  * free extent that can be very quickly allocated to a node.  The hope is
  * that doesn't happen very often.
  */
-static int alloc_extent(struct super_block *sb, u64 len, u64 *start)
+static int alloc_extent(struct super_block *sb, u64 blocks,
+			u64 *start, u64 *len)
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
@@ -226,17 +227,20 @@ static int alloc_extent(struct super_block *sb, u64 len, u64 *start)
 	int ret;
 
 	*start = 0;
+	*len = 0;
 
 	down_write(&server->alloc_rwsem);
 
-	if (len & (SCOUTFS_SEGMENT_BLOCKS - 1)) {
+	if (blocks & (SCOUTFS_SEGMENT_BLOCKS - 1)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
 	scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE, 0,
-			    0, len, 0, 0);
+			    0, blocks, 0, 0);
 	ret = scoutfs_extent_next(sb, server_extent_io, &ext, NULL);
+	if (ret == -ENOENT)
+		ret = scoutfs_extent_prev(sb, server_extent_io, &ext, NULL);
 	if (ret) {
 		if (ret == -ENOENT)
 			ret = -ENOSPC;
@@ -246,7 +250,7 @@ static int alloc_extent(struct super_block *sb, u64 len, u64 *start)
 	trace_scoutfs_server_alloc_extent_next(sb, &ext);
 
 	ext.type = SCOUTFS_FREE_EXTENT_BLKNO_TYPE;
-	ext.len = len;
+	ext.len = min(blocks, ext.len);
 
 	ret = scoutfs_extent_remove(sb, server_extent_io, &ext, NULL);
 	if (ret)
@@ -256,6 +260,7 @@ static int alloc_extent(struct super_block *sb, u64 len, u64 *start)
 	le64_add_cpu(&super->free_blocks, -ext.len);
 
 	*start = ext.start;
+	*len = ext.len;
 	ret = 0;
 
 out:
@@ -705,26 +710,29 @@ static int process_alloc_extent(struct server_connection *conn,
 	struct server_info *server = conn->server;
 	struct super_block *sb = server->sb;
 	struct commit_waiter cw;
-	__le64 lestart;
-	__le64 lelen;
+	struct scoutfs_net_extent nex;
+	__le64 leblocks;
 	u64 start;
+	u64 len;
 	int ret;
 
-	if (data_len != sizeof(lelen)) {
+	if (data_len != sizeof(leblocks)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	memcpy(&lelen, data, data_len);
+	memcpy(&leblocks, data, data_len);
 
 	down_read(&server->commit_rwsem);
-	ret = alloc_extent(sb, le64_to_cpu(lelen), &start);
+	ret = alloc_extent(sb, le64_to_cpu(leblocks), &start, &len);
 	if (ret == -ENOSPC) {
 		start = 0;
+		len = 0;
 		ret = 0;
 	}
 	if (ret == 0) {
-		lestart = cpu_to_le64(start);
+		nex.start = cpu_to_le64(start);
+		nex.len = cpu_to_le64(len);
 		queue_commit_work(server, &cw);
 	}
 	up_read(&server->commit_rwsem);
@@ -732,7 +740,7 @@ static int process_alloc_extent(struct server_connection *conn,
 	if (ret == 0)
 		ret = wait_for_commit(server, &cw, id, type);
 out:
-	return send_reply(conn, id, type, ret, &lestart, sizeof(lestart));
+	return send_reply(conn, id, type, ret, &nex, sizeof(nex));
 }
 
 /*

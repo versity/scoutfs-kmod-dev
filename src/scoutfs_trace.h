@@ -2255,6 +2255,10 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_server_extent,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_find_free_extent,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
 DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block_next,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)

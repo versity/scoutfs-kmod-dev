@@ -563,6 +563,11 @@ struct scoutfs_net_statfs {
 	__u8 uuid[SCOUTFS_UUID_BYTES];	/* logical volume uuid */
 } __packed;
 
+struct scoutfs_net_extent {
+	__le64 start;
+	__le64 len;
+} __packed;
+
 /* XXX eventually we'll have net compaction and will need agents to agree */
 
 /* one upper segment and fanout lower segments */

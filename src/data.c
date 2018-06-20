@@ -58,6 +58,20 @@
  *  - need trans around each bulk alloc
  */
 
+/*
+ * The largest extent that we'll store in a single item.  This will
+ * determine the granularity of interleaved concurrent allocations on a
+ * node.  Sequential max length allocations could still see contiguous
+ * physical extent allocations.  It limits the amount of IO needed to
+ * invalidate a lock.  And it determines the granularity of parallel
+ * writes to a file between nodes.
+ */
+#define MAX_EXTENT_BLOCKS (8ULL * 1024 * 1024 >> SCOUTFS_BLOCK_SHIFT)
+/*
+ * We ask for a fixed size from the server today.
+ */
+#define SERVER_ALLOC_BLOCKS (MAX_EXTENT_BLOCKS * 8)
+
 struct data_info {
 	struct rw_semaphore alloc_rwsem;
 };
@@ -399,14 +413,16 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 	return ret;
 }
 
-static int get_server_extent(struct super_block *sb, u64 len)
+static int get_server_extent(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_extent ext;
 	u64 start;
+	u64 len;
 	int ret;
 
-	ret = scoutfs_client_alloc_extent(sb, len, &start);
+	ret = scoutfs_client_alloc_extent(sb, SERVER_ALLOC_BLOCKS,
+					  &start, &len);
 	if (ret)
 		goto out;
 
@@ -417,6 +433,57 @@ static int get_server_extent(struct super_block *sb, u64 len)
 	/* XXX don't free extent on error, crash recovery with server */
 
 out:
+	return ret;
+}
+
+/*
+ * Find a free extent to satisfy an allocation of at most @len blocks.
+ *
+ * Returns 0 and fills the caller's extent with a _BLKNO_TYPE extent if
+ * we found a match.  It's len may be less than desired.  No stored
+ * extents have been modified.
+ *
+ * Returns -errno on error and -ENOSPC if no free extents were found.
+ *
+ * The caller's extent is always clobbered.
+ */
+static int find_free_extent(struct super_block *sb, u64 len,
+			    struct scoutfs_extent *ext)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	int ret;
+
+	len = min(len, MAX_EXTENT_BLOCKS);
+
+	for (;;) {
+		/* first try to find the first sufficient extent */
+		scoutfs_extent_init(ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
+				    sbi->node_id, 0, len, 0, 0);
+		ret = scoutfs_extent_next(sb, data_extent_io, ext,
+					  sbi->node_id_lock);
+
+		/* if none big enough, look for last largest smaller */
+		if (ret == -ENOENT && len > 1)
+			ret = scoutfs_extent_prev(sb, data_extent_io, ext,
+						  sbi->node_id_lock);
+
+		/* ask the server for more if we think it'll help */
+		if (ret == -ENOENT || ext->len < len) {
+			ret = get_server_extent(sb);
+			if (ret == 0)
+				continue;
+		}
+
+		/* use the extent we found or return errors */
+		break;
+	}
+
+	if (ret == 0)
+		scoutfs_extent_init(ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
+				    sbi->node_id, ext->start,
+				    min(ext->len, len), 0, 0);
+
+	trace_scoutfs_data_find_free_extent(sb, ext);
 	return ret;
 }
 
@@ -448,8 +515,6 @@ out:
  * On success we update the caller's extent to the single block
  * allocated extent for the logical block for use in block mapping.
  */
-#define MAX_STREAMING_PREALLOC_BLOCKS	((u64)SCOUTFS_SEGMENT_BLOCKS)
-#define SERVER_ALLOC_BLOCKS		(MAX_STREAMING_PREALLOC_BLOCKS * 32)
 static int alloc_block(struct super_block *sb, struct inode *inode,
 		       struct scoutfs_extent *ext, u64 iblock, u64 len,
 		       struct scoutfs_lock *lock)
@@ -474,30 +539,16 @@ static int alloc_block(struct super_block *sb, struct inode *inode,
 
 	/* strictly contiguous extending writes will try to preallocate */ 
 	if (iblock > 1 && iblock == online)
-		len = min3(len, iblock, MAX_STREAMING_PREALLOC_BLOCKS);
+		len = min3(len, iblock, MAX_EXTENT_BLOCKS);
 	else
 		len = 1;
 
 	trace_scoutfs_data_alloc_block(sb, inode, ext, iblock, len,
 				       online, offline);
 
-	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
-			    sbi->node_id, 0, len, 0, 0);
-	ret = scoutfs_extent_next(sb, data_extent_io, &fr,
-				  sbi->node_id_lock);
-	if (ret == -ENOENT) {
-		/* try to get allocation from the server if we're out */
-		ret = get_server_extent(sb, SERVER_ALLOC_BLOCKS);
-		if (ret == 0)
-			ret = scoutfs_extent_next(sb, data_extent_io, &fr,
-						  sbi->node_id_lock);
-	}
-	if (ret) {
-		/* XXX should try to look for smaller free extents :/ */
-		if (ret == -ENOENT)
-			ret = -ENOSPC;
+	ret = find_free_extent(sb, len, &fr);
+	if (ret < 0)
 		goto out;
-	}
 
 	trace_scoutfs_data_alloc_block_next(sb, &fr);
 
@@ -505,9 +556,7 @@ static int alloc_block(struct super_block *sb, struct inode *inode,
 	scoutfs_extent_init(&blk, SCOUTFS_FILE_EXTENT_TYPE, ino,
 			    iblock, 1, fr.start, 0);
 
-	/* remove the free extent we're using */
-	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
-			    sbi->node_id, fr.start, len, 0, 0);
+	/* remove the free extent that we're allocating */
 	ret = scoutfs_extent_remove(sb, data_extent_io, &fr, sbi->node_id_lock);
 	if (ret)
 		goto out;
@@ -855,21 +904,14 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 }
 
 /*
- * Update one extent on behalf of fallocate.
+ * Allocate one extent on behalf of fallocate.  The caller has given us
+ * the largest extent we can add, its flags, and the flags of an
+ * existing overlapping extent to remove.
  *
- * The caller has searched for the next extent that intersects with the
- * region including first_block and last_block.  The next extent will be
- * zeroed if it wasn't found.  We don't know the state of the offsets
- * past the next extent.
- *
- * The caller has held transactions and acquired locks.  We only ever
- * make one extent modification here.
- *
- * If this returns 0 then the caller's extent is clobbered.  It is set
- * to the newly fallocated extent so that the caller can continue with
- * the fallocate operation.
+ * We allocate the largest extent that we can and return its length or
+ * -errno.
  */
-static int fallocate_one_extent(struct super_block *sb, u64 ino, u64 start,
+static s64 fallocate_one_extent(struct super_block *sb, u64 ino, u64 start,
 				u64 len, u8 flags, u8 rem_flags,
 				struct scoutfs_lock *lock)
 {
@@ -879,7 +921,7 @@ static int fallocate_one_extent(struct super_block *sb, u64 ino, u64 start,
 	struct scoutfs_extent fr;
 	bool add_rem = false;
 	bool add_fr = false;
-	int ret;
+	s64 ret;
 
 	if (WARN_ON_ONCE(len == 0) ||
 	    WARN_ON_ONCE(start + len < start)) {
@@ -887,28 +929,9 @@ static int fallocate_one_extent(struct super_block *sb, u64 ino, u64 start,
 		goto out;
 	}
 
-	/* find a sufficiently large free extent */
-	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
-			    sbi->node_id, 0, len, 0, 0);
-	ret = scoutfs_extent_next(sb, data_extent_io, &fr,
-				  sbi->node_id_lock);
-	if (ret == -ENOENT) {
-		/* try to get allocation from the server if we're out */
-		ret = get_server_extent(sb, SERVER_ALLOC_BLOCKS);
-		if (ret == 0)
-			ret = scoutfs_extent_next(sb, data_extent_io, &fr,
-						  sbi->node_id_lock);
-		/* XXX try to find smaller free extents */
-	}
-	if (ret < 0) {
-		if (ret == -ENOENT)
-			ret = -ENOSPC;
+	ret = find_free_extent(sb, len, &fr);
+	if (ret < 0)
 		goto out;
-	}
-
-	/* trim our allocation from the length indexed extent */
-	scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
-			    sbi->node_id, fr.start, min(fr.len, len), 0, 0);
 
 	ret = scoutfs_extent_init(&fal, SCOUTFS_FILE_EXTENT_TYPE, ino,
 				  start, fr.len, fr.start, flags);
@@ -931,6 +954,8 @@ static int fallocate_one_extent(struct super_block *sb, u64 ino, u64 start,
 	}
 
 	ret = scoutfs_extent_add(sb, data_extent_io, &fal, lock);
+	if (ret == 0)
+		ret = fal.len;
 out:
 	scoutfs_extent_cleanup(ret < 0 && add_rem, scoutfs_extent_add, sb,
 			       data_extent_io, &rem, lock,
@@ -961,7 +986,7 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	LIST_HEAD(ind_locks);
 	u64 last_block;
 	u64 iblock;
-	u64 blocks;
+	s64 blocks;
 	loff_t end;
 	u8 rem_flags;
 	u8 flags;
@@ -1003,7 +1028,7 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	iblock = offset >> SCOUTFS_BLOCK_SHIFT;
 	last_block = (offset + len - 1) >> SCOUTFS_BLOCK_SHIFT;
 
-	for (; iblock <= last_block; iblock = ext.start + ext.len) {
+	while(iblock <= last_block) {
 
 		scoutfs_extent_init(&ext, SCOUTFS_FILE_EXTENT_TYPE,
 				    ino, iblock, 1, 0, 0);
@@ -1020,17 +1045,19 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 
 		} else if (iblock < ext.start) {
 			/* sparse region until next extent */
-			blocks = min(blocks, ext.start - iblock);
+			blocks = min_t(u64, blocks, ext.start - iblock);
 
 		} else if (ext.map > 0) {
 			/* skip past an allocated extent */
-			blocks = min(blocks, (ext.start + ext.len) - iblock);
+			blocks = min_t(u64, blocks,
+				      (ext.start + ext.len) - iblock);
 			iblock += blocks;
 			blocks = 0;
 
 		} else {
 			/* allocating a portion of an unallocated extent */
-			blocks = min(blocks, (ext.start + ext.len) - iblock);
+			blocks = min_t(u64, blocks,
+				       (ext.start + ext.len) - iblock);
 			flags |= ext.flags;
 			rem_flags = ext.flags;
 			/* XXX corruption; why'd we store map == flags == 0? */
@@ -1047,9 +1074,13 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 
 		if (blocks > 0) {
 			down_write(&datinf->alloc_rwsem);
-			ret = fallocate_one_extent(sb, ino, iblock, blocks,
-						   flags, rem_flags, lock);
+			blocks = fallocate_one_extent(sb, ino, iblock, blocks,
+						      flags, rem_flags, lock);
 			up_write(&datinf->alloc_rwsem);
+			if (blocks < 0)
+				ret = blocks;
+			else
+				ret = 0;
 		}
 
 		if (ret == 0 && !(mode & FALLOC_FL_KEEP_SIZE)) {
@@ -1068,7 +1099,7 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 
 		iblock += blocks;
 	}
-	ret = 0;
+
 out:
 	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 	mutex_unlock(&inode->i_mutex);

@@ -153,6 +153,19 @@ int scoutfs_extent_next(struct super_block *sb, scoutfs_extent_io_t iof,
 	return ret;
 }
 
+int scoutfs_extent_prev(struct super_block *sb, scoutfs_extent_io_t iof,
+			struct scoutfs_extent *ext, void *data)
+{
+	int ret;
+
+	scoutfs_inc_counter(sb, extent_prev);
+	trace_scoutfs_extent_prev_input(sb, ext);
+	ret = iof(sb, SEI_PREV, ext, data);
+	if (ret == 0)
+		trace_scoutfs_extent_prev_output(sb, ext);
+	return ret;
+}
+
 /*
  * Search for a next extent and see if we can merge it with the caller's
  * extent.  The caller has initialized next for us to search from.  If

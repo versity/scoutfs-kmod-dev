@@ -2222,6 +2222,14 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_next_output,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_prev_input,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_prev_output,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
 DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_add,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)

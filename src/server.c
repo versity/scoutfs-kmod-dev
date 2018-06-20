@@ -164,9 +164,13 @@ static int server_extent_io(struct super_block *sb, int op,
 	if (ext->type == SCOUTFS_FREE_EXTENT_BLOCKS_TYPE)
 		swap(ebk.major, ebk.minor);
 
-	if (op == SEI_NEXT) {
-		ret = scoutfs_btree_next(sb, &super->alloc_root,
-					 &ebk, sizeof(ebk), &iref);
+	if (op == SEI_NEXT || op == SEI_PREV) {
+		if (op == SEI_NEXT)
+			ret = scoutfs_btree_next(sb, &super->alloc_root,
+						 &ebk, sizeof(ebk), &iref);
+		else
+			ret = scoutfs_btree_prev(sb, &super->alloc_root,
+						 &ebk, sizeof(ebk), &iref);
 		if (ret == 0) {
 			ret = init_extent_from_btree_key(ext, ext->type,
 							 iref.key,

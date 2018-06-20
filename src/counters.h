@@ -56,6 +56,7 @@
 	EXPAND_COUNTER(extent_delete)				\
 	EXPAND_COUNTER(extent_insert)				\
 	EXPAND_COUNTER(extent_next)				\
+	EXPAND_COUNTER(extent_prev)				\
 	EXPAND_COUNTER(extent_remove)				\
 	EXPAND_COUNTER(item_alloc)				\
 	EXPAND_COUNTER(item_batch_duplicate)			\

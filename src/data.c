@@ -139,6 +139,7 @@ static int data_extent_io(struct super_block *sb, int op,
 {
 	struct scoutfs_lock *lock = data;
 	struct scoutfs_file_extent fex;
+	struct scoutfs_key first;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
 	struct kvec val;
@@ -164,6 +165,7 @@ static int data_extent_io(struct super_block *sb, int op,
 	if (ext->type == SCOUTFS_FILE_EXTENT_TYPE) {
 		init_file_extent_key(&key, ext->owner,
 				     ext->start + ext->len - 1);
+		init_file_extent_key(&first, ext->owner, 0);
 		init_file_extent_key(&last, ext->owner, U64_MAX);
 		fex.blkno = cpu_to_le64(ext->map);
 		fex.len = cpu_to_le64(ext->len);
@@ -174,14 +176,20 @@ static int data_extent_io(struct super_block *sb, int op,
 				     ext->start + ext->len - 1, ext->len);
 		if (ext->type == SCOUTFS_FREE_EXTENT_BLOCKS_TYPE)
 			swap(key.sknf_major, key.sknf_minor);
+		init_free_extent_key(&first, ext->type, ext->owner,
+				     0, 0);
 		init_free_extent_key(&last, ext->type, ext->owner,
 				     U64_MAX, U64_MAX);
 		kvec_init(&val, NULL, 0);
 	}
 
-	if (op == SEI_NEXT) {
+	if (op == SEI_NEXT || op == SEI_PREV) {
 		expected = val.iov_len;
-		ret = scoutfs_item_next(sb, &key, &last, &val, lock);
+
+		if (op == SEI_NEXT)
+			ret = scoutfs_item_next(sb, &key, &last, &val, lock);
+		else
+			ret = scoutfs_item_prev(sb, &key, &first, &val, lock);
 		if (ret >= 0 && ret != expected)
 			ret = -EIO;
 		if (ret == expected)

@@ -20,6 +20,7 @@ struct scoutfs_extent {
 
 enum {
 	SEI_NEXT,
+	SEI_PREV,
 	SEI_INSERT,
 	SEI_DELETE,
 };
@@ -32,6 +33,8 @@ bool scoutfs_extent_intersection(struct scoutfs_extent *a,
 				 struct scoutfs_extent *b);
 
 int scoutfs_extent_next(struct super_block *sb, scoutfs_extent_io_t iof,
+			struct scoutfs_extent *ext, void *data);
+int scoutfs_extent_prev(struct super_block *sb, scoutfs_extent_io_t iof,
 			struct scoutfs_extent *ext, void *data);
 int scoutfs_extent_add(struct super_block *sb, scoutfs_extent_io_t iof,
 		       struct scoutfs_extent *add, void *data);

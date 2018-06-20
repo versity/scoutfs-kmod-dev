@@ -14,6 +14,9 @@ int scoutfs_item_lookup_exact(struct super_block *sb,
 int scoutfs_item_next(struct super_block *sb, struct scoutfs_key *key,
 		      struct scoutfs_key *last, struct kvec *val,
 		      struct scoutfs_lock *lock);
+int scoutfs_item_prev(struct super_block *sb, struct scoutfs_key *key,
+		      struct scoutfs_key *first, struct kvec *val,
+		      struct scoutfs_lock *lock);
 int scoutfs_item_create(struct super_block *sb, struct scoutfs_key *key,
 		        struct kvec *val, struct scoutfs_lock *lock);
 int scoutfs_item_create_force(struct super_block *sb,

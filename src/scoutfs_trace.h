@@ -352,6 +352,24 @@ TRACE_EVENT(scoutfs_item_next_ret,
 	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
 );
 
+TRACE_EVENT(scoutfs_item_prev_ret,
+	TP_PROTO(struct super_block *sb, int ret),
+
+	TP_ARGS(sb, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ret = ret;
+	),
+
+	TP_printk("fsid "FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+);
+
 TRACE_EVENT(scoutfs_erase_item,
 	TP_PROTO(struct super_block *sb, void *item),
 
@@ -1863,6 +1881,36 @@ TRACE_EVENT(scoutfs_item_next_range_check,
 		  __entry->sb, __entry->cached, SK_ARG(&__entry->key),
 		  SK_ARG(&__entry->pos), SK_ARG(&__entry->last),
 		  SK_ARG(&__entry->end), SK_ARG(&__entry->range_end))
+);
+
+TRACE_EVENT(scoutfs_item_prev_range_check,
+        TP_PROTO(struct super_block *sb, int cached,
+		 struct scoutfs_key *key, struct scoutfs_key *pos,
+		 struct scoutfs_key *first, struct scoutfs_key *start,
+		 struct scoutfs_key *range_start),
+        TP_ARGS(sb, cached, key, pos, first, start, range_start),
+        TP_STRUCT__entry(
+		__field(void *, sb)
+		__field(int, cached)
+		__field_struct(struct scoutfs_key, key)
+		__field_struct(struct scoutfs_key, pos)
+		__field_struct(struct scoutfs_key, first)
+		__field_struct(struct scoutfs_key, start)
+		__field_struct(struct scoutfs_key, range_start)
+        ),
+        TP_fast_assign(
+		__entry->sb = sb;
+		__entry->cached = cached;
+		scoutfs_key_copy_or_zeros(&__entry->key, key);
+		scoutfs_key_copy_or_zeros(&__entry->pos, pos);
+		scoutfs_key_copy_or_zeros(&__entry->first, first);
+		scoutfs_key_copy_or_zeros(&__entry->start, start);
+		scoutfs_key_copy_or_zeros(&__entry->range_start, range_start);
+        ),
+        TP_printk("sb %p cached %d key "SK_FMT" pos "SK_FMT" first "SK_FMT" start "SK_FMT" range_start "SK_FMT,
+		  __entry->sb, __entry->cached, SK_ARG(&__entry->key),
+		  SK_ARG(&__entry->pos), SK_ARG(&__entry->first),
+		  SK_ARG(&__entry->start), SK_ARG(&__entry->range_start))
 );
 
 DECLARE_EVENT_CLASS(scoutfs_shrink_exit_class,

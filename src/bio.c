@@ -69,6 +69,7 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 {
 	unsigned int nr_pages = DIV_ROUND_UP(nr_blocks,
 					     SCOUTFS_BLOCKS_PER_PAGE);
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct bio_end_io_args *args;
 	struct blk_plug plug;
 	unsigned int bytes;
@@ -76,6 +77,12 @@ void scoutfs_bio_submit(struct super_block *sb, int rw, struct page **pages,
 	struct bio *bio = NULL;
 	int ret = 0;
 	int i;
+
+	if (super->total_blocks &&
+	    WARN_ON_ONCE(blkno >= le64_to_cpu(super->total_blocks))) {
+		end_io(sb, data, -EIO);
+		return;
+	}
 
 	args = kmalloc(sizeof(struct bio_end_io_args), GFP_NOFS);
 	if (!args) {

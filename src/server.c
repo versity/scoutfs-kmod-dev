@@ -753,7 +753,7 @@ static int process_alloc_segno(struct server_connection *conn,
 	struct server_info *server = conn->server;
 	struct super_block *sb = server->sb;
 	struct commit_waiter cw;
-	__le64 lesegno;
+	__le64 lesegno = 0;
 	u64 segno;
 	int ret;
 
@@ -767,10 +767,12 @@ static int process_alloc_segno(struct server_connection *conn,
 	if (ret == 0) {
 		lesegno = cpu_to_le64(segno);
 		queue_commit_work(server, &cw);
+	} else if (ret == -ENOSPC) {
+		ret = 0;
 	}
 	up_read(&server->commit_rwsem);
 
-	if (ret == 0)
+	if (ret == 0 && lesegno != 0)
 		ret = wait_for_commit(server, &cw, id, type);
 out:
 	return send_reply(conn, id, type, ret, &lesegno, sizeof(lesegno));

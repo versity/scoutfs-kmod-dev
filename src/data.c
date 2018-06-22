@@ -20,6 +20,7 @@
 #include <linux/hash.h>
 #include <linux/log2.h>
 #include <linux/falloc.h>
+#include <linux/writeback.h>
 
 #include "format.h"
 #include "super.h"
@@ -874,6 +875,20 @@ out:
         return ret;
 }
 
+/* kinda like __filemap_fdatawrite_range! :P */
+static int writepages_sync_none(struct address_space *mapping, loff_t start,
+				loff_t end)
+{
+        struct writeback_control wbc = {
+                .sync_mode = WB_SYNC_NONE,
+                .nr_to_write = LONG_MAX,
+                .range_start = start,
+                .range_end = end,
+        };
+
+	return mapping->a_ops->writepages(mapping, &wbc);
+}
+
 static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 			     loff_t pos, unsigned len, unsigned copied,
 			     struct page *page, void *fsdata)
@@ -900,6 +915,27 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 	scoutfs_release_trans(sb);
 	scoutfs_inode_index_unlock(sb, &wbd->ind_locks);
 	kfree(wbd);
+
+	/*
+	 * Currently transactions are kept very simple.  Only one is
+	 * open at a time and commit excludes concurrent dirtying.  It
+	 * writes out all dirty file data during commit.  This can lead
+	 * to very long commit latencies with lots of dirty file data.
+	 *
+	 * This hack tries to minimize these writeback latencies while
+	 * keeping concurrent large file strreaming writes from
+	 * suffering too terribly.  Every N bytes we kick off background
+	 * writbeack on the previous N bytes.  By the time transaction
+	 * commit comes along it will find that dirty file blocks have
+	 * already been written.
+	 */
+#define BACKGROUND_WRITEBACK_BYTES (16 * 1024 * 1024)
+#define BACKGROUND_WRITEBACK_MASK (BACKGROUND_WRITEBACK_BYTES - 1)
+	if (ret > 0 && ((pos + ret) & BACKGROUND_WRITEBACK_MASK) == 0)
+		writepages_sync_none(mapping,
+				     pos + ret - BACKGROUND_WRITEBACK_BYTES,
+				     pos + ret - 1);
+
 	return ret;
 }
 

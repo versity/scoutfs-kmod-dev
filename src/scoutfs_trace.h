@@ -298,42 +298,6 @@ TRACE_EVENT(scoutfs_item_update_ret,
 	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
 );
 
-TRACE_EVENT(scoutfs_item_next_same,
-	TP_PROTO(struct super_block *sb, unsigned int key_len),
-
-	TP_ARGS(sb, key_len),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(unsigned int, key_len)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->key_len = key_len;
-	),
-
-	TP_printk(FSID_FMT" key len %u", __entry->fsid, __entry->key_len)
-);
-
-TRACE_EVENT(scoutfs_item_next_same_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
-);
-
 TRACE_EVENT(scoutfs_item_next_ret,
 	TP_PROTO(struct super_block *sb, int ret),
 
@@ -524,49 +488,6 @@ TRACE_EVENT(scoutfs_data_alloc_block_ret,
 
 	TP_printk(FSID_FMT" ext "SE_FMT" ret %d", __entry->fsid,
 		SE_ARG(&__entry->ext), __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_data_find_alloc_block_curs,
-	TP_PROTO(struct super_block *sb, void *curs, __u64 blkno),
-
-	TP_ARGS(sb, curs, blkno),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(void *, curs)
-		__field(__u64, blkno)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->curs = curs;
-		__entry->blkno = blkno;
-	),
-
-	TP_printk(FSID_FMT" got curs %p blkno %llu", __entry->fsid,
-		  __entry->curs, __entry->blkno)
-);
-
-TRACE_EVENT(scoutfs_data_get_cursor,
-	TP_PROTO(void *curs, void *task, unsigned int pid),
-
-	TP_ARGS(curs, task, pid),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(void *, curs)
-		__field(void *, task)
-		__field(unsigned int, pid)
-	),
-
-	TP_fast_assign(
-		__entry->curs = curs;
-		__entry->task = task;
-		__entry->pid = pid;
-	),
-
-	TP_printk("resetting curs %p was task %p pid %u", __entry->curs,
-		  __entry->task, __entry->pid)
 );
 
 TRACE_EVENT(scoutfs_data_truncate_items,
@@ -887,27 +808,6 @@ DEFINE_EVENT(scoutfs_index_item_class, scoutfs_delete_index_item,
 	TP_PROTO(struct super_block *sb, __u8 type, __u64 major, __u32 minor,
 		 __u64 ino),
 	TP_ARGS(sb, type, major, minor, ino)
-);
-
-TRACE_EVENT(scoutfs_inode_fill_pool,
-	TP_PROTO(struct super_block *sb, __u64 ino, __u64 nr),
-
-	TP_ARGS(sb, ino, nr),
-
-	TP_STRUCT__entry(
-		__field(__u64, fsid)
-		__field(__u64, ino)
-		__field(__u64, nr)
-	),
-
-	TP_fast_assign(
-		__entry->fsid = FSID_ARG(sb);
-		__entry->ino = ino;
-		__entry->nr = nr;
-	),
-
-	TP_printk(FSID_FMT" filling ino %llu nr %llu",  __entry->fsid,
-		  __entry->ino, __entry->nr)
 );
 
 TRACE_EVENT(scoutfs_alloc_ino,
@@ -1495,12 +1395,6 @@ DEFINE_EVENT(scoutfs_range_class, scoutfs_item_invalidate_range,
         TP_ARGS(sb, start, end)
 );
 
-DEFINE_EVENT(scoutfs_range_class, scoutfs_item_shrink_range,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
-		 struct scoutfs_key *end),
-        TP_ARGS(sb, start, end)
-);
-
 DECLARE_EVENT_CLASS(scoutfs_cached_range_class,
         TP_PROTO(struct super_block *sb, void *rng,
 		 struct scoutfs_key *start, struct scoutfs_key *end),
@@ -1553,12 +1447,6 @@ DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_end,
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_rem_rb_insert,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_delete_enoent,
         TP_PROTO(struct super_block *sb, void *rng,
 		 struct scoutfs_key *start, struct scoutfs_key *end),
         TP_ARGS(sb, rng, start, end)

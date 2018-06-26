@@ -18,6 +18,31 @@ struct scoutfs_extent {
 #define SE_ARG(ext)	(ext)->owner, (ext)->start, (ext)->len, (ext)->map, \
 			(ext)->type, (ext)->flags
 
+#define se_trace_define(name)			\
+	__field(__u64, name##_owner)		\
+	__field(__u64, name##_start)		\
+	__field(__u64, name##_len)		\
+	__field(__u64, name##_map)		\
+	__field(__u8, name##_type)		\
+	__field(__u8, name##_flags)
+
+/* doesn't support null extent pointers */
+#define se_trace_assign(name, ext)		\
+do {						\
+	__typeof__(ext) _ext = (ext);		\
+						\
+	__entry->name##_owner = _ext->owner;	\
+	__entry->name##_start = _ext->start;	\
+	__entry->name##_len = _ext->len;	\
+	__entry->name##_map = _ext->map;	\
+	__entry->name##_type = _ext->type;	\
+	__entry->name##_flags = _ext->flags;	\
+} while (0)
+
+#define se_trace_args(name) \
+	__entry->name##_owner, __entry->name##_start, __entry->name##_len, \
+	__entry->name##_map, __entry->name##_type, __entry->name##_flags
+
 enum {
 	SEI_NEXT,
 	SEI_PREV,

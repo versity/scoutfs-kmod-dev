@@ -446,7 +446,7 @@ TRACE_EVENT(scoutfs_data_alloc_block,
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(__u64, ino)
-		__field_struct(struct scoutfs_extent, ext)
+		se_trace_define(ext)
 		__field(__u64, iblock)
 		__field(__u64, len)
 		__field(__u64, online_blocks)
@@ -456,7 +456,7 @@ TRACE_EVENT(scoutfs_data_alloc_block,
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->ino = scoutfs_ino(inode);
-		__entry->ext = *ext;
+		se_trace_assign(ext, ext);
 		__entry->iblock = iblock;
 		__entry->len = len;
 		__entry->online_blocks = online_blocks;
@@ -464,7 +464,7 @@ TRACE_EVENT(scoutfs_data_alloc_block,
 	),
 
 	TP_printk("fsid "FSID_FMT" ino %llu ext "SE_FMT" iblock %llu len %llu online_blocks %llu offline_blocks %llu",
-		  __entry->fsid, __entry->ino, SE_ARG(&__entry->ext),
+		  __entry->fsid, __entry->ino, se_trace_args(ext),
 		  __entry->iblock, __entry->len, __entry->online_blocks,
 		  __entry->offline_blocks)
 );
@@ -476,18 +476,18 @@ TRACE_EVENT(scoutfs_data_alloc_block_ret,
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
-		__field_struct(struct scoutfs_extent, ext)
+		se_trace_define(ext)
 		__field(int, ret)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		__entry->ext = *ext;
+		se_trace_assign(ext, ext);
 		__entry->ret = ret;
 	),
 
 	TP_printk(FSID_FMT" ext "SE_FMT" ret %d", __entry->fsid,
-		SE_ARG(&__entry->ext), __entry->ret)
+		se_trace_args(ext), __entry->ret)
 );
 
 TRACE_EVENT(scoutfs_data_truncate_items,
@@ -2083,16 +2083,16 @@ DECLARE_EVENT_CLASS(scoutfs_extent_class,
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
-		__field_struct(struct scoutfs_extent, ext)
+		se_trace_define(ext)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = SCOUTFS_SB(sb) ? FSID_ARG(sb) : 0;
-		__entry->ext = *ext;
+		se_trace_assign(ext, ext);
 	),
 
 	TP_printk("fsid "FSID_FMT" ext "SE_FMT,
-		  __entry->fsid, SE_ARG(&__entry->ext))
+		  __entry->fsid, se_trace_args(ext))
 );
 
 DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_insert,

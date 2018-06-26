@@ -6,7 +6,7 @@ CFLAGS_super.o = -DSCOUTFS_GIT_DESCRIBE=\"$(SCOUTFS_GIT_DESCRIBE)\" \
 CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
  
 scoutfs-y += bio.o btree.o client.o compact.o counters.o data.o dir.o \
-	     export.o extents.o file.o inode.o ioctl.o item.o key.o lock.o \
+	     export.o extents.o file.o inode.o ioctl.o item.o lock.o \
 	     manifest.o msg.o options.o per_task.o seg.o server.o \
 	     scoutfs_trace.o sock.o sort_priv.o super.o sysfs.o trans.o \
 	     triggers.o xattr.o

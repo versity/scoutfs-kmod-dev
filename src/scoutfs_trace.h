@@ -235,18 +235,18 @@ DECLARE_EVENT_CLASS(scoutfs_key_ret_class,
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
-		__field_struct(struct scoutfs_key, key)
+		sk_trace_define(key)
 		__field(int, ret)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		__entry->key = *key;
+		sk_trace_assign(key, key);
 		__entry->ret = ret;
 	),
 
 	TP_printk("fsid "FSID_FMT" key "SK_FMT" ret %d",
-		  __entry->fsid, SK_ARG(&__entry->key), __entry->ret)
+		  __entry->fsid, sk_trace_args(key), __entry->ret)
 );
 
 DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_create,
@@ -1243,19 +1243,19 @@ DECLARE_EVENT_CLASS(scoutfs_manifest_class,
 		__field(u8, level)
 		__field(u64, segno)
 		__field(u64, seq)
-		__field_struct(struct scoutfs_key, first)
-		__field_struct(struct scoutfs_key, last)
+		sk_trace_define(first)
+		sk_trace_define(last)
         ),
         TP_fast_assign(
 		__entry->level = level;
 		__entry->segno = segno;
 		__entry->seq = seq;
-		scoutfs_key_copy_or_zeros(&__entry->first, first);
-		scoutfs_key_copy_or_zeros(&__entry->last, last);
+		sk_trace_assign(first, first);
+		sk_trace_assign(last, last);
         ),
         TP_printk("level %u segno %llu seq %llu first "SK_FMT" last "SK_FMT,
 		  __entry->level, __entry->segno, __entry->seq,
-		  SK_ARG(&__entry->first), SK_ARG(&__entry->last))
+		  sk_trace_args(first), sk_trace_args(last))
 );
 
 DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_add,
@@ -1292,24 +1292,24 @@ TRACE_EVENT(scoutfs_read_item_keys,
         TP_ARGS(sb, key, start, end, seg_start, seg_end),
         TP_STRUCT__entry(
 		__field(__u64, fsid)
-		__field_struct(struct scoutfs_key, key)
-		__field_struct(struct scoutfs_key, start)
-		__field_struct(struct scoutfs_key, end)
-		__field_struct(struct scoutfs_key, seg_start)
-		__field_struct(struct scoutfs_key, seg_end)
+		sk_trace_define(key)
+		sk_trace_define(start)
+		sk_trace_define(end)
+		sk_trace_define(seg_start)
+		sk_trace_define(seg_end)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		scoutfs_key_copy_or_zeros(&__entry->key, key);
-		scoutfs_key_copy_or_zeros(&__entry->start, start);
-		scoutfs_key_copy_or_zeros(&__entry->end, end);
-		scoutfs_key_copy_or_zeros(&__entry->seg_start, seg_start);
-		scoutfs_key_copy_or_zeros(&__entry->seg_end, seg_end);
+		sk_trace_assign(key, key);
+		sk_trace_assign(start, start);
+		sk_trace_assign(end, end);
+		sk_trace_assign(seg_start, seg_start);
+		sk_trace_assign(seg_end, seg_end);
         ),
         TP_printk("fsid "FSID_FMT" key "SK_FMT" start "SK_FMT" end "SK_FMT" seg_start "SK_FMT" seg_end "SK_FMT"",
-		  __entry->fsid, SK_ARG(&__entry->key), SK_ARG(&__entry->start),
-		  SK_ARG(&__entry->end), SK_ARG(&__entry->seg_start),
-		  SK_ARG(&__entry->seg_end))
+		  __entry->fsid, sk_trace_args(key), sk_trace_args(start),
+		  sk_trace_args(end), sk_trace_args(seg_start),
+		  sk_trace_args(seg_end))
 );
 
 DECLARE_EVENT_CLASS(scoutfs_key_class,
@@ -1317,13 +1317,13 @@ DECLARE_EVENT_CLASS(scoutfs_key_class,
         TP_ARGS(sb, key),
         TP_STRUCT__entry(
  		__field(__u64, fsid)
-		__field_struct(struct scoutfs_key, key)
+		sk_trace_define(key)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		scoutfs_key_copy_or_zeros(&__entry->key, key);
+		sk_trace_assign(key, key);
         ),
-	TP_printk(FSID_FMT" key "SK_FMT, __entry->fsid, SK_ARG(&__entry->key))
+	TP_printk(FSID_FMT" key "SK_FMT, __entry->fsid, sk_trace_args(key))
 );
 
 DEFINE_EVENT(scoutfs_key_class, scoutfs_item_lookup,
@@ -1370,17 +1370,16 @@ DECLARE_EVENT_CLASS(scoutfs_range_class,
         TP_ARGS(sb, start, end),
         TP_STRUCT__entry(
 		__field(__u64, fsid)
-		__field_struct(struct scoutfs_key, start)
-		__field_struct(struct scoutfs_key, end)
+		sk_trace_define(start)
+		sk_trace_define(end)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		scoutfs_key_copy_or_zeros(&__entry->start, start);
-		scoutfs_key_copy_or_zeros(&__entry->end, end);
+		sk_trace_assign(start, start);
+		sk_trace_assign(end, end);
         ),
         TP_printk("fsid "FSID_FMT" start "SK_FMT" end "SK_FMT,
-		  __entry->fsid, SK_ARG(&__entry->start),
-		  SK_ARG(&__entry->end))
+		  __entry->fsid, sk_trace_args(start), sk_trace_args(end))
 );
 
 DEFINE_EVENT(scoutfs_range_class, scoutfs_item_insert_batch,
@@ -1402,18 +1401,18 @@ DECLARE_EVENT_CLASS(scoutfs_cached_range_class,
         TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(void *, rng)
-		__field_struct(struct scoutfs_key, start)
-		__field_struct(struct scoutfs_key, end)
+		sk_trace_define(start)
+		sk_trace_define(end)
         ),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->rng = rng;
-		scoutfs_key_copy_or_zeros(&__entry->start, start);
-		scoutfs_key_copy_or_zeros(&__entry->end, end);
+		sk_trace_assign(start, start);
+		sk_trace_assign(end, end);
         ),
         TP_printk("fsid "FSID_FMT" rng %p start "SK_FMT" end "SK_FMT,
-		  __entry->fsid, __entry->rng, SK_ARG(&__entry->start),
-		  SK_ARG(&__entry->end))
+		  __entry->fsid, __entry->rng, sk_trace_args(start),
+		  sk_trace_args(end))
 );
 
 DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_free,
@@ -1617,7 +1616,7 @@ TRACE_EVENT(scoutfs_seg_append_item,
 		__field(__u64, seq)
 		__field(__u32, nr_items)
 		__field(__u32, total_bytes)
-		__field_struct(struct scoutfs_key, key)
+		sk_trace_define(key)
 		__field(__u16, val_len)
 	),
 
@@ -1627,15 +1626,14 @@ TRACE_EVENT(scoutfs_seg_append_item,
 		__entry->seq = seq;
 		__entry->nr_items = nr_items;
 		__entry->total_bytes = total_bytes;
-		__entry->key = *key;
+		sk_trace_assign(key, key);
 		__entry->val_len = val_len;
 	),
 
 	TP_printk("fsid "FSID_FMT" segno %llu seq %llu nr_items %u total_bytes %u key "SK_FMT" val_len %u",
 		  __entry->fsid, __entry->segno, __entry->seq,
 		  __entry->nr_items, __entry->total_bytes,
-		  SK_ARG(&__entry->key),
-		  __entry->val_len)
+		  sk_trace_args(key), __entry->val_len)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_net_class,
@@ -1753,25 +1751,25 @@ TRACE_EVENT(scoutfs_item_next_range_check,
         TP_STRUCT__entry(
 		__field(void *, sb)
 		__field(int, cached)
-		__field_struct(struct scoutfs_key, key)
-		__field_struct(struct scoutfs_key, pos)
-		__field_struct(struct scoutfs_key, last)
-		__field_struct(struct scoutfs_key, end)
-		__field_struct(struct scoutfs_key, range_end)
+		sk_trace_define(key)
+		sk_trace_define(pos)
+		sk_trace_define(last)
+		sk_trace_define(end)
+		sk_trace_define(range_end)
         ),
         TP_fast_assign(
 		__entry->sb = sb;
 		__entry->cached = cached;
-		scoutfs_key_copy_or_zeros(&__entry->key, key);
-		scoutfs_key_copy_or_zeros(&__entry->pos, pos);
-		scoutfs_key_copy_or_zeros(&__entry->last, last);
-		scoutfs_key_copy_or_zeros(&__entry->end, end);
-		scoutfs_key_copy_or_zeros(&__entry->range_end, range_end);
+		sk_trace_assign(key, key);
+		sk_trace_assign(pos, pos);
+		sk_trace_assign(last, last);
+		sk_trace_assign(end, end);
+		sk_trace_assign(range_end, range_end);
         ),
         TP_printk("sb %p cached %d key "SK_FMT" pos "SK_FMT" last "SK_FMT" end "SK_FMT" range_end "SK_FMT,
-		  __entry->sb, __entry->cached, SK_ARG(&__entry->key),
-		  SK_ARG(&__entry->pos), SK_ARG(&__entry->last),
-		  SK_ARG(&__entry->end), SK_ARG(&__entry->range_end))
+		  __entry->sb, __entry->cached, sk_trace_args(key),
+		  sk_trace_args(pos), sk_trace_args(last),
+		  sk_trace_args(end), sk_trace_args(range_end))
 );
 
 TRACE_EVENT(scoutfs_item_prev_range_check,
@@ -1783,25 +1781,25 @@ TRACE_EVENT(scoutfs_item_prev_range_check,
         TP_STRUCT__entry(
 		__field(void *, sb)
 		__field(int, cached)
-		__field_struct(struct scoutfs_key, key)
-		__field_struct(struct scoutfs_key, pos)
-		__field_struct(struct scoutfs_key, first)
-		__field_struct(struct scoutfs_key, start)
-		__field_struct(struct scoutfs_key, range_start)
+		sk_trace_define(key)
+		sk_trace_define(pos)
+		sk_trace_define(first)
+		sk_trace_define(start)
+		sk_trace_define(range_start)
         ),
         TP_fast_assign(
 		__entry->sb = sb;
 		__entry->cached = cached;
-		scoutfs_key_copy_or_zeros(&__entry->key, key);
-		scoutfs_key_copy_or_zeros(&__entry->pos, pos);
-		scoutfs_key_copy_or_zeros(&__entry->first, first);
-		scoutfs_key_copy_or_zeros(&__entry->start, start);
-		scoutfs_key_copy_or_zeros(&__entry->range_start, range_start);
+		sk_trace_assign(key, key);
+		sk_trace_assign(pos, pos);
+		sk_trace_assign(first, first);
+		sk_trace_assign(start, start);
+		sk_trace_assign(range_start, range_start);
         ),
         TP_printk("sb %p cached %d key "SK_FMT" pos "SK_FMT" first "SK_FMT" start "SK_FMT" range_start "SK_FMT,
-		  __entry->sb, __entry->cached, SK_ARG(&__entry->key),
-		  SK_ARG(&__entry->pos), SK_ARG(&__entry->first),
-		  SK_ARG(&__entry->start), SK_ARG(&__entry->range_start))
+		  __entry->sb, __entry->cached, sk_trace_args(key),
+		  sk_trace_args(pos), sk_trace_args(first),
+		  sk_trace_args(start), sk_trace_args(range_start))
 );
 
 DECLARE_EVENT_CLASS(scoutfs_shrink_exit_class,
@@ -1845,29 +1843,29 @@ TRACE_EVENT(scoutfs_item_shrink_around,
         TP_ARGS(sb, rng_start, rng_end, item, prev, first, last, next),
         TP_STRUCT__entry(
 		__field(void *, sb)
-		__field_struct(struct scoutfs_key, rng_start)
-		__field_struct(struct scoutfs_key, rng_end)
-		__field_struct(struct scoutfs_key, item)
-		__field_struct(struct scoutfs_key, prev)
-		__field_struct(struct scoutfs_key, first)
-		__field_struct(struct scoutfs_key, last)
-		__field_struct(struct scoutfs_key, next)
+		sk_trace_define(rng_start)
+		sk_trace_define(rng_end)
+		sk_trace_define(item)
+		sk_trace_define(prev)
+		sk_trace_define(first)
+		sk_trace_define(last)
+		sk_trace_define(next)
         ),
         TP_fast_assign(
 		__entry->sb = sb;
-		scoutfs_key_copy_or_zeros(&__entry->rng_start, rng_start);
-		scoutfs_key_copy_or_zeros(&__entry->rng_end, rng_end);
-		scoutfs_key_copy_or_zeros(&__entry->item, item);
-		scoutfs_key_copy_or_zeros(&__entry->prev, prev);
-		scoutfs_key_copy_or_zeros(&__entry->first, first);
-		scoutfs_key_copy_or_zeros(&__entry->last, last);
-		scoutfs_key_copy_or_zeros(&__entry->next, next);
+		sk_trace_assign(rng_start, rng_start);
+		sk_trace_assign(rng_end, rng_end);
+		sk_trace_assign(item, item);
+		sk_trace_assign(prev, prev);
+		sk_trace_assign(first, first);
+		sk_trace_assign(last, last);
+		sk_trace_assign(next, next);
         ),
         TP_printk("sb %p rng_start "SK_FMT" rng_end "SK_FMT" item "SK_FMT" prev "SK_FMT" first "SK_FMT" last "SK_FMT" next "SK_FMT,
-		  __entry->sb, SK_ARG(&__entry->rng_start),
-		  SK_ARG(&__entry->rng_end), SK_ARG(&__entry->item),
-		  SK_ARG(&__entry->prev), SK_ARG(&__entry->first),
-		  SK_ARG(&__entry->last), SK_ARG(&__entry->next))
+		  __entry->sb, sk_trace_args(rng_start),
+		  sk_trace_args(rng_end), sk_trace_args(item),
+		  sk_trace_args(prev), sk_trace_args(first),
+		  sk_trace_args(last), sk_trace_args(next))
 );
 
 TRACE_EVENT(scoutfs_rename,

@@ -419,7 +419,6 @@ static int __init scoutfs_module_init(void)
 		".string	\""SCOUTFS_GIT_DESCRIBE"\\n\"\n"
 		".previous\n");
 
-	scoutfs_key_init();
 	scoutfs_init_counters();
 
 	ret = scoutfs_sysfs_init();

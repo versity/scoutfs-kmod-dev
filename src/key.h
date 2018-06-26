@@ -6,38 +6,51 @@
 #include "cmp.h"
 #include "endian_swap.h"
 
-extern char *scoutfs_zone_strings[SCOUTFS_MAX_ZONE];
-extern char *scoutfs_type_strings[SCOUTFS_MAX_ZONE][SCOUTFS_MAX_TYPE];
-#define U8_STR_MAX 5 /* u%3u'\0' */
-extern char scoutfs_unknown_u8_strings[U8_MAX][U8_STR_MAX];
+#define SK_FMT		"%u.%llu.%u.%llu.%llu.%u"
 
-int __init scoutfs_key_init(void);
-
-static inline char *sk_zone_str(u8 zone)
-{
-	if (zone >= SCOUTFS_MAX_ZONE || scoutfs_zone_strings[zone] == NULL)
-		return scoutfs_unknown_u8_strings[zone];
-
-	return scoutfs_zone_strings[zone];
-}
-
-static inline char *sk_type_str(u8 zone, u8 type)
-{
-	if (zone >= SCOUTFS_MAX_ZONE || type >= SCOUTFS_MAX_TYPE ||
-	    scoutfs_type_strings[zone][type] == NULL)
-		return scoutfs_unknown_u8_strings[type];
-
-	return scoutfs_type_strings[zone][type];
-}
-
-#define SK_FMT		"%s.%llu.%s.%llu.%llu.%u"
 /* This does not support null keys */
-#define SK_ARG(key)	sk_zone_str((key)->sk_zone),			\
-			le64_to_cpu((key)->_sk_first),			\
-			sk_type_str((key)->sk_zone, (key)->sk_type),	\
-			le64_to_cpu((key)->_sk_second),			\
-			le64_to_cpu((key)->_sk_third),			\
+#define SK_ARG(key)	(key)->sk_zone,			\
+			le64_to_cpu((key)->_sk_first),	\
+			(key)->sk_type,			\
+			le64_to_cpu((key)->_sk_second),	\
+			le64_to_cpu((key)->_sk_third),	\
 			(key)->_sk_fourth
+
+/* userspace trace event printing doesn't like arguments with structure
+ * field references.  So we explode structures into their fields instead
+ * of
+ */
+#define sk_trace_define(name)			\
+	__field(__u8, name##_zone)		\
+	__field(__u64, name##_first)		\
+	__field(__u8, name##_type)		\
+	__field(__u64, name##_second)		\
+	__field(__u64, name##_third)		\
+	__field(__u8, name##_fourth)
+
+#define sk_trace_assign(name, key)					\
+do {									\
+	__typeof__(key) _key = (key);					\
+	if (_key) {							\
+		__entry->name##_zone = _key->sk_zone;			\
+		__entry->name##_first = le64_to_cpu(_key->_sk_first);	\
+		__entry->name##_type = _key->sk_type;			\
+		__entry->name##_second = le64_to_cpu(_key->_sk_second);\
+		__entry->name##_third = le64_to_cpu(_key->_sk_third);	\
+		__entry->name##_fourth = _key->_sk_fourth;		\
+	} else {							\
+		__entry->name##_zone = 0;				\
+		__entry->name##_first = 0;				\
+		__entry->name##_type = 0;				\
+		__entry->name##_second = 0;				\
+		__entry->name##_third = 0;				\
+		__entry->name##_fourth = 0;				\
+	}								\
+} while (0)
+
+#define sk_trace_args(name) \
+	__entry->name##_zone, __entry->name##_first, __entry->name##_type, \
+	__entry->name##_second, __entry->name##_third, __entry->name##_fourth
 
 static inline void scoutfs_key_set_zeros(struct scoutfs_key *key)
 {

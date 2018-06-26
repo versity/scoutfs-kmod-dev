@@ -37,6 +37,7 @@
 #include "export.h"
 #include "dir.h"
 #include "extents.h"
+#include "server.h"
 
 struct lock_info;
 
@@ -1641,36 +1642,20 @@ DECLARE_EVENT_CLASS(scoutfs_net_class,
 		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
         TP_ARGS(sb, name, peer, nh),
         TP_STRUCT__entry(
-		__field(unsigned int, major)
-		__field(unsigned int, minor)
-		__field(u32, name_addr)
-		__field(u16, name_port)
-		__field(u32, peer_addr)
-		__field(u16, peer_port)
-		__field(u64, id)
-		__field(u8, type)
-		__field(u8, status)
-		__field(u16, data_len)
+		__field(__u64, fsid)
+		si4_trace_define(name)
+		si4_trace_define(peer)
+		snh_trace_define(nh)
         ),
         TP_fast_assign(
-		__entry->major = MAJOR(sb->s_bdev->bd_dev);
-		__entry->minor = MINOR(sb->s_bdev->bd_dev);
-		/* sparse can't handle this cpp nightmare */
-		__entry->name_addr = (u32 __force)name->sin_addr.s_addr;
-		__entry->name_port = be16_to_cpu(name->sin_port);
-		__entry->peer_addr = (u32 __force)peer->sin_addr.s_addr;
-		__entry->peer_port = be16_to_cpu(peer->sin_port);
-		__entry->id = le64_to_cpu(nh->id);
-		__entry->type = nh->type;
-		__entry->status = nh->status;
-		__entry->data_len = le16_to_cpu(nh->data_len);
+		__entry->fsid = FSID_ARG(sb);
+		si4_trace_assign(name, name);
+		si4_trace_assign(peer, peer);
+		snh_trace_assign(nh, nh);
         ),
-        TP_printk("dev %u:%u %pI4:%u -> %pI4:%u id %llu type %u status %u data_len %u",
-		  __entry->major, __entry->minor,
-		  &__entry->name_addr, __entry->name_port,
-		  &__entry->peer_addr, __entry->peer_port,
-		  __entry->id, __entry->type, __entry->status,
-		  __entry->data_len)
+        TP_printk("fsid "FSID_FMT" name "SI4_FMT" peer "SI4_FMT" nh "SNH_FMT,
+		  __entry->fsid, si4_trace_args(name), si4_trace_args(peer),
+		  snh_trace_args(nh))
 );
 
 DEFINE_EVENT(scoutfs_net_class, scoutfs_client_send_request,

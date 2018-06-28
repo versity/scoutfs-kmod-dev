@@ -33,17 +33,15 @@
 #define SCOUTFS_BLOCK_PAGE_ORDER (SCOUTFS_BLOCK_SHIFT - PAGE_SHIFT)
 
 /*
- * The super blocks leave some room at the start of the first block for
- * platform structures like boot loaders.
+ * The super block leaves some room before the first block for platform
+ * structures like boot loaders.
  */
-#define SCOUTFS_SUPER_BLKNO ((64 * 1024) >> SCOUTFS_BLOCK_SHIFT)
-#define SCOUTFS_SUPER_NR 2
+#define SCOUTFS_SUPER_BLKNO ((64ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
 
 /*
- * This header is found at the start of every block so that we can
- * verify that it's what we were looking for.  The crc and padding
- * starts the block so that its calculation operations on a nice 64bit
- * aligned region.
+ * This header is stored at the start of btree blocks and the super
+ * block for verification.  The crc is calculated by zeroing the crc and
+ * padding so the buffer is large and aligned.
  */
 struct scoutfs_block_header {
 	__le32 crc;
@@ -183,11 +181,7 @@ struct scoutfs_btree_item {
 } __packed;
 
 struct scoutfs_btree_block {
-	__le64 fsid;
-	__le64 blkno;
-	__le64 seq;
-	__le32 crc;
-	__le32 _pad;
+	struct scoutfs_block_header hdr;
 	__le16 free_end;
 	__le16 free_reclaim;
 	__le16 nr_items;

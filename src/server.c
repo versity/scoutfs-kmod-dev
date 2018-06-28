@@ -1340,7 +1340,7 @@ static void scoutfs_server_func(struct work_struct *work)
 		goto out;
 
 	/* publish the address for clients to connect to */
-	ret = scoutfs_read_supers(sb, super);
+	ret = scoutfs_read_super(sb, super);
 	if (ret)
 		goto out;
 

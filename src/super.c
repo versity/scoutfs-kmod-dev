@@ -22,6 +22,7 @@
 #include <linux/debugfs.h>
 
 #include "super.h"
+#include "block.h"
 #include "export.h"
 #include "format.h"
 #include "inode.h"
@@ -155,7 +156,7 @@ static const struct super_operations scoutfs_super_ops = {
 };
 
 /*
- * The caller advances the block number and sequence number in the super
+ * The caller advances the sequence number in the super block header
  * every time it wants to dirty it and eventually write it to reference
  * dirty data that's been written.
  */
@@ -164,13 +165,7 @@ void scoutfs_advance_dirty_super(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 
-	le64_add_cpu(&super->hdr.blkno, 1);
-	if (le64_to_cpu(super->hdr.blkno) == (SCOUTFS_SUPER_BLKNO +
-					      SCOUTFS_SUPER_NR))
-		super->hdr.blkno = cpu_to_le64(SCOUTFS_SUPER_BLKNO);
-
 	le64_add_cpu(&super->hdr.seq, 1);
-
 	trace_scoutfs_advance_dirty_super(sb, le64_to_cpu(super->hdr.seq));
 }
 
@@ -193,6 +188,8 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 
 	super = page_address(page);
 	memcpy(super, &sbi->super, sizeof(*super));
+	super->hdr._pad = 0;
+	super->hdr.crc = scoutfs_block_calc_crc(&super->hdr);
 
 	ret = scoutfs_bio_write(sb, &page, le64_to_cpu(super->hdr.blkno), 1);
 	WARN_ON_ONCE(ret);
@@ -203,67 +200,64 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 }
 
 /*
- * Read the pair of super blocks and store the most recent one in the sb
- * info.  Clients reference but don't modify the super.  The server has
- * to re-read the super every time it comes up so that it can work from
- * the most recent persistent state.
+ * Read the super block.  If it's valid store it in the caller's super
+ * struct.
  */
-int scoutfs_read_supers(struct super_block *sb,
-			struct scoutfs_super_block *local)
+int scoutfs_read_super(struct super_block *sb,
+		       struct scoutfs_super_block *super_res)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
 	struct page *page;
-	int found = -1;
+	__le32 calc;
 	int ret;
-	int i;
-	u64 seq = 0;
 
 	page = alloc_page(GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
 
-	for (i = 0; i < SCOUTFS_SUPER_NR; i++) {
-
-		ret = scoutfs_bio_read(sb, &page, SCOUTFS_SUPER_BLKNO + i, 1);
-		if (ret) {
-			scoutfs_warn(sb, "couldn't read super block %u", i);
-			continue;
-		}
-
-		super = scoutfs_page_block_address(&page, 0);
-
-		if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
-			scoutfs_warn(sb, "super block %u has invalid id %llx",
-				     i, le64_to_cpu(super->id));
-			continue;
-		}
-
-		if (super->format_hash != cpu_to_le64(SCOUTFS_FORMAT_HASH)) {
-			scoutfs_warn(sb, "super block %u has invalid format hash 0x%llx, expected 0x%llx",
-				     i, le64_to_cpu(super->format_hash),
-				     SCOUTFS_FORMAT_HASH);
-			continue;
-		}
-
-		if (found < 0 || (le64_to_cpu(super->hdr.seq) > seq)) {
-			*local = *super;
-			seq = le64_to_cpu((*local).hdr.seq);
-			found = i;
-		}
+	ret = scoutfs_bio_read(sb, &page, SCOUTFS_SUPER_BLKNO, 1);
+	if (ret) {
+		scoutfs_err(sb, "error reading super block: %d", ret);
+		goto out;
 	}
 
+	super = scoutfs_page_block_address(&page, 0);
+
+	if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
+		scoutfs_err(sb, "super block has invalid id %llx",
+			    le64_to_cpu(super->id));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	calc = scoutfs_block_calc_crc(&super->hdr);
+	if (calc != super->hdr.crc) {
+		scoutfs_err(sb, "super block has invalid crc 0x%08x, calculated 0x%08x",
+			    le32_to_cpu(super->hdr.crc), le32_to_cpu(calc));
+		ret = -EINVAL;
+	}
+
+	if (le64_to_cpu(super->hdr.blkno) != SCOUTFS_SUPER_BLKNO) {
+		scoutfs_err(sb, "super block has invalid block number %llu, data read from %llu",
+		le64_to_cpu(super->hdr.blkno), SCOUTFS_SUPER_BLKNO);
+		ret = -EINVAL;
+		goto out;
+	}
+
+
+	if (super->format_hash != cpu_to_le64(SCOUTFS_FORMAT_HASH)) {
+		scoutfs_err(sb, "super block has invalid format hash 0x%llx, expected 0x%llx",
+			    le64_to_cpu(super->format_hash),
+			    SCOUTFS_FORMAT_HASH);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	*super_res = *super;
+	ret = 0;
+out:
 	__free_page(page);
-
-	if (found < 0) {
-		scoutfs_err(sb, "unable to read valid super block");
-		return -EINVAL;
-	}
-
-	scoutfs_info(sb, "using super %u with seq %llu",
-		     found, le64_to_cpu(sbi->super.hdr.seq));
-
-	return 0;
+	return ret;
 }
 
 static int scoutfs_debugfs_setup(struct super_block *sb)
@@ -328,7 +322,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	ret = scoutfs_setup_sysfs(sb) ?:
 	      scoutfs_setup_counters(sb) ?:
-	      scoutfs_read_supers(sb, &SCOUTFS_SB(sb)->super) ?:
+	      scoutfs_read_super(sb, &SCOUTFS_SB(sb)->super) ?:
 	      scoutfs_debugfs_setup(sb) ?:
 	      scoutfs_options_setup(sb) ?:
 	      scoutfs_setup_triggers(sb) ?:

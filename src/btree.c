@@ -28,6 +28,7 @@
 #include "triggers.h"
 #include "options.h"
 #include "msg.h"
+#include "block.h"
 
 #include "scoutfs_trace.h"
 
@@ -603,24 +604,16 @@ BUFFER_FNS(ScoutfsValidCrc, scoutfs_valid_crc)	/* crc matched */
  * Make sure that we've found a valid block and that it's the block that
  * we're looking for.
  */
-static bool valid_referenced_block(struct scoutfs_super_block *super,
+static bool valid_referenced_block(struct super_block *sb,
 				   struct scoutfs_btree_ref *ref,
 				   struct scoutfs_btree_block *bt,
 				   struct buffer_head *bh)
 {
-	__le32 existing;
-	u32 calc;
-
 	smp_rmb(); /* load checked before crc */
 	if (!buffer_scoutfs_checked(bh)) {
 		lock_buffer(bh);
 		if (!buffer_scoutfs_checked(bh)) {
-			existing = bt->crc;
-			bt->crc = 0;
-			calc = crc32c(~0, bt, SCOUTFS_BLOCK_SIZE);
-			bt->crc = existing;
-
-			if (calc == le32_to_cpu(existing))
+			if (scoutfs_block_valid_crc(&bt->hdr))
 				set_buffer_scoutfs_valid_crc(bh);
 			else
 				clear_buffer_scoutfs_valid_crc(bh);
@@ -631,8 +624,8 @@ static bool valid_referenced_block(struct scoutfs_super_block *super,
 		unlock_buffer(bh);
 	}
 
-	return buffer_scoutfs_valid_crc(bh) && super->hdr.fsid == bt->fsid &&
-	       ref->blkno == bt->blkno && ref->seq == bt->seq;
+	return buffer_scoutfs_valid_crc(bh) &&
+	       scoutfs_block_valid_ref(sb, &bt->hdr, ref->seq, ref->blkno);
 }
 
 /*
@@ -681,7 +674,7 @@ retry:
 		}
 		bt = (void *)bh->b_data;
 
-		if (!valid_referenced_block(super, ref, bt, bh) ||
+		if (!valid_referenced_block(sb, ref, bt, bh) ||
 		    scoutfs_trigger(sb, BTREE_STALE_READ)) {
 
 			scoutfs_inc_counter(sb, btree_stale_read);
@@ -706,7 +699,7 @@ retry:
 
 		/* done if not dirtying or already dirty */
 		if (!(flags & BTW_DIRTY) ||
-		    (le64_to_cpu(bt->seq) >= bti->first_dirty_seq)) {
+		    (le64_to_cpu(bt->hdr.seq) >= bti->first_dirty_seq)) {
 			ret = 0;
 			goto out;
 		}
@@ -784,15 +777,15 @@ retry:
 		bt = new;
 		new = NULL;
 		memset(bt, 0, SCOUTFS_BLOCK_SIZE);
-		bt->fsid = super->hdr.fsid;
+		bt->hdr.fsid = super->hdr.fsid;
 		bt->free_end = cpu_to_le16(SCOUTFS_BLOCK_SIZE);
 	}
 
-	bt->blkno = cpu_to_le64(blkno);
-	bt->seq = cpu_to_le64(seq);
+	bt->hdr.blkno = cpu_to_le64(blkno);
+	bt->hdr.seq = cpu_to_le64(seq);
 	if (ref) {
-		ref->blkno = bt->blkno;
-		ref->seq = bt->seq;
+		ref->blkno = bt->hdr.blkno;
+		ref->seq = bt->hdr.seq;
 	}
 	ret = 0;
 
@@ -816,8 +809,8 @@ static void create_parent_item(struct scoutfs_btree_ring *bring,
 			       void *key, unsigned key_len)
 {
 	struct scoutfs_btree_ref ref = {
-		.blkno = child->blkno,
-		.seq = child->seq,
+		.blkno = child->hdr.blkno,
+		.seq = child->hdr.seq,
 	};
 
 	create_item(parent, pos, key, key_len, &ref, sizeof(ref));
@@ -888,8 +881,8 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
 
 		parent->level = root->height;
 		root->height++;
-		root->ref.blkno = parent->blkno;
-		root->ref.seq = parent->seq;
+		root->ref.blkno = parent->hdr.blkno;
+		root->ref.seq = parent->hdr.seq;
 
 		pos = 0;
 		create_parent_item(bring, parent, pos, right,
@@ -975,8 +968,8 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 	/* and finally shrink the tree if our parent is the root with 1 */
 	if (le16_to_cpu(parent->nr_items) == 1) {
 		root->height--;
-		root->ref.blkno = bt->blkno;
-		root->ref.seq = bt->seq;
+		root->ref.blkno = bt->hdr.blkno;
+		root->ref.seq = bt->hdr.seq;
 	}
 
 	put_btree_block(sib);
@@ -1041,7 +1034,7 @@ static int verify_btree_block(struct scoutfs_btree_block *bt, int level)
 out:
 	if (bad) {
 		printk("bt %p blkno %llu level %d end %u reclaim %u nr %u (after %u bytes %u)\n",
-			bt, le64_to_cpu(bt->blkno), level,
+			bt, le64_to_cpu(bt->hdr.blkno), level,
 			le16_to_cpu(bt->free_end),
 			le16_to_cpu(bt->free_reclaim), le16_to_cpu(bt->nr_items),
 			after_off, bytes);
@@ -1160,8 +1153,8 @@ restart:
 					   root->height,
 					   le64_to_cpu(root->ref.blkno),
 					   le64_to_cpu(root->ref.seq),
-					   le64_to_cpu(bt->blkno),
-					   le64_to_cpu(bt->seq), bt->level,
+					   le64_to_cpu(bt->hdr.blkno),
+					   le64_to_cpu(bt->hdr.seq), bt->level,
 					   level);
 			ret = -EIO;
 			break;
@@ -1201,8 +1194,8 @@ restart:
 					   root->height,
 					   le64_to_cpu(root->ref.blkno),
 					   le64_to_cpu(root->ref.seq),
-					   le64_to_cpu(bt->blkno),
-					   le64_to_cpu(bt->seq), bt->level,
+					   le64_to_cpu(bt->hdr.blkno),
+					   le64_to_cpu(bt->hdr.seq), bt->level,
 					   nr, pos, cmp);
 			ret = -EIO;
 			break;
@@ -1653,8 +1646,8 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 	/* checksum everything to reduce time between io submission merging */
 	for_each_dirty_bh(bti, bh, tmp) {
 		bt = (void *)bh->b_data;
-		bt->crc = 0;
-		bt->crc = cpu_to_le32(crc32c(~0, bt, SCOUTFS_BLOCK_SIZE));
+		bt->hdr._pad = 0;
+		bt->hdr.crc = scoutfs_block_calc_crc(&bt->hdr);
 	}
 
         blk_start_plug(&plug);

@@ -271,7 +271,7 @@ static int client_connect(struct client_info *client)
 			break;
 		}
 
-		ret = scoutfs_read_supers(sb, &super);
+		ret = scoutfs_read_super(sb, &super);
 		if (ret)
 			continue;
 

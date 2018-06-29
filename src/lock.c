@@ -282,6 +282,16 @@ static bool lock_modes_match(int granted, int user)
 }
 
 /*
+ * This isn't strictly the same as being compatible.. callers
+ * need to be very careful to understand the combinations of
+ * modes that are possible for them to attempt.
+ */
+static bool lock_mode_valid_and_greater(int mode, int other)
+{
+	return mode != DLM_LOCK_IV && mode > other;
+}
+
+/*
  * Returns true if all the actively used modes are satisfied by a lock
  * of the given granted mode.
  */
@@ -616,24 +626,35 @@ static void scoutfs_lock_ast(void *arg)
  * that we should convert our lock to.  We can only either downconvert
  * to a matching PR or unlock.
  *
- * These are truly asynchronous and can arrive multiple times, at any time.
- * We're careful to only set the bast mode here and let lock processing
- * sort out the state machine.
+ * These are truly asynchronous and can arrive multiple times, at any
+ * time.  We're careful to only set the lock's bast mode here if the
+ * mode that's required conflicts with the lock's current mode, the mode
+ * the work might be converting to, or the next mode from a previous
+ * bast.  This stops us from setting the lock's bast mode when it isn't
+ * needed a confusing the state machine, like for a lock that's being
+ * unlocked.
  */
 static void scoutfs_lock_bast(void *arg, int blocked_mode)
 {
 	struct scoutfs_lock *lock = arg;
 	struct super_block *sb = lock->sb;
 	DECLARE_LOCK_INFO(sb, linfo);
+	int bast_mode;
 
 	scoutfs_inc_counter(sb, lock_bast);
 
 	spin_lock(&linfo->lock);
 
 	if (lock->granted_mode == DLM_LOCK_EX && blocked_mode == DLM_LOCK_PR)
-		lock->bast_mode = DLM_LOCK_PR;
+		bast_mode = DLM_LOCK_PR;
 	else
-		lock->bast_mode = DLM_LOCK_NL;
+		bast_mode = DLM_LOCK_NL;
+
+	/* greater is safe, only try nl < all or pr < ex */
+	if (lock_mode_valid_and_greater(lock->granted_mode, bast_mode) ||
+	    lock_mode_valid_and_greater(lock->work_mode, bast_mode) ||
+	    lock_mode_valid_and_greater(lock->bast_mode, bast_mode))
+		lock->bast_mode = bast_mode;
 
 	trace_scoutfs_lock_bast(sb, lock);
 	lock_process(linfo, lock);

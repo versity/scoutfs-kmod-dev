@@ -562,6 +562,20 @@ struct scoutfs_net_extent {
 	__le64 len;
 } __packed;
 
+struct scoutfs_net_extent_list {
+	__le64 nr;
+	struct {
+		__le64 start;
+		__le64 len;
+	} __packed extents[0];
+} __packed;
+
+#define SCOUTFS_NET_EXTENT_LIST_BYTES(nr) \
+	offsetof(struct scoutfs_net_extent_list, extents[nr])
+
+/* arbitrarily makes a nice ~1k extent list payload */
+#define SCOUTFS_NET_EXTENT_LIST_MAX_NR	64
+
 /* XXX eventually we'll have net compaction and will need agents to agree */
 
 /* one upper segment and fanout lower segments */
@@ -575,6 +589,7 @@ struct scoutfs_net_extent {
 enum {
 	SCOUTFS_NET_ALLOC_INODES = 0,
 	SCOUTFS_NET_ALLOC_EXTENT,
+	SCOUTFS_NET_FREE_EXTENTS,
 	SCOUTFS_NET_ALLOC_SEGNO,
 	SCOUTFS_NET_RECORD_SEGMENT,
 	SCOUTFS_NET_ADVANCE_SEQ,

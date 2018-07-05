@@ -278,6 +278,21 @@ SIC_TRUNC_EXTENT(struct inode *inode)
 }
 
 /*
+ * Returning extents to the server can, at most:
+ *  - delete MAX_NR extents with indexed copies
+ *  - create an extent for the leftovers of the last extent
+ */
+static inline const struct scoutfs_item_count SIC_RETURN_EXTENTS(void)
+{
+	struct scoutfs_item_count cnt = {0,};
+	unsigned int nr = SCOUTFS_NET_EXTENT_LIST_MAX_NR + 1;
+
+	cnt.items += (nr * 2);
+
+	return cnt;
+}
+
+/*
  * Fallocating an extent can, at most:
  *  - allocate from the server: delete two free and insert merged
  *  - free an allocated extent: delete one and create two split

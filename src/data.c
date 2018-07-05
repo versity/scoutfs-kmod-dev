@@ -21,6 +21,7 @@
 #include <linux/log2.h>
 #include <linux/falloc.h>
 #include <linux/writeback.h>
+#include <linux/workqueue.h>
 
 #include "format.h"
 #include "super.h"
@@ -38,6 +39,7 @@
 #include "file.h"
 #include "extents.h"
 #include "msg.h"
+#include "count.h"
 
 /*
  * scoutfs uses extent items to track file data block mappings and free
@@ -72,9 +74,17 @@
  * We ask for a fixed size from the server today.
  */
 #define SERVER_ALLOC_BLOCKS (MAX_EXTENT_BLOCKS * 8)
+/*
+ * Send free extents back to the server if we have plenty locally.
+ */
+#define NODE_FREE_HIGH_WATER_BLOCKS (SERVER_ALLOC_BLOCKS * 16)
 
 struct data_info {
+	struct super_block *sb;
 	struct rw_semaphore alloc_rwsem;
+	atomic64_t node_free_blocks;
+	struct workqueue_struct *workq;
+	struct work_struct return_work;
 };
 
 #define DECLARE_DATA_INFO(sb, name) \
@@ -148,10 +158,16 @@ static int init_extent_from_item(struct scoutfs_extent *ext,
  * We also index free extents by their length.  We implement that by
  * keeping their _BLOCKS_ item in sync with the primary _BLKNO_ item
  * that callers operate on.
+ *
+ * The count of free blocks stored in node items is kept consistent by
+ * updating the count every time we create or delete items.  Updated
+ * extents are deleted and then recreated so the count can bounce around
+ * a bit, but it's OK for it to be imprecise at the margins.
  */
 static int data_extent_io(struct super_block *sb, int op,
 			  struct scoutfs_extent *ext, void *data)
 {
+	DECLARE_DATA_INFO(sb, datinf);
 	struct scoutfs_lock *lock = data;
 	struct scoutfs_file_extent fex;
 	struct scoutfs_key first;
@@ -230,6 +246,13 @@ static int data_extent_io(struct super_block *sb, int op,
 		}
 	}
 
+	if (ret == 0 && ext->type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE) {
+		if (op == SEI_INSERT)
+			atomic64_add(ext->len, &datinf->node_free_blocks);
+		else if (op == SEI_DELETE)
+			atomic64_sub(ext->len, &datinf->node_free_blocks);
+	}
+
 	return ret;
 }
 
@@ -252,6 +275,7 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 				struct scoutfs_lock *lock)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	DECLARE_DATA_INFO(sb, datinf);
 	struct scoutfs_extent next;
 	struct scoutfs_extent rem;
 	struct scoutfs_extent fr;
@@ -323,6 +347,11 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 		offline_delta += ofl.len;
 
 	scoutfs_inode_add_onoff(inode, online_delta, offline_delta);
+
+	/* start returning free extents to the server after a small delay */
+	if (rem.map && (atomic64_read(&datinf->node_free_blocks) >
+			NODE_FREE_HIGH_WATER_BLOCKS))
+		queue_work(datinf->workq, &datinf->return_work);
 
 	ret = 1;
 out:
@@ -1238,6 +1267,94 @@ const struct file_operations scoutfs_file_fops = {
 	.fallocate	= scoutfs_fallocate,
 };
 
+/*
+ * Return extents to the server if we're over the high water mark.  Each
+ * work call sends one batch of extents so that the work can be easily
+ * canceled to stop progress during unmount.
+ */
+static void scoutfs_data_return_server_extents_worker(struct work_struct *work)
+{
+	struct data_info *datinf = container_of(work, struct data_info,
+						return_work);
+	struct super_block *sb = datinf->sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_net_extent_list *nexl;
+	struct scoutfs_extent ext;
+	u64 nr = 0;
+	u64 free;
+	int bytes;
+	int ret;
+	int err;
+
+	trace_scoutfs_data_return_server_extents_enter(sb, 0, 0);
+
+	bytes = SCOUTFS_NET_EXTENT_LIST_BYTES(SCOUTFS_NET_EXTENT_LIST_MAX_NR);
+	nexl = kmalloc(bytes, GFP_NOFS);
+	if (!nexl) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = scoutfs_hold_trans(sb, SIC_RETURN_EXTENTS());
+	if (ret)
+		goto out;
+
+	down_write(&datinf->alloc_rwsem);
+
+	free = atomic64_read(&datinf->node_free_blocks);
+
+	while (nr < SCOUTFS_NET_EXTENT_LIST_MAX_NR &&
+	       free > NODE_FREE_HIGH_WATER_BLOCKS) {
+
+		scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
+				    sbi->node_id, 0, 1, 0, 0);
+		ret = scoutfs_extent_next(sb, data_extent_io, &ext,
+					  sbi->node_id_lock);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		trace_scoutfs_data_return_server_extent(sb, &ext);
+
+		ext.type = SCOUTFS_FREE_EXTENT_BLKNO_TYPE;
+		ext.len = min(ext.len, free - NODE_FREE_HIGH_WATER_BLOCKS);
+
+		ret = scoutfs_extent_remove(sb, data_extent_io, &ext,
+					    sbi->node_id_lock);
+		if (ret)
+			break;
+
+		nexl->extents[nr].start = cpu_to_le64(ext.start);
+		nexl->extents[nr].len = cpu_to_le64(ext.len);
+
+		nr++;
+		free -= ext.len;
+	}
+
+	nexl->nr = cpu_to_le64(nr);
+
+	up_write(&datinf->alloc_rwsem);
+
+	if (nr > 0) {
+		err = scoutfs_client_free_extents(sb, nexl);
+		/* XXX leaked extents if free failed */
+		if (ret == 0 && err < 0)
+			ret = err;
+	}
+
+	scoutfs_release_trans(sb);
+out:
+	kfree(nexl);
+
+	trace_scoutfs_data_return_server_extents_exit(sb, nr, ret);
+
+	/* keep returning if we're still over the water mark */
+	if (ret == 0 && (atomic64_read(&datinf->node_free_blocks) >
+			 NODE_FREE_HIGH_WATER_BLOCKS))
+		queue_work(datinf->workq, &datinf->return_work);
+}
 
 int scoutfs_data_setup(struct super_block *sb)
 {
@@ -1248,10 +1365,19 @@ int scoutfs_data_setup(struct super_block *sb)
 	if (!datinf)
 		return -ENOMEM;
 
+	datinf->sb = sb;
 	init_rwsem(&datinf->alloc_rwsem);
+	atomic64_set(&datinf->node_free_blocks, 0);
+	INIT_WORK(&datinf->return_work,
+		  scoutfs_data_return_server_extents_worker);
+
+	datinf->workq = alloc_workqueue("scoutfs_data", 0, 1);
+	if (!datinf->workq) {
+		kfree(datinf);
+		return -ENOMEM;
+	}
 
 	sbi->data_info = datinf;
-
 	return 0;
 }
 
@@ -1260,5 +1386,14 @@ void scoutfs_data_destroy(struct super_block *sb)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct data_info *datinf = sbi->data_info;
 
-	kfree(datinf);
+	if (datinf) {
+		if (datinf->workq) {
+			cancel_work_sync(&datinf->return_work);
+			destroy_workqueue(datinf->workq);
+			datinf->workq = NULL;
+		}
+
+		sbi->data_info = NULL;
+		kfree(datinf);
+	}
 }

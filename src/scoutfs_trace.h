@@ -1726,6 +1726,14 @@ DEFINE_EVENT(scoutfs_work_class, scoutfs_server_workqueue_destroy,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
 );
+DEFINE_EVENT(scoutfs_work_class, scoutfs_data_return_server_extents_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_data_return_server_extents_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
 
 TRACE_EVENT(scoutfs_item_next_range_check,
         TP_PROTO(struct super_block *sb, int cached,
@@ -2146,6 +2154,10 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_block_intersection,
 	TP_ARGS(sb, ext)
 );
 DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_fiemap_extent,
+	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
+	TP_ARGS(sb, ext)
+);
+DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_return_server_extent,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );

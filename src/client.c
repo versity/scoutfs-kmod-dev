@@ -582,6 +582,18 @@ int scoutfs_client_alloc_extent(struct super_block *sb, u64 blocks, u64 *start,
 	return ret;
 }
 
+int scoutfs_client_free_extents(struct super_block *sb,
+				struct scoutfs_net_extent_list *nexl)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+	unsigned int bytes;
+
+	bytes = SCOUTFS_NET_EXTENT_LIST_BYTES(le64_to_cpu(nexl->nr));
+
+	return client_request(client, SCOUTFS_NET_FREE_EXTENTS,
+			      nexl, bytes, NULL, 0);
+}
+
 int scoutfs_client_alloc_segno(struct super_block *sb, u64 *segno)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;

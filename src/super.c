@@ -120,12 +120,13 @@ static void scoutfs_put_super(struct super_block *sb)
 
 	sbi->shutdown = true;
 
+	scoutfs_data_destroy(sb);
+
 	scoutfs_unlock(sb, sbi->node_id_lock, DLM_LOCK_EX);
 	sbi->node_id_lock = NULL;
 
 	scoutfs_shutdown_trans(sb);
 	scoutfs_client_destroy(sb);
-	scoutfs_data_destroy(sb);
 	scoutfs_inode_destroy(sb);
 	scoutfs_item_destroy(sb);
 

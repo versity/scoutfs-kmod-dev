@@ -743,6 +743,54 @@ out:
 	return send_reply(conn, id, type, ret, &nex, sizeof(nex));
 }
 
+static bool invalid_net_extent_list(struct scoutfs_net_extent_list *nexl,
+				    unsigned data_len)
+{
+	return (data_len < sizeof(struct scoutfs_net_extent_list)) ||
+	       (le64_to_cpu(nexl->nr) > SCOUTFS_NET_EXTENT_LIST_MAX_NR) ||
+	       (data_len != offsetof(struct scoutfs_net_extent_list,
+				    extents[le64_to_cpu(nexl->nr)]));
+}
+
+static int process_free_extents(struct server_connection *conn,
+			       u64 id, u8 type, void *data, unsigned data_len)
+{
+	struct server_info *server = conn->server;
+	struct super_block *sb = server->sb;
+	struct scoutfs_net_extent_list *nexl;
+	struct commit_waiter cw;
+	int ret = 0;
+	int err;
+	u64 i;
+
+	nexl = data;
+	if (invalid_net_extent_list(nexl, data_len)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	down_read(&server->commit_rwsem);
+
+	for (i = 0; i < le64_to_cpu(nexl->nr); i++) {
+		ret = free_extent(sb, le64_to_cpu(nexl->extents[i].start),
+				  le64_to_cpu(nexl->extents[i].len));
+		if (ret)
+			break;
+	}
+
+	if (i > 0)
+		queue_commit_work(server, &cw);
+	up_read(&server->commit_rwsem);
+
+	if (i > 0) {
+		err = wait_for_commit(server, &cw, id, type);
+		if (ret == 0)
+			ret = err;
+	}
+out:
+	return send_reply(conn, id, type, ret, NULL, 0);
+}
+
 /*
  * We still special case segno allocation because it's aligned and we'd
  * like to keep that detail in the server.
@@ -1091,6 +1139,7 @@ static void scoutfs_server_process_func(struct work_struct *work)
 	static process_func_t process_funcs[] = {
 		[SCOUTFS_NET_ALLOC_INODES]	= process_alloc_inodes,
 		[SCOUTFS_NET_ALLOC_EXTENT]	= process_alloc_extent,
+		[SCOUTFS_NET_FREE_EXTENTS]	= process_free_extents,
 		[SCOUTFS_NET_ALLOC_SEGNO]	= process_alloc_segno,
 		[SCOUTFS_NET_RECORD_SEGMENT]	= process_record_segment,
 		[SCOUTFS_NET_ADVANCE_SEQ]	= process_advance_seq,

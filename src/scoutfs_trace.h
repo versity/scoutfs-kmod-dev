@@ -1658,25 +1658,13 @@ DECLARE_EVENT_CLASS(scoutfs_net_class,
 		  snh_trace_args(nh))
 );
 
-DEFINE_EVENT(scoutfs_net_class, scoutfs_client_send_request,
+DEFINE_EVENT(scoutfs_net_class, scoutfs_net_send_message,
         TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
 		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
         TP_ARGS(sb, name, peer, nh)
 );
 
-DEFINE_EVENT(scoutfs_net_class, scoutfs_server_recv_request,
-        TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
-		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
-        TP_ARGS(sb, name, peer, nh)
-);
-
-DEFINE_EVENT(scoutfs_net_class, scoutfs_server_send_reply,
-        TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
-		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
-        TP_ARGS(sb, name, peer, nh)
-);
-
-DEFINE_EVENT(scoutfs_net_class, scoutfs_client_recv_reply,
+DEFINE_EVENT(scoutfs_net_class, scoutfs_net_recv_message,
         TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
 		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
         TP_ARGS(sb, name, peer, nh)
@@ -1706,11 +1694,51 @@ DEFINE_EVENT(scoutfs_work_class, scoutfs_server_commit_work_exit,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
 );
-DEFINE_EVENT(scoutfs_work_class, scoutfs_server_recv_work_enter,
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_proc_work_enter,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
 );
-DEFINE_EVENT(scoutfs_work_class, scoutfs_server_recv_work_exit,
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_proc_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_listen_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_listen_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_connect_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_connect_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_shutdown_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_shutdown_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_send_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_send_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_recv_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_recv_work_exit,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
 );

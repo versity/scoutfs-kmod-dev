@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Versity Software, Inc.  All rights reserved.
+ * Copyright (C) 2018 Versity Software, Inc.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -32,8 +32,19 @@
 #include "msg.h"
 #include "client.h"
 #include "server.h"
-#include "sock.h"
+#include "net.h"
 #include "endian_swap.h"
+
+/*
+ * Every active mount can act as the server that listens on a net
+ * connection and accepts connections from all the other mounts acting
+ * as clients.
+ *
+ * It queues long-lived work that blocks trying to acquire a lock.  If
+ * it acquires the lock it listens on a socket and serves requests.  If
+ * it sees errors it shuts down the server in the hopes that another
+ * mount will have less trouble.
+ */
 
 #define SIN_FMT		"%pIS:%u"
 #define SIN_ARG(sin)	sin, be16_to_cpu((sin)->sin_port)
@@ -43,18 +54,13 @@ struct server_info {
 
 	struct workqueue_struct *wq;
 	struct delayed_work dwork;
-
-	struct mutex mutex;
-	bool shutting_down;
+	struct completion shutdown_comp;
 	bool bind_warned;
-	struct task_struct *listen_task;
-	struct socket *listen_sock;
 
 	/* request processing coordinates committing manifest and alloc */
 	struct rw_semaphore commit_rwsem;
 	struct llist_head commit_waiters;
 	struct work_struct commit_work;
-
 
 	/* adding new segments can have to wait for compaction */
 	wait_queue_head_t compaction_waitq;
@@ -72,6 +78,10 @@ struct server_info {
 	struct list_head pending_frees;
 };
 
+#define DECLARE_SERVER_INFO(sb, name) \
+	struct server_info *name = SCOUTFS_SB(sb)->server_info
+
+#if 0
 struct server_request {
 	struct server_connection *conn;
 	struct work_struct work;
@@ -89,6 +99,7 @@ struct server_connection {
 	struct work_struct recv_work;
 	struct mutex send_mutex;
 };
+#endif
 
 struct commit_waiter {
 	struct completion comp;
@@ -454,17 +465,9 @@ out:
 	return ret;
 }
 
-/*
- * Trigger a server shutdown by shutting down the listening socket.  The
- * server thread will break out of accept and exit.
- */
-static void shut_down_server(struct server_info *server)
+static void shutdown_server(struct server_info *server)
 {
-	mutex_lock(&server->mutex);
-	server->shutting_down = true;
-	if (server->listen_sock)
-		kernel_sock_shutdown(server->listen_sock, SHUT_RDWR);
-	mutex_unlock(&server->mutex);
+	complete(&server->shutdown_comp);
 }
 
 /*
@@ -495,21 +498,11 @@ static void queue_commit_work(struct server_info *server,
 }
 
 /*
- * Commit errors are fatal and shut down the server.  This is called
- * from request processing which shutdown will wait for.
+ * Wait for a commit during request processing and return its status.
  */
-static int wait_for_commit(struct server_info *server,
-			   struct commit_waiter *cw, u64 id, u8 type)
+static inline int wait_for_commit(struct commit_waiter *cw)
 {
-	struct super_block *sb = server->sb;
-
 	wait_for_completion(&cw->comp);
-	if (cw->ret < 0) {
-		scoutfs_err(sb, "commit error %d processing req id %llu type %u",
-				cw->ret, id, type);
-
-		shut_down_server(server);
-	}
 	return cw->ret;
 }
 
@@ -546,14 +539,15 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 
 	down_write(&server->commit_rwsem);
 
-	if (!scoutfs_btree_has_dirty(sb)) {
-		ret = 0;
-		goto out;
-	}
-
+	/* try to free first which can dirty the btrees */
 	ret = apply_pending_frees(sb);
 	if (ret) {
 		scoutfs_err(sb, "server error freeing extents: %d", ret);
+		goto out;
+	}
+
+	if (!scoutfs_btree_has_dirty(sb)) {
+		ret = 0;
 		goto out;
 	}
 
@@ -591,6 +585,7 @@ out:
 	trace_scoutfs_server_commit_work_exit(sb, 0, ret);
 }
 
+#if 0
 /*
  * Request processing synchronously sends their reply from within their
  * processing work.  If this fails the socket is shutdown.
@@ -639,6 +634,7 @@ static int send_reply(struct server_connection *conn, u64 id,
 
 	return ret;
 }
+#endif
 
 void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
 			      struct scoutfs_manifest_entry *ment)
@@ -660,26 +656,26 @@ void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
 	ment->last = net_ment->last;
 }
 
-static int process_alloc_inodes(struct server_connection *conn,
-				u64 id, u8 type, void *data, unsigned data_len)
+static int server_alloc_inodes(struct super_block *sb,
+			       struct scoutfs_net_connection *conn,
+			       u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_net_inode_alloc ial;
+	struct scoutfs_net_inode_alloc ial = { 0, };
 	struct commit_waiter cw;
 	__le64 lecount;
 	u64 ino;
 	u64 nr;
 	int ret;
 
-	if (data_len != sizeof(lecount)) {
+	if (arg_len != sizeof(lecount)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	memcpy(&lecount, data, data_len);
+	memcpy(&lecount, arg, arg_len);
 
 	down_read(&server->commit_rwsem);
 
@@ -695,52 +691,48 @@ static int process_alloc_inodes(struct server_connection *conn,
 	ial.ino = cpu_to_le64(ino);
 	ial.nr = cpu_to_le64(nr);
 
-	ret = wait_for_commit(server, &cw, id, type);
+	ret = wait_for_commit(&cw);
 out:
-	return send_reply(conn, id, type, ret, &ial, sizeof(ial));
+	return scoutfs_net_response(sb, conn, cmd, id, ret, &ial, sizeof(ial));
 }
 
 /*
  * Give the client an extent allocation of len blocks.  We leave the
  * details to the extent allocator.
  */
-static int process_alloc_extent(struct server_connection *conn,
-			       u64 id, u8 type, void *data, unsigned data_len)
+static int server_alloc_extent(struct super_block *sb,
+			       struct scoutfs_net_connection *conn,
+			       u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct commit_waiter cw;
-	struct scoutfs_net_extent nex;
+	struct scoutfs_net_extent nex = {0,};
 	__le64 leblocks;
 	u64 start;
 	u64 len;
 	int ret;
 
-	if (data_len != sizeof(leblocks)) {
+	if (arg_len != sizeof(leblocks)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	memcpy(&leblocks, data, data_len);
+	memcpy(&leblocks, arg, arg_len);
 
 	down_read(&server->commit_rwsem);
 	ret = alloc_extent(sb, le64_to_cpu(leblocks), &start, &len);
-	if (ret == -ENOSPC) {
-		start = 0;
-		len = 0;
-		ret = 0;
-	}
-	if (ret == 0) {
-		nex.start = cpu_to_le64(start);
-		nex.len = cpu_to_le64(len);
-		queue_commit_work(server, &cw);
-	}
-	up_read(&server->commit_rwsem);
-
 	if (ret == 0)
-		ret = wait_for_commit(server, &cw, id, type);
+		queue_commit_work(server, &cw);
+	up_read(&server->commit_rwsem);
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+	if (ret)
+		goto out;
+
+	nex.start = cpu_to_le64(start);
+	nex.len = cpu_to_le64(len);
 out:
-	return send_reply(conn, id, type, ret, &nex, sizeof(nex));
+	return scoutfs_net_response(sb, conn, cmd, id, ret, &nex, sizeof(nex));
 }
 
 static bool invalid_net_extent_list(struct scoutfs_net_extent_list *nexl,
@@ -752,19 +744,19 @@ static bool invalid_net_extent_list(struct scoutfs_net_extent_list *nexl,
 				    extents[le64_to_cpu(nexl->nr)]));
 }
 
-static int process_free_extents(struct server_connection *conn,
-			       u64 id, u8 type, void *data, unsigned data_len)
+static int server_free_extents(struct super_block *sb,
+			       struct scoutfs_net_connection *conn,
+			       u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_net_extent_list *nexl;
 	struct commit_waiter cw;
-	int ret = 0;
+	int ret;
 	int err;
 	u64 i;
 
-	nexl = data;
-	if (invalid_net_extent_list(nexl, data_len)) {
+	nexl = arg;
+	if (invalid_net_extent_list(nexl, arg_len)) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -783,70 +775,66 @@ static int process_free_extents(struct server_connection *conn,
 	up_read(&server->commit_rwsem);
 
 	if (i > 0) {
-		err = wait_for_commit(server, &cw, id, type);
+		err = wait_for_commit(&cw);
 		if (ret == 0)
 			ret = err;
 	}
+
 out:
-	return send_reply(conn, id, type, ret, NULL, 0);
+	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
 }
 
 /*
  * We still special case segno allocation because it's aligned and we'd
  * like to keep that detail in the server.
  */
-static int process_alloc_segno(struct server_connection *conn,
-			       u64 id, u8 type, void *data, unsigned data_len)
+static int server_alloc_segno(struct super_block *sb,
+			      struct scoutfs_net_connection *conn,
+			      u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct commit_waiter cw;
 	__le64 lesegno = 0;
 	u64 segno;
 	int ret;
 
-	if (data_len != 0) {
+	if (arg_len != 0) {
 		ret = -EINVAL;
 		goto out;
 	}
 
 	down_read(&server->commit_rwsem);
 	ret = alloc_segno(sb, &segno);
-	if (ret == 0) {
-		lesegno = cpu_to_le64(segno);
+	if (ret == 0)
 		queue_commit_work(server, &cw);
-	} else if (ret == -ENOSPC) {
-		ret = 0;
-	}
 	up_read(&server->commit_rwsem);
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+	if (ret)
+		goto out;
 
-	if (ret == 0 && lesegno != 0)
-		ret = wait_for_commit(server, &cw, id, type);
+	lesegno = cpu_to_le64(segno);
 out:
-	return send_reply(conn, id, type, ret, &lesegno, sizeof(lesegno));
+	return scoutfs_net_response(sb, conn, cmd, id, ret,
+				    &lesegno, sizeof(lesegno));
 }
 
-static int process_record_segment(struct server_connection *conn, u64 id,
-				  u8 type, void *data, unsigned data_len)
+static int server_record_segment(struct super_block *sb,
+				 struct scoutfs_net_connection *conn,
+				 u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_net_manifest_entry *net_ment;
 	struct scoutfs_manifest_entry ment;
 	struct commit_waiter cw;
 	int ret;
 
-	if (data_len < sizeof(struct scoutfs_net_manifest_entry)) {
+	if (arg_len != sizeof(struct scoutfs_net_manifest_entry)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	net_ment = data;
-
-	if (data_len != sizeof(*net_ment))  {
-		ret = -EINVAL;
-		goto out;
-	}
+	net_ment = arg;
 
 retry:
 	down_read(&server->commit_rwsem);
@@ -871,12 +859,13 @@ retry:
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0) {
-		ret = wait_for_commit(server, &cw, id, type);
+		ret = wait_for_commit(&cw);
 		if (ret == 0)
 			scoutfs_compact_kick(sb);
 	}
+
 out:
-	return send_reply(conn, id, type, ret, NULL, 0);
+	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
 }
 
 struct pending_seq {
@@ -896,21 +885,21 @@ struct pending_seq {
  * XXX The pending seq tracking should be persistent so that it survives
  * server failover.
  */
-static int process_advance_seq(struct server_connection *conn, u64 id, u8 type,
-			       void *data, unsigned data_len)
+static int server_advance_seq(struct super_block *sb,
+			      struct scoutfs_net_connection *conn,
+			      u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct pending_seq *next_ps;
 	struct pending_seq *ps;
 	struct commit_waiter cw;
-	__le64 * __packed their_seq = data;
+	__le64 * __packed their_seq = arg;
 	__le64 next_seq;
 	int ret;
 
-	if (data_len != sizeof(__le64)) {
+	if (arg_len != sizeof(__le64)) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -941,24 +930,24 @@ static int process_advance_seq(struct server_connection *conn, u64 id, u8 type,
 	spin_unlock(&server->seq_lock);
 	queue_commit_work(server, &cw);
 	up_read(&server->commit_rwsem);
-	ret = wait_for_commit(server, &cw, id, type);
-
+	ret = wait_for_commit(&cw);
 out:
-	return send_reply(conn, id, type, ret, &next_seq, sizeof(next_seq));
+	return scoutfs_net_response(sb, conn, cmd, id, ret,
+				    &next_seq, sizeof(next_seq));
 }
 
-static int process_get_last_seq(struct server_connection *conn, u64 id,
-				u8 type, void *data, unsigned data_len)
+static int server_get_last_seq(struct super_block *sb,
+			       struct scoutfs_net_connection *conn,
+			       u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct pending_seq *ps;
 	__le64 last_seq;
 	int ret;
 
-	if (data_len != 0) {
+	if (arg_len != 0) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -975,18 +964,20 @@ static int process_get_last_seq(struct server_connection *conn, u64 id,
 	spin_unlock(&server->seq_lock);
 	ret = 0;
 out:
-	return send_reply(conn, id, type, ret, &last_seq, sizeof(last_seq));
+	return scoutfs_net_response(sb, conn, cmd, id, ret,
+				    &last_seq, sizeof(last_seq));
 }
 
-static int process_get_manifest_root(struct server_connection *conn, u64 id,
-				     u8 type, void *data, unsigned data_len)
+static int server_get_manifest_root(struct super_block *sb,
+				    struct scoutfs_net_connection *conn,
+				    u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_btree_root root;
 	unsigned int start;
 	int ret;
 
-	if (data_len == 0) {
+	if (arg_len == 0) {
 		do {
 			start = read_seqcount_begin(&server->stable_seqcount);
 			root = server->stable_manifest_root;
@@ -996,24 +987,25 @@ static int process_get_manifest_root(struct server_connection *conn, u64 id,
 		ret = -EINVAL;
 	}
 
-	return send_reply(conn, id, type, ret, &root, sizeof(root));
+	return scoutfs_net_response(sb, conn, cmd, id, ret,
+				    &root, sizeof(root));
 }
 
 /*
  * Sample the super stats that the client wants for statfs by serializing
  * with each component.
  */
-static int process_statfs(struct server_connection *conn, u64 id, u8 type,
-			  void *data, unsigned data_len)
+static int server_statfs(struct super_block *sb,
+			 struct scoutfs_net_connection *conn,
+			 u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_net_statfs nstatfs;
 	int ret;
 
-	if (data_len == 0) {
+	if (arg_len == 0) {
 		/* uuid and total_segs are constant, so far */
 		memcpy(nstatfs.uuid, super->uuid, sizeof(nstatfs.uuid));
 
@@ -1030,7 +1022,8 @@ static int process_statfs(struct server_connection *conn, u64 id, u8 type,
 		ret = -EINVAL;
 	}
 
-	return send_reply(conn, id, type, ret, &nstatfs, sizeof(nstatfs));
+	return scoutfs_net_response(sb, conn, cmd, id, ret,
+				    &nstatfs, sizeof(nstatfs));
 }
 
 /*
@@ -1078,7 +1071,7 @@ int scoutfs_client_get_compaction(struct super_block *sb, void *curs)
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0)
-		ret = wait_for_commit(server, &cw, U64_MAX, 1);
+		ret = wait_for_commit(&cw);
 
 	return ret;
 }
@@ -1117,13 +1110,14 @@ int scoutfs_client_finish_compaction(struct super_block *sb, void *curs,
 	up_read(&server->commit_rwsem);
 
 	if (ret == 0)
-		ret = wait_for_commit(server, &cw, U64_MAX, 2);
+		ret = wait_for_commit(&cw);
 
 	scoutfs_compact_kick(sb);
 
 	return ret;
 }
 
+#if 0
 typedef int (*process_func_t)(struct server_connection *conn, u64 id,
 			      u8 type, void *data, unsigned data_len);
 
@@ -1168,7 +1162,9 @@ static void scoutfs_server_process_func(struct work_struct *work)
 	/* process_one_work explicitly allows freeing work in its func */
 	kfree(req);
 }
+#endif
 
+#if 0
 /*
  * Always block receiving from the socket.  This owns the socket.  If
  * receive fails this shuts down and frees the socket.
@@ -1292,6 +1288,7 @@ out:
 
 	trace_scoutfs_server_recv_work_exit(sb, 0, ret);
 }
+#endif
 
 /*
  * This relies on the caller having read the current super and advanced
@@ -1308,6 +1305,7 @@ static int write_server_addr(struct super_block *sb, struct sockaddr_in *sin)
 	return scoutfs_write_dirty_super(sb);
 }
 
+#if 0
 static bool barrier_list_empty_careful(struct list_head *list)
 {
 	/* store caller's task state before loading wake condition */
@@ -1315,7 +1313,27 @@ static bool barrier_list_empty_careful(struct list_head *list)
 
 	return list_empty_careful(list);
 }
+#endif
 
+static scoutfs_net_request_t server_req_funcs[] = {
+	[SCOUTFS_NET_CMD_ALLOC_INODES]		= server_alloc_inodes,
+	[SCOUTFS_NET_CMD_ALLOC_EXTENT]		= server_alloc_extent,
+	[SCOUTFS_NET_CMD_FREE_EXTENTS]		= server_free_extents,
+	[SCOUTFS_NET_CMD_ALLOC_SEGNO]		= server_alloc_segno,
+	[SCOUTFS_NET_CMD_RECORD_SEGMENT]	= server_record_segment,
+	[SCOUTFS_NET_CMD_ADVANCE_SEQ]		= server_advance_seq,
+	[SCOUTFS_NET_CMD_GET_LAST_SEQ]		= server_get_last_seq,
+	[SCOUTFS_NET_CMD_GET_MANIFEST_ROOT]	= server_get_manifest_root,
+	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
+};
+
+static void server_notify_down(struct super_block *sb,
+			       struct scoutfs_net_connection *conn)
+{
+	DECLARE_SERVER_INFO(sb, server);
+
+	shutdown_server(server);
+}
 /*
  * This work is always running or has a delayed timer set while a super
  * is mounted.  It tries to grab the lock to become the server.  If it
@@ -1323,51 +1341,45 @@ static bool barrier_list_empty_careful(struct list_head *list)
  * anything goes wrong it releases the lock and sets a timer to try to
  * become the server all over again.
  */
-static void scoutfs_server_func(struct work_struct *work)
+static void scoutfs_server_worker(struct work_struct *work)
 {
 	struct server_info *server = container_of(work, struct server_info,
 						  dwork.work);
 	struct super_block *sb = server->sb;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_net_connection *conn = NULL;
 	static struct sockaddr_in zeros = {0,};
-	struct socket *new_sock;
-	struct socket *sock = NULL;
 	struct scoutfs_lock *lock = NULL;
-	struct server_connection *conn;
 	struct pending_seq *ps;
 	struct pending_seq *ps_tmp;
 	DECLARE_WAIT_QUEUE_HEAD(waitq);
 	struct sockaddr_in sin;
 	LIST_HEAD(conn_list);
-	int addrlen;
-	int optval;
 	int ret;
 
 	trace_scoutfs_server_work_enter(sb, 0, 0);
 
-	init_waitqueue_head(&waitq);
+	init_completion(&server->shutdown_comp);
 
 	ret = scoutfs_lock_global(sb, DLM_LOCK_EX, 0,
 				  SCOUTFS_LOCK_TYPE_GLOBAL_SERVER, &lock);
 	if (ret)
 		goto out;
 
+	conn = scoutfs_net_alloc_conn(sb, NULL, server_notify_down,
+				      server_req_funcs, "server");
+	if (!conn) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
 	sin.sin_family = AF_INET;
 	sin.sin_addr.s_addr = le32_to_be32(sbi->opts.listen_addr.addr);
 	sin.sin_port = le16_to_be16(sbi->opts.listen_addr.port);
 
-	optval = 1;
-	ret = sock_create_kern(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock) ?:
-	      kernel_setsockopt(sock, SOL_TCP, TCP_NODELAY,
-			        (char *)&optval, sizeof(optval)) ?:
-	      kernel_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
-			        (char *)&optval, sizeof(optval));
-	if (ret)
-		goto out;
-
-	addrlen = sizeof(sin);
-	ret = kernel_bind(sock, (struct sockaddr *)&sin, addrlen);
+	/* get the address of our listening socket */
+	ret = scoutfs_net_bind(sb, conn, &sin);
 	if (ret) {
 		if (!server->bind_warned) {
 			scoutfs_err(sb, "server failed to bind to "SIN_FMT", errno %d%s.  Retrying indefinitely..",
@@ -1378,15 +1390,6 @@ static void scoutfs_server_func(struct work_struct *work)
 		}
 		goto out;
 	}
-	server->bind_warned = false;
-
-	kernel_getsockname(sock, (struct sockaddr *)&sin, &addrlen);
-	if (ret)
-		goto out;
-
-	ret = kernel_listen(sock, 255);
-	if (ret)
-		goto out;
 
 	/* publish the address for clients to connect to */
 	ret = scoutfs_read_super(sb, super);
@@ -1398,17 +1401,7 @@ static void scoutfs_server_func(struct work_struct *work)
 	if (ret)
 		goto out;
 
-	/* either see shutting down or they'll shutdown our sock */
-	mutex_lock(&server->mutex);
-	server->listen_task = current;
-	server->listen_sock = sock;
-	if (server->shutting_down)
-		ret = -ESHUTDOWN;
-	mutex_unlock(&server->mutex);
-	if (ret)
-		goto out;
-
-	/* finally start up the server subsystems before accepting */
+	/* start up the server subsystems before accepting */
 	ret = scoutfs_btree_setup(sb) ?:
 	      scoutfs_manifest_setup(sb) ?:
 	      scoutfs_compact_setup(sb);
@@ -1420,69 +1413,24 @@ static void scoutfs_server_func(struct work_struct *work)
 
 	scoutfs_info(sb, "server started on "SIN_FMT, SIN_ARG(&sin));
 
-	for (;;) {
-		ret = kernel_accept(sock, &new_sock, 0);
-		if (ret < 0)
-			break;
+	/* start accepting connections and processing work */
+	scoutfs_net_listen(sb, conn);
 
-		conn = kmalloc(sizeof(struct server_connection), GFP_NOFS);
-		if (!conn) {
-			sock_release(new_sock);
-			ret = -ENOMEM;
-			continue;
-		}
-
-		addrlen = sizeof(struct sockaddr_in);
-		ret = kernel_getsockname(new_sock,
-					 (struct sockaddr *)&conn->sockname,
-					 &addrlen) ?:
-		      kernel_getpeername(new_sock,
-					 (struct sockaddr *)&conn->peername,
-					 &addrlen);
-		if (ret) {
-			sock_release(new_sock);
-			continue;
-		}
-
-		/*
-		 * XXX yeah, ok, killing the sock and accepting a new
-		 * one is racey.  think about that in all the code.  Are
-		 * we destroying a resource to shutdown that the thing
-		 * we're canceling creates?
-		 */
-
-		conn->server = server;
-		conn->sock = new_sock;
-		mutex_init(&conn->send_mutex);
-
-		scoutfs_info(sb, "server accepted "SIN_FMT" -> "SIN_FMT,
-			     SIN_ARG(&conn->peername),
-			     SIN_ARG(&conn->sockname));
-
-		/* recv work owns the conn once its in the list */
-		mutex_lock(&server->mutex);
-		list_add(&conn->head, &conn_list);
-		mutex_unlock(&server->mutex);
-
-		INIT_WORK(&conn->recv_work, scoutfs_server_recv_func);
-		queue_work(server->wq, &conn->recv_work);
-	}
-
-	/* shutdown send and recv on all accepted sockets */
-	mutex_lock(&server->mutex);
-	list_for_each_entry(conn, &conn_list, head)
-		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
-	mutex_unlock(&server->mutex);
-
-	/* wait for all recv work to finish and free connections */
-	wait_event(waitq, barrier_list_empty_careful(&conn_list));
+	/* wait for listening down or umount, conn can still be live */
+	wait_for_completion_interruptible(&server->shutdown_comp);
 
 	scoutfs_info(sb, "server shutting down on "SIN_FMT, SIN_ARG(&sin));
 
 shutdown:
+	/* wait for request processing */
+	scoutfs_net_shutdown(sb, conn);
+	/* wait for commit queued by request processing */
+	flush_work(&server->commit_work);
 
 	/* shut down all the server subsystems */
 	scoutfs_compact_destroy(sb);
+	/* (wait for possible double commit work queued by compaction) */
+	flush_work(&server->commit_work);
 	destroy_pending_frees(sb);
 	scoutfs_manifest_destroy(sb);
 	scoutfs_btree_destroy(sb);
@@ -1496,9 +1444,7 @@ shutdown:
 	write_server_addr(sb, &zeros);
 
 out:
-	if (sock)
-		sock_release(sock);
-
+	scoutfs_net_free_conn(sb, conn);
 	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
 
 	/* always requeues, cancel_delayed_work_sync cancels on shutdown */
@@ -1517,8 +1463,9 @@ int scoutfs_server_setup(struct super_block *sb)
 		return -ENOMEM;
 
 	server->sb = sb;
-	INIT_DELAYED_WORK(&server->dwork, scoutfs_server_func);
-	mutex_init(&server->mutex);
+	init_completion(&server->shutdown_comp);
+	server->bind_warned = false;
+	INIT_DELAYED_WORK(&server->dwork, scoutfs_server_worker);
 	init_rwsem(&server->commit_rwsem);
 	init_llist_head(&server->commit_waiters);
 	INIT_WORK(&server->commit_work, scoutfs_server_commit_func);
@@ -1547,7 +1494,7 @@ void scoutfs_server_destroy(struct super_block *sb)
 	struct server_info *server = sbi->server_info;
 
 	if (server) {
-		shut_down_server(server);
+		shutdown_server(server);
 
 		/* wait for server work to wait for everything to shut down */
 		cancel_delayed_work_sync(&server->dwork);

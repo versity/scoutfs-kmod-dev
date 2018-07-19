@@ -38,6 +38,7 @@
 #include "compact.h"
 #include "data.h"
 #include "lock.h"
+#include "net.h"
 #include "client.h"
 #include "server.h"
 #include "options.h"
@@ -133,6 +134,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	/* the server locks the listen address and compacts */
 	scoutfs_lock_shutdown(sb);
 	scoutfs_server_destroy(sb);
+	scoutfs_net_destroy(sb);
 	scoutfs_seg_destroy(sb);
 	scoutfs_lock_destroy(sb);
 
@@ -333,6 +335,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_data_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:
 	      scoutfs_lock_setup(sb) ?:
+	      scoutfs_net_setup(sb) ?:
 	      scoutfs_server_setup(sb) ?:
 	      scoutfs_client_setup(sb) ?:
 	      scoutfs_lock_node_id(sb, DLM_LOCK_EX, 0, sbi->node_id,

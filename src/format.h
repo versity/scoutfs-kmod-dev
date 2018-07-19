@@ -353,8 +353,6 @@ struct scoutfs_inet_addr {
 	__le16 port;
 } __packed;
 
-#define SCOUTFS_DEFAULT_PORT 12345
-
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
@@ -506,6 +504,10 @@ struct scoutfs_lock_name {
  * messages over the wire.
  */
 
+/*
+ * Greetings verify identity of communicating nodes.  The sender
+ * sends their credentials and the receiver verifies them.
+ */
 struct scoutfs_net_greeting {
 	__le64 fsid;
 	__le64 format_hash;
@@ -517,14 +519,69 @@ struct scoutfs_net_greeting {
  * type is strictly redundant in the reply because the id will find the
  * send but we include it in both packets to make it easier to observe
  * replies without having the id from their previous request.
+ *
+ * Error is only set to a translated errno on response messages and
+ * data_len will be 0.
  */
 struct scoutfs_net_header {
 	__le64 id;
 	__le16 data_len;
-	__u8 type;
-	__u8 status;
+	__u8 msg;
+	__u8 cmd;
+	__u8 error;
 	__u8 data[0];
 } __packed;
+
+/*
+ * Greetings are the first messages sent down every newly established
+ * socket on the connection.  Every other message gets a unique
+ * increasing id over the life time of the connection.
+ */
+#define SCOUTFS_NET_ID_GREETING 1
+
+enum {
+	SCOUTFS_NET_MSG_REQUEST = 0,
+	SCOUTFS_NET_MSG_RESPONSE,
+	SCOUTFS_NET_MSG_ACK,
+	SCOUTFS_NET_MSG_UNKNOWN,
+};
+
+enum {
+	SCOUTFS_NET_CMD_GREETING = 0,
+	SCOUTFS_NET_CMD_ALLOC_INODES,
+	SCOUTFS_NET_CMD_ALLOC_EXTENT,
+	SCOUTFS_NET_CMD_FREE_EXTENTS,
+	SCOUTFS_NET_CMD_ALLOC_SEGNO,
+	SCOUTFS_NET_CMD_RECORD_SEGMENT,
+	SCOUTFS_NET_CMD_ADVANCE_SEQ,
+	SCOUTFS_NET_CMD_GET_LAST_SEQ,
+	SCOUTFS_NET_CMD_GET_MANIFEST_ROOT,
+	SCOUTFS_NET_CMD_STATFS,
+	SCOUTFS_NET_CMD_UNKNOWN,
+};
+
+/*
+ * Define a macro to evaluate another macro for each of the errnos we
+ * translate over the wire.  This lets us keep our enum in sync with the
+ * mapping arrays to and from host errnos.
+ */
+#define EXPAND_EACH_NET_ERRNO		\
+	EXPAND_NET_ERRNO(ENOENT)	\
+	EXPAND_NET_ERRNO(ENOMEM)	\
+	EXPAND_NET_ERRNO(EIO)		\
+	EXPAND_NET_ERRNO(ENOSPC)	\
+	EXPAND_NET_ERRNO(EINVAL)
+
+#undef EXPAND_NET_ERRNO
+#define EXPAND_NET_ERRNO(which) SCOUTFS_NET_ERR_##which,
+enum {
+	SCOUTFS_NET_ERR_NONE = 0,
+	EXPAND_EACH_NET_ERRNO
+	SCOUTFS_NET_ERR_UNKNOWN,
+};
+
+/* arbitrarily chosen to be safely less than mss and allow 1k with header */
+#define SCOUTFS_NET_MAX_DATA_LEN 1100
 
 /*
  * When there's no more free inodes this will be sent with ino = ~0 and
@@ -585,26 +642,6 @@ struct scoutfs_net_extent_list {
 /* delete all inputs and insert all outputs (same goes for alloc|free segnos) */
 #define SCOUTFS_COMPACTION_MAX_UPDATE \
 	(2 * (SCOUTFS_COMPACTION_MAX_INPUT + SCOUTFS_COMPACTION_SLOP))
-
-enum {
-	SCOUTFS_NET_ALLOC_INODES = 0,
-	SCOUTFS_NET_ALLOC_EXTENT,
-	SCOUTFS_NET_FREE_EXTENTS,
-	SCOUTFS_NET_ALLOC_SEGNO,
-	SCOUTFS_NET_RECORD_SEGMENT,
-	SCOUTFS_NET_ADVANCE_SEQ,
-	SCOUTFS_NET_GET_LAST_SEQ,
-	SCOUTFS_NET_GET_MANIFEST_ROOT,
-	SCOUTFS_NET_STATFS,
-	SCOUTFS_NET_UNKNOWN,
-};
-
-enum {
-	SCOUTFS_NET_STATUS_REQUEST = 0,
-	SCOUTFS_NET_STATUS_SUCCESS,
-	SCOUTFS_NET_STATUS_ERROR,
-	SCOUTFS_NET_STATUS_UNKNOWN,
-};
 
 /*
  * Scoutfs file handle structure - this can be copied out to userspace

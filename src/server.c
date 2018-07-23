@@ -30,7 +30,6 @@
 #include "compact.h"
 #include "scoutfs_trace.h"
 #include "msg.h"
-#include "client.h"
 #include "server.h"
 #include "net.h"
 #include "endian_swap.h"
@@ -45,9 +44,6 @@
  * it sees errors it shuts down the server in the hopes that another
  * mount will have less trouble.
  */
-
-#define SIN_FMT		"%pIS:%u"
-#define SIN_ARG(sin)	sin, be16_to_cpu((sin)->sin_port)
 
 struct server_info {
 	struct super_block *sb;
@@ -80,26 +76,6 @@ struct server_info {
 
 #define DECLARE_SERVER_INFO(sb, name) \
 	struct server_info *name = SCOUTFS_SB(sb)->server_info
-
-#if 0
-struct server_request {
-	struct server_connection *conn;
-	struct work_struct work;
-
-	struct scoutfs_net_header nh;
-	/* data payload is allocated here, referenced as ->nh.data */
-};
-
-struct server_connection {
-	struct server_info *server;
-	struct sockaddr_in sockname;
-	struct sockaddr_in peername;
-	struct list_head head;
-	struct socket *sock;
-	struct work_struct recv_work;
-	struct mutex send_mutex;
-};
-#endif
 
 struct commit_waiter {
 	struct completion comp;
@@ -585,57 +561,6 @@ out:
 	trace_scoutfs_server_commit_work_exit(sb, 0, ret);
 }
 
-#if 0
-/*
- * Request processing synchronously sends their reply from within their
- * processing work.  If this fails the socket is shutdown.
- */
-static int send_reply(struct server_connection *conn, u64 id,
-		      u8 type, int error, void *data, unsigned data_len)
-{
-	struct scoutfs_net_header nh;
-	struct kvec kv[2];
-	unsigned kv_len;
-	u8 status;
-	int ret;
-
-	if (WARN_ON_ONCE(error > 0) || WARN_ON_ONCE(data && data_len == 0))
-		return -EINVAL;
-
-	kv[0].iov_base = &nh;
-	kv[0].iov_len = sizeof(nh);
-	kv_len = 1;
-
-	/* maybe we can have better error communication to clients */
-	if (error < 0) {
-		status = SCOUTFS_NET_STATUS_ERROR;
-		data = NULL;
-		data_len = 0;
-	} else {
-		status = SCOUTFS_NET_STATUS_SUCCESS;
-		if (data) {
-			kv[1].iov_base = data;
-			kv[1].iov_len = data_len;
-			kv_len++;
-		}
-	}
-
-	nh.id = cpu_to_le64(id);
-	nh.data_len = cpu_to_le16(data_len);
-	nh.type = type;
-	nh.status = status;
-
-	trace_scoutfs_server_send_reply(conn->server->sb, &conn->sockname,
-					&conn->peername, &nh);
-
-	mutex_lock(&conn->send_mutex);
-	ret = scoutfs_sock_sendmsg(conn->sock, kv, kv_len);
-	mutex_unlock(&conn->send_mutex);
-
-	return ret;
-}
-#endif
-
 void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
 			      struct scoutfs_manifest_entry *ment)
 {
@@ -1117,179 +1042,6 @@ int scoutfs_client_finish_compaction(struct super_block *sb, void *curs,
 	return ret;
 }
 
-#if 0
-typedef int (*process_func_t)(struct server_connection *conn, u64 id,
-			      u8 type, void *data, unsigned data_len);
-
-/*
- * Each request message gets its own concurrent blocking request processing
- * context.
- */
-static void scoutfs_server_process_func(struct work_struct *work)
-{
-	struct server_request *req = container_of(work, struct server_request,
-						  work);
-	struct server_connection *conn = req->conn;
-	static process_func_t process_funcs[] = {
-		[SCOUTFS_NET_ALLOC_INODES]	= process_alloc_inodes,
-		[SCOUTFS_NET_ALLOC_EXTENT]	= process_alloc_extent,
-		[SCOUTFS_NET_FREE_EXTENTS]	= process_free_extents,
-		[SCOUTFS_NET_ALLOC_SEGNO]	= process_alloc_segno,
-		[SCOUTFS_NET_RECORD_SEGMENT]	= process_record_segment,
-		[SCOUTFS_NET_ADVANCE_SEQ]	= process_advance_seq,
-		[SCOUTFS_NET_GET_LAST_SEQ]	= process_get_last_seq,
-		[SCOUTFS_NET_GET_MANIFEST_ROOT]	= process_get_manifest_root,
-		[SCOUTFS_NET_STATFS]		= process_statfs,
-	};
-	struct scoutfs_net_header *nh = &req->nh;
-	process_func_t func;
-	int ret;
-
-	if (nh->type < ARRAY_SIZE(process_funcs))
-		func = process_funcs[nh->type];
-	else
-		func = NULL;
-
-	if (func)
-		ret = func(conn, le64_to_cpu(nh->id), nh->type, nh->data,
-			   le16_to_cpu(nh->data_len));
-	else
-		ret = -EINVAL;
-
-	if (ret)
-		kernel_sock_shutdown(conn->sock, SHUT_RDWR);
-
-	/* process_one_work explicitly allows freeing work in its func */
-	kfree(req);
-}
-#endif
-
-#if 0
-/*
- * Always block receiving from the socket.  This owns the socket.  If
- * receive fails this shuts down and frees the socket.
- */
-static void scoutfs_server_recv_func(struct work_struct *work)
-{
-	struct server_connection *conn = container_of(work,
-						      struct server_connection,
-						      recv_work);
-	struct server_info *server = conn->server;
-	struct super_block *sb = server->sb;
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-	struct socket *sock = conn->sock;
-	struct workqueue_struct *req_wq;
-	struct scoutfs_net_greeting greet;
-	struct scoutfs_net_header nh;
-	struct server_request *req;
-	bool passed_greeting;
-	unsigned data_len;
-	struct kvec kv;
-	int ret;
-
-	trace_scoutfs_server_recv_work_enter(sb, 0, 0);
-
-	req_wq = alloc_workqueue("scoutfs_server_requests",
-				 WQ_NON_REENTRANT, 0);
-	if (!req_wq) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	/* first bounce the greeting */
-	ret = scoutfs_sock_recvmsg(sock, &greet, sizeof(greet));
-	if (ret)
-		goto out;
-
-	/* we'll close conn after failed greeting to let client see ours */
-	passed_greeting = false;
-
-	if (greet.fsid != super->id) {
-		scoutfs_warn(sb, "client "SIN_FMT" has fsid 0x%llx, expected 0x%llx",
-			     SIN_ARG(&conn->peername),
-			     le64_to_cpu(greet.fsid),
-			     le64_to_cpu(super->id));
-	} else if (greet.format_hash != super->format_hash) {
-		scoutfs_warn(sb, "client "SIN_FMT" has format hash 0x%llx, expected 0x%llx",
-			     SIN_ARG(&conn->peername),
-			     le64_to_cpu(greet.format_hash),
-			     le64_to_cpu(super->format_hash));
-	} else {
-		passed_greeting = true;
-	}
-
-	greet.fsid = super->id;
-	greet.format_hash = super->format_hash;
-	kv.iov_base = &greet;
-	kv.iov_len = sizeof(greet);
-	ret = scoutfs_sock_sendmsg(sock, &kv, 1);
-	if (ret)
-		goto out;
-
-	for (;;) {
-		/* receive the header */
-		ret = scoutfs_sock_recvmsg(sock, &nh, sizeof(nh));
-		if (ret)
-			break;
-
-		if (!passed_greeting)
-			break;
-
-		trace_scoutfs_server_recv_request(conn->server->sb,
-						  &conn->sockname,
-						  &conn->peername, &nh);
-
-		/* XXX verify data_len isn't insane */
-		/* XXX test for bad messages */
-		data_len = le16_to_cpu(nh.data_len);
-
-		req = kmalloc(sizeof(struct server_request) + data_len,
-			      GFP_NOFS);
-		if (!req) {
-			ret = -ENOMEM;
-			break;
-		}
-
-		ret = scoutfs_sock_recvmsg(sock, req->nh.data, data_len);
-		if (ret)
-			break;
-
-		req->conn = conn;
-		INIT_WORK(&req->work, scoutfs_server_process_func);
-		req->nh = nh;
-
-		queue_work(req_wq, &req->work);
-		/* req is freed by its work func */
-		req = NULL;
-	}
-
-out:
-	scoutfs_info(sb, "server closing "SIN_FMT" -> "SIN_FMT,
-		     SIN_ARG(&conn->peername), SIN_ARG(&conn->sockname));
-
-	/* make sure reply sending returns */
-	kernel_sock_shutdown(conn->sock, SHUT_RDWR);
-
-	/* wait for processing work to drain */
-	if (req_wq) {
-		drain_workqueue(req_wq);
-		destroy_workqueue(req_wq);
-	}
-
-	/* process_one_work explicitly allows freeing work in its func */
-	mutex_lock(&server->mutex);
-	sock_release(conn->sock);
-	list_del_init(&conn->head);
-	kfree(conn);
-	smp_mb();
-	wake_up_process(server->listen_task);
-	mutex_unlock(&server->mutex);
-
-	trace_scoutfs_server_recv_work_exit(sb, 0, ret);
-}
-#endif
-
 /*
  * This relies on the caller having read the current super and advanced
  * its seq so that it's dirty.  This will go away when we communicate
@@ -1304,16 +1056,6 @@ static int write_server_addr(struct super_block *sb, struct sockaddr_in *sin)
 
 	return scoutfs_write_dirty_super(sb);
 }
-
-#if 0
-static bool barrier_list_empty_careful(struct list_head *list)
-{
-	/* store caller's task state before loading wake condition */
-	smp_mb();
-
-	return list_empty_careful(list);
-}
-#endif
 
 static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_ALLOC_INODES]		= server_alloc_inodes,

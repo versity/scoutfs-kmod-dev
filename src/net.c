@@ -32,7 +32,7 @@
 #include "msg.h"
 #include "net.h"
 #include "endian_swap.h"
-
+#include "tseq.h"
 
 /*
  * scoutfs networking reliably delivers requests and responses between
@@ -64,6 +64,8 @@
  */
 struct net_info {
 	struct workqueue_struct *shutdown_workq;
+	struct dentry *conn_tseq_dentry;
+	struct scoutfs_tseq_tree conn_tseq_tree;
 };
 
 struct scoutfs_net_connection {
@@ -102,6 +104,8 @@ struct scoutfs_net_connection {
 	struct work_struct recv_work;
 	struct work_struct shutdown_work;
 	/* message_recv proc_work also executes in the conn workq */
+
+	struct scoutfs_tseq_entry tseq_entry;
 };
 
 /*
@@ -837,6 +841,8 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 
 static void destroy_conn(struct scoutfs_net_connection *conn)
 {
+	struct super_block *sb = conn->sb;
+	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct scoutfs_net_connection *listener;
 	struct message_send *msend;
 	struct message_send *tmp;
@@ -863,6 +869,7 @@ static void destroy_conn(struct scoutfs_net_connection *conn)
 	}
 
 	destroy_workqueue(conn->workq);
+	scoutfs_tseq_del(&ninf->conn_tseq_tree, &conn->tseq_entry);
 	kfree(conn);
 }
 
@@ -1114,7 +1121,7 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 	trace_scoutfs_net_shutdown_work_enter(sb, 0, 0);
 
 	/* connected and accepted conns print a message */
-	if (conn->peername.sin_family)
+	if (conn->peername.sin_port != 0)
 		scoutfs_info(sb, "%s "SIN_FMT" -> "SIN_FMT,
 			     conn->listening_conn ? "server closing" :
 			                            "client disconnected",
@@ -1186,6 +1193,7 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 		       scoutfs_net_notify_t notify_down,
 		       scoutfs_net_request_t *req_funcs, char *name_suffix)
 {
+	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct scoutfs_net_connection *conn;
 
 	/* we handle greetings, the caller shouldn't attempt to */
@@ -1210,6 +1218,8 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 	conn->notify_down = notify_down;
 	conn->req_funcs = req_funcs;
 	spin_lock_init(&conn->lock);
+	conn->sockname.sin_family = AF_INET;
+	conn->peername.sin_family = AF_INET;
 	INIT_LIST_HEAD(&conn->accepted_head);
 	INIT_LIST_HEAD(&conn->accepted_list);
 	init_waitqueue_head(&conn->accepted_waitq);
@@ -1221,6 +1231,8 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 	INIT_WORK(&conn->send_work, scoutfs_net_send_worker);
 	INIT_WORK(&conn->recv_work, scoutfs_net_recv_worker);
 	INIT_WORK(&conn->shutdown_work, scoutfs_net_shutdown_worker);
+
+	scoutfs_tseq_add(&ninf->conn_tseq_tree, &conn->tseq_entry);
 
 	return conn;
 }
@@ -1448,6 +1460,19 @@ int scoutfs_net_sync_request(struct super_block *sb,
 	return ret;
 }
 
+static void net_tseq_show_conn(struct seq_file *m,
+			      struct scoutfs_tseq_entry *ent)
+{
+	struct scoutfs_net_connection *conn =
+		container_of(ent, struct scoutfs_net_connection, tseq_entry);
+
+	seq_printf(m, "name "SIN_FMT" peer "SIN_FMT" vg %u est %u sd %u cto_ms %lu nsi %llu lpi %llu\n",
+		   SIN_ARG(&conn->sockname), SIN_ARG(&conn->peername),
+		   conn->valid_greeting, conn->established,
+		   conn->shutting_down, conn->connect_timeout_ms,
+		   conn->next_send_id, conn->last_proc_id);
+}
+
 int scoutfs_net_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -1464,12 +1489,21 @@ int scoutfs_net_setup(struct super_block *sb)
 		ret = -ENOMEM;
 		goto out;
 	}
-
 	sbi->net_info = ninf;
+
+	scoutfs_tseq_tree_init(&ninf->conn_tseq_tree, net_tseq_show_conn);
 
 	ninf->shutdown_workq = alloc_workqueue("scoutfs_net_shutdown",
 					      WQ_UNBOUND, 0);
 	if (!ninf->shutdown_workq) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ninf->conn_tseq_dentry = scoutfs_tseq_create("connections",
+						     sbi->debug_root,
+						     &ninf->conn_tseq_tree);
+	if (!ninf->conn_tseq_dentry) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -1489,6 +1523,7 @@ void scoutfs_net_destroy(struct super_block *sb)
 	if (ninf) {
 		if (ninf->shutdown_workq)
 			destroy_workqueue(ninf->shutdown_workq);
+		debugfs_remove(ninf->conn_tseq_dentry);
 		kfree(ninf);
 		sbi->net_info = NULL;
 	}

@@ -66,6 +66,8 @@ struct net_info {
 	struct workqueue_struct *shutdown_workq;
 	struct dentry *conn_tseq_dentry;
 	struct scoutfs_tseq_tree conn_tseq_tree;
+	struct dentry *msg_tseq_dentry;
+	struct scoutfs_tseq_tree msg_tseq_tree;
 };
 
 struct scoutfs_net_connection {
@@ -122,10 +124,11 @@ struct scoutfs_net_connection {
  * to risk freeing messages from under the unlocked send worker.
  */
 struct message_send {
+	struct scoutfs_tseq_entry tseq_entry;
+	unsigned long dead:1;
 	struct list_head head;
 	scoutfs_net_response_t resp_func;
 	void *resp_data;
-	unsigned long dead:1;
 	struct scoutfs_net_header nh;
 };
 
@@ -134,8 +137,9 @@ struct message_send {
  * contexts.
  */
 struct message_recv {
-	struct scoutfs_net_connection *conn;
+	struct scoutfs_tseq_entry tseq_entry;
 	struct work_struct proc_work;
+	struct scoutfs_net_connection *conn;
 	struct scoutfs_net_header nh;
 };
 
@@ -313,6 +317,7 @@ static int submit_send(struct super_block *sb,
 		       scoutfs_net_response_t resp_func, void *resp_data,
 		       u64 *id_ret)
 {
+	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct message_send *msend;
 
 	if (WARN_ON_ONCE(msg >= SCOUTFS_NET_MSG_UNKNOWN) ||
@@ -357,6 +362,8 @@ static int submit_send(struct super_block *sb,
 
 	if (id_ret)
 		*id_ret = le64_to_cpu(msend->nh.id);
+
+	scoutfs_tseq_add(&ninf->msg_tseq_tree, &msend->tseq_entry);
 
 	spin_unlock(&conn->lock);
 
@@ -574,6 +581,7 @@ static void scoutfs_net_proc_worker(struct work_struct *work)
 						  proc_work);
 	struct scoutfs_net_connection *conn = mrecv->conn;
 	struct super_block *sb = conn->sb;
+	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	int ret;
 
 	trace_scoutfs_net_proc_work_enter(sb, 0, 0);
@@ -596,6 +604,7 @@ static void scoutfs_net_proc_worker(struct work_struct *work)
 	}
 
 	/* process_one_work explicitly allows freeing work in its func */
+	scoutfs_tseq_del(&ninf->msg_tseq_tree, &mrecv->tseq_entry);
 	kfree(mrecv);
 
 	/* shut down the connection if processing returns fatal errors */
@@ -671,6 +680,7 @@ static void scoutfs_net_recv_worker(struct work_struct *work)
 {
 	DEFINE_CONN_FROM_WORK(conn, work, recv_work);
 	struct super_block *sb = conn->sb;
+	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct socket *sock = conn->sock;
 	struct scoutfs_net_header nh;
 	struct message_recv *mrecv;
@@ -736,8 +746,11 @@ static void scoutfs_net_recv_worker(struct work_struct *work)
 		}
 		spin_unlock(&conn->lock);
 
-		if (mrecv)
+		if (mrecv) {
+			scoutfs_tseq_add(&ninf->msg_tseq_tree,
+					 &mrecv->tseq_entry);
 			queue_work(conn->workq, &mrecv->proc_work);
+		}
 	}
 
 	if (ret)
@@ -774,6 +787,13 @@ static int sendmsg_full(struct socket *sock, void *buf, unsigned len)
 	return 0;
 }
 
+static void free_msend(struct net_info *ninf, struct message_send *msend)
+{
+	list_del_init(&msend->head);
+	scoutfs_tseq_del(&ninf->msg_tseq_tree, &msend->tseq_entry);
+	kfree(msend);
+}
+
 /*
  * Each connection has a single worker that sends queued messages down
  * the connection's socket.  The work is queued whenever a message is
@@ -789,6 +809,7 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 {
 	DEFINE_CONN_FROM_WORK(conn, work, send_work);
 	struct super_block *sb = conn->sb;
+	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct message_send *msend;
 	int ret = 0;
 	int len;
@@ -801,8 +822,7 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 						 struct message_send, head))) {
 
 		if (msend->dead) {
-			list_del_init(&msend->head);
-			kfree(msend);
+			free_msend(ninf, msend);
 			continue;
 		}
 
@@ -853,8 +873,7 @@ static void destroy_conn(struct scoutfs_net_connection *conn)
 	/* free all messages, refactor and complete for forced unmount? */
 	list_splice_init(&conn->resend_queue, &conn->send_queue);
 	list_for_each_entry_safe(msend, tmp, &conn->send_queue, head) {
-		list_del_init(&msend->head);
-		kfree(msend);
+		free_msend(ninf, msend);
 	}
 
 	/* accepted sockets are removed from their listener's list */
@@ -1473,6 +1492,41 @@ static void net_tseq_show_conn(struct seq_file *m,
 		   conn->next_send_id, conn->last_proc_id);
 }
 
+/*
+ * How's this for sneaky?!  We line up the structs so that the entries
+ * and function pointers are at the same offsets.  recv's function
+ * pointer value is known and can't be found in send's.
+ */
+static bool tseq_entry_is_recv(struct scoutfs_tseq_entry *ent)
+{
+	struct message_recv *mrecv =
+		container_of(ent, struct message_recv, tseq_entry);
+
+	BUILD_BUG_ON(offsetof(struct message_recv, tseq_entry) !=
+		     offsetof(struct message_send, tseq_entry));
+	BUILD_BUG_ON(offsetof(struct message_recv, proc_work.func) !=
+		     offsetof(struct message_send, resp_func));
+
+	return mrecv->proc_work.func == scoutfs_net_proc_worker;
+}
+
+static void net_tseq_show_msg(struct seq_file *m,
+			      struct scoutfs_tseq_entry *ent)
+{
+	struct message_send *msend;
+	struct message_recv *mrecv;
+
+	if (tseq_entry_is_recv(ent)) {
+		mrecv = container_of(ent, struct message_recv, tseq_entry);
+
+		seq_printf(m, "recv "SNH_FMT"\n", SNH_ARG(&mrecv->nh));
+	} else {
+		msend = container_of(ent, struct message_send, tseq_entry);
+
+		seq_printf(m, "send "SNH_FMT"\n", SNH_ARG(&msend->nh));
+	}
+}
+
 int scoutfs_net_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -1492,6 +1546,7 @@ int scoutfs_net_setup(struct super_block *sb)
 	sbi->net_info = ninf;
 
 	scoutfs_tseq_tree_init(&ninf->conn_tseq_tree, net_tseq_show_conn);
+	scoutfs_tseq_tree_init(&ninf->msg_tseq_tree, net_tseq_show_msg);
 
 	ninf->shutdown_workq = alloc_workqueue("scoutfs_net_shutdown",
 					      WQ_UNBOUND, 0);
@@ -1504,6 +1559,14 @@ int scoutfs_net_setup(struct super_block *sb)
 						     sbi->debug_root,
 						     &ninf->conn_tseq_tree);
 	if (!ninf->conn_tseq_dentry) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ninf->msg_tseq_dentry = scoutfs_tseq_create("messages",
+						    sbi->debug_root,
+						    &ninf->msg_tseq_tree);
+	if (!ninf->msg_tseq_dentry) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -1524,6 +1587,7 @@ void scoutfs_net_destroy(struct super_block *sb)
 		if (ninf->shutdown_workq)
 			destroy_workqueue(ninf->shutdown_workq);
 		debugfs_remove(ninf->conn_tseq_dentry);
+		debugfs_remove(ninf->msg_tseq_dentry);
 		kfree(ninf);
 		sbi->net_info = NULL;
 	}

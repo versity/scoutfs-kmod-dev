@@ -23,6 +23,8 @@ do {									\
 	__entry->name##_port
 
 #define SNH_FMT	"id %llu data_len %u msg %u cmd %u error %u"
+#define SNH_ARG(nh) le64_to_cpu((nh)->id), le16_to_cpu((nh)->data_len), \
+		    (nh)->msg, (nh)->cmd, (nh)->error
 
 #define snh_trace_define(name)		\
 	__field(__u64, name##_id)	\

@@ -3,6 +3,7 @@
 
 #include <linux/dlm.h>
 #include "key.h"
+#include "tseq.h"
 
 #define SCOUTFS_LKF_REFRESH_INODE	0x01 /* update stale inode from item */
 #define SCOUTFS_LKF_NONBLOCK		0x02 /* only use already held locks */
@@ -40,6 +41,8 @@ struct scoutfs_lock {
 	int work_mode;
 	unsigned int waiters[SCOUTFS_LOCK_NR_MODES];
 	unsigned int users[SCOUTFS_LOCK_NR_MODES];
+
+	struct scoutfs_tseq_entry tseq_entry;
 };
 
 struct scoutfs_lock_coverage {

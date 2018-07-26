@@ -17,8 +17,6 @@
 #include <linux/dlm.h>
 #include <linux/mm.h>
 #include <linux/sort.h>
-#include <linux/debugfs.h>
-#include <linux/idr.h>
 #include <linux/ctype.h>
 
 #include "super.h"
@@ -32,6 +30,7 @@
 #include "counters.h"
 #include "endian_swap.h"
 #include "triggers.h"
+#include "tseq.h"
 
 /*
  * scoutfs manages internode item cache consistency using the kernel's
@@ -78,9 +77,9 @@ struct lock_info {
 	unsigned long long lru_nr;
 	struct workqueue_struct *workq;
 	dlm_lockspace_t *lockspace;
-	struct dentry *debug_locks_dentry;
-	struct idr debug_locks_idr;
 	atomic64_t next_refresh_gen;
+	struct dentry *tseq_dentry;
+	struct scoutfs_tseq_tree tseq_tree;
 };
 
 #define DECLARE_LOCK_INFO(sb, name) \
@@ -181,8 +180,7 @@ static void lock_free(struct lock_info *linfo, struct scoutfs_lock *lock)
 	BUG_ON(!linfo->shutdown && lock->granted_mode != DLM_LOCK_IV);
 	BUG_ON(delayed_work_pending(&lock->grace_work));
 
-	if (lock->debug_locks_id)
-		idr_remove(&linfo->debug_locks_idr, lock->debug_locks_id);
+	scoutfs_tseq_del(&linfo->tseq_tree, &lock->tseq_entry);
 	if (!RB_EMPTY_NODE(&lock->node))
 		rb_erase(&lock->node, &linfo->lock_tree);
 	if (!RB_EMPTY_NODE(&lock->range_node))
@@ -202,7 +200,6 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
-	int id;
 
 	if (WARN_ON_ONCE(!!start != !!end))
 		return NULL;
@@ -212,18 +209,6 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 		return NULL;
 
 	scoutfs_inc_counter(sb, lock_alloc);
-
-	idr_preload(GFP_NOFS);
-	spin_lock(&linfo->lock);
-	id = idr_alloc(&linfo->debug_locks_idr, lock, 1, INT_MAX, GFP_NOWAIT);
-	if (id > 0)
-		lock->debug_locks_id = id;
-	spin_unlock(&linfo->lock);
-	idr_preload_end();
-	if (id <= 0) {
-		lock_free(linfo, lock);
-		return NULL;
-	}
 
 	RB_CLEAR_NODE(&lock->node);
 	RB_CLEAR_NODE(&lock->range_node);
@@ -247,6 +232,7 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 	lock->work_prev_mode = DLM_LOCK_IV;
 	lock->work_mode = DLM_LOCK_IV;
 
+	scoutfs_tseq_add(&linfo->tseq_tree, &lock->tseq_entry);
 	trace_scoutfs_lock_alloc(sb, lock);
 
 	return lock;
@@ -1285,50 +1271,10 @@ void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr)
 	linfo->shrinker.shrink(&linfo->shrinker, &sc);
 }
 
-/* _stop is always called no matter what start returns */
-static void *scoutfs_debug_locks_seq_start(struct seq_file *m, loff_t *pos)
-	__acquires(linfo->lock)
+static void lock_tseq_show(struct seq_file *m, struct scoutfs_tseq_entry *ent)
 {
-	struct super_block *sb = m->private;
-	DECLARE_LOCK_INFO(sb, linfo);
-	int id;
-
-	spin_lock(&linfo->lock);
-
-	if (*pos >= INT_MAX)
-		return NULL;
-
-	id = *pos;
-	return idr_get_next(&linfo->debug_locks_idr, &id);
-}
-
-static void *scoutfs_debug_locks_seq_next(struct seq_file *m, void *v,
-					  loff_t *pos)
-{
-	struct super_block *sb = m->private;
-	DECLARE_LOCK_INFO(sb, linfo);
-	struct scoutfs_lock *lock = v;
-	int id;
-
-	id = lock->debug_locks_id + 1;
-	lock = idr_get_next(&linfo->debug_locks_idr, &id);
-	if (lock)
-		*pos = lock->debug_locks_id;
-	return lock;
-}
-
-static void scoutfs_debug_locks_seq_stop(struct seq_file *m, void *v)
-	__releases(linfo->lock)
-{
-	struct super_block *sb = m->private;
-	DECLARE_LOCK_INFO(sb, linfo);
-
-	spin_unlock(&linfo->lock);
-}
-
-static int scoutfs_debug_locks_seq_show(struct seq_file *m, void *v)
-{
-	struct scoutfs_lock *lock = v;
+	struct scoutfs_lock *lock =
+		container_of(ent, struct scoutfs_lock, tseq_entry);
 
 	seq_printf(m, "name "LN_FMT" start "SK_FMT" end "SK_FMT" refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u dlmlksb: status %d lkid 0x%x flags 0x%x\n",
 			   LN_ARG(&lock->name), SK_ARG(&lock->start),
@@ -1344,36 +1290,7 @@ static int scoutfs_debug_locks_seq_show(struct seq_file *m, void *v)
 			   lock->lksb.sb_status,
 			   lock->lksb.sb_lkid,
 			   lock->lksb.sb_flags);
-
-	return 0;
 }
-
-static const struct seq_operations scoutfs_debug_locks_seq_ops = {
-	.start =	scoutfs_debug_locks_seq_start,
-	.next =		scoutfs_debug_locks_seq_next,
-	.stop =		scoutfs_debug_locks_seq_stop,
-	.show =		scoutfs_debug_locks_seq_show,
-};
-
-static int scoutfs_debug_locks_open(struct inode *inode, struct file *file)
-{
-	struct seq_file *m;
-	int ret;
-
-	ret = seq_open(file, &scoutfs_debug_locks_seq_ops);
-	if (ret == 0) {
-		m = file->private_data;
-		m->private = inode->i_private;
-	}
-	return ret;
-}
-
-static const struct file_operations scoutfs_debug_locks_fops = {
-	.open	=	scoutfs_debug_locks_open,
-	.release =	seq_release,
-	.read =		seq_read,
-	.llseek =	seq_lseek,
-};
 
 /*
  * We're going to be destroying the locks soon.  We shouldn't have any
@@ -1472,7 +1389,7 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	}
 
 	/* XXX does anything synchronize with open debugfs fds? */
-	debugfs_remove(linfo->debug_locks_dentry);
+	debugfs_remove(linfo->tseq_dentry);
 
 	/* free our stale locks that now describe released dlm locks */
 	spin_lock(&linfo->lock);
@@ -1484,7 +1401,6 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	}
 	spin_unlock(&linfo->lock);
 
-	idr_destroy(&linfo->debug_locks_idr);
 	kfree(linfo);
 	sbi->lock_info = NULL;
 }
@@ -1515,16 +1431,15 @@ int scoutfs_lock_setup(struct super_block *sb)
 	linfo->shrinker.seeks = DEFAULT_SEEKS;
 	register_shrinker(&linfo->shrinker);
 	INIT_LIST_HEAD(&linfo->lru_list);
-	idr_init(&linfo->debug_locks_idr);
 	atomic64_set(&linfo->next_refresh_gen, 0);
+	scoutfs_tseq_tree_init(&linfo->tseq_tree, lock_tseq_show);
 
 	sbi->lock_info = linfo;
 	trace_scoutfs_lock_setup(sb, linfo);
 
-	linfo->debug_locks_dentry = debugfs_create_file("locks",
-					S_IFREG|S_IRUSR, sbi->debug_root, sb,
-					&scoutfs_debug_locks_fops);
-	if (!linfo->debug_locks_dentry) {
+	linfo->tseq_dentry = scoutfs_tseq_create("locks", sbi->debug_root,
+						 &linfo->tseq_tree);
+	if (!linfo->tseq_dentry) {
 		ret = -ENOMEM;
 		goto out;
 	}

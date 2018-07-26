@@ -609,7 +609,6 @@ struct scoutfs_net_manifest_entry {
 	struct scoutfs_key first;
 	struct scoutfs_key last;
 	__u8 level;
-	__u8 keys[0];
 } __packed;
 
 struct scoutfs_net_statfs {

@@ -369,6 +369,7 @@ struct scoutfs_super_block {
 	struct scoutfs_btree_ring bring;
 	__le64 next_seg_seq;
 	__le64 next_node_id;
+	__le64 next_compact_id;
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
 	struct scoutfs_inet_addr server_addr;
@@ -548,6 +549,7 @@ enum {
 	SCOUTFS_NET_CMD_GET_LAST_SEQ,
 	SCOUTFS_NET_CMD_GET_MANIFEST_ROOT,
 	SCOUTFS_NET_CMD_STATFS,
+	SCOUTFS_NET_CMD_COMPACT,
 	SCOUTFS_NET_CMD_UNKNOWN,
 };
 
@@ -623,15 +625,49 @@ struct scoutfs_net_extent_list {
 /* arbitrarily makes a nice ~1k extent list payload */
 #define SCOUTFS_NET_EXTENT_LIST_MAX_NR	64
 
-/* XXX eventually we'll have net compaction and will need agents to agree */
-
 /* one upper segment and fanout lower segments */
-#define SCOUTFS_COMPACTION_MAX_INPUT	(1 + SCOUTFS_MANIFEST_FANOUT)
-/* sticky can add one, and so can item page alignment */
-#define SCOUTFS_COMPACTION_SLOP		2
-/* delete all inputs and insert all outputs (same goes for alloc|free segnos) */
-#define SCOUTFS_COMPACTION_MAX_UPDATE \
-	(2 * (SCOUTFS_COMPACTION_MAX_INPUT + SCOUTFS_COMPACTION_SLOP))
+#define SCOUTFS_COMPACTION_MAX_INPUT        (1 + SCOUTFS_MANIFEST_FANOUT)
+/* sticky can split the input and item alignment padding can add a lower */
+#define SCOUTFS_COMPACTION_SEGNO_OVERHEAD   2
+#define SCOUTFS_COMPACTION_MAX_OUTPUT       \
+	(SCOUTFS_COMPACTION_MAX_INPUT + SCOUTFS_COMPACTION_SEGNO_OVERHEAD)
+
+/*
+ * A compact request is sent by the server to the client.  It provides
+ * the input segments and enough allocated segnos to write the results.
+ * The id uniquely identifies this compaction request and is included in
+ * the response to clean up its allocated resources.
+ */
+struct scoutfs_net_compact_request {
+	__le64 id;
+	__u8 last_level;
+	__u8 flags;
+	__le64 segnos[SCOUTFS_COMPACTION_MAX_OUTPUT];
+	struct scoutfs_net_manifest_entry ents[SCOUTFS_COMPACTION_MAX_INPUT];
+} __packed;
+
+/*
+ * A sticky compaction has more lower level segments that overlap with
+ * the end of the upper after the last lower level segment included in
+ * the compaction.  Items left in the upper segment after the last lower
+ * need to be written to the upper level instead of the lower.  The
+ * upper segment "sticks" in place instead of moving down to the lower
+ * level.
+ */
+#define SCOUTFS_NET_COMPACT_FLAG_STICKY (1 << 0)
+
+/*
+ * A compact response is sent by the client to the server.  It describes
+ * the written output segments that need to be added to the manifest.
+ * The server compares the response to the request to free unused
+ * allocated segnos and input manifest entries.  An empty response is
+ * valid and can happen if, say, the upper input segment completely
+ * deleted all the items in a single overlapping lower segment.
+ */
+struct scoutfs_net_compact_response {
+	__le64 id;
+	struct scoutfs_net_manifest_entry ents[SCOUTFS_COMPACTION_MAX_OUTPUT];
+} __packed;
 
 /*
  * Scoutfs file handle structure - this can be copied out to userspace

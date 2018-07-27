@@ -15,7 +15,9 @@
 	EXPAND_COUNTER(btree_read_error)			\
 	EXPAND_COUNTER(btree_stale_read)			\
 	EXPAND_COUNTER(btree_write_error)			\
+	EXPAND_COUNTER(compact_invalid_request)			\
 	EXPAND_COUNTER(compact_operations)			\
+	EXPAND_COUNTER(compact_segment_busy)			\
 	EXPAND_COUNTER(compact_segment_moved)			\
 	EXPAND_COUNTER(compact_segment_read)			\
 	EXPAND_COUNTER(compact_segment_write_bytes)		\

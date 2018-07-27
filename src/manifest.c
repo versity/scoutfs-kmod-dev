@@ -29,6 +29,7 @@
 #include "counters.h"
 #include "triggers.h"
 #include "client.h"
+#include "spbm.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -47,6 +48,8 @@ struct manifest {
 
 	/* calculated on mount, const thereafter */
 	u64 level_limits[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
+	u64 compacts_pending[SCOUTFS_MANIFEST_MAX_LEVEL + 1];
+	struct scoutfs_spbm segno_busy;
 
 	unsigned long flags;
 
@@ -884,6 +887,121 @@ out:
 	return ret;
 }
 
+static bool level_should_compact(struct super_block *sb, int level)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+
+	BUG_ON(!rwsem_is_locked(&mani->rwsem));
+
+	return ((s64)le64_to_cpu(super->manifest.level_counts[level]) -
+	        (s64)mani->compacts_pending[level]) > mani->level_limits[level];
+}
+
+int scoutfs_manifest_should_compact(struct super_block *sb)
+{
+	DECLARE_MANIFEST(sb, mani);
+	bool should = false;
+	int level;
+
+	down_read(&mani->rwsem);
+	for (level = mani->nr_levels - 1; level >= 0; level--) {
+		if (level_should_compact(sb, level)) {
+			should = true;
+			break;
+		}
+	}
+	up_read(&mani->rwsem);
+
+	return should;
+}
+
+/*
+ * Record that a compaction operation is in flight.  We mark the segnos
+ * involved so that we don't use them as inputs for other compactions
+ * and assume that the compaction will delete a segment from its upper
+ * level when deciding what level to compact.
+ */
+static int start_compact_request(struct super_block *sb,
+				 struct scoutfs_net_compact_request *req)
+{
+	DECLARE_MANIFEST(sb, mani);
+	int level;
+	int ret = 0;
+	int i;
+
+	BUG_ON(!rwsem_is_locked(&mani->rwsem));
+
+	for (i = 0; i < ARRAY_SIZE(req->ents); i++) {
+		if (req->ents[i].segno == 0)
+			break;
+
+		ret = scoutfs_spbm_set(&mani->segno_busy,
+				       le64_to_cpu(req->ents[i].segno));
+		if (ret) {
+			while (i-- > 0)
+				scoutfs_spbm_clear(&mani->segno_busy,
+					le64_to_cpu(req->ents[i].segno));
+			break;
+		}
+	}
+
+	if (ret == 0) {
+		level = req->ents[0].level;
+		mani->compacts_pending[level]++;
+	}
+
+	return ret;
+}
+
+/*
+ * A compaction request has completed.  No longer account for it in the
+ * level pending counts and stop tracking all its segments.
+ *
+ * This can be called in error paths with an empty zeroed request and it
+ * will do nothing.
+ */
+void scoutfs_manifest_compact_done(struct super_block *sb,
+				   struct scoutfs_net_compact_request *req)
+{
+	DECLARE_MANIFEST(sb, mani);
+	int level;
+	int i;
+
+	down_write(&mani->rwsem);
+
+	for (i = 0; i < ARRAY_SIZE(req->ents); i++) {
+		if (req->ents[i].segno == 0)
+			break;
+
+		scoutfs_spbm_clear(&mani->segno_busy,
+				   le64_to_cpu(req->ents[i].segno));
+	}
+
+	if (i > 0) {
+		level = req->ents[0].level;
+		mani->compacts_pending[level]--;
+	}
+
+	up_write(&mani->rwsem);
+}
+
+static int add_entry_unless_busy(struct super_block *sb,
+				 struct scoutfs_net_compact_request *req,
+				 unsigned int ind,
+				 struct scoutfs_manifest_entry *ment)
+{
+	DECLARE_MANIFEST(sb, mani);
+
+	if (scoutfs_spbm_test(&mani->segno_busy, ment->segno)) {
+		scoutfs_inc_counter(sb, compact_segment_busy);
+		return -EAGAIN;
+	}
+
+	scoutfs_init_ment_to_net(&req->ents[ind], ment);
+	return 0;
+}
+
 /*
  * Give the caller the segments that will be involved in the next
  * compaction.
@@ -898,15 +1016,19 @@ out:
  * We add all the segments to the compaction caller's data and let it do
  * its thing.  It'll allocate and free segments and update the manifest.
  *
- * Returns the number of input segments or -errno.
+ * Returns:
+ *  0:        no compactions were needed at the given level
+ *  > 0:      number of total imput segments in the compaction
+ *  -EAGAIN:  segments were already in a pending compaction
+ *  -errno:   fatal error
  *
- * XXX this will get a lot more clever:
- *  - ensuring concurrent compactions don't overlap
+ * XXX this could be more clever:
  *  - prioritize segments with deletion or incremental records
  *  - prioritize partial segments
  *  - maybe compact segments by age in a given level
  */
-int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
+static int next_compact_req(struct super_block *sb, int level,
+			    struct scoutfs_net_compact_request *req)
 {
 	DECLARE_MANIFEST(sb, mani);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -918,30 +1040,17 @@ int scoutfs_manifest_next_compact(struct super_block *sb, void *data)
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	SCOUTFS_BTREE_ITEM_REF(over_iref);
 	SCOUTFS_BTREE_ITEM_REF(prev);
-	struct scoutfs_key zeros;
+	static struct scoutfs_key zeros;
 	bool wrapped;
 	bool sticky;
-	int level;
 	int ret;
 	int nr = 0;
 	int i;
 
 	scoutfs_key_set_zeros(&zeros);
+	memset(req, 0, sizeof(*req));
 
-	down_write(&mani->rwsem);
-
-	for (level = mani->nr_levels - 1; level >= 0; level--) {
-		if (le64_to_cpu(super->manifest.level_counts[level]) >
-	            mani->level_limits[level])
-			break;
-	}
-
-	trace_scoutfs_manifest_next_compact(sb, level);
-
-	if (level < 0) {
-		ret = 0;
-		goto out;
-	}
+	BUG_ON(!rwsem_is_locked(&mani->rwsem));
 
 	/* fill ment and ret == 0 if we find an entry at the level */
 	if (level == 0) {
@@ -1003,9 +1112,9 @@ again:
 	}
 
 	/* add the upper input segment */
-	ret = scoutfs_compact_add(sb, data, &ment);
+	ret = add_entry_unless_busy(sb, req, nr, &ment);
 	if (ret)
-		goto out;
+		goto skip;
 	nr++;
 
 	/* and add a fanout's worth of lower overlapping segments */
@@ -1029,7 +1138,7 @@ again:
 			break;
 		}
 
-		ret = scoutfs_compact_add(sb, data, &over);
+		ret = add_entry_unless_busy(sb, req, nr, &over);
 		if (ret)
 			goto out;
 		nr++;
@@ -1042,21 +1151,100 @@ again:
 	if (ret < 0 && ret != -ENOENT)
 		goto out;
 
-	scoutfs_compact_describe(sb, data, level, mani->nr_levels - 1, sticky);
+	req->last_level = mani->nr_levels - 1;
+	if (sticky)
+		req->flags |= SCOUTFS_NET_COMPACT_FLAG_STICKY;
 
+	ret = start_compact_request(sb, req);
+	if (ret)
+		goto out;
+
+	ret = 0;
+skip:
 	/* record the next key to start from */
 	mani->compact_keys[level] = ment.last;
 	scoutfs_key_inc(&mani->compact_keys[level]);
-
-	ret = 0;
 out:
-	up_write(&mani->rwsem);
-
 	scoutfs_btree_put_iref(&iref);
 	scoutfs_btree_put_iref(&over_iref);
 	scoutfs_btree_put_iref(&prev);
 
 	return ret ?: nr;
+}
+
+/*
+ * Find the next segment to compact into its lower overlapping segments.
+ * Fill out the callers request describing all the segments involved in
+ * the operation.
+ *
+ * First we search for a level to compact.  A level needs compaction if
+ * it has more segments than its limit.  We search from the bottom up
+ * because segments are written at the top when there's space.  By
+ * compacting from the bottom we pull new segments down until there's
+ * space.  If we compacted from the top down then we could create an
+ * imbalanced top-heavy structure.
+ *
+ * At each level we find the segment from a cursor and try to compact it
+ * into its lower segments.  Any of the segments involved could already
+ * be part of a pending compaction and need to be skipped.  In that case
+ * we move to the next segment at the level.  All the segments at the
+ * level could be busy so we detect when we skip to the first value we
+ * skipped to and move on.
+ *
+ * If we return a filled compact request then we've tracked it.  We
+ * assume it will delete an upper segment and have marked all its segnos
+ * as busy so they won't be used by future compaction requests.  The
+ * caller must call complete_done when the compact operation completes.
+ */
+int scoutfs_manifest_next_compact(struct super_block *sb,
+				  struct scoutfs_net_compact_request *req)
+{
+	DECLARE_MANIFEST(sb, mani);
+	struct scoutfs_key key = {0,};
+	bool first;
+	int level;
+	int ret = 0;
+
+	memset(req, 0, sizeof(*req));
+
+	down_write(&mani->rwsem);
+
+	for (level = mani->nr_levels - 1; level >= 0; level--) {
+		if (!level_should_compact(sb, level))
+			continue;
+
+		first = true;
+
+		for (;;) {
+			ret = next_compact_req(sb, level, req);
+			if (ret > 0 || (ret < 0 && ret != -EAGAIN))
+				goto out;
+			if (ret == 0)
+				break;
+
+			/* remember first skip and keep going */
+			if (first) {
+				first = false;
+				key = mani->compact_keys[level];
+				continue;
+			}
+
+			/* bail if we looped around */
+			if (!scoutfs_key_compare(&key,
+						 &mani->compact_keys[level])) {
+				ret = 0;
+				break;
+			}
+		}
+		/* continue to next level */
+	}
+
+out:
+	up_write(&mani->rwsem);
+
+	trace_scoutfs_manifest_next_compact(sb, level, ret);
+
+	return ret;
 }
 
 int scoutfs_manifest_setup(struct super_block *sb)
@@ -1071,6 +1259,7 @@ int scoutfs_manifest_setup(struct super_block *sb)
 		return -ENOMEM;
 
 	init_rwsem(&mani->rwsem);
+	scoutfs_spbm_init(&mani->segno_busy);
 
 	for (i = 0; i < ARRAY_SIZE(mani->compact_keys); i++)
 		scoutfs_key_set_zeros(&mani->compact_keys[i]);
@@ -1101,6 +1290,7 @@ void scoutfs_manifest_destroy(struct super_block *sb)
 	struct manifest *mani = sbi->manifest;
 
 	if (mani) {
+		scoutfs_spbm_destroy(&mani->segno_busy);
 		kfree(mani);
 		sbi->manifest = NULL;
 	}

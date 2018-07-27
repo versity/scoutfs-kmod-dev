@@ -34,7 +34,6 @@ void scoutfs_seg_put(struct scoutfs_segment *seg);
 
 int scoutfs_seg_alloc(struct super_block *sb, u64 segno,
 		      struct scoutfs_segment **seg_ret);
-int scoutfs_seg_free_segno(struct super_block *sb, struct scoutfs_segment *seg);
 bool scoutfs_seg_fits_single(u32 nr_items, u32 val_bytes);
 bool scoutfs_seg_append_item(struct super_block *sb, struct scoutfs_segment *seg,
 			     struct scoutfs_key *key, struct kvec *val,

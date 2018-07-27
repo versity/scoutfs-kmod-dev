@@ -38,7 +38,11 @@ int scoutfs_manifest_read_items(struct super_block *sb,
 int scoutfs_manifest_next_key(struct super_block *sb, struct scoutfs_key *key,
 			      struct scoutfs_key *next_key);
 
-int scoutfs_manifest_next_compact(struct super_block *sb, void *data);
+int scoutfs_manifest_should_compact(struct super_block *sb);
+int scoutfs_manifest_next_compact(struct super_block *sb,
+				  struct scoutfs_net_compact_request *req);
+void scoutfs_manifest_compact_done(struct super_block *sb,
+				   struct scoutfs_net_compact_request *req);
 
 bool scoutfs_manifest_level0_full(struct super_block *sb);
 

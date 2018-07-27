@@ -348,7 +348,7 @@ static int submit_send(struct super_block *sb,
 	    WARN_ON_ONCE(flags & SCOUTFS_NET_FLAGS_UNKNOWN) ||
 	    WARN_ON_ONCE(net_err >= SCOUTFS_NET_ERR_UNKNOWN) ||
 	    WARN_ON_ONCE(data_len > SCOUTFS_NET_MAX_DATA_LEN) ||
-	    WARN_ON_ONCE(data_len && (!data || net_err)) ||
+	    WARN_ON_ONCE(data_len && data == NULL) ||
 	    WARN_ON_ONCE(net_err && (!(flags & SCOUTFS_NET_FLAG_RESPONSE))) ||
 	    WARN_ON_ONCE(id == 0 && (flags & SCOUTFS_NET_FLAG_RESPONSE)))
 		return -EINVAL;
@@ -430,12 +430,13 @@ static void saw_valid_greeting(struct scoutfs_net_connection *conn, u64 node_id)
 
 	conn->valid_greeting = 1;
 	conn->node_id = node_id;
-	if (conn->notify_up)
-		conn->notify_up(sb, conn, conn->info, node_id);
 	list_splice_tail_init(&conn->resend_queue, &conn->send_queue);
 	queue_work(conn->workq, &conn->send_work);
 
 	spin_unlock(&conn->lock);
+
+	if (conn->notify_up)
+		conn->notify_up(sb, conn, conn->info, node_id);
 }
 
 /*
@@ -587,10 +588,6 @@ static bool invalid_message(struct scoutfs_net_header *nh)
 	if (nh->cmd >= SCOUTFS_NET_CMD_UNKNOWN ||
 	    (nh->flags & SCOUTFS_NET_FLAGS_UNKNOWN) ||
 	    nh->error >= SCOUTFS_NET_ERR_UNKNOWN)
-		return true;
-
-	/* errors can't have payloads */
-	if (nh->data_len != 0 && nh->error != SCOUTFS_NET_ERR_NONE)
 		return true;
 
 	/* payloads have a limit */

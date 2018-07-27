@@ -358,6 +358,63 @@ out:
 }
 
 /*
+ * Perform a compaction in the client as requested by the server.  The
+ * server has protected the input segments and allocated the output
+ * segnos for us.  This executes in work queued by the client's net
+ * connection.  It only reads and write segments.  The server will
+ * update the manifest and allocators while processing the response.  An
+ * error response includes the compaction id so that the server can
+ * clean it up.
+ *
+ * If we get duplicate requests across a reconnected socket we can have
+ * two workers performing the same compaction simultaneously.  This
+ * isn't particularly efficient but it's rare and won't corrupt the
+ * output.  Our response can be lost if the socket is shutdown while
+ * it's in flight, the server deals with this.
+ */
+static int client_compact(struct super_block *sb,
+			  struct scoutfs_net_connection *conn,
+			  u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	struct scoutfs_net_compact_response *resp = NULL;
+	struct scoutfs_net_compact_request *req;
+	int ret;
+
+	if (arg_len != sizeof(struct scoutfs_net_compact_request)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	req = arg;
+
+	trace_scoutfs_client_compact_start(sb, le64_to_cpu(req->id),
+					   req->last_level, req->flags);
+
+	resp = kzalloc(sizeof(struct scoutfs_net_compact_response), GFP_NOFS);
+	if (!resp) {
+		ret = -ENOMEM;
+	} else {
+		resp->id = req->id;
+		ret = scoutfs_compact(sb, req, resp);
+	}
+
+	trace_scoutfs_client_compact_stop(sb, le64_to_cpu(req->id), ret);
+
+	if (ret < 0)
+		ret = scoutfs_net_response(sb, conn, cmd, id, ret,
+					   &req->id, sizeof(req->id));
+	else
+		ret = scoutfs_net_response(sb, conn, cmd, id, 0,
+					   resp, sizeof(*resp));
+	kfree(resp);
+out:
+	return ret;
+}
+
+static scoutfs_net_request_t client_req_funcs[] = {
+	[SCOUTFS_NET_CMD_COMPACT]		= client_compact,
+};
+
+/*
  * Called when either a connect attempt or established connection times
  * out and fails.
  */
@@ -405,9 +462,8 @@ int scoutfs_client_setup(struct super_block *sb)
 	INIT_DELAYED_WORK(&client->connect_dwork,
 			  scoutfs_client_connect_worker);
 
-	/* client doesn't process any incoming requests yet */
 	client->conn = scoutfs_net_alloc_conn(sb, NULL, client_notify_down, 0,
-					      NULL, "client");
+					      client_req_funcs, "client");
 	if (!client->conn) {
 		ret = -ENOMEM;
 		goto out;

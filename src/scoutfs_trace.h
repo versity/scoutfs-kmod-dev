@@ -998,21 +998,24 @@ TRACE_EVENT(scoutfs_xattr_set,
 );
 
 TRACE_EVENT(scoutfs_manifest_next_compact,
-	TP_PROTO(struct super_block *sb, int level),
+	TP_PROTO(struct super_block *sb, int level, int ret),
 
-	TP_ARGS(sb, level),
+	TP_ARGS(sb, level, ret),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
 		__field(int, level)
+		__field(int, ret)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
 		__entry->level = level;
+		__entry->ret = ret;
 	),
 
-	TP_printk(FSID_FMT" level %d", __entry->fsid, __entry->level)
+	TP_printk(FSID_FMT" level %d ret %d", __entry->fsid, __entry->level,
+		  __entry->ret)
 );
 
 TRACE_EVENT(scoutfs_advance_dirty_super,
@@ -1069,22 +1072,127 @@ TRACE_EVENT(scoutfs_dir_add_next_linkref,
 		  __entry->found_dir_ino, __entry->name_len)
 );
 
-TRACE_EVENT(scoutfs_compact_func,
-	TP_PROTO(struct super_block *sb, int ret),
+TRACE_EVENT(scoutfs_client_compact_start,
+	TP_PROTO(struct super_block *sb, u64 id, u8 last_level, u8 flags),
 
-	TP_ARGS(sb, ret),
+	TP_ARGS(sb, id, last_level, flags),
 
 	TP_STRUCT__entry(
 		__field(__u64, fsid)
+		__field(__u64, id)
+		__field(__u8, last_level)
+		__field(__u8, flags)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->id = id;
+		__entry->last_level = last_level;
+		__entry->flags = flags;
+	),
+
+	TP_printk("fsid "FSID_FMT" id %llu last_level %u flags 0x%x",
+		  __entry->fsid, __entry->id, __entry->last_level,
+		  __entry->flags)
+);
+
+TRACE_EVENT(scoutfs_client_compact_stop,
+	TP_PROTO(struct super_block *sb, u64 id, int ret),
+
+	TP_ARGS(sb, id, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, id)
 		__field(int, ret)
 	),
 
 	TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
+		__entry->id = id;
 		__entry->ret = ret;
 	),
 
-	TP_printk(FSID_FMT" ret %d", __entry->fsid, __entry->ret)
+	TP_printk("fsid "FSID_FMT" id %llu ret %d",
+		  __entry->fsid, __entry->id, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_server_compact_start,
+	TP_PROTO(struct super_block *sb, u64 id, u8 level, u64 node_id,
+		 unsigned long client_nr, unsigned long server_nr,
+		 unsigned long per_client),
+
+	TP_ARGS(sb, id, level, node_id, client_nr, server_nr, per_client),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, id)
+		__field(__u8, level)
+		__field(__u64, node_id)
+		__field(unsigned long, client_nr)
+		__field(unsigned long, server_nr)
+		__field(unsigned long, per_client)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->id = id;
+		__entry->level = level;
+		__entry->node_id = node_id;
+		__entry->client_nr = client_nr;
+		__entry->server_nr = server_nr;
+		__entry->per_client = per_client;
+	),
+
+	TP_printk("fsid "FSID_FMT" id %llu level %u node_id %llu client_nr %lu server_nr %lu per_client %lu",
+		  __entry->fsid, __entry->id, __entry->level, __entry->node_id,
+		  __entry->client_nr, __entry->server_nr, __entry->per_client)
+);
+
+TRACE_EVENT(scoutfs_server_compact_done,
+	TP_PROTO(struct super_block *sb, u64 id, u64 node_id,
+		 unsigned long server_nr),
+
+	TP_ARGS(sb, id, node_id, server_nr),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, id)
+		__field(__u64, node_id)
+		__field(unsigned long, server_nr)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->id = id;
+		__entry->node_id = node_id;
+		__entry->server_nr = server_nr;
+	),
+
+	TP_printk("fsid "FSID_FMT" id %llu node_id %llu server_nr %lu",
+		  __entry->fsid, __entry->id, __entry->node_id,
+		  __entry->server_nr)
+);
+
+TRACE_EVENT(scoutfs_server_compact_response,
+	TP_PROTO(struct super_block *sb, u64 id, int error),
+
+	TP_ARGS(sb, id, error),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, id)
+		__field(int, error)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->id = id;
+		__entry->error = error;
+	),
+
+	TP_printk("fsid "FSID_FMT" id %llu error %d",
+		  __entry->fsid, __entry->id, __entry->error)
 );
 
 TRACE_EVENT(scoutfs_write_begin,
@@ -1272,6 +1380,12 @@ DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_delete,
 );
 
 DEFINE_EVENT(scoutfs_manifest_class, scoutfs_compact_input,
+        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
+		 struct scoutfs_key *first, struct scoutfs_key *last),
+        TP_ARGS(sb, level, segno, seq, first, last)
+);
+
+DEFINE_EVENT(scoutfs_manifest_class, scoutfs_compact_output,
         TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
 		 struct scoutfs_key *first, struct scoutfs_key *last),
         TP_ARGS(sb, level, segno, seq, first, last)
@@ -1691,6 +1805,14 @@ DEFINE_EVENT(scoutfs_work_class, scoutfs_server_commit_work_enter,
         TP_ARGS(sb, data, ret)
 );
 DEFINE_EVENT(scoutfs_work_class, scoutfs_server_commit_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_compact_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_server_compact_work_exit,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
 );
@@ -2266,6 +2388,39 @@ DEFINE_EVENT(scoutfs_segno_class, scoutfs_alloc_segno,
 DEFINE_EVENT(scoutfs_segno_class, scoutfs_free_segno,
 	TP_PROTO(struct super_block *sb, u64 segno),
 	TP_ARGS(sb, segno)
+);
+DEFINE_EVENT(scoutfs_segno_class, scoutfs_remove_segno,
+	TP_PROTO(struct super_block *sb, u64 segno),
+	TP_ARGS(sb, segno)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_server_client_count_class,
+	TP_PROTO(struct super_block *sb, u64 node_id, unsigned long nr_clients),
+
+	TP_ARGS(sb, node_id, nr_clients),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__s64, node_id)
+		__field(unsigned long, nr_clients)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->node_id = node_id;
+		__entry->nr_clients = nr_clients;
+	),
+
+	TP_printk("fsid "FSID_FMT" node_id %llu nr_clients %lu",
+		  __entry->fsid, __entry->node_id, __entry->nr_clients)
+);
+DEFINE_EVENT(scoutfs_server_client_count_class, scoutfs_server_client_up,
+	TP_PROTO(struct super_block *sb, u64 node_id, unsigned long nr_clients),
+	TP_ARGS(sb, node_id, nr_clients)
+);
+DEFINE_EVENT(scoutfs_server_client_count_class, scoutfs_server_client_down,
+	TP_PROTO(struct super_block *sb, u64 node_id, unsigned long nr_clients),
+	TP_ARGS(sb, node_id, nr_clients)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

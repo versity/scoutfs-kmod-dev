@@ -315,15 +315,6 @@ out:
 
 }
 
-/*
- * This just frees the segno for the given seg.  It's gross but
- * symmetrical with only being able to allocate segnos by allocating a
- * seg.  We'll probably have to do better.
- */
-int scoutfs_seg_free_segno(struct super_block *sb, struct scoutfs_segment *seg)
-{
-	return scoutfs_server_free_segno(sb, seg->segno);
-}
 
 /*
  * The bios submitted by this don't have page references themselves.  If

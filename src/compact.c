@@ -13,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include <linux/sort.h>
 
 #include "super.h"
 #include "format.h"
@@ -30,10 +31,6 @@
  * segments in each level of the lsm tree and is what merges duplicate
  * and deletion keys.
  *
- * When the manifest is modified in a way that requires compaction it
- * kicks the compaction thread.  The compaction thread calls into the
- * manifest to find the segments that need to be compaction.
- *
  * The compaction operation itself always involves a single "upper"
  * segment at a given level and a limited number of "lower" segments at
  * the next higher level whose key range intersects with the upper
@@ -42,22 +39,9 @@
  * Compaction proceeds by iterating over the items in the upper segment
  * and items in each of the lower segments in sort order.  The items
  * from the two input segments are copied into new output segments in
- * sorted order.  Item space is reclaimed as duplicate or deletion items
- * are removed.
- *
- * Once the compaction is completed the manifest is updated to remove
- * the input segments and add the output segments.  Here segment space
- * is reclaimed when the input items fit in fewer output segments.
+ * sorted order.  Space is reclaimed as duplicate or deletion items are
+ * removed and fewer segments are written than were read.
  */
-
-struct compact_info {
-	struct super_block *sb;
-	struct workqueue_struct *workq;
-	struct work_struct work;
-};
-
-#define DECLARE_COMPACT_INFO(sb, name) \
-	struct compact_info *name = SCOUTFS_SB(sb)->compact_info
 
 struct compact_seg {
 	struct list_head entry;
@@ -72,16 +56,12 @@ struct compact_seg {
 	bool part_of_move;
 };
 
-/*
- * A compaction request.  It's filled up in scoutfs_compact_add() as
- * the manifest is wlaked and it finds segments involved in the compaction.
- */
 struct compact_cursor {
 	struct list_head csegs;
 
 	/* buffer holds allocations and our returning them */
-	u64 segnos[SCOUTFS_COMPACTION_MAX_UPDATE];
-	unsigned nr_segnos;
+	u64 segnos[SCOUTFS_COMPACTION_MAX_OUTPUT];
+	unsigned int nr_segnos;
 
 	u8 lower_level;
 	u8 last_level;
@@ -371,6 +351,12 @@ static int compact_segments(struct super_block *sb,
 			break;
 		}
 
+		/* didn't get enough segnos */
+		if (next_segno >= curs->nr_segnos) {
+			ret = -ENOSPC;
+			break;
+		}
+
 		cseg->segno = curs->segnos[next_segno];
 		curs->segnos[next_segno] = 0;
 		next_segno++;
@@ -435,153 +421,216 @@ static int compact_segments(struct super_block *sb,
 }
 
 /*
- * Manifest walking is providing the details of the overall compaction
- * operation.
+ * We want all the non-zero segnos sorted at the front of the array
+ * and the empty segnos all packed at the end.  This is easily done by
+ * subtracting one from both then comparing as usual.  All relations hold
+ * except that 0 becomes the greatest instead of the least.
  */
-void scoutfs_compact_describe(struct super_block *sb, void *data,
-			      u8 upper_level, u8 last_level, bool sticky)
+static int sort_cmp_segnos(const void *A, const void *B)
 {
-	struct compact_cursor *curs = data;
+	const u64 a = *(const u64 *)A - 1;
+	const u64 b = *(const u64 *)B - 1;
 
-	curs->lower_level = upper_level + 1;
-	curs->last_level = last_level;
-	curs->sticky = sticky;
+	return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/*
- * Add a segment involved in the compaction operation.
- *
- * XXX Today we know that the caller is always adding only one upper segment
- * and is then possibly adding all the lower overlapping segments.
- */
-int scoutfs_compact_add(struct super_block *sb, void *data,
-			struct scoutfs_manifest_entry *ment)
+static void sort_swap_segnos(void *A, void *B, int size)
 {
-	struct compact_cursor *curs = data;
-	struct compact_seg *cseg;
-	int ret;
+	u64 *a = A;
+	u64 *b = B;
 
-	cseg = alloc_cseg(sb, &ment->first, &ment->last);
-	if (!cseg) {
-		ret = -ENOMEM;
+	swap(*a, *b);
+}
+
+static int verify_request(struct super_block *sb,
+			  struct scoutfs_net_compact_request *req)
+{
+	int ret = -EINVAL;
+	int nr_segnos;
+	int nr_ents;
+	int i;
+
+	/* no unknown flags */
+	if (req->flags & ~SCOUTFS_NET_COMPACT_FLAG_STICKY)
 		goto out;
+
+	/* find the number of segments and entries */
+	for (i = 0; i < ARRAY_SIZE(req->segnos); i++) {
+		if (req->segnos[i] == 0)
+			break;
+	}
+	nr_segnos = i;
+
+	for (i = 0; i < ARRAY_SIZE(req->ents); i++) {
+		if (req->ents[i].segno == 0)
+			break;
+	}
+	nr_ents = i;
+
+	/* must have at least an upper */
+	if (nr_ents == 0)
+		goto out;
+
+	sort(req->segnos, nr_segnos, sizeof(req->segnos[i]),
+	     sort_cmp_segnos, sort_swap_segnos);
+
+	/* segnos must be unique */
+	for (i = 1; i < nr_segnos; i++) {
+		if (req->segnos[i] == req->segnos[i - 1])
+			goto out;
 	}
 
-	list_add_tail(&cseg->entry, &curs->csegs);
+	/* if we have a lower it must be under upper */
+	if (nr_ents > 1 && (req->ents[1].level != req->ents[0].level + 1))
+		goto out;
 
-	cseg->segno = ment->segno;
-	cseg->seq = ment->seq;
-	cseg->level = ment->level;
+	/* make sure lower ents are on the same level */
+	for (i = 2; i < nr_ents; i++) {
+		if (req->ents[i].level != req->ents[i - 1].level)
+			goto out;
+	}
 
-	if (!curs->upper)
-		curs->upper = cseg;
-	else if (!curs->lower)
-		curs->lower = cseg;
-	if (curs->lower)
-		curs->last_lower = cseg;
+	for (i = 1; i < nr_ents; i++) {
+		/* lowers must overlap with upper */
+		if (scoutfs_key_compare_ranges(&req->ents[0].first,
+					       &req->ents[0].last,
+					       &req->ents[i].first,
+					       &req->ents[i].last) != 0)
+			goto out;
+
+		/* lowers must be on the level below upper */
+		if (req->ents[i].level != req->ents[0].level + 1)
+			goto out;
+	}
+
+	/* last level must include lowest level */
+	if (req->last_level < req->ents[nr_ents - 1].level)
+		goto out;
+
+	for (i = 2; i < nr_ents; i++) {
+		/* lowers must be sorted by first key */
+		if (scoutfs_key_compare(&req->ents[i].first,
+					&req->ents[i - 1].first) <= 0)
+			goto out;
+
+		/* lowers must not overlap with each other */
+		if (scoutfs_key_compare_ranges(&req->ents[i].first,
+					       &req->ents[i].last,
+					       &req->ents[i - 1].first,
+					       &req->ents[i - 1].last) == 0)
+			goto out;
+	}
 
 	ret = 0;
 out:
+	if (WARN_ON_ONCE(ret < 0)) {
+		scoutfs_inc_counter(sb, compact_invalid_request);
+		printk("id %llu last_level %u flags 0x%x\n",
+		       le64_to_cpu(req->id), req->last_level, req->flags);
+		printk("segnos: ");
+		for (i = 0; i < ARRAY_SIZE(req->segnos); i++)
+			printk("%llu ", le64_to_cpu(req->segnos[i]));
+		printk("\n");
+		printk("entries: ");
+		for (i = 0; i < ARRAY_SIZE(req->ents); i++) {
+			printk("  [%u] segno %llu seq %llu level %u first "SK_FMT" last "SK_FMT"\n",
+				i, le64_to_cpu(req->ents[i].segno),
+				le64_to_cpu(req->ents[i].seq),
+				req->ents[i].level,
+				SK_ARG(&req->ents[i].first),
+				SK_ARG(&req->ents[i].last));
+		}
+		printk("\n");
+	}
+
 	return ret;
 }
 
 /*
- * Give the compaction cursor a segno to allocate from.
- */
-void scoutfs_compact_add_segno(struct super_block *sb, void *data, u64 segno)
-{
-	struct compact_cursor *curs = data;
-
-	curs->segnos[curs->nr_segnos++] = segno;
-}
-
-/*
- * Commit the result of a compaction based on the state of the cursor.
- * The server caller stops the manifest from being written while we're
- * making changes.  We lock the manifest to atomically make our changes.
+ * Translate the compaction request into our native structs that we use
+ * to perform the compaction.  The caller has verified that the request
+ * satisfies our constraints.
  *
- * The erorr handling is sketchy here because calling the manifest from
- * here is temporary.  We should be sending a message to the server
- * instead of calling the allocator and manifest.
+ * If we return an error the caller will clean up a partially prepared
+ * cursor.
  */
-int scoutfs_compact_commit(struct super_block *sb, void *c, void *r)
+static int prepare_curs(struct super_block *sb, struct compact_cursor *curs,
+			struct scoutfs_net_compact_request *req)
 {
 	struct scoutfs_manifest_entry ment;
-	struct compact_cursor *curs = c;
-	struct list_head *results = r;
 	struct compact_seg *cseg;
-	int ret;
+	int ret = 0;
 	int i;
 
-	/* free unused segnos that were allocated for the compaction */
-	for (i = 0; i < curs->nr_segnos; i++) {
-		if (curs->segnos[i]) {
-			ret = scoutfs_server_free_segno(sb, curs->segnos[i]);
-			BUG_ON(ret);
+	curs->lower_level = req->ents[0].level + 1;
+	curs->last_level = req->last_level;
+	curs->sticky = !!(req->flags & SCOUTFS_NET_COMPACT_FLAG_STICKY);
+
+	for (i = 0; i < ARRAY_SIZE(req->segnos); i++) {
+		if (req->segnos[i] == 0)
+			break;
+		curs->segnos[i] = le64_to_cpu(req->segnos[i]);
+	}
+	curs->nr_segnos = i;
+
+	for (i = 0; i < ARRAY_SIZE(req->ents); i++) {
+		if (req->ents[i].segno == 0)
+			break;
+
+		scoutfs_init_ment_from_net(&ment, &req->ents[i]);
+
+		cseg = alloc_cseg(sb, &ment.first, &ment.last);
+		if (!cseg) {
+			ret = -ENOMEM;
+			break;
 		}
+
+		list_add_tail(&cseg->entry, &curs->csegs);
+
+		cseg->segno = ment.segno;
+		cseg->seq = ment.seq;
+		cseg->level = ment.level;
+
+		if (!curs->upper)
+			curs->upper = cseg;
+		else if (!curs->lower)
+			curs->lower = cseg;
+		if (curs->lower)
+			curs->last_lower = cseg;
 	}
 
-	scoutfs_manifest_lock(sb);
-
-	/* delete input segments, probably freeing their segnos */
-	list_for_each_entry(cseg, &curs->csegs, entry) {
-		if (!cseg->part_of_move) {
-			ret = scoutfs_server_free_segno(sb, cseg->segno);
-			BUG_ON(ret);
-		}
-
-		scoutfs_manifest_init_entry(&ment, cseg->level, 0, cseg->seq,
-					    &cseg->first, NULL);
-		ret = scoutfs_manifest_del(sb, &ment);
-		BUG_ON(ret);
-	}
-
-	/* add output entries */
-	list_for_each_entry(cseg, results, entry) {
-		/* XXX moved upper segments won't have read the segment :P */
-		if (cseg->seg)
-			scoutfs_seg_init_ment(&ment, cseg->level, cseg->seg);
-		else
-			scoutfs_manifest_init_entry(&ment, cseg->level,
-						    cseg->segno, cseg->seq,
-						    &cseg->first, &cseg->last);
-		ret = scoutfs_manifest_add(sb, &ment);
-		BUG_ON(ret);
-	}
-
-	scoutfs_manifest_unlock(sb);
-
-	return 0;
+	return ret;
 }
 
 /*
- * The compaction worker tries to make forward progress with compaction
- * every time its kicked.  It pretends to send a message requesting
- * compaction parameters but in reality the net request function there
- * is calling directly into the manifest and back into our compaction
- * add routines.
+ * Perform a compaction by translating the incoming request into our
+ * working state, iterating over input segments and write output
+ * segments, then generating the response that describes the output
+ * segments.
  *
- * We always try to clean up everything on errors.
+ * The server will either commit our response or cleanup the request
+ * if we return an error that the caller sends in response.
  */
-static void scoutfs_compact_func(struct work_struct *work)
+int scoutfs_compact(struct super_block *sb,
+		    struct scoutfs_net_compact_request *req,
+		    struct scoutfs_net_compact_response *resp)
 {
-	struct compact_info *ci = container_of(work, struct compact_info, work);
-	struct super_block *sb = ci->sb;
 	struct compact_cursor curs = {{NULL,}};
+	struct scoutfs_manifest_entry ment;
 	struct scoutfs_bio_completion comp;
 	struct compact_seg *cseg;
 	LIST_HEAD(results);
 	int ret;
 	int err;
+	int nr;
 
 	INIT_LIST_HEAD(&curs.csegs);
 	scoutfs_bio_init_comp(&comp);
 
-	ret = scoutfs_client_get_compaction(sb, (void *)&curs);
-
-	/* short circuit no compaction work to do */
-	if (ret == 0 && list_empty(&curs.csegs))
-		return;
+	ret = verify_request(sb, req) ?:
+	      prepare_curs(sb, &curs, req);
+	if (ret)
+		goto out;
 
 	/* trace compaction ranges */
 	list_for_each_entry(cseg, &curs.csegs, entry) {
@@ -590,84 +639,40 @@ static void scoutfs_compact_func(struct work_struct *work)
 					    &cseg->last);
 	}
 
-	if (ret == 0 && !list_empty(&curs.csegs)) {
-		ret = compact_segments(sb, &curs, &comp, &results);
+	ret = compact_segments(sb, &curs, &comp, &results);
 
-		/* always wait for io completion */
-		err = scoutfs_bio_wait_comp(sb, &comp);
-		if (!ret && err)
-			ret = err;
-	}
-
-	/* don't update manifest on error, just free segnos */
-	if (ret) {
-		list_for_each_entry(cseg, &results, entry) {
-			if (!cseg->part_of_move)
-				curs.segnos[curs.nr_segnos++] = cseg->segno;
-		}
-		free_cseg_list(sb, &curs.csegs);
-		free_cseg_list(sb, &results);
-	}
-
-	err = scoutfs_client_finish_compaction(sb, &curs, &results);
+	/* always wait for io completion */
+	err = scoutfs_bio_wait_comp(sb, &comp);
 	if (!ret && err)
 		ret = err;
+	if (ret)
+		goto out;
+
+	/* fill entries for written output segments */
+	nr = 0;
+	list_for_each_entry(cseg, &results, entry) {
+		/* XXX moved upper segments won't have read the segment :P */
+		if (cseg->seg)
+			scoutfs_seg_init_ment(&ment, cseg->level, cseg->seg);
+		else
+			scoutfs_manifest_init_entry(&ment, cseg->level,
+						    cseg->segno, cseg->seq,
+						    &cseg->first, &cseg->last);
+
+		trace_scoutfs_compact_output(sb, ment.level, ment.segno,
+					    ment.seq, &ment.first,
+					    &ment.last);
+
+		scoutfs_init_ment_to_net(&resp->ents[nr++], &ment);
+	}
+
+	ret = 0;
+out:
+	if (ret == -ESTALE)
+		scoutfs_inc_counter(sb, compact_stale_error);
 
 	free_cseg_list(sb, &curs.csegs);
 	free_cseg_list(sb, &results);
 
-	if (ret == -ESTALE)
-		scoutfs_inc_counter(sb, compact_stale_error);
-
-	WARN_ON_ONCE(ret && ret != -ESTALE);
-	trace_scoutfs_compact_func(sb, ret);
-}
-
-void scoutfs_compact_kick(struct super_block *sb)
-{
-	DECLARE_COMPACT_INFO(sb, ci);
-
-	queue_work(ci->workq, &ci->work);
-}
-
-int scoutfs_compact_setup(struct super_block *sb)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct compact_info *ci;
-
-	ci = kzalloc(sizeof(struct compact_info), GFP_KERNEL);
-	if (!ci)
-		return -ENOMEM;
-
-	ci->sb = sb;
-	INIT_WORK(&ci->work, scoutfs_compact_func);
-
-	ci->workq = alloc_workqueue("scoutfs_compact", 0, 1);
-	if (!ci->workq) {
-		kfree(ci);
-		return -ENOMEM;
-	}
-
-	sbi->compact_info = ci;
-
-	return 0;
-}
-
-/*
- * The system should be idle, there should not be any more manifest
- * modification which would kick compaction.
- */
-void scoutfs_compact_destroy(struct super_block *sb)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	DECLARE_COMPACT_INFO(sb, ci);
-
-	if (ci) {
-		/* stop compaction from requeueing itself */
-		cancel_work_sync(&ci->work);
-		destroy_workqueue(ci->workq);
-		sbi->compact_info = NULL;
-
-		kfree(ci);
-	}
+	return ret;
 }

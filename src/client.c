@@ -361,7 +361,8 @@ out:
  * out and fails.
  */
 static void client_notify_down(struct super_block *sb,
-			       struct scoutfs_net_connection *conn)
+			       struct scoutfs_net_connection *conn, void *info,
+			       u64 node_id)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
 
@@ -404,7 +405,7 @@ int scoutfs_client_setup(struct super_block *sb)
 			  scoutfs_client_connect_worker);
 
 	/* client doesn't process any incoming requests yet */
-	client->conn = scoutfs_net_alloc_conn(sb, NULL, client_notify_down,
+	client->conn = scoutfs_net_alloc_conn(sb, NULL, client_notify_down, 0,
 					      NULL, "client");
 	if (!client->conn) {
 		ret = -ENOMEM;

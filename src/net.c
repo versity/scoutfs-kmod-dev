@@ -73,6 +73,7 @@ struct scoutfs_net_connection {
 	struct super_block *sb;
 	scoutfs_net_notify_t notify_up;
 	scoutfs_net_notify_t notify_down;
+	size_t info_size;
 	scoutfs_net_request_t *req_funcs;
 
 	spinlock_t lock;
@@ -108,6 +109,8 @@ struct scoutfs_net_connection {
 	/* message_recv proc_work also executes in the conn workq */
 
 	struct scoutfs_tseq_entry tseq_entry;
+
+	u8 info[0] __aligned(sizeof(u64));
 };
 
 /* listening and their accepting sockets have a fixed locking order */
@@ -418,7 +421,7 @@ static void saw_valid_greeting(struct scoutfs_net_connection *conn, u64 node_id)
 	conn->valid_greeting = 1;
 	conn->node_id = node_id;
 	if (conn->notify_up)
-		conn->notify_up(sb, conn);
+		conn->notify_up(sb, conn, conn->info, node_id);
 	list_splice_tail_init(&conn->resend_queue, &conn->send_queue);
 	queue_work(conn->workq, &conn->send_work);
 
@@ -947,7 +950,9 @@ static void scoutfs_net_listen_worker(struct work_struct *work)
 			break;
 
 		/* inherit accepted request funcs from listening conn */
-		acc_conn = scoutfs_net_alloc_conn(sb, NULL, NULL,
+		acc_conn = scoutfs_net_alloc_conn(sb, conn->notify_up,
+						  conn->notify_down,
+						  conn->info_size,
 						  conn->req_funcs, "accepted");
 		if (!acc_conn) {
 			sock_release(acc_sock);
@@ -1133,7 +1138,7 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 
 	/* tell the caller that the connection is down */
 	if (conn->notify_down)
-		conn->notify_down(sb, conn);
+		conn->notify_down(sb, conn, conn->info, conn->node_id);
 
 	/* accepted conns are destroyed */
 	if (conn->listening_conn) {
@@ -1147,16 +1152,29 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 	trace_scoutfs_net_shutdown_work_exit(sb, 0, 0);
 }
 
+/*
+ * Accepted connections inherit the callbacks from their listening
+ * connection.
+ *
+ * notify_up is called once a valid greeting is received.  node_id is
+ * non-zero on accepted sockets once they've seen a valid greeting.
+ * Connected and listening connections have a node_id of 0.
+ *
+ * notify_down is always called as connections are shut down.  It can be
+ * called without notify_up ever being called.  The node_id is only
+ * non-zero for accepted connections.
+ */
 struct scoutfs_net_connection *
 scoutfs_net_alloc_conn(struct super_block *sb,
 		       scoutfs_net_notify_t notify_up,
-		       scoutfs_net_notify_t notify_down,
+		       scoutfs_net_notify_t notify_down, size_t info_size,
 		       scoutfs_net_request_t *req_funcs, char *name_suffix)
 {
 	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct scoutfs_net_connection *conn;
 
-	conn = kzalloc(sizeof(struct scoutfs_net_connection), GFP_NOFS);
+	conn = kzalloc(offsetof(struct scoutfs_net_connection,
+				info[info_size]), GFP_NOFS);
 	if (!conn)
 		return NULL;
 
@@ -1171,6 +1189,7 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 	conn->sb = sb;
 	conn->notify_up = notify_up;
 	conn->notify_down = notify_down;
+	conn->info_size = info_size;
 	conn->req_funcs = req_funcs;
 	spin_lock_init(&conn->lock);
 	init_waitqueue_head(&conn->waitq);

@@ -20,12 +20,13 @@ typedef int (*scoutfs_net_response_t)(struct super_block *sb,
 				      int error, void *data);
 
 typedef void (*scoutfs_net_notify_t)(struct super_block *sb,
-				     struct scoutfs_net_connection *conn);
+				     struct scoutfs_net_connection *conn,
+				     void *info, u64 node_id);
 
 struct scoutfs_net_connection *
 scoutfs_net_alloc_conn(struct super_block *sb,
 		       scoutfs_net_notify_t notify_up,
-		       scoutfs_net_notify_t notify_down,
+		       scoutfs_net_notify_t notify_down, size_t info_size,
 		       scoutfs_net_request_t *req_funcs, char *name_suffix);
 int scoutfs_net_connect(struct super_block *sb,
 			struct scoutfs_net_connection *conn,

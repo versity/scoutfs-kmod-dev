@@ -73,10 +73,20 @@ struct server_info {
 	/* server tracks pending frees to be applied during commit */
 	struct rw_semaphore alloc_rwsem;
 	struct list_head pending_frees;
+
+	struct list_head clients;
 };
 
 #define DECLARE_SERVER_INFO(sb, name) \
 	struct server_info *name = SCOUTFS_SB(sb)->server_info
+
+/*
+ * The server tracks each connected client.
+ */
+struct server_client_info {
+	u64 node_id;
+	struct list_head head;
+};
 
 struct commit_waiter {
 	struct completion comp;
@@ -1153,13 +1163,37 @@ static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
 };
 
-static void server_notify_down(struct super_block *sb,
-			       struct scoutfs_net_connection *conn)
+static void server_notify_up(struct super_block *sb,
+			     struct scoutfs_net_connection *conn,
+			     void *info, u64 node_id)
 {
+	struct server_client_info *sci = info;
 	DECLARE_SERVER_INFO(sb, server);
 
-	shutdown_server(server);
+	if (node_id != 0) {
+		sci->node_id = node_id;
+		spin_lock(&server->lock);
+		list_add_tail(&sci->head, &server->clients);
+		spin_unlock(&server->lock);
+	}
 }
+
+static void server_notify_down(struct super_block *sb,
+			       struct scoutfs_net_connection *conn,
+			       void *info, u64 node_id)
+{
+	struct server_client_info *sci = info;
+	DECLARE_SERVER_INFO(sb, server);
+
+	if (node_id != 0) {
+		spin_lock(&server->lock);
+		list_del(&sci->head);
+		spin_unlock(&server->lock);
+	} else {
+		shutdown_server(server);
+	}
+}
+
 /*
  * This work is always running or has a delayed timer set while a super
  * is mounted.  It tries to grab the lock to become the server.  If it
@@ -1193,7 +1227,8 @@ static void scoutfs_server_worker(struct work_struct *work)
 	if (ret)
 		goto out;
 
-	conn = scoutfs_net_alloc_conn(sb, NULL, server_notify_down,
+	conn = scoutfs_net_alloc_conn(sb, server_notify_up, server_notify_down,
+				      sizeof(struct server_client_info),
 				      server_req_funcs, "server");
 	if (!conn) {
 		ret = -ENOMEM;
@@ -1302,6 +1337,7 @@ int scoutfs_server_setup(struct super_block *sb)
 	INIT_LIST_HEAD(&server->pending_seqs);
 	init_rwsem(&server->alloc_rwsem);
 	INIT_LIST_HEAD(&server->pending_frees);
+	INIT_LIST_HEAD(&server->clients);
 
 	server->wq = alloc_workqueue("scoutfs_server", WQ_NON_REENTRANT, 0);
 	if (!server->wq) {

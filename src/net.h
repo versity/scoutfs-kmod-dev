@@ -27,9 +27,9 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 		       scoutfs_net_notify_t notify_up,
 		       scoutfs_net_notify_t notify_down,
 		       scoutfs_net_request_t *req_funcs, char *name_suffix);
-void scoutfs_net_connect(struct super_block *sb,
-			 struct scoutfs_net_connection *conn,
-			 struct sockaddr_in *sin, unsigned long timeout_ms);
+int scoutfs_net_connect(struct super_block *sb,
+			struct scoutfs_net_connection *conn,
+			struct sockaddr_in *sin, unsigned long timeout_ms);
 int scoutfs_net_bind(struct super_block *sb,
 		     struct scoutfs_net_connection *conn,
 		     struct sockaddr_in *sin);
@@ -40,6 +40,11 @@ int scoutfs_net_submit_request(struct super_block *sb,
 			       u8 cmd, void *arg, u16 arg_len,
 			       scoutfs_net_response_t resp_func,
 			       void *resp_data, u64 *id_ret);
+int scoutfs_net_submit_greeting_request(struct super_block *sb,
+					struct scoutfs_net_connection *conn,
+					void *arg, u16 arg_len,
+					scoutfs_net_response_t resp_func,
+					void *resp_data);
 void scoutfs_net_cancel_request(struct super_block *sb,
 				struct scoutfs_net_connection *conn,
 				u8 cmd, u64 id);

@@ -51,6 +51,7 @@ struct client_info {
 	struct super_block *sb;
 
 	struct scoutfs_net_connection *conn;
+	struct completion node_id_comp;
 	atomic_t shutting_down;
 
 	struct workqueue_struct *workq;
@@ -231,12 +232,77 @@ int scoutfs_client_statfs(struct super_block *sb,
 }
 
 /*
+ * Process a greeting response in the client from the server.  This is
+ * called for every connected socket on the connection.  The first
+ * response will have the node_id that the server assigned the client.
+ */
+static int client_greeting(struct super_block *sb,
+			   struct scoutfs_net_connection *conn,
+			   void *resp, unsigned int resp_len, int error,
+			   void *data)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_net_greeting *gr = resp;
+	int ret = 0;
+
+	if (error) {
+		ret = error;
+		goto out;
+	}
+
+	if (resp_len != sizeof(struct scoutfs_net_greeting)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (gr->fsid != super->id) {
+		scoutfs_warn(sb, "server sent fsid 0x%llx, client has 0x%llx",
+			     le64_to_cpu(gr->fsid),
+			     le64_to_cpu(super->id));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (gr->format_hash != super->format_hash) {
+		scoutfs_warn(sb, "server sent format 0x%llx, client has 0x%llx",
+			     le64_to_cpu(gr->format_hash),
+			     le64_to_cpu(super->format_hash));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (sbi->node_id != 0 && le64_to_cpu(gr->node_id) != sbi->node_id) {
+		scoutfs_warn(sb, "server sent node_id %llu, client has %llu",
+			     le64_to_cpu(gr->node_id),
+			     sbi->node_id);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (sbi->node_id == 0 && gr->node_id == 0) {
+		scoutfs_warn(sb, "server sent node_id 0, client also has 0\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (sbi->node_id == 0) {
+		sbi->node_id = le64_to_cpu(gr->node_id);
+		complete(&client->node_id_comp);
+	}
+
+out:
+	return ret;
+}
+
+/*
  * Attempt to connect to the listening address that the server wrote in
  * the super block.  We keep trying indefinitely with an increasing
  * delay if we fail to either read the address or connect to it.
  *
  * We're careful to only ever have one connection attempt in flight.  We
- * only queue this work on mount, on error, or from the connection
+ * only queue this work on mount, on error, or from the notify_down
  * callback.
  */
 static void scoutfs_client_connect_worker(struct work_struct *work)
@@ -244,6 +310,8 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	struct client_info *client = container_of(work, struct client_info,
 						  connect_dwork.work);
 	struct super_block *sb = client->sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_net_greeting greet;
 	struct scoutfs_super_block super;
 	struct sockaddr_in sin;
 	int ret;
@@ -262,22 +330,30 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	sin.sin_addr.s_addr = le32_to_be32(super.server_addr.addr);
 	sin.sin_port = le16_to_be16(super.server_addr.port);
 
-	scoutfs_net_connect(sb, client->conn, &sin, client->conn_retry_ms);
-	ret = 0;
+	ret = scoutfs_net_connect(sb, client->conn, &sin,
+				  client->conn_retry_ms);
+	if (ret)
+		goto out;
+
+	reset_connect_timeout(client);
+
+	/* send a greeting to verify endpoints of each connection */
+	greet.fsid = super.id;
+	greet.format_hash = super.format_hash;
+	greet.node_id = cpu_to_le64(sbi->node_id);
+
+	ret = scoutfs_net_submit_greeting_request(sb, client->conn,
+						  &greet, sizeof(greet),
+						  client_greeting, NULL);
+	if (ret)
+		scoutfs_net_shutdown(sb, client->conn);
+
 out:
 	if (ret && !atomic_read(&client->shutting_down)) {
 		queue_delayed_work(client->workq, &client->connect_dwork,
 				   msecs_to_jiffies(client->conn_retry_ms));
 		grow_connect_timeout(client);
 	}
-}
-
-static void client_notify_up(struct super_block *sb,
-			     struct scoutfs_net_connection *conn)
-{
-	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-
-	reset_connect_timeout(client);
 }
 
 /*
@@ -296,6 +372,18 @@ static void client_notify_down(struct super_block *sb,
 	}
 }
 
+/*
+ * Wait for the first connected socket on the connection that assigns
+ * the node_id that will be used for the rest of the life time of the
+ * mount.
+ */
+int scoutfs_client_wait_node_id(struct super_block *sb)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return wait_for_completion_interruptible(&client->node_id_comp);
+}
+
 int scoutfs_client_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -310,14 +398,14 @@ int scoutfs_client_setup(struct super_block *sb)
 	sbi->client_info = client;
 
 	client->sb = sb;
+	init_completion(&client->node_id_comp);
 	atomic_set(&client->shutting_down, 0);
 	INIT_DELAYED_WORK(&client->connect_dwork,
 			  scoutfs_client_connect_worker);
 
 	/* client doesn't process any incoming requests yet */
-	client->conn = scoutfs_net_alloc_conn(sb, client_notify_up,
-					      client_notify_down, NULL,
-					      "client");
+	client->conn = scoutfs_net_alloc_conn(sb, NULL, client_notify_down,
+					      NULL, "client");
 	if (!client->conn) {
 		ret = -ENOMEM;
 		goto out;

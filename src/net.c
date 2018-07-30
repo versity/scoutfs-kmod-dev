@@ -50,7 +50,6 @@
  * deliver messages across renumbering.
  *
  * XXX:
- *  - assign node_ids and validate with the greeting
  *  - defer accepted conn destruction until reconnect timeout
  *  - trace command and response data payloads
  *  - checksum message contents?
@@ -77,6 +76,7 @@ struct scoutfs_net_connection {
 	scoutfs_net_request_t *req_funcs;
 
 	spinlock_t lock;
+	wait_queue_head_t waitq;
 
 	unsigned long valid_greeting:1,	/* other commands can proceed */
 		      established:1,	/* added sends queue send work */
@@ -92,7 +92,6 @@ struct scoutfs_net_connection {
 	struct list_head accepted_head;
 	struct scoutfs_net_connection *listening_conn;
 	struct list_head accepted_list;
-	wait_queue_head_t accepted_waitq;
 
 	u64 next_send_id;
 	u64 last_proc_id;
@@ -371,123 +370,27 @@ static int submit_send(struct super_block *sb,
 }
 
 /*
- * Messages can flow once we receive a valid greeting from our peer.
- * Response callers are already called under the lock, request callers
- * need to acquire it.
+ * Messages can flow once we receive and process a valid greeting from
+ * our peer.
  *
- * At this point greeting request processing has queued the greeting
- * response message on the send queue.  All the sends waiting to be
- * resent need to be added to the end of the send queue after the
- * greeting response.  Greeting acks are sent differently and can be
- * received after resend messages.
+ * At this point recv processing has queued the greeting response or ack
+ * message on the send queue.  All the sends waiting to be resent need
+ * to be added to the end of the send queue after the greeting message.
  */
 static void saw_valid_greeting(struct scoutfs_net_connection *conn)
 {
 	struct super_block *sb = conn->sb;
 
-	assert_spin_locked(&conn->lock);
+	spin_lock(&conn->lock);
 
 	conn->valid_greeting = 1;
 	if (conn->notify_up)
 		conn->notify_up(sb, conn);
 	list_splice_tail_init(&conn->resend_queue, &conn->send_queue);
 	queue_work(conn->workq, &conn->send_work);
+
+	spin_unlock(&conn->lock);
 }
-
-static int greeting_response(struct super_block *sb,
-			     struct scoutfs_net_connection *conn,
-			     void *resp, unsigned int resp_len, int error,
-			     void *data)
-{
-	struct scoutfs_net_greeting *gr = resp;
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	int ret = 0;
-
-	if (error) {
-		ret = error;
-		goto out;
-	}
-
-	if (resp_len != sizeof(struct scoutfs_net_greeting)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (gr->fsid != super->id) {
-		scoutfs_warn(sb, "server "SIN_FMT" has fsid 0x%llx, expected 0x%llx",
-			     SIN_ARG(&conn->peername),
-			     le64_to_cpu(gr->fsid),
-			     le64_to_cpu(super->id));
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (gr->format_hash != super->format_hash) {
-		scoutfs_warn(sb, "server "SIN_FMT" has format hash 0x%llx, expected 0x%llx",
-			     SIN_ARG(&conn->peername),
-			     le64_to_cpu(gr->format_hash),
-			     le64_to_cpu(super->format_hash));
-		ret = -EINVAL;
-		goto out;
-	}
-
-	saw_valid_greeting(conn);
-
-out:
-	return ret;
-}
-
-/*
- * Process an incoming greeting request.  We try to send responses to
- * failed greetings so that the sender can log some detail before
- * shutting down.  A failure to send a greeting response shuts down the
- * connection.
- */
-static int greeting_request(struct super_block *sb,
-			    struct scoutfs_net_connection *conn,
-			    u8 cmd, u64 id, void *arg, u16 arg_len)
-{
-	struct scoutfs_net_greeting *gr = arg;
-	struct scoutfs_net_greeting greet;
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	int ret = 0;
-
-	if (arg_len != sizeof(struct scoutfs_net_greeting)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (gr->fsid != super->id) {
-		scoutfs_warn(sb, "client "SIN_FMT" has fsid 0x%llx, expected 0x%llx",
-			     SIN_ARG(&conn->peername),
-			     le64_to_cpu(gr->fsid),
-			     le64_to_cpu(super->id));
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (gr->format_hash != super->format_hash) {
-		scoutfs_warn(sb, "client "SIN_FMT" has format hash 0x%llx, expected 0x%llx",
-			     SIN_ARG(&conn->peername),
-			     le64_to_cpu(gr->format_hash),
-			     le64_to_cpu(super->format_hash));
-		ret = -EINVAL;
-		goto out;
-	}
-
-	greet.fsid = super->id;
-	greet.format_hash = super->format_hash;
-out:
-	ret = scoutfs_net_response(sb, conn, cmd, id, ret,
-				   &greet, sizeof(greet));
-	if (ret == 0) {
-		spin_lock(&conn->lock);
-		saw_valid_greeting(conn);
-		spin_unlock(&conn->lock);
-	}
-	return ret;
-}
-
 
 /*
  * Process an incoming response.  The greeting should ensure that the
@@ -500,20 +403,27 @@ static int process_request(struct scoutfs_net_connection *conn,
 			   struct message_recv *mrecv)
 {
 	struct super_block *sb = conn->sb;
-	scoutfs_net_request_t req_func = NULL;
+	scoutfs_net_request_t req_func;
+	int ret;
 
-	if (conn->listening_conn != NULL &&
-	    mrecv->nh.cmd == SCOUTFS_NET_CMD_GREETING) {
-		req_func = greeting_request;
-	} else if (mrecv->nh.cmd < SCOUTFS_NET_CMD_UNKNOWN) {
+	if (mrecv->nh.cmd < SCOUTFS_NET_CMD_UNKNOWN)
 		req_func = conn->req_funcs[mrecv->nh.cmd];
-	} if (req_func == NULL) {
+	else
+		req_func = NULL;
+
+	if (req_func == NULL) {
 		scoutfs_inc_counter(sb, net_unknown_request);
 		return -EINVAL;
 	}
 
-	return req_func(sb, conn, mrecv->nh.cmd, le64_to_cpu(mrecv->nh.id),
-			mrecv->nh.data, le16_to_cpu(mrecv->nh.data_len));
+	ret = req_func(sb, conn, mrecv->nh.cmd, le64_to_cpu(mrecv->nh.id),
+		       mrecv->nh.data, le16_to_cpu(mrecv->nh.data_len));
+
+	if (!conn->valid_greeting &&
+	    mrecv->nh.cmd == SCOUTFS_NET_CMD_GREETING && ret == 0)
+		saw_valid_greeting(conn);
+
+	return ret;
 }
 
 /*
@@ -547,6 +457,11 @@ static int process_response(struct scoutfs_net_connection *conn,
 		ret = submit_send(sb, conn, SCOUTFS_NET_MSG_ACK, mrecv->nh.cmd,
 				  le64_to_cpu(mrecv->nh.id), 0, NULL, 0, NULL,
 				  NULL, NULL);
+
+	if (!conn->valid_greeting &&
+	    mrecv->nh.cmd == SCOUTFS_NET_CMD_GREETING && msend && ret == 0)
+		saw_valid_greeting(conn);
+
 	return ret;
 }
 
@@ -883,7 +798,7 @@ static void destroy_conn(struct scoutfs_net_connection *conn)
 		spin_lock(&listener->lock);
 		list_del_init(&conn->accepted_head);
 		if (list_empty(&listener->accepted_list))
-			wake_up(&listener->accepted_waitq);
+			wake_up(&listener->waitq);
 		spin_unlock(&listener->lock);
 	}
 
@@ -1038,8 +953,7 @@ static void scoutfs_net_connect_worker(struct work_struct *work)
 {
 	DEFINE_CONN_FROM_WORK(conn, work, connect_work);
 	struct super_block *sb = conn->sb;
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_net_greeting greet;
+	struct message_send *msend;
 	struct socket *sock;
 	struct timeval tv;
 	int ret;
@@ -1074,26 +988,29 @@ static void scoutfs_net_connect_worker(struct work_struct *work)
 	if (ret)
 		goto out;
 
-	/* greeting is about to queue send work */
-	spin_lock(&conn->lock);
-	conn->established = 1;
-	spin_unlock(&conn->lock);
-
-	queue_work(conn->workq, &conn->recv_work);
-
-	/* queue a new updated greeting send */
-	greet.fsid = super->id;
-	greet.format_hash = super->format_hash;
-
-	ret = submit_send(sb, conn, SCOUTFS_NET_MSG_REQUEST,
-			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING, 0,
-			  &greet, sizeof(greet), greeting_response, NULL, NULL);
-	if (ret)
-		goto out;
-
 	scoutfs_info(sb, "client connected "SIN_FMT" -> "SIN_FMT,
 		     SIN_ARG(&conn->sockname),
 		     SIN_ARG(&conn->peername));
+
+	spin_lock(&conn->lock);
+
+	/* clear greeting state for next negotiation */
+	conn->valid_greeting = 0;
+	msend = find_send(conn, SCOUTFS_NET_MSG_REQUEST,
+			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING) ?:
+		find_send(conn, SCOUTFS_NET_MSG_RESPONSE,
+			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING) ?:
+		find_send(conn, SCOUTFS_NET_MSG_ACK,
+			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING);
+	if (msend)
+		complete_send(conn, msend, NULL, 0, 0);
+
+	conn->established = 1;
+	wake_up(&conn->waitq);
+
+	spin_unlock(&conn->lock);
+
+	queue_work(conn->workq, &conn->recv_work);
 out:
 	if (ret)
 		shutdown_conn(conn);
@@ -1135,7 +1052,6 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 	DEFINE_CONN_FROM_WORK(conn, work, shutdown_work);
 	struct super_block *sb = conn->sb;
 	struct scoutfs_net_connection *acc_conn;
-	struct message_send *msend;
 
 	trace_scoutfs_net_shutdown_work_enter(sb, 0, 0);
 
@@ -1160,6 +1076,8 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 		conn->sock = NULL;
 	}
 
+	memset(&conn->peername, 0, sizeof(conn->peername));
+
 	/* listening connections shut down all the connections they accepted */
 	spin_lock_nested(&conn->lock, CONN_LOCK_LISTENER);
 	list_for_each_entry(acc_conn, &conn->accepted_list, accepted_head) {
@@ -1168,27 +1086,15 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 		spin_unlock(&acc_conn->lock);
 	}
 	spin_unlock(&conn->lock);
-	wait_event(conn->accepted_waitq, empty_accepted_list(conn));
+	wait_event(conn->waitq, empty_accepted_list(conn));
 
 	spin_lock(&conn->lock);
-
 	/* all queued sends will be resent, protocol handles dupes */
 	list_splice_tail_init(&conn->send_queue, &conn->resend_queue);
-
-	/* clear greeting state for next negotiation */
-	conn->valid_greeting = 0;
-	msend = find_send(conn, SCOUTFS_NET_MSG_REQUEST,
-			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING) ?:
-		find_send(conn, SCOUTFS_NET_MSG_RESPONSE,
-			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING) ?:
-		find_send(conn, SCOUTFS_NET_MSG_ACK,
-			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING);
-	if (msend)
-		complete_send(conn, msend, NULL, 0, 0);
-
+	/* signal connect failure */
+	memset(&conn->connect_sin, 0, sizeof(conn->connect_sin));
+	wake_up(&conn->waitq);
 	spin_unlock(&conn->lock);
-
-	memset(&conn->peername, 0, sizeof(conn->peername));
 
 	/* tell the caller that the connection is down */
 	if (conn->notify_down)
@@ -1215,11 +1121,6 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct scoutfs_net_connection *conn;
 
-	/* we handle greetings, the caller shouldn't attempt to */
-	if (WARN_ON_ONCE(req_funcs != NULL &&
-			 req_funcs[SCOUTFS_NET_CMD_GREETING] != NULL))
-		return NULL;
-
 	conn = kzalloc(sizeof(struct scoutfs_net_connection), GFP_NOFS);
 	if (!conn)
 		return NULL;
@@ -1237,11 +1138,11 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 	conn->notify_down = notify_down;
 	conn->req_funcs = req_funcs;
 	spin_lock_init(&conn->lock);
+	init_waitqueue_head(&conn->waitq);
 	conn->sockname.sin_family = AF_INET;
 	conn->peername.sin_family = AF_INET;
 	INIT_LIST_HEAD(&conn->accepted_head);
 	INIT_LIST_HEAD(&conn->accepted_list);
-	init_waitqueue_head(&conn->accepted_waitq);
 	conn->next_send_id = SCOUTFS_NET_ID_GREETING + 1;
 	INIT_LIST_HEAD(&conn->send_queue);
 	INIT_LIST_HEAD(&conn->resend_queue);
@@ -1345,22 +1246,52 @@ void scoutfs_net_listen(struct super_block *sb,
 }
 
 /*
- * Start connecting to the given address.  notify_up may be called if
- * the connection completes.  notify_down will be called when either the
- * connection disconnects or times out.  Both could be called before
- * this function returns.  The caller must be careful not to call
- * connect again until notify_down has been called.
+ * Return once a connection attempt has completed either successfully
+ * or in error.
  */
-void scoutfs_net_connect(struct super_block *sb,
-			 struct scoutfs_net_connection *conn,
-			 struct sockaddr_in *sin, unsigned long timeout_ms)
+static bool connect_result(struct scoutfs_net_connection *conn, int *error)
 {
+	bool done = false;
+
+	spin_lock(&conn->lock);
+	if (conn->established) {
+		done = true;
+		*error = 0;
+	} else if (conn->shutting_down || conn->connect_sin.sin_family == 0) {
+		done = true;
+		*error = -ESHUTDOWN;
+	}
+	spin_unlock(&conn->lock);
+
+	return done;
+}
+
+/*
+ * Connect to the given address.  An error is returned if the socket was
+ * not connected before the given timeout.  The connection isn't fully
+ * active until the connecting caller starts greeting negotiation by
+ * sending the initial greeting request.
+ *
+ * The conn notify_down callback can be called as the connection is
+ * shutdown before this returns.
+ */
+int scoutfs_net_connect(struct super_block *sb,
+			struct scoutfs_net_connection *conn,
+			struct sockaddr_in *sin, unsigned long timeout_ms)
+{
+	int error = 0;
+	int ret;
+
 	spin_lock(&conn->lock);
 	conn->connect_sin = *sin;
 	conn->connect_timeout_ms = timeout_ms;
 	spin_unlock(&conn->lock);
 
 	queue_work(conn->workq, &conn->connect_work);
+
+	ret = wait_event_interruptible(conn->waitq,
+				       connect_result(conn, &error));
+	return ret ?: error;
 }
 
 /*
@@ -1377,6 +1308,20 @@ int scoutfs_net_submit_request(struct super_block *sb,
 {
 	return submit_send(sb, conn, SCOUTFS_NET_MSG_REQUEST, cmd, 0, 0,
 			   arg, arg_len, resp_func, resp_data, id_ret);
+}
+
+/*
+ * Greeting requests are special because they have a known id.
+ */
+int scoutfs_net_submit_greeting_request(struct super_block *sb,
+					struct scoutfs_net_connection *conn,
+					void *arg, u16 arg_len,
+					scoutfs_net_response_t resp_func,
+					void *resp_data)
+{
+	return submit_send(sb, conn, SCOUTFS_NET_MSG_REQUEST,
+			   SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING,
+			   0, arg, arg_len, resp_func, resp_data, NULL);
 }
 
 /*

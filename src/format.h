@@ -368,6 +368,7 @@ struct scoutfs_super_block {
 	__le64 alloc_cursor;
 	struct scoutfs_btree_ring bring;
 	__le64 next_seg_seq;
+	__le64 next_node_id;
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
 	struct scoutfs_inet_addr server_addr;
@@ -514,6 +515,7 @@ struct scoutfs_lock_name {
 struct scoutfs_net_greeting {
 	__le64 fsid;
 	__le64 format_hash;
+	__le64 node_id;
 } __packed;
 
 /*

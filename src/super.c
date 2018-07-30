@@ -304,12 +304,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sbi)
 		return -ENOMEM;
 
-	/*
-	 * XXX this is random today for initial testing, but we'll want
-	 * it to be assigned by the server.
-	 */
-	get_random_bytes_arch(&sbi->node_id, sizeof(sbi->node_id));
-
 	spin_lock_init(&sbi->next_ino_lock);
 	init_waitqueue_head(&sbi->trans_hold_wq);
 	spin_lock_init(&sbi->trans_write_lock);
@@ -338,6 +332,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_net_setup(sb) ?:
 	      scoutfs_server_setup(sb) ?:
 	      scoutfs_client_setup(sb) ?:
+	      scoutfs_client_wait_node_id(sb) ?:
 	      scoutfs_lock_node_id(sb, DLM_LOCK_EX, 0, sbi->node_id,
 				   &sbi->node_id_lock);
 	if (ret)

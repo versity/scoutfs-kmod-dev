@@ -47,6 +47,7 @@
 
 struct server_info {
 	struct super_block *sb;
+	spinlock_t lock;
 
 	struct workqueue_struct *wq;
 	struct delayed_work dwork;
@@ -959,6 +960,74 @@ static int server_statfs(struct super_block *sb,
 }
 
 /*
+ * Process an incoming greeting request in the server from the client.
+ * We try to send responses to failed greetings so that the sender can
+ * log some detail before shutting down.  A failure to send a greeting
+ * response shuts down the connection.
+ *
+ * We allocate a new node_id for the first connect attempt from a
+ * client.  If they reconnect they'll send their initially assigned node_id
+ * in their greeting request.
+ */
+static int server_greeting(struct super_block *sb,
+			   struct scoutfs_net_connection *conn,
+			   u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_net_greeting *gr = arg;
+	struct scoutfs_net_greeting greet;
+	DECLARE_SERVER_INFO(sb, server);
+	struct commit_waiter cw;
+	__le64 node_id;
+	int ret = 0;
+
+	if (arg_len != sizeof(struct scoutfs_net_greeting)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (gr->fsid != super->id) {
+		scoutfs_warn(sb, "client sent fsid 0x%llx, server has 0x%llx",
+			     le64_to_cpu(gr->fsid),
+			     le64_to_cpu(super->id));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (gr->format_hash != super->format_hash) {
+		scoutfs_warn(sb, "client sent format 0x%llx, server has 0x%llx",
+			     le64_to_cpu(gr->format_hash),
+			     le64_to_cpu(super->format_hash));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (gr->node_id == 0) {
+		down_read(&server->commit_rwsem);
+
+		spin_lock(&server->lock);
+		node_id = super->next_node_id;
+		le64_add_cpu(&super->next_node_id, 1);
+		spin_unlock(&server->lock);
+
+		queue_commit_work(server, &cw);
+		up_read(&server->commit_rwsem);
+		ret = wait_for_commit(&cw);
+		if (ret)
+			goto out;
+	} else {
+		node_id = gr->node_id;
+	}
+
+	greet.fsid = super->id;
+	greet.format_hash = super->format_hash;
+	greet.node_id = node_id;
+out:
+	return scoutfs_net_response(sb, conn, cmd, id, ret,
+				   &greet, sizeof(greet));
+}
+
+/*
  * Eventually we're going to have messages that control compaction.
  * Each client mount would have long-lived work that sends requests
  * which are stuck in processing until there's work to do.  They'd get
@@ -1065,6 +1134,7 @@ static int write_server_addr(struct super_block *sb, struct sockaddr_in *sin)
 }
 
 static scoutfs_net_request_t server_req_funcs[] = {
+	[SCOUTFS_NET_CMD_GREETING]		= server_greeting,
 	[SCOUTFS_NET_CMD_ALLOC_INODES]		= server_alloc_inodes,
 	[SCOUTFS_NET_CMD_ALLOC_EXTENT]		= server_alloc_extent,
 	[SCOUTFS_NET_CMD_FREE_EXTENTS]		= server_free_extents,
@@ -1212,6 +1282,7 @@ int scoutfs_server_setup(struct super_block *sb)
 		return -ENOMEM;
 
 	server->sb = sb;
+	spin_lock_init(&server->lock);
 	init_completion(&server->shutdown_comp);
 	server->bind_warned = false;
 	INIT_DELAYED_WORK(&server->dwork, scoutfs_server_worker);

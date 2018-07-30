@@ -966,7 +966,10 @@ static int server_statfs(struct super_block *sb,
  * response shuts down the connection.
  *
  * We allocate a new node_id for the first connect attempt from a
- * client.  If they reconnect they'll send their initially assigned node_id
+ * client.  We update the request node_id for the calling net layer to
+ * consume.
+ *
+ * If a client reconnects they'll send their initially assigned node_id
  * in their greeting request.
  */
 static int server_greeting(struct super_block *sb,
@@ -978,7 +981,7 @@ static int server_greeting(struct super_block *sb,
 	struct scoutfs_net_greeting greet;
 	DECLARE_SERVER_INFO(sb, server);
 	struct commit_waiter cw;
-	__le64 node_id;
+	__le64 node_id = 0;
 	int ret = 0;
 
 	if (arg_len != sizeof(struct scoutfs_net_greeting)) {
@@ -1023,8 +1026,12 @@ static int server_greeting(struct super_block *sb,
 	greet.format_hash = super->format_hash;
 	greet.node_id = node_id;
 out:
-	return scoutfs_net_response(sb, conn, cmd, id, ret,
+	ret = scoutfs_net_response(sb, conn, cmd, id, ret,
 				   &greet, sizeof(greet));
+	/* give net caller client's new node_id :/ */
+	if (ret == 0 && node_id != 0)
+		gr->node_id = node_id;
+	return ret;
 }
 
 /*

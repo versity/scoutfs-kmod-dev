@@ -40,6 +40,12 @@ int scoutfs_net_submit_request(struct super_block *sb,
 			       u8 cmd, void *arg, u16 arg_len,
 			       scoutfs_net_response_t resp_func,
 			       void *resp_data, u64 *id_ret);
+int scoutfs_net_submit_request_node(struct super_block *sb,
+				    struct scoutfs_net_connection *conn,
+				    u64 node_id, u8 cmd,
+				    void *arg, u16 arg_len,
+				    scoutfs_net_response_t resp_func,
+				    void *resp_data, u64 *id_ret);
 int scoutfs_net_submit_greeting_request(struct super_block *sb,
 					struct scoutfs_net_connection *conn,
 					void *arg, u16 arg_len,

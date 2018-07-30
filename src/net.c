@@ -86,6 +86,7 @@ struct scoutfs_net_connection {
 	unsigned long connect_timeout_ms;
 
 	struct socket *sock;
+	u64 node_id;			/* assigned during greeting */
 	struct sockaddr_in sockname;
 	struct sockaddr_in peername;
 
@@ -107,6 +108,12 @@ struct scoutfs_net_connection {
 	/* message_recv proc_work also executes in the conn workq */
 
 	struct scoutfs_tseq_entry tseq_entry;
+};
+
+/* listening and their accepting sockets have a fixed locking order */
+enum {
+	CONN_LOCK_LISTENER,
+	CONN_LOCK_ACCEPTED,
 };
 
 /*
@@ -308,15 +315,20 @@ static void shutdown_conn(struct scoutfs_net_connection *conn)
  * shutting down.  We only directly queue the send work if the
  * connection has passed the greeting and isn't being shut down.  At all
  * other times we add new sends to the resend queue.
+ *
+ * If a non-zero node_id is specified then the conn argument is a listening
+ * connection and the connection to send the message down is found by
+ * searching for the node_id in its accepted connections.
  */
 static int submit_send(struct super_block *sb,
-		       struct scoutfs_net_connection *conn,
+		       struct scoutfs_net_connection *conn, u64 node_id,
 		       u8 msg, u8 cmd, u64 id, u8 net_err,
 		       void *data, u16 data_len,
 		       scoutfs_net_response_t resp_func, void *resp_data,
 		       u64 *id_ret)
 {
 	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
+	struct scoutfs_net_connection *acc_conn;
 	struct message_send *msend;
 
 	if (WARN_ON_ONCE(msg >= SCOUTFS_NET_MSG_UNKNOWN) ||
@@ -335,7 +347,25 @@ static int submit_send(struct super_block *sb,
 	if (!msend)
 		return -ENOMEM;
 
-	spin_lock(&conn->lock);
+	spin_lock_nested(&conn->lock, CONN_LOCK_LISTENER);
+
+	if (node_id != 0) {
+		list_for_each_entry(acc_conn, &conn->accepted_list,
+				    accepted_head) {
+			if (acc_conn->node_id == node_id) {
+				spin_lock_nested(&acc_conn->lock,
+						 CONN_LOCK_ACCEPTED);
+				spin_unlock(&conn->lock);
+				conn = acc_conn;
+				node_id = 0;
+				break;
+			}
+		}
+		if (node_id != 0) {
+			spin_unlock(&conn->lock);
+			return -ENOTCONN;
+		}
+	}
 
 	msend->resp_func = resp_func;
 	msend->resp_data = resp_data;
@@ -376,14 +406,17 @@ static int submit_send(struct super_block *sb,
  * At this point recv processing has queued the greeting response or ack
  * message on the send queue.  All the sends waiting to be resent need
  * to be added to the end of the send queue after the greeting message.
+ *
+ * Update the conn's node_id so that servers can send to specific clients.
  */
-static void saw_valid_greeting(struct scoutfs_net_connection *conn)
+static void saw_valid_greeting(struct scoutfs_net_connection *conn, u64 node_id)
 {
 	struct super_block *sb = conn->sb;
 
 	spin_lock(&conn->lock);
 
 	conn->valid_greeting = 1;
+	conn->node_id = node_id;
 	if (conn->notify_up)
 		conn->notify_up(sb, conn);
 	list_splice_tail_init(&conn->resend_queue, &conn->send_queue);
@@ -404,6 +437,7 @@ static int process_request(struct scoutfs_net_connection *conn,
 {
 	struct super_block *sb = conn->sb;
 	scoutfs_net_request_t req_func;
+	struct scoutfs_net_greeting *gr;
 	int ret;
 
 	if (mrecv->nh.cmd < SCOUTFS_NET_CMD_UNKNOWN)
@@ -419,9 +453,16 @@ static int process_request(struct scoutfs_net_connection *conn,
 	ret = req_func(sb, conn, mrecv->nh.cmd, le64_to_cpu(mrecv->nh.id),
 		       mrecv->nh.data, le16_to_cpu(mrecv->nh.data_len));
 
+	/*
+	 * Greeting response updates our *request* node_id so that
+	 * we can consume a new allocation without callbacks.  We're
+	 * about to free the recv in the caller anyway.
+	 */
 	if (!conn->valid_greeting &&
-	    mrecv->nh.cmd == SCOUTFS_NET_CMD_GREETING && ret == 0)
-		saw_valid_greeting(conn);
+	    mrecv->nh.cmd == SCOUTFS_NET_CMD_GREETING && ret == 0) {
+		gr = (void *)mrecv->nh.data;
+		saw_valid_greeting(conn, le64_to_cpu(gr->node_id));
+	}
 
 	return ret;
 }
@@ -454,13 +495,13 @@ static int process_response(struct scoutfs_net_connection *conn,
 	spin_unlock(&conn->lock);
 
 	if (ret == 0)
-		ret = submit_send(sb, conn, SCOUTFS_NET_MSG_ACK, mrecv->nh.cmd,
-				  le64_to_cpu(mrecv->nh.id), 0, NULL, 0, NULL,
-				  NULL, NULL);
+		ret = submit_send(sb, conn, 0, SCOUTFS_NET_MSG_ACK,
+				  mrecv->nh.cmd, le64_to_cpu(mrecv->nh.id), 0,
+				  NULL, 0, NULL, NULL, NULL);
 
 	if (!conn->valid_greeting &&
 	    mrecv->nh.cmd == SCOUTFS_NET_CMD_GREETING && msend && ret == 0)
-		saw_valid_greeting(conn);
+		saw_valid_greeting(conn, 0);
 
 	return ret;
 }
@@ -1029,12 +1070,6 @@ static bool empty_accepted_list(struct scoutfs_net_connection *conn)
 	return empty;
 }
 
-/* listening and their accepting sockets have a fixed locking order */
-enum {
-	CONN_LOCK_LISTENER,
-	CONN_LOCK_ACCEPTED,
-};
-
 /*
  * Safely shut down an active connection.  This can be triggered by
  * errors in workers or by an external call to free the connection.  The
@@ -1306,8 +1341,23 @@ int scoutfs_net_submit_request(struct super_block *sb,
 			       scoutfs_net_response_t resp_func,
 			       void *resp_data, u64 *id_ret)
 {
-	return submit_send(sb, conn, SCOUTFS_NET_MSG_REQUEST, cmd, 0, 0,
+	return submit_send(sb, conn, 0, SCOUTFS_NET_MSG_REQUEST, cmd, 0, 0,
 			   arg, arg_len, resp_func, resp_data, id_ret);
+}
+
+/*
+ * Send a request to a specific node_id that was accepted by this listening
+ * connection.
+ */
+int scoutfs_net_submit_request_node(struct super_block *sb,
+				    struct scoutfs_net_connection *conn,
+				    u64 node_id, u8 cmd,
+				    void *arg, u16 arg_len,
+				    scoutfs_net_response_t resp_func,
+				    void *resp_data, u64 *id_ret)
+{
+	return submit_send(sb, conn, node_id, SCOUTFS_NET_MSG_REQUEST, cmd, 0,
+			   0, arg, arg_len, resp_func, resp_data, id_ret);
 }
 
 /*
@@ -1319,7 +1369,7 @@ int scoutfs_net_submit_greeting_request(struct super_block *sb,
 					scoutfs_net_response_t resp_func,
 					void *resp_data)
 {
-	return submit_send(sb, conn, SCOUTFS_NET_MSG_REQUEST,
+	return submit_send(sb, conn, 0, SCOUTFS_NET_MSG_REQUEST,
 			   SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING,
 			   0, arg, arg_len, resp_func, resp_data, NULL);
 }
@@ -1342,7 +1392,7 @@ int scoutfs_net_response(struct super_block *sb,
 		resp_len = 0;
 	}
 
-	return submit_send(sb, conn, SCOUTFS_NET_MSG_RESPONSE,
+	return submit_send(sb, conn, 0, SCOUTFS_NET_MSG_RESPONSE,
 			   cmd, id, net_err_from_host(sb, error),
 			   resp, resp_len, NULL, NULL, NULL);
 }

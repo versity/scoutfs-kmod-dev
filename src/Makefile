@@ -8,7 +8,7 @@ CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
 scoutfs-y += bio.o block.o btree.o client.o compact.o counters.o data.o dir.o \
 	     export.o extents.o file.o inode.o ioctl.o item.o lock.o \
 	     manifest.o msg.o net.o options.o per_task.o seg.o server.o \
-	     scoutfs_trace.o sort_priv.o super.o sysfs.o trans.o \
+	     scoutfs_trace.o sort_priv.o spbm.o super.o sysfs.o trans.o \
 	     triggers.o tseq.o xattr.o
 
 #

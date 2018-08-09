@@ -197,35 +197,21 @@ static struct message_send *find_send(struct scoutfs_net_connection *conn,
 
 /*
  * Complete a send message by moving it to the send queue and marking it
- * to be freed.
- *
- * Request messages have their response function called.  Their response
- * processing can return an error if the response is invalid.  The
- * request message is still removed and freed in that case.
+ * to be freed.  It won't be visible to callers trying to find sends.
  */
-static int complete_send(struct scoutfs_net_connection *conn,
-			 struct message_send *msend,
-			 void *resp, unsigned int resp_len, int error)
+static void complete_send(struct scoutfs_net_connection *conn,
+			  struct message_send *msend)
 {
-	struct super_block *sb = conn->sb;
-	int ret = 0;
+	assert_spin_locked(&conn->lock);
 
 	if (WARN_ON_ONCE(msend->dead) ||
 	    WARN_ON_ONCE(list_empty(&msend->head)))
-		return -EINVAL;
+		return;
 
-	assert_spin_locked(&conn->lock);
-
-	if (msend->resp_func)
-		ret = msend->resp_func(sb, conn, resp, resp_len, error,
-				       msend->resp_data);
 	msend->dead = 1;
 	list_move(&msend->head, &conn->send_queue);
 	queue_work(conn->workq, &conn->send_work);
-
-	return ret;
 }
-
 
 /*
  * Translate a positive error on the wire to a negative host errno.
@@ -482,20 +468,28 @@ static int process_response(struct scoutfs_net_connection *conn,
 {
 	struct super_block *sb = conn->sb;
 	struct message_send *msend;
+	scoutfs_net_response_t resp_func = NULL;
+	void *resp_data;
 	int ret = 0;
 
 	spin_lock(&conn->lock);
 
 	msend = find_send(conn, SCOUTFS_NET_MSG_REQUEST, mrecv->nh.cmd,
 			  le64_to_cpu(mrecv->nh.id));
-	if (msend)
-		ret = complete_send(conn, msend, mrecv->nh.data,
-				    le16_to_cpu(mrecv->nh.data_len),
-				    net_err_to_host(mrecv->nh.error));
-	else
+	if (msend) {
+		resp_func = msend->resp_func;
+		resp_data = msend->resp_data;
+		complete_send(conn, msend);
+	} else {
 		scoutfs_inc_counter(sb, net_dropped_response);
+	}
 
 	spin_unlock(&conn->lock);
+
+	if (resp_func)
+		ret = resp_func(sb, conn, mrecv->nh.data,
+				le16_to_cpu(mrecv->nh.data_len),
+				net_err_to_host(mrecv->nh.error), resp_data);
 
 	if (ret == 0)
 		ret = submit_send(sb, conn, 0, SCOUTFS_NET_MSG_ACK,
@@ -523,7 +517,7 @@ static void process_ack(struct scoutfs_net_connection *conn,
 	msend = find_send(conn, SCOUTFS_NET_MSG_RESPONSE, mrecv->nh.cmd,
 			  le64_to_cpu(mrecv->nh.id));
 	if (msend)
-		complete_send(conn, msend, NULL, 0, 0);
+		complete_send(conn, msend);
 	else
 		scoutfs_inc_counter(sb, net_dropped_ack);
 
@@ -1049,7 +1043,7 @@ static void scoutfs_net_connect_worker(struct work_struct *work)
 		find_send(conn, SCOUTFS_NET_MSG_ACK,
 			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING);
 	if (msend)
-		complete_send(conn, msend, NULL, 0, 0);
+		complete_send(conn, msend);
 
 	conn->established = 1;
 	wake_up(&conn->waitq);
@@ -1416,6 +1410,10 @@ int scoutfs_net_response(struct super_block *sb,
 			   resp, resp_len, NULL, NULL, NULL);
 }
 
+/*
+ * The response function that was submitted with the request is not
+ * called if the request is canceled here.
+ */
 void scoutfs_net_cancel_request(struct super_block *sb,
 				struct scoutfs_net_connection *conn,
 				u8 cmd, u64 id)
@@ -1425,7 +1423,7 @@ void scoutfs_net_cancel_request(struct super_block *sb,
 	spin_lock(&conn->lock);
 	msend = find_send(conn, SCOUTFS_NET_MSG_REQUEST, cmd, id);
 	if (msend)
-		complete_send(conn, msend, NULL, 0, -ECANCELED);
+		complete_send(conn, msend);
 	spin_unlock(&conn->lock);
 }
 

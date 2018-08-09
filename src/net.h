@@ -13,7 +13,7 @@ typedef int (*scoutfs_net_request_t)(struct super_block *sb,
 				     struct scoutfs_net_connection *conn,
 				     u8 cmd, u64 id, void *arg, u16 arg_len);
 
-/* These are called with a spinlock held, funcs must be fast and nonblocking */
+/* These are called in their own blocking context */
 typedef int (*scoutfs_net_response_t)(struct super_block *sb,
 				      struct scoutfs_net_connection *conn,
 				      void *resp, unsigned int resp_len,

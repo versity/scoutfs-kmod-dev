@@ -120,6 +120,10 @@ static int init_extent_from_btree_key(struct scoutfs_extent *ext, u8 type,
  * This is called by the extent core on behalf of the server who holds
  * the appropriate locks to protect the many btree items that can be
  * accessed on behalf of one extent operation.
+ *
+ * The free_blocks count in the super tracks the number of blocks in
+ * the primary extent index.  We update it here instead of expecting
+ * callers to remember.
  */
 static int server_extent_io(struct super_block *sb, int op,
 			    struct scoutfs_extent *ext, void *data)
@@ -192,6 +196,13 @@ static int server_extent_io(struct super_block *sb, int op,
 		}
 	}
 
+	if (ret == 0 && ext->type == SCOUTFS_FREE_EXTENT_BLKNO_TYPE) {
+		if (op == SEI_INSERT)
+			le64_add_cpu(&super->free_blocks, ext->len);
+		else if (op == SEI_DELETE)
+			le64_add_cpu(&super->free_blocks, -ext->len);
+	}
+
 	return ret;
 }
 
@@ -209,7 +220,6 @@ static int alloc_extent(struct super_block *sb, u64 blocks,
 			u64 *start, u64 *len)
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_extent ext;
 	int ret;
 
@@ -244,7 +254,6 @@ static int alloc_extent(struct super_block *sb, u64 blocks,
 		goto out;
 
 	trace_scoutfs_server_alloc_extent_allocated(sb, &ext);
-	le64_add_cpu(&super->free_blocks, -ext.len);
 
 	*start = ext.start;
 	*len = ext.len;
@@ -278,7 +287,6 @@ struct pending_free_extent {
  */
 static int apply_pending_frees(struct super_block *sb)
 {
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 	struct pending_free_extent *pfe;
 	struct pending_free_extent *tmp;
@@ -298,7 +306,6 @@ static int apply_pending_frees(struct super_block *sb)
 			break;
 		}
 
-		le64_add_cpu(&super->free_blocks, pfe->len);
 		list_del_init(&pfe->head);
 		kfree(pfe);
 	}

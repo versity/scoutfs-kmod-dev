@@ -1561,7 +1561,8 @@ int scoutfs_net_setup(struct super_block *sb)
 	scoutfs_tseq_tree_init(&ninf->msg_tseq_tree, net_tseq_show_msg);
 
 	ninf->shutdown_workq = alloc_workqueue("scoutfs_net_shutdown",
-					      WQ_UNBOUND, 0);
+					       WQ_UNBOUND | WQ_NON_REENTRANT,
+					       0);
 	if (!ninf->shutdown_workq) {
 		ret = -ENOMEM;
 		goto out;

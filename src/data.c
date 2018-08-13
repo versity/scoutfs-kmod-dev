@@ -1371,7 +1371,7 @@ int scoutfs_data_setup(struct super_block *sb)
 	INIT_WORK(&datinf->return_work,
 		  scoutfs_data_return_server_extents_worker);
 
-	datinf->workq = alloc_workqueue("scoutfs_data", 0, 1);
+	datinf->workq = alloc_workqueue("scoutfs_data", WQ_UNBOUND, 1);
 	if (!datinf->workq) {
 		kfree(datinf);
 		return -ENOMEM;

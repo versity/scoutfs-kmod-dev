@@ -1445,7 +1445,8 @@ int scoutfs_lock_setup(struct super_block *sb)
 	}
 
 	linfo->workq = alloc_workqueue("scoutfs_lock_work",
-				       WQ_UNBOUND|WQ_HIGHPRI, 0);
+				       WQ_NON_REENTRANT | WQ_UNBOUND |
+				       WQ_HIGHPRI, 0);
 	if (!linfo->workq) {
 		ret = -ENOMEM;
 		goto out;

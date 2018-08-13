@@ -1339,7 +1339,8 @@ int scoutfs_server_setup(struct super_block *sb)
 	INIT_LIST_HEAD(&server->pending_frees);
 	INIT_LIST_HEAD(&server->clients);
 
-	server->wq = alloc_workqueue("scoutfs_server", WQ_NON_REENTRANT, 0);
+	server->wq = alloc_workqueue("scoutfs_server",
+				     WQ_UNBOUND | WQ_NON_REENTRANT, 0);
 	if (!server->wq) {
 		kfree(server);
 		return -ENOMEM;

@@ -113,6 +113,7 @@
 	EXPAND_COUNTER(net_unknown_message)			\
 	EXPAND_COUNTER(net_unknown_request)			\
 	EXPAND_COUNTER(seg_alloc)				\
+	EXPAND_COUNTER(seg_csum_error)				\
 	EXPAND_COUNTER(seg_free)				\
 	EXPAND_COUNTER(seg_shrink)				\
 	EXPAND_COUNTER(seg_stale_read)				\

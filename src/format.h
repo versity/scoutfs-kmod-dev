@@ -271,6 +271,9 @@ struct scoutfs_segment_item {
 /*
  * Each large segment starts with a segment block that describes the
  * rest of the blocks that make up the segment.
+ *
+ * The crc covers the initial total_bytes of the segment but starts
+ * after the padding.
  */
 struct scoutfs_segment_block {
 	__le32 crc;

@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/crc32c.h>
 
 #include "super.h"
 #include "format.h"
@@ -55,6 +56,9 @@ struct segment_cache {
 
 enum {
 	SF_END_IO = 0,
+	SF_CALC_CRC_STARTED,
+	SF_CALC_CRC_DONE,
+	SF_INVALID_CRC,
 };
 
 static void *off_ptr(struct scoutfs_segment *seg, u32 off)
@@ -159,6 +163,26 @@ static void lru_check(struct segment_cache *cac, struct scoutfs_segment *seg)
 			list_move_tail(&seg->lru_entry, &cac->lru_list);
 		}
 	}
+}
+
+static __le32 calc_seg_crc(struct scoutfs_segment *seg)
+{
+	u32 total = scoutfs_seg_total_bytes(seg);
+	u32 crc = ~0;
+	u32 off;
+	u32 len;
+
+	off = offsetof(struct scoutfs_segment_block, _padding) +
+	       FIELD_SIZEOF(struct scoutfs_segment_block, _padding);
+
+	while (off < total) {
+		len = min(total - off,
+			  SCOUTFS_BLOCK_SIZE - (off & SCOUTFS_BLOCK_MASK));
+		crc = crc32c(crc, off_ptr(seg, off), len);
+		off += len;
+	}
+
+	return cpu_to_le32(crc);
 }
 
 /*
@@ -346,11 +370,19 @@ struct scoutfs_segment *scoutfs_seg_submit_read(struct super_block *sb,
 	return seg;
 }
 
+/*
+ * The caller has ensured that the segment won't be modified while
+ * it is in flight.
+ */
 int scoutfs_seg_submit_write(struct super_block *sb,
 			     struct scoutfs_segment *seg,
 			     struct scoutfs_bio_completion *comp)
 {
+	struct scoutfs_segment_block *sblk = off_ptr(seg, 0);
+
 	trace_scoutfs_seg_submit_write(sb, seg->segno);
+
+	sblk->crc = calc_seg_crc(seg);
 
 	scoutfs_bio_submit_comp(sb, WRITE, seg->pages,
 				segno_to_blkno(seg->segno),
@@ -360,8 +392,7 @@ int scoutfs_seg_submit_write(struct super_block *sb,
 }
 
 /*
- * Wait for IO on the segment to complete.  In the cached read fast path
- * the bit is already set by the reads that populated the cache.
+ * Wait for IO on the segment to complete.
  *
  * The caller provides the segno and seq from their segment reference to
  * validate that we found the version of the segment that they were
@@ -370,8 +401,9 @@ int scoutfs_seg_submit_write(struct super_block *sb,
  * its operation.  (Typically by getting a new manifest btree root and
  * searching for keys in the manifest.)
  *
- * XXX drop stale segments from the cache
- * XXX none of the callers perform that retry today.
+ * An invalid crc can be racing to read a stale segment while it's being
+ * written.  The caller will retry and consider it corrupt if it keeps
+ * getting stale reads.
  */
 int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg,
 		     u64 segno, u64 seq)
@@ -393,10 +425,28 @@ int scoutfs_seg_wait(struct super_block *sb, struct scoutfs_segment *seg,
 		goto out;
 	}
 
+	/* calc crc in waiting task instead of end_io */
+	if (!test_bit(SF_CALC_CRC_DONE, &seg->flags) &&
+	    !test_and_set_bit(SF_CALC_CRC_STARTED, &seg->flags)) {
+		if (sblk->crc != calc_seg_crc(seg)) {
+			scoutfs_inc_counter(sb, seg_csum_error);
+			set_bit(SF_INVALID_CRC, &seg->flags);
+		}
+		set_bit(SF_CALC_CRC_DONE, &seg->flags);
+		wake_up(&cac->waitq);
+	}
+
+	/* very rarely race waiting for calc to finish */
+	ret = wait_event_interruptible(cac->waitq,
+				       test_bit(SF_CALC_CRC_DONE, &seg->flags));
+	if (ret)
+		goto out;
+
 	sblk = off_ptr(seg, 0);
 
-	if (WARN_ON_ONCE(segno != le64_to_cpu(sblk->segno)) ||
-	    WARN_ON_ONCE(seq != le64_to_cpu(sblk->seq)) ||
+	if (test_bit(SF_INVALID_CRC, &seg->flags) ||
+	    segno != le64_to_cpu(sblk->segno) ||
+	    seq != le64_to_cpu(sblk->seq) ||
 	    scoutfs_trigger(sb, SEG_STALE_READ)) {
 		spin_lock_irqsave(&cac->lock, flags);
 		erased = erase_seg(cac, seg);

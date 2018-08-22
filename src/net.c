@@ -35,19 +35,35 @@
 #include "tseq.h"
 
 /*
- * scoutfs networking reliably delivers requests and responses between
- * nodes.
+ * scoutfs networking delivers requests and responses between nodes.
  *
  * Nodes decide to be either a connecting client or a listening server.
  * Both set up a connection and specify the set of request commands they
  * can process.
  *
- * The networking core maintains reliable request processing as the
- * nodes reconnect.  Requests are resent as connections are
- * re-established until a response is received.  Responses are resent
- * until an ack is received.  The connections are not bound to the
- * addresses of the underlying socket transports and can reliably
- * deliver messages across renumbering.
+ * Requests are tracked on a connection and sent to its peer.  They're
+ * resent down newly established sockets on a long lived connection.
+ * Queued requests are removed as a response is processed or if the
+ * request is canceled by the sender.
+ *
+ * Request processing sends a response down the socket that received a
+ * connection.  Processing is stopped as a socket is shutdown so
+ * responses are only send down sockets that received a request.
+ *
+ * Thus requests can be received multiple times as sockets are shutdown
+ * and reconnected.  Responses are only processed once for a given
+ * request.  It is up to request and response implementations to ensure
+ * that duplicate requests are safely handled.
+ *
+ * It turns out that we have to deal with duplicate request processing
+ * at the layer above networking anyway.  Request processing can make
+ * persistent changes that are committed on the server before it
+ * crashes.  The client then reconnects to before it crashes and the
+ * client reconnects to a server who must detect that the persistent
+ * work on behalf of the resent request has already been committed.  If
+ * we have to deal with that duplicate processing we may as well
+ * simplify networking by allowing it between reconnecting peers as
+ * well.
  *
  * XXX:
  *  - defer accepted conn destruction until reconnect timeout
@@ -96,7 +112,6 @@ struct scoutfs_net_connection {
 	struct list_head accepted_list;
 
 	u64 next_send_id;
-	u64 last_proc_id;
 	struct list_head send_queue;
 	struct list_head resend_queue;
 
@@ -122,9 +137,8 @@ enum {
 /*
  * Messages to be sent are allocated and put on the send queue.
  *
- * Request and response messages are put on the resend queue until their
- * response or ack messages are received, respectively, and they can be
- * freed.
+ * Request messages are put on the resend queue until their response
+ * messages is received and they can be freed.
  *
  * The send worker is the only context that references messages while
  * not holding the lock.  It does this while blocking sending the
@@ -162,16 +176,26 @@ static int nh_bytes(unsigned int data_len)
 	return offsetof(struct scoutfs_net_header, data[data_len]);
 }
 
+static bool nh_is_response(struct scoutfs_net_header *nh)
+{
+	return !!(nh->flags & SCOUTFS_NET_FLAG_RESPONSE);
+}
+
+static bool nh_is_request(struct scoutfs_net_header *nh)
+{
+	return !nh_is_response(nh);
+}
+
 static struct message_send *search_list(struct scoutfs_net_connection *conn,
 					struct list_head *list,
-					u8 msg, u8 cmd, u64 id)
+					u8 cmd, u64 id)
 {
 	struct message_send *msend;
 
 	assert_spin_locked(&conn->lock);
 
 	list_for_each_entry(msend, list, head) {
-		if (msend->nh.msg == msg && msend->nh.cmd == cmd &&
+		if (nh_is_request(&msend->nh) && msend->nh.cmd == cmd &&
 		    le64_to_cpu(msend->nh.id) == id)
 			return msend;
 	}
@@ -180,16 +204,16 @@ static struct message_send *search_list(struct scoutfs_net_connection *conn,
 }
 
 /*
- * Find an active send on the lists.  It's almost certainly waiting on
- * the resend queue but it could be actively being sent.
+ * Find an active send request on the lists.  It's almost certainly
+ * waiting on the resend queue but it could be actively being sent.
  */
-static struct message_send *find_send(struct scoutfs_net_connection *conn,
-				      u8 msg, u8 cmd, u64 id)
+static struct message_send *find_request(struct scoutfs_net_connection *conn,
+					 u8 cmd, u64 id)
 {
 	struct message_send *msend;
 
-	msend = search_list(conn, &conn->resend_queue, msg, cmd, id) ?:
-		search_list(conn, &conn->send_queue, msg, cmd, id);
+	msend = search_list(conn, &conn->resend_queue, cmd, id) ?:
+		search_list(conn, &conn->send_queue, cmd, id);
 	if (msend && msend->dead)
 		msend = NULL;
 	return msend;
@@ -311,7 +335,7 @@ static void shutdown_conn(struct scoutfs_net_connection *conn)
  */
 static int submit_send(struct super_block *sb,
 		       struct scoutfs_net_connection *conn, u64 node_id,
-		       u8 msg, u8 cmd, u64 id, u8 net_err,
+		       u8 cmd, u8 flags, u64 id, u8 net_err,
 		       void *data, u16 data_len,
 		       scoutfs_net_response_t resp_func, void *resp_data,
 		       u64 *id_ret)
@@ -320,15 +344,13 @@ static int submit_send(struct super_block *sb,
 	struct scoutfs_net_connection *acc_conn;
 	struct message_send *msend;
 
-	if (WARN_ON_ONCE(msg >= SCOUTFS_NET_MSG_UNKNOWN) ||
-	    WARN_ON_ONCE(cmd >= SCOUTFS_NET_CMD_UNKNOWN) ||
+	if (WARN_ON_ONCE(cmd >= SCOUTFS_NET_CMD_UNKNOWN) ||
+	    WARN_ON_ONCE(flags & SCOUTFS_NET_FLAGS_UNKNOWN) ||
 	    WARN_ON_ONCE(net_err >= SCOUTFS_NET_ERR_UNKNOWN) ||
 	    WARN_ON_ONCE(data_len > SCOUTFS_NET_MAX_DATA_LEN) ||
 	    WARN_ON_ONCE(data_len && (!data || net_err)) ||
-	    WARN_ON_ONCE(net_err && (msg != SCOUTFS_NET_MSG_RESPONSE)) ||
-	    WARN_ON_ONCE(id == 0 && msg != SCOUTFS_NET_MSG_REQUEST) ||
-	    WARN_ON_ONCE((cmd == SCOUTFS_NET_CMD_GREETING) !=
-		         (id == SCOUTFS_NET_ID_GREETING)))
+	    WARN_ON_ONCE(net_err && (!(flags & SCOUTFS_NET_FLAG_RESPONSE))) ||
+	    WARN_ON_ONCE(id == 0 && (flags & SCOUTFS_NET_FLAG_RESPONSE)))
 		return -EINVAL;
 
 	msend = kmalloc(offsetof(struct message_send,
@@ -363,8 +385,8 @@ static int submit_send(struct super_block *sb,
 	if (id == 0)
 		id = conn->next_send_id++;
 	msend->nh.id = cpu_to_le64(id);
-	msend->nh.msg = msg;
 	msend->nh.cmd = cmd;
+	msend->nh.flags = flags;
 	msend->nh.error = net_err;
 	msend->nh.data_len = cpu_to_le16(data_len);
 	if (data_len)
@@ -392,11 +414,13 @@ static int submit_send(struct super_block *sb,
  * Messages can flow once we receive and process a valid greeting from
  * our peer.
  *
- * At this point recv processing has queued the greeting response or ack
- * message on the send queue.  All the sends waiting to be resent need
- * to be added to the end of the send queue after the greeting message.
+ * At this point recv processing has queued the greeting response
+ * message on the send queue.  Any request messages waiting to be resent
+ * need to be added to the end of the send queue after the greeting
+ * response.
  *
- * Update the conn's node_id so that servers can send to specific clients.
+ * Update the conn's node_id so that servers can send to specific
+ * clients.
  */
 static void saw_valid_greeting(struct scoutfs_net_connection *conn, u64 node_id)
 {
@@ -458,10 +482,10 @@ static int process_request(struct scoutfs_net_connection *conn,
 
 /*
  * An incoming response finds the queued request and calls its response
- * function.  We call the function and remove it from the lists before
- * trying to send the ack so that we only call the response function
- * once.  Future duplicate responses will just resend the ack in
- * response.
+ * function.  The response function for a given request will only be
+ * called once.  Requests can be canceled while a response is in flight.
+ * It's not an error to receive a response to a request that no longer
+ * exists.
  */
 static int process_response(struct scoutfs_net_connection *conn,
 			    struct message_recv *mrecv)
@@ -474,8 +498,7 @@ static int process_response(struct scoutfs_net_connection *conn,
 
 	spin_lock(&conn->lock);
 
-	msend = find_send(conn, SCOUTFS_NET_MSG_REQUEST, mrecv->nh.cmd,
-			  le64_to_cpu(mrecv->nh.id));
+	msend = find_request(conn, mrecv->nh.cmd, le64_to_cpu(mrecv->nh.id));
 	if (msend) {
 		resp_func = msend->resp_func;
 		resp_data = msend->resp_data;
@@ -491,37 +514,11 @@ static int process_response(struct scoutfs_net_connection *conn,
 				le16_to_cpu(mrecv->nh.data_len),
 				net_err_to_host(mrecv->nh.error), resp_data);
 
-	if (ret == 0)
-		ret = submit_send(sb, conn, 0, SCOUTFS_NET_MSG_ACK,
-				  mrecv->nh.cmd, le64_to_cpu(mrecv->nh.id), 0,
-				  NULL, 0, NULL, NULL, NULL);
-
 	if (!conn->valid_greeting &&
 	    mrecv->nh.cmd == SCOUTFS_NET_CMD_GREETING && msend && ret == 0)
 		saw_valid_greeting(conn, 0);
 
 	return ret;
-}
-
-/*
- * An incoming ack frees the pending response.
- */
-static void process_ack(struct scoutfs_net_connection *conn,
-			struct message_recv *mrecv)
-{
-	struct super_block *sb = conn->sb;
-	struct message_send *msend;
-
-	spin_lock(&conn->lock);
-
-	msend = find_send(conn, SCOUTFS_NET_MSG_RESPONSE, mrecv->nh.cmd,
-			  le64_to_cpu(mrecv->nh.id));
-	if (msend)
-		complete_send(conn, msend);
-	else
-		scoutfs_inc_counter(sb, net_dropped_ack);
-
-	spin_unlock(&conn->lock);
 }
 
 /*
@@ -539,22 +536,10 @@ static void scoutfs_net_proc_worker(struct work_struct *work)
 
 	trace_scoutfs_net_proc_work_enter(sb, 0, 0);
 
-	switch (mrecv->nh.msg) {
-		case SCOUTFS_NET_MSG_REQUEST:
-			ret = process_request(conn, mrecv);
-			break;
-		case SCOUTFS_NET_MSG_RESPONSE:
-			ret = process_response(conn, mrecv);
-			break;
-		case SCOUTFS_NET_MSG_ACK:
-			process_ack(conn, mrecv);
-			ret = 0;
-			break;
-		default:
-			scoutfs_inc_counter(sb, net_unknown_message);
-			ret = -ENOMSG;
-			break;
-	}
+	if (nh_is_request(&mrecv->nh))
+		ret = process_request(conn, mrecv);
+	else
+		ret = process_response(conn, mrecv);
 
 	/* process_one_work explicitly allows freeing work in its func */
 	scoutfs_tseq_del(&ninf->msg_tseq_tree, &mrecv->tseq_entry);
@@ -598,14 +583,9 @@ static bool invalid_message(struct scoutfs_net_header *nh)
 	if (nh->id == 0)
 		return true;
 
-	/* greeting messages must have the greeting id */
-	if ((nh->cmd == SCOUTFS_NET_CMD_GREETING) !=
-	    (le64_to_cpu(nh->id) == SCOUTFS_NET_ID_GREETING))
-		return true;
-
 	/* greeting should negotiate understood protocol */
-	if (nh->msg >= SCOUTFS_NET_MSG_UNKNOWN ||
-	    nh->cmd >= SCOUTFS_NET_CMD_UNKNOWN ||
+	if (nh->cmd >= SCOUTFS_NET_CMD_UNKNOWN ||
+	    (nh->flags & SCOUTFS_NET_FLAGS_UNKNOWN) ||
 	    nh->error >= SCOUTFS_NET_ERR_UNKNOWN)
 		return true;
 
@@ -618,8 +598,7 @@ static bool invalid_message(struct scoutfs_net_header *nh)
 		return true;
 
 	/* only responses can carry errors */
-	if (nh->error != SCOUTFS_NET_ERR_NONE &&
-	    nh->msg != SCOUTFS_NET_MSG_RESPONSE)
+	if (nh_is_request(nh) && nh->error != SCOUTFS_NET_ERR_NONE)
 		return true;
 
 	return false;
@@ -681,29 +660,8 @@ static void scoutfs_net_recv_worker(struct work_struct *work)
 			break;
 		}
 
-		/*
-		 * Check and maintain the last processed id for
-		 * non-greeting requests before introducing reordering
-		 * by queueing concurrent work.
-		 */
-		spin_lock(&conn->lock);
-		if (mrecv->nh.msg == SCOUTFS_NET_MSG_REQUEST &&
-		    mrecv->nh.cmd != SCOUTFS_NET_CMD_GREETING) {
-			if (le64_to_cpu(mrecv->nh.id) <= conn->last_proc_id) {
-				scoutfs_inc_counter(sb, net_dropped_request);
-				kfree(mrecv);
-				mrecv = NULL;
-			} else {
-				conn->last_proc_id = le64_to_cpu(mrecv->nh.id);
-			}
-		}
-		spin_unlock(&conn->lock);
-
-		if (mrecv) {
-			scoutfs_tseq_add(&ninf->msg_tseq_tree,
-					 &mrecv->tseq_entry);
-			queue_work(conn->workq, &mrecv->proc_work);
-		}
+		scoutfs_tseq_add(&ninf->msg_tseq_tree, &mrecv->tseq_entry);
+		queue_work(conn->workq, &mrecv->proc_work);
 	}
 
 	if (ret)
@@ -795,11 +753,11 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 		if (ret)
 			break;
 
-		/* acks are always freed, others will be resent if not dead */
-		if (msend->nh.msg == SCOUTFS_NET_MSG_ACK)
-			msend->dead = 1;
-		else if (!msend->dead)
+		/* active requests are resent, everything else is freed */
+		if (nh_is_request(&msend->nh) && !msend->dead)
 			list_move_tail(&msend->head, &conn->resend_queue);
+		else
+			msend->dead = 1;
 	}
 
 	spin_unlock(&conn->lock);
@@ -993,7 +951,6 @@ static void scoutfs_net_connect_worker(struct work_struct *work)
 {
 	DEFINE_CONN_FROM_WORK(conn, work, connect_work);
 	struct super_block *sb = conn->sb;
-	struct message_send *msend;
 	struct socket *sock;
 	struct timeval tv;
 	int ret;
@@ -1036,15 +993,6 @@ static void scoutfs_net_connect_worker(struct work_struct *work)
 
 	/* clear greeting state for next negotiation */
 	conn->valid_greeting = 0;
-	msend = find_send(conn, SCOUTFS_NET_MSG_REQUEST,
-			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING) ?:
-		find_send(conn, SCOUTFS_NET_MSG_RESPONSE,
-			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING) ?:
-		find_send(conn, SCOUTFS_NET_MSG_ACK,
-			  SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING);
-	if (msend)
-		complete_send(conn, msend);
-
 	conn->established = 1;
 	wake_up(&conn->waitq);
 
@@ -1074,18 +1022,15 @@ static bool empty_accepted_list(struct scoutfs_net_connection *conn)
  * errors in workers or by an external call to free the connection.  The
  * shutting down flag ensures that this only executes once for each live
  * socket.
- *
- * Our reliability guarantee requires request processing to make forward
- * progress once we've received and recorded a request id.   We wait for
- * processing work that is in flight and its sends will be queued for
- * resending because the connection is not established while it's
- * shutting down.
  */
 static void scoutfs_net_shutdown_worker(struct work_struct *work)
 {
 	DEFINE_CONN_FROM_WORK(conn, work, shutdown_work);
 	struct super_block *sb = conn->sb;
+	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct scoutfs_net_connection *acc_conn;
+	struct message_send *msend;
+	struct message_send *tmp;
 
 	trace_scoutfs_net_shutdown_work_enter(sb, 0, 0);
 
@@ -1123,8 +1068,15 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 	wait_event(conn->waitq, empty_accepted_list(conn));
 
 	spin_lock(&conn->lock);
-	/* all queued sends will be resent, protocol handles dupes */
+
+	/* resend any pending requests, drop responses or greetings */
 	list_splice_tail_init(&conn->send_queue, &conn->resend_queue);
+	list_for_each_entry_safe(msend, tmp, &conn->resend_queue, head) {
+		if (nh_is_response(&msend->nh) ||
+		    msend->nh.cmd == SCOUTFS_NET_CMD_GREETING)
+			free_msend(ninf, msend);
+	}
+
 	/* signal connect failure */
 	memset(&conn->connect_sin, 0, sizeof(conn->connect_sin));
 	wake_up(&conn->waitq);
@@ -1191,7 +1143,7 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 	conn->peername.sin_family = AF_INET;
 	INIT_LIST_HEAD(&conn->accepted_head);
 	INIT_LIST_HEAD(&conn->accepted_list);
-	conn->next_send_id = SCOUTFS_NET_ID_GREETING + 1;
+	conn->next_send_id = 1;
 	INIT_LIST_HEAD(&conn->send_queue);
 	INIT_LIST_HEAD(&conn->resend_queue);
 	INIT_WORK(&conn->listen_work, scoutfs_net_listen_worker);
@@ -1354,8 +1306,8 @@ int scoutfs_net_submit_request(struct super_block *sb,
 			       scoutfs_net_response_t resp_func,
 			       void *resp_data, u64 *id_ret)
 {
-	return submit_send(sb, conn, 0, SCOUTFS_NET_MSG_REQUEST, cmd, 0, 0,
-			   arg, arg_len, resp_func, resp_data, id_ret);
+	return submit_send(sb, conn, 0, cmd, 0, 0, 0, arg, arg_len,
+			   resp_func, resp_data, id_ret);
 }
 
 /*
@@ -1369,22 +1321,8 @@ int scoutfs_net_submit_request_node(struct super_block *sb,
 				    scoutfs_net_response_t resp_func,
 				    void *resp_data, u64 *id_ret)
 {
-	return submit_send(sb, conn, node_id, SCOUTFS_NET_MSG_REQUEST, cmd, 0,
-			   0, arg, arg_len, resp_func, resp_data, id_ret);
-}
-
-/*
- * Greeting requests are special because they have a known id.
- */
-int scoutfs_net_submit_greeting_request(struct super_block *sb,
-					struct scoutfs_net_connection *conn,
-					void *arg, u16 arg_len,
-					scoutfs_net_response_t resp_func,
-					void *resp_data)
-{
-	return submit_send(sb, conn, 0, SCOUTFS_NET_MSG_REQUEST,
-			   SCOUTFS_NET_CMD_GREETING, SCOUTFS_NET_ID_GREETING,
-			   0, arg, arg_len, resp_func, resp_data, NULL);
+	return submit_send(sb, conn, node_id, cmd, 0, 0, 0, arg, arg_len,
+			   resp_func, resp_data, id_ret);
 }
 
 /*
@@ -1405,9 +1343,9 @@ int scoutfs_net_response(struct super_block *sb,
 		resp_len = 0;
 	}
 
-	return submit_send(sb, conn, 0, SCOUTFS_NET_MSG_RESPONSE,
-			   cmd, id, net_err_from_host(sb, error),
-			   resp, resp_len, NULL, NULL, NULL);
+	return submit_send(sb, conn, 0, cmd, SCOUTFS_NET_FLAG_RESPONSE, id,
+			   net_err_from_host(sb, error), resp, resp_len,
+			   NULL, NULL, NULL);
 }
 
 /*
@@ -1421,7 +1359,7 @@ void scoutfs_net_cancel_request(struct super_block *sb,
 	struct message_send *msend;
 
 	spin_lock(&conn->lock);
-	msend = find_send(conn, SCOUTFS_NET_MSG_REQUEST, cmd, id);
+	msend = find_request(conn, cmd, id);
 	if (msend)
 		complete_send(conn, msend);
 	spin_unlock(&conn->lock);
@@ -1497,11 +1435,11 @@ static void net_tseq_show_conn(struct seq_file *m,
 	struct scoutfs_net_connection *conn =
 		container_of(ent, struct scoutfs_net_connection, tseq_entry);
 
-	seq_printf(m, "name "SIN_FMT" peer "SIN_FMT" vg %u est %u sd %u cto_ms %lu nsi %llu lpi %llu\n",
+	seq_printf(m, "name "SIN_FMT" peer "SIN_FMT" vg %u est %u sd %u cto_ms %lu nsi %llu\n",
 		   SIN_ARG(&conn->sockname), SIN_ARG(&conn->peername),
 		   conn->valid_greeting, conn->established,
 		   conn->shutting_down, conn->connect_timeout_ms,
-		   conn->next_send_id, conn->last_proc_id);
+		   conn->next_send_id);
 }
 
 /*

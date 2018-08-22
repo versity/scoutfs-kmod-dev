@@ -100,9 +100,7 @@
 	EXPAND_COUNTER(manifest_compact_migrate)		\
 	EXPAND_COUNTER(manifest_hard_stale_error)		\
 	EXPAND_COUNTER(manifest_read_excluded_key)		\
-	EXPAND_COUNTER(net_dropped_ack)				\
 	EXPAND_COUNTER(net_dropped_response)			\
-	EXPAND_COUNTER(net_dropped_request)			\
 	EXPAND_COUNTER(net_send_bytes)				\
 	EXPAND_COUNTER(net_send_error)				\
 	EXPAND_COUNTER(net_send_messages)			\
@@ -110,7 +108,6 @@
 	EXPAND_COUNTER(net_recv_error)				\
 	EXPAND_COUNTER(net_recv_invalid_message)		\
 	EXPAND_COUNTER(net_recv_messages)			\
-	EXPAND_COUNTER(net_unknown_message)			\
 	EXPAND_COUNTER(net_unknown_request)			\
 	EXPAND_COUNTER(seg_alloc)				\
 	EXPAND_COUNTER(seg_csum_error)				\

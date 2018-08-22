@@ -520,36 +520,22 @@ struct scoutfs_net_greeting {
 
 /*
  * This header precedes and describes all network messages sent over
- * sockets.  The id is set by the request and sent in the reply.  The
- * type is strictly redundant in the reply because the id will find the
- * send but we include it in both packets to make it easier to observe
- * replies without having the id from their previous request.
+ * sockets.  The id is set by the request and sent in the response.
  *
- * Error is only set to a translated errno on response messages and
- * data_len will be 0.
+ * Error is only set to a translated errno and will only be found in
+ * response messages.
  */
 struct scoutfs_net_header {
 	__le64 id;
 	__le16 data_len;
-	__u8 msg;
 	__u8 cmd;
+	__u8 flags;
 	__u8 error;
 	__u8 data[0];
 } __packed;
 
-/*
- * Greetings are the first messages sent down every newly established
- * socket on the connection.  Every other message gets a unique
- * increasing id over the life time of the connection.
- */
-#define SCOUTFS_NET_ID_GREETING 1
-
-enum {
-	SCOUTFS_NET_MSG_REQUEST = 0,
-	SCOUTFS_NET_MSG_RESPONSE,
-	SCOUTFS_NET_MSG_ACK,
-	SCOUTFS_NET_MSG_UNKNOWN,
-};
+#define SCOUTFS_NET_FLAG_RESPONSE	(1 << 0)
+#define SCOUTFS_NET_FLAGS_UNKNOWN	(U8_MAX << 1)
 
 enum {
 	SCOUTFS_NET_CMD_GREETING = 0,

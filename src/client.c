@@ -342,9 +342,10 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	greet.format_hash = super.format_hash;
 	greet.node_id = cpu_to_le64(sbi->node_id);
 
-	ret = scoutfs_net_submit_greeting_request(sb, client->conn,
-						  &greet, sizeof(greet),
-						  client_greeting, NULL);
+	ret = scoutfs_net_submit_request(sb, client->conn,
+					 SCOUTFS_NET_CMD_GREETING,
+					 &greet, sizeof(greet),
+					 client_greeting, NULL, NULL);
 	if (ret)
 		scoutfs_net_shutdown(sb, client->conn);
 

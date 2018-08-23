@@ -129,7 +129,6 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_shutdown_trans(sb);
 	scoutfs_client_destroy(sb);
 	scoutfs_inode_destroy(sb);
-	scoutfs_item_destroy(sb);
 
 	/* the server locks the listen address and compacts */
 	scoutfs_lock_shutdown(sb);
@@ -138,6 +137,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_seg_destroy(sb);
 	scoutfs_lock_destroy(sb);
 
+	scoutfs_item_destroy(sb);
 	scoutfs_destroy_triggers(sb);
 	scoutfs_options_destroy(sb);
 	debugfs_remove(sbi->debug_root);

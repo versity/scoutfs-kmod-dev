@@ -746,7 +746,7 @@ static int server_free_extents(struct super_block *sb,
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_net_extent_list *nexl;
 	struct commit_waiter cw;
-	int ret;
+	int ret = 0;
 	int err;
 	u64 i;
 

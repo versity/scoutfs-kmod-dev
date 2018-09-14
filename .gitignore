@@ -13,3 +13,4 @@ rpmbuild/
 rpms/
 
 scoutfs-*.git*/
+scoutfs-kmod-*.tar

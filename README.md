@@ -16,6 +16,8 @@ It meets best of breed expectations:
  * Atomic transactions to maintain consistent persistent structures
  * First class kernel implementation for high performance and low latency
  * Open GPLv2 implementation
+ 
+Learn more in the [white paper](https://docs.wixstatic.com/ugd/aaa89b_88a5cc84be0b4d1a90f60d8900834d28.pdf).
 
 # Current Status
 

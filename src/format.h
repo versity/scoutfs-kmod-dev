@@ -453,7 +453,6 @@ struct scoutfs_super_block {
 	__le64 next_compact_id;
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
-	struct scoutfs_inet_addr server_addr;
 	struct scoutfs_quorum_config quorum_config;
 } __packed;
 

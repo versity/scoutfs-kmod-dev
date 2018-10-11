@@ -27,8 +27,6 @@
 #include "super.h"
 
 static const match_table_t tokens = {
-	{Opt_listen, "listen=%s"},
-	{Opt_cluster, "cluster=%s"},
 	{Opt_uniq_name, "uniq_name=%s"},
 	{Opt_err, NULL}
 };
@@ -55,15 +53,12 @@ u32 scoutfs_option_u32(struct super_block *sb, int token)
 int scoutfs_parse_options(struct super_block *sb, char *options,
 			  struct mount_options *parsed)
 {
-	char ipstr[INET_ADDRSTRLEN + 1];
 	substring_t args[MAX_OPT_ARGS];
 	int token, len;
-	__be32 addr;
 	char *p;
 
 	/* Set defaults */
 	memset(parsed, 0, sizeof(*parsed));
-	strcpy(parsed->cluster_name, "scoutfs");
 
 	while ((p = strsep(&options, ",")) != NULL) {
 		if (!*p)
@@ -71,22 +66,6 @@ int scoutfs_parse_options(struct super_block *sb, char *options,
 
 		token = match_token(p, tokens, args);
 		switch (token) {
-		case Opt_listen:
-			match_strlcpy(ipstr, args, ARRAY_SIZE(ipstr));
-			addr = in_aton(ipstr);
-			if (ipv4_is_multicast(addr) || ipv4_is_lbcast(addr) ||
-			    ipv4_is_zeronet(addr) || ipv4_is_local_multicast(addr))
-				return -EINVAL;
-			parsed->listen_addr.addr =
-				cpu_to_le32(be32_to_cpu(addr));
-			break;
-		case Opt_cluster:
-			len = args[0].to - args[0].from;
-			if (len == 0 || len > (MAX_CLUSTER_NAME_LEN - 1))
-				return -EINVAL;
-			match_strlcpy(parsed->cluster_name, args,
-				      MAX_CLUSTER_NAME_LEN);
-			break;
 		case Opt_uniq_name:
 			len = match_strlcpy(parsed->uniq_name, args,
 					    SCOUTFS_UNIQUE_NAME_MAX_BYTES);

@@ -36,19 +36,13 @@
 #include "endian_swap.h"
 
 /*
- * XXX pre commit:
- *  - comments
- */
-
-/*
  * Every active mount can act as the server that listens on a net
  * connection and accepts connections from all the other mounts acting
  * as clients.
  *
- * It queues long-lived work that blocks trying to acquire a lock.  If
- * it acquires the lock it listens on a socket and serves requests.  If
+ * The server is started when raft elects the mount as the leader.  If
  * it sees errors it shuts down the server in the hopes that another
- * mount will have less trouble.
+ * mount will become the leader and have less trouble.
  */
 
 struct server_info {
@@ -57,9 +51,11 @@ struct server_info {
 	wait_queue_head_t waitq;
 
 	struct workqueue_struct *wq;
-	struct delayed_work dwork;
-	struct completion shutdown_comp;
-	bool bind_warned;
+	struct work_struct work;
+	int err;
+	bool shutting_down;
+	struct completion start_comp;
+	struct sockaddr_in listen_sin;
 	struct scoutfs_net_connection *conn;
 
 	/* request processing coordinates committing manifest and alloc */
@@ -495,9 +491,11 @@ static int remove_segno(struct super_block *sb, u64 segno)
 	return ret;
 }
 
-static void shutdown_server(struct server_info *server)
+static void stop_server(struct server_info *server)
 {
-	complete(&server->shutdown_comp);
+	/* wait_event/wake_up provide barriers */
+	server->shutting_down = true;
+	wake_up(&server->waitq);
 }
 
 /*
@@ -1733,21 +1731,6 @@ out:
 	trace_scoutfs_server_compact_work_exit(sb, 0, ret);
 }
 
-/*
- * This relies on the caller having read the current super and advanced
- * its seq so that it's dirty.  This will go away when we communicate
- * the server address in a lock lvb.
- */
-static int write_server_addr(struct super_block *sb, struct sockaddr_in *sin)
-{
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-
-	super->server_addr.addr = be32_to_le32(sin->sin_addr.s_addr);
-	super->server_addr.port = be16_to_le16(sin->sin_port);
-
-	return scoutfs_write_dirty_super(sb);
-}
-
 static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_GREETING]		= server_greeting,
 	[SCOUTFS_NET_CMD_ALLOC_INODES]		= server_alloc_inodes,
@@ -1800,27 +1783,18 @@ static void server_notify_down(struct super_block *sb,
 		forget_client_compacts(sb, sci);
 		try_queue_compact(server);
 	} else {
-		shutdown_server(server);
+		stop_server(server);
 	}
 }
 
-/*
- * This work is always running or has a delayed timer set while a super
- * is mounted.  It tries to grab the lock to become the server.  If it
- * succeeds it publishes its address and accepts connections.  If
- * anything goes wrong it releases the lock and sets a timer to try to
- * become the server all over again.
- */
 static void scoutfs_server_worker(struct work_struct *work)
 {
 	struct server_info *server = container_of(work, struct server_info,
-						  dwork.work);
+						  work);
 	struct super_block *sb = server->sb;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_net_connection *conn = NULL;
-	static struct sockaddr_in zeros = {0,};
-	struct scoutfs_lock *lock = NULL;
 	struct pending_seq *ps;
 	struct pending_seq *ps_tmp;
 	DECLARE_WAIT_QUEUE_HEAD(waitq);
@@ -1830,13 +1804,6 @@ static void scoutfs_server_worker(struct work_struct *work)
 
 	trace_scoutfs_server_work_enter(sb, 0, 0);
 
-	init_completion(&server->shutdown_comp);
-
-	ret = scoutfs_lock_global(sb, DLM_LOCK_EX, 0,
-				  SCOUTFS_LOCK_TYPE_GLOBAL_SERVER, &lock);
-	if (ret)
-		goto out;
-
 	conn = scoutfs_net_alloc_conn(sb, server_notify_up, server_notify_down,
 				      sizeof(struct server_client_info),
 				      server_req_funcs, "server");
@@ -1845,30 +1812,18 @@ static void scoutfs_server_worker(struct work_struct *work)
 		goto out;
 	}
 
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = le32_to_be32(sbi->opts.listen_addr.addr);
-	sin.sin_port = le16_to_be16(sbi->opts.listen_addr.port);
+	sin = server->listen_sin;
 
-	/* get the address of our listening socket */
 	ret = scoutfs_net_bind(sb, conn, &sin);
 	if (ret) {
-		if (!server->bind_warned) {
-			scoutfs_err(sb, "server failed to bind to "SIN_FMT", errno %d%s.  Retrying indefinitely..",
-				    SIN_ARG(&sin), ret,
-				    ret == -EADDRNOTAVAIL ? " (Bad address?)"
-							  : "");
-			server->bind_warned = true;
-		}
+		scoutfs_err(sb, "server failed to bind to "SIN_FMT", err %d%s",
+			    SIN_ARG(&sin), ret,
+			    ret == -EADDRNOTAVAIL ? " (Bad address?)"
+						  : "");
 		goto out;
 	}
 
-	/* publish the address for clients to connect to */
 	ret = scoutfs_read_super(sb, super);
-	if (ret)
-		goto out;
-
-	scoutfs_advance_dirty_super(sb);
-	ret = write_server_addr(sb, &sin);
 	if (ret)
 		goto out;
 
@@ -1879,6 +1834,8 @@ static void scoutfs_server_worker(struct work_struct *work)
 	if (ret)
 		goto shutdown;
 
+	complete(&server->start_comp);
+
 	scoutfs_advance_dirty_super(sb);
 	server->stable_manifest_root = super->manifest.root;
 
@@ -1888,8 +1845,8 @@ static void scoutfs_server_worker(struct work_struct *work)
 	server->conn = conn;
 	scoutfs_net_listen(sb, conn);
 
-	/* wait for listening down or umount, conn can still be live */
-	wait_for_completion_interruptible(&server->shutdown_comp);
+	/* wait_event/wake_up provide barriers */
+	wait_event_interruptible(server->waitq, server->shutting_down);
 
 	scoutfs_info(sb, "server shutting down on "SIN_FMT, SIN_ARG(&sin));
 
@@ -1913,16 +1870,39 @@ shutdown:
 		kfree(ps);
 	}
 
-	write_server_addr(sb, &zeros);
-
 out:
 	scoutfs_net_free_conn(sb, conn);
-	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
-
-	/* always requeues, cancel_delayed_work_sync cancels on shutdown */
-	queue_delayed_work(server->wq, &server->dwork, HZ / 2);
 
 	trace_scoutfs_server_work_exit(sb, 0, ret);
+
+	server->err = ret;
+	complete(&server->start_comp);
+}
+
+/* XXX can we call start multiple times? */
+int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin)
+{
+	DECLARE_SERVER_INFO(sb, server);
+
+	server->err = 0;
+	server->shutting_down = false;
+	server->listen_sin = *sin;
+	init_completion(&server->start_comp);
+
+	queue_work(server->wq, &server->work);
+
+	wait_for_completion(&server->start_comp);
+	return server->err;
+}
+
+void scoutfs_server_stop(struct super_block *sb)
+{
+	DECLARE_SERVER_INFO(sb, server);
+
+	stop_server(server);
+	/* XXX not sure both are needed */
+	cancel_work_sync(&server->work);
+	cancel_work_sync(&server->commit_work);
 }
 
 int scoutfs_server_setup(struct super_block *sb)
@@ -1937,9 +1917,7 @@ int scoutfs_server_setup(struct super_block *sb)
 	server->sb = sb;
 	spin_lock_init(&server->lock);
 	init_waitqueue_head(&server->waitq);
-	init_completion(&server->shutdown_comp);
-	server->bind_warned = false;
-	INIT_DELAYED_WORK(&server->dwork, scoutfs_server_worker);
+	INIT_WORK(&server->work, scoutfs_server_worker);
 	init_rwsem(&server->commit_rwsem);
 	init_llist_head(&server->commit_waiters);
 	INIT_WORK(&server->commit_work, scoutfs_server_commit_func);
@@ -1960,22 +1938,24 @@ int scoutfs_server_setup(struct super_block *sb)
 		return -ENOMEM;
 	}
 
-	queue_delayed_work(server->wq, &server->dwork, 0);
-
 	sbi->server_info = server;
 	return 0;
 }
 
+/*
+ * The caller should have already stopped but we do the same just in
+ * case.
+ */
 void scoutfs_server_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct server_info *server = sbi->server_info;
 
 	if (server) {
-		shutdown_server(server);
+		stop_server(server);
 
 		/* wait for server work to wait for everything to shut down */
-		cancel_delayed_work_sync(&server->dwork);
+		cancel_work_sync(&server->work);
 		/* recv work/compaction could have left commit_work queued */
 		cancel_work_sync(&server->commit_work);
 

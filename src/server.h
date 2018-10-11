@@ -48,6 +48,9 @@ do {								\
 	__entry->name##_id, __entry->name##_data_len, __entry->name##_cmd, \
 	__entry->name##_flags, __entry->name##_error
 
+struct scoutfs_net_manifest_entry;
+struct scoutfs_manifest_entry;
+
 void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
 			      struct scoutfs_manifest_entry *ment);
 void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
@@ -57,6 +60,10 @@ int scoutfs_server_lock_request(struct super_block *sb, u64 node_id,
 				struct scoutfs_net_lock *nl);
 int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
 				 u64 id, struct scoutfs_net_lock *nl);
+
+struct sockaddr_in;
+int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin);
+void scoutfs_server_stop(struct super_block *sb);
 
 int scoutfs_server_setup(struct super_block *sb);
 void scoutfs_server_destroy(struct super_block *sb);

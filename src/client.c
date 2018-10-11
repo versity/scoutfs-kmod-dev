@@ -33,19 +33,17 @@
 #include "client.h"
 #include "net.h"
 #include "endian_swap.h"
+#include "quorum.h"
 
 /*
- * The client always maintains a connection to the server.  It reads the
- * super to get the address it should try and connect to.
+ * The client is responsible for maintaining a connection to the server.
+ * This includes managing quorum elections that determine which client
+ * should run the server that all the clients connect to.
  */
 
-/*
- * Connection timeouts have to allow for enough time for servers to
- * reboot.  Figure order minutes at the outside.
- */
-#define CONN_RETRY_MIN_MS	10UL
-#define CONN_RETRY_MAX_MS	(5UL * MSEC_PER_SEC)
-#define CONN_RETRY_LIMIT_J	(5 * 60 * HZ)
+#define CLIENT_CONNECT_DELAY_MS		(MSEC_PER_SEC / 10)
+#define CLIENT_CONNECT_TIMEOUT_MS	(1 * MSEC_PER_SEC)
+#define CLIENT_QUORUM_TIMEOUT_MS	(5 * MSEC_PER_SEC)
 
 struct client_info {
 	struct super_block *sb;
@@ -55,22 +53,11 @@ struct client_info {
 	atomic_t shutting_down;
 
 	struct workqueue_struct *workq;
-	struct delayed_work connect_dwork;
+	struct work_struct connect_work;
 
-	/* connection timeouts are tracked across attempts */
-	unsigned long conn_retry_ms;
+	struct scoutfs_quorum_elected_info qei;
+	u64 old_elected_nr;
 };
-
-static void reset_connect_timeout(struct client_info *client)
-{
-	client->conn_retry_ms = CONN_RETRY_MIN_MS;
-}
-
-static void grow_connect_timeout(struct client_info *client)
-{
-	client->conn_retry_ms = min(client->conn_retry_ms * 2,
-				    CONN_RETRY_MAX_MS);
-}
 
 /*
  * Ask for a new run of allocated inode numbers.  The server can return
@@ -346,49 +333,96 @@ out:
 }
 
 /*
- * Attempt to connect to the listening address that the server wrote in
- * the super block.  We keep trying indefinitely with an increasing
- * delay if we fail to either read the address or connect to it.
+ * If the previous election told us to start the server then stop it
+ * and wipe the old election info.  If we're not fast enough to clear
+ * the election block then the next server might fence us.  Should
+ * be very unlikely as election requires multiple RMW cycles.
+ */
+static void stop_our_server(struct super_block *sb,
+			    struct scoutfs_quorum_elected_info *qei)
+{
+	if (qei->run_server) {
+		scoutfs_server_stop(sb);
+		scoutfs_quorum_clear_elected(sb, qei);
+		memset(qei, 0, sizeof(*qei));
+	}
+}
+
+/*
+ * This work is responsible for managing leader elections, running the
+ * server, and connecting clients to the server.
  *
- * We're careful to only ever have one connection attempt in flight.  We
- * only queue this work on mount, on error, or from the notify_down
- * callback.
+ * In the typical case a mount reads the quorum blocks and finds the
+ * address of the currently running server and connects to it.
+ *
+ * More rarely clients who aren't connected and are configured to
+ * participate in quorum need to elect the new leader.  The elected info
+ * filled by quorum tells us if we were elected to run the server.
+ *
+ * This leads to the possibility that the mount who is running the
+ * server had its mount disconnect.  This is only weirdly different from
+ * other clients disconnecting and trying to reconnect because of the
+ * way quorum slots are reconfigured and reclaimed.  If we connect to a
+ * server with the new quorum config then we can't have any old servers
+ * running in the stale old quorum slot.  The simplest way to do this is
+ * to *always* stop the server if we're running it and we got
+ * disconnected.  It's a big hammer, but it's reliable, and arguably if
+ * *we* couldn't' use *our* server then something bad is happening and
+ * someone else should be the server.
+ *
+ * This only executes on mount, error, or as a connection disconnects
+ * and there's only ever one executing.
  */
 static void scoutfs_client_connect_worker(struct work_struct *work)
 {
 	struct client_info *client = container_of(work, struct client_info,
-						  connect_dwork.work);
+						  connect_work);
 	struct super_block *sb = client->sb;
+	struct scoutfs_quorum_elected_info *qei = &client->qei;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct mount_options *opts = &sbi->opts;
 	struct scoutfs_net_greeting greet;
-	struct scoutfs_super_block super;
-	struct sockaddr_in sin;
+	ktime_t timeout_abs;
 	int ret;
 
-	ret = scoutfs_read_super(sb, &super);
+	/* don't try quorum and connecting while our mount runs a server */
+	stop_our_server(sb, qei);
+
+	timeout_abs = ktime_add_ms(ktime_get(), CLIENT_QUORUM_TIMEOUT_MS);
+
+	ret = scoutfs_quorum_election(sb, opts->uniq_name,
+				      client->old_elected_nr,
+			              timeout_abs, qei);
 	if (ret)
 		goto out;
 
-	if (super.server_addr.addr == cpu_to_le32(INADDR_ANY)) {
-		ret = -EADDRNOTAVAIL;
+	if (qei->run_server) {
+		ret = scoutfs_server_start(sb, &qei->sin);
+		if (ret) {
+			/* forget that we tried to start the server */
+			memset(qei, 0, sizeof(*qei));
+			goto out;
+		}
+	}
+
+	/* always give the server some time before connecting */
+	msleep(CLIENT_CONNECT_DELAY_MS);
+
+	ret = scoutfs_net_connect(sb, client->conn, &qei->sin,
+				  CLIENT_CONNECT_TIMEOUT_MS);
+	if (ret) {
+		/* we couldn't connect, try electing a new server */
+		client->old_elected_nr = qei->elected_nr;
 		goto out;
 	}
 
-	memset(&sin, 0, sizeof(sin));
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = le32_to_be32(super.server_addr.addr);
-	sin.sin_port = le16_to_be16(super.server_addr.port);
-
-	ret = scoutfs_net_connect(sb, client->conn, &sin,
-				  client->conn_retry_ms);
-	if (ret)
-		goto out;
-
-	reset_connect_timeout(client);
+	/* trust this server again if it's still around after we disconnect */
+	client->old_elected_nr = 0;
 
 	/* send a greeting to verify endpoints of each connection */
-	greet.fsid = super.id;
-	greet.format_hash = super.format_hash;
+	greet.fsid = super->id;
+	greet.format_hash = super->format_hash;
 	greet.node_id = cpu_to_le64(sbi->node_id);
 
 	ret = scoutfs_net_submit_request(sb, client->conn,
@@ -397,13 +431,9 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 					 client_greeting, NULL, NULL);
 	if (ret)
 		scoutfs_net_shutdown(sb, client->conn);
-
 out:
-	if (ret && !atomic_read(&client->shutting_down)) {
-		queue_delayed_work(client->workq, &client->connect_dwork,
-				   msecs_to_jiffies(client->conn_retry_ms));
-		grow_connect_timeout(client);
-	}
+	if (ret && !atomic_read(&client->shutting_down))
+		queue_work(client->workq, &client->connect_work);
 }
 
 /*
@@ -474,11 +504,8 @@ static void client_notify_down(struct super_block *sb,
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
 
-	if (!atomic_read(&client->shutting_down)) {
-		queue_delayed_work(client->workq, &client->connect_dwork,
-				   msecs_to_jiffies(client->conn_retry_ms));
-		grow_connect_timeout(client);
-	}
+	if (!atomic_read(&client->shutting_down))
+		queue_work(client->workq, &client->connect_work);
 }
 
 /*
@@ -509,8 +536,7 @@ int scoutfs_client_setup(struct super_block *sb)
 	client->sb = sb;
 	init_completion(&client->node_id_comp);
 	atomic_set(&client->shutting_down, 0);
-	INIT_DELAYED_WORK(&client->connect_dwork,
-			  scoutfs_client_connect_worker);
+	INIT_WORK(&client->connect_work, scoutfs_client_connect_worker);
 
 	client->conn = scoutfs_net_alloc_conn(sb, NULL, client_notify_down, 0,
 					      client_req_funcs, "client");
@@ -525,10 +551,7 @@ int scoutfs_client_setup(struct super_block *sb)
 		goto out;
 	}
 
-	reset_connect_timeout(client);
-	/* delay initial connect to give a local server some time to setup */
-	queue_delayed_work(client->workq, &client->connect_dwork,
-			   msecs_to_jiffies(client->conn_retry_ms));
+	queue_work(client->workq, &client->connect_work);
 	ret = 0;
 
 out:
@@ -552,12 +575,15 @@ void scoutfs_client_destroy(struct super_block *sb)
 		atomic_set(&client->shutting_down, 1);
 
 		/* make sure worker isn't using the conn */
-		cancel_delayed_work_sync(&client->connect_dwork);
+		cancel_work_sync(&client->connect_work);
 
 		/* make racing conn use explode */
 		conn = client->conn;
 		client->conn = NULL;
 		scoutfs_net_free_conn(sb, conn);
+
+		/* stop running the server if we were, harmless otherwise */
+		stop_our_server(sb, &client->qei);
 
 		if (client->workq)
 			destroy_workqueue(client->workq);

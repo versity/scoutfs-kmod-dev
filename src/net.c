@@ -1326,9 +1326,6 @@ int scoutfs_net_submit_request_node(struct super_block *sb,
  * Send a response.  Responses don't get callbacks and use the request's
  * id so caller's don't need to get an id in return.
  *
- * The data payload is ignored if an error is sent so that callers have
- * simple processing exit paths.
- *
  * An error is returned if the response could not be sent.
  */
 int scoutfs_net_response(struct super_block *sb,

@@ -1155,6 +1155,17 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 }
 
 /*
+ * Give the caller the client node_id of the connection.  This used by
+ * rare server processing callers who want to send async responses after
+ * request processing has returned.  We didn't want to plumb the
+ * requesting node_id into all the request handlers but that'd work too.
+ */
+u64 scoutfs_net_client_node_id(struct scoutfs_net_connection *conn)
+{
+	return conn->node_id;
+}
+
+/*
  * Shutdown the connection.  Once this returns no network traffic
  * or work will be executing.  The caller can then connect or bind and
  * listen again.  Additional shutdown calls will already find it shutdown.

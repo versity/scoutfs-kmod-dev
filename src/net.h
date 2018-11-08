@@ -28,6 +28,7 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 		       scoutfs_net_notify_t notify_up,
 		       scoutfs_net_notify_t notify_down, size_t info_size,
 		       scoutfs_net_request_t *req_funcs, char *name_suffix);
+u64 scoutfs_net_client_node_id(struct scoutfs_net_connection *conn);
 int scoutfs_net_connect(struct super_block *sb,
 			struct scoutfs_net_connection *conn,
 			struct sockaddr_in *sin, unsigned long timeout_ms);

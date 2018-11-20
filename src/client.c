@@ -293,10 +293,10 @@ static int client_greeting(struct super_block *sb,
 		goto out;
 	}
 
-	if (gr->fsid != super->id) {
+	if (gr->fsid != super->hdr.fsid) {
 		scoutfs_warn(sb, "server sent fsid 0x%llx, client has 0x%llx",
 			     le64_to_cpu(gr->fsid),
-			     le64_to_cpu(super->id));
+			     le64_to_cpu(super->hdr.fsid));
 		ret = -EINVAL;
 		goto out;
 	}
@@ -421,7 +421,7 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	client->old_elected_nr = 0;
 
 	/* send a greeting to verify endpoints of each connection */
-	greet.fsid = super->id;
+	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
 	greet.node_id = cpu_to_le64(sbi->node_id);
 

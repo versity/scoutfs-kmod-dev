@@ -3,8 +3,10 @@
 
 /* statfs(2) f_type */
 #define SCOUTFS_SUPER_MAGIC	0x554f4353		/* "SCOU" */
-/* super block id */
-#define SCOUTFS_SUPER_ID	0x2e736674756f6373ULL	/* "scoutfs." */
+
+/* block header magic values, chosen at random */
+#define SCOUTFS_BLOCK_MAGIC_SUPER	0x103c428b
+#define SCOUTFS_BLOCK_MAGIC_BTREE	0xe597f96d
 
 /*
  * The super block and btree blocks are fixed 4k.
@@ -67,12 +69,12 @@ struct scoutfs_inet_addr {
 
 /*
  * This header is stored at the start of btree blocks and the super
- * block for verification.  The crc is calculated by zeroing the crc and
- * padding so the buffer is large and aligned.
+ * block for verification.  The crc field is not included in the
+ * calculation of the crc.
  */
 struct scoutfs_block_header {
 	__le32 crc;
-	__le32 _pad;
+	__le32 magic;
 	__le64 fsid;
 	__le64 seq;
 	__le64 blkno;

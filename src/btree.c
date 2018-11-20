@@ -781,6 +781,7 @@ retry:
 		bt->free_end = cpu_to_le16(SCOUTFS_BLOCK_SIZE);
 	}
 
+	bt->hdr.magic = cpu_to_le32(SCOUTFS_BLOCK_MAGIC_BTREE);
 	bt->hdr.blkno = cpu_to_le64(blkno);
 	bt->hdr.seq = cpu_to_le64(seq);
 	if (ref) {
@@ -1646,7 +1647,6 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 	/* checksum everything to reduce time between io submission merging */
 	for_each_dirty_bh(bti, bh, tmp) {
 		bt = (void *)bh->b_data;
-		bt->hdr._pad = 0;
 		bt->hdr.crc = scoutfs_block_calc_crc(&bt->hdr);
 	}
 

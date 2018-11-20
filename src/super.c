@@ -191,7 +191,7 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 
 	super = page_address(page);
 	memcpy(super, &sbi->super, sizeof(*super));
-	super->hdr._pad = 0;
+	super->hdr.magic = cpu_to_le32(SCOUTFS_BLOCK_MAGIC_SUPER);
 	super->hdr.crc = scoutfs_block_calc_crc(&super->hdr);
 
 	ret = scoutfs_bio_write(sb, &page, le64_to_cpu(super->hdr.blkno), 1);
@@ -226,9 +226,9 @@ int scoutfs_read_super(struct super_block *sb,
 
 	super = scoutfs_page_block_address(&page, 0);
 
-	if (super->id != cpu_to_le64(SCOUTFS_SUPER_ID)) {
-		scoutfs_err(sb, "super block has invalid id %llx",
-			    le64_to_cpu(super->id));
+	if (super->hdr.magic != cpu_to_le32(SCOUTFS_BLOCK_MAGIC_SUPER)) {
+		scoutfs_err(sb, "super block has invalid magic value 0x%08x",
+			    le32_to_cpu(super->hdr.magic));
 		ret = -EINVAL;
 		goto out;
 	}

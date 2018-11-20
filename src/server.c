@@ -1095,10 +1095,10 @@ static int server_greeting(struct super_block *sb,
 		goto out;
 	}
 
-	if (gr->fsid != super->id) {
+	if (gr->fsid != super->hdr.fsid) {
 		scoutfs_warn(sb, "client sent fsid 0x%llx, server has 0x%llx",
 			     le64_to_cpu(gr->fsid),
-			     le64_to_cpu(super->id));
+			     le64_to_cpu(super->hdr.fsid));
 		ret = -EINVAL;
 		goto out;
 	}
@@ -1128,7 +1128,7 @@ static int server_greeting(struct super_block *sb,
 		node_id = gr->node_id;
 	}
 
-	greet.fsid = super->id;
+	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
 	greet.node_id = node_id;
 out:

@@ -1353,6 +1353,21 @@ int scoutfs_net_response(struct super_block *sb,
 			   NULL, NULL, NULL);
 }
 
+int scoutfs_net_response_node(struct super_block *sb,
+			      struct scoutfs_net_connection *conn,
+			      u64 node_id, u8 cmd, u64 id, int error,
+			      void *resp, u16 resp_len)
+{
+	if (error) {
+		resp = NULL;
+		resp_len = 0;
+	}
+
+	return submit_send(sb, conn, node_id, cmd, SCOUTFS_NET_FLAG_RESPONSE,
+			   id, net_err_from_host(sb, error), resp, resp_len,
+			   NULL, NULL, NULL);
+}
+
 /*
  * The response function that was submitted with the request is not
  * called if the request is canceled here.

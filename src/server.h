@@ -53,6 +53,11 @@ void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
 void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
 				struct scoutfs_net_manifest_entry *net_ment);
 
+int scoutfs_server_lock_request(struct super_block *sb, u64 node_id,
+				struct scoutfs_net_lock *nl);
+int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
+				 u64 id, struct scoutfs_net_lock *nl);
+
 int scoutfs_server_setup(struct super_block *sb);
 void scoutfs_server_destroy(struct super_block *sb);
 

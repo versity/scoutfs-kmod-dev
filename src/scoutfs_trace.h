@@ -2423,6 +2423,52 @@ DEFINE_EVENT(scoutfs_server_client_count_class, scoutfs_server_client_down,
 	TP_ARGS(sb, node_id, nr_clients)
 );
 
+#define slt_symbolic(mode)						\
+	__print_symbolic(mode,					\
+		{ SLT_CLIENT,		"client" },	\
+		{ SLT_SERVER,		"server" },	\
+		{ SLT_GRANT,		"grant" },	\
+		{ SLT_INVALIDATE,	"invalidate" },	\
+		{ SLT_REQUEST,		"request" },	\
+		{ SLT_RESPONSE,		"response" })
+
+TRACE_EVENT(scoutfs_lock_message,
+	TP_PROTO(struct super_block *sb, int who, int what, int dir,
+		 u64 node_id, u64 net_id, struct scoutfs_net_lock *nl),
+
+	TP_ARGS(sb, who, what, dir, node_id, net_id, nl),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(int, who)
+		__field(int, what)
+		__field(int, dir)
+		__field(__u64, node_id)
+		__field(__u64, net_id)
+		sk_trace_define(key)
+		__field(__u8, old_mode)
+		__field(__u8, new_mode)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->who = who;
+		__entry->what = what;
+		__entry->dir = dir;
+		__entry->node_id = node_id;
+		__entry->net_id = net_id;
+		sk_trace_assign(key, &nl->key);
+		__entry->old_mode = nl->old_mode;
+		__entry->new_mode = nl->new_mode;
+	),
+
+	TP_printk("fsid "FSID_FMT" %s %s %s node_id %llu net_id %llu key "SK_FMT" old_mode %u new_mode %u",
+		  __entry->fsid, slt_symbolic(__entry->who),
+		  slt_symbolic(__entry->what), slt_symbolic(__entry->dir),
+		  __entry->node_id, __entry->net_id, sk_trace_args(key),
+		  __entry->old_mode, __entry->new_mode)
+);
+
 DECLARE_EVENT_CLASS(scoutfs_quorum_block_class,
 	TP_PROTO(struct super_block *sb, u64 io_blkno,
 		 struct scoutfs_quorum_block *blk),

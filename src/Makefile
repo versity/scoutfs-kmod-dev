@@ -21,6 +21,7 @@ scoutfs-y +=			\
 	ioctl.o			\
 	item.o			\
 	lock.o			\
+	lock_server.o		\
 	manifest.o		\
 	msg.o			\
 	net.o			\

@@ -16,6 +16,7 @@ struct compact_info;
 struct data_info;
 struct trans_info;
 struct lock_info;
+struct lock_server_info;
 struct client_info;
 struct server_info;
 struct inode_sb_info;
@@ -59,6 +60,7 @@ struct scoutfs_sb_info {
 
 	struct trans_info *trans_info;
 	struct lock_info *lock_info;
+	struct lock_server_info *lock_server_info;
 	struct client_info *client_info;
 	struct server_info *server_info;
 	struct sysfs_info *sfsinfo;

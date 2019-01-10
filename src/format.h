@@ -624,6 +624,7 @@ enum {
 	SCOUTFS_NET_CMD_GET_MANIFEST_ROOT,
 	SCOUTFS_NET_CMD_STATFS,
 	SCOUTFS_NET_CMD_COMPACT,
+	SCOUTFS_NET_CMD_LOCK,
 	SCOUTFS_NET_CMD_UNKNOWN,
 };
 
@@ -742,6 +743,42 @@ struct scoutfs_net_compact_response {
 	__le64 id;
 	struct scoutfs_net_manifest_entry ents[SCOUTFS_COMPACTION_MAX_OUTPUT];
 } __packed;
+
+struct scoutfs_net_lock {
+	struct scoutfs_key key;
+	__u8 old_mode;
+	__u8 new_mode;
+} __packed;
+
+/* some enums for tracing */
+enum {
+	SLT_CLIENT,
+	SLT_SERVER,
+	SLT_GRANT,
+	SLT_INVALIDATE,
+	SLT_REQUEST,
+	SLT_RESPONSE,
+};
+
+/*
+ * Read and write locks operate as you'd expect.  Multiple readers can
+ * hold read locks while writers are excluded.  A single writer can hold
+ * a write lock which excludes other readers and writers.  Writers can
+ * read while holding a write lock.
+ *
+ * Multiple writers can hold write only locks but they can not read,
+ * they can only generate dirty items.  It's used when the system has
+ * other means of knowing that it's safe to overwrite items.
+ *
+ * The null mode provides no access and is used to destroy locks.
+ */
+enum {
+	SCOUTFS_LOCK_NULL = 0,
+	SCOUTFS_LOCK_READ,
+	SCOUTFS_LOCK_WRITE,
+	SCOUTFS_LOCK_WRITE_ONLY,
+	SCOUTFS_LOCK_INVALID,
+};
 
 /*
  * Scoutfs file handle structure - this can be copied out to userspace

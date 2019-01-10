@@ -32,6 +32,7 @@
 #include "msg.h"
 #include "server.h"
 #include "net.h"
+#include "lock_server.h"
 #include "endian_swap.h"
 
 /*
@@ -1020,6 +1021,52 @@ static int server_statfs(struct super_block *sb,
 				    &nstatfs, sizeof(nstatfs));
 }
 
+static int server_lock(struct super_block *sb,
+		       struct scoutfs_net_connection *conn,
+		       u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	u64 node_id = scoutfs_net_client_node_id(conn);
+
+	if (arg_len != sizeof(struct scoutfs_net_lock))
+		return -EINVAL;
+
+	return scoutfs_lock_server_request(sb, node_id, id, arg);
+}
+
+static int lock_response(struct super_block *sb,
+			 struct scoutfs_net_connection *conn,
+			 void *resp, unsigned int resp_len,
+			 int error, void *data)
+{
+	u64 node_id = scoutfs_net_client_node_id(conn);
+
+	if (resp_len != sizeof(struct scoutfs_net_lock))
+		return -EINVAL;
+
+	return scoutfs_lock_server_response(sb, node_id, resp);
+}
+
+int scoutfs_server_lock_request(struct super_block *sb, u64 node_id,
+				struct scoutfs_net_lock *nl)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+
+	return scoutfs_net_submit_request_node(sb, server->conn, node_id,
+					      SCOUTFS_NET_CMD_LOCK,
+					      nl, sizeof(*nl),
+					      lock_response, NULL, NULL);
+}
+
+int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
+				 u64 id, struct scoutfs_net_lock *nl)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+
+	return scoutfs_net_response_node(sb, server->conn, node_id,
+					 SCOUTFS_NET_CMD_LOCK, id, 0,
+					 nl, sizeof(*nl));
+}
+
 /*
  * Process an incoming greeting request in the server from the client.
  * We try to send responses to failed greetings so that the sender can
@@ -1712,6 +1759,7 @@ static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_GET_LAST_SEQ]		= server_get_last_seq,
 	[SCOUTFS_NET_CMD_GET_MANIFEST_ROOT]	= server_get_manifest_root,
 	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
+	[SCOUTFS_NET_CMD_LOCK]			= server_lock,
 };
 
 static void server_notify_up(struct super_block *sb,
@@ -1826,7 +1874,8 @@ static void scoutfs_server_worker(struct work_struct *work)
 
 	/* start up the server subsystems before accepting */
 	ret = scoutfs_btree_setup(sb) ?:
-	      scoutfs_manifest_setup(sb);
+	      scoutfs_manifest_setup(sb) ?:
+	      scoutfs_lock_server_setup(sb);
 	if (ret)
 		goto shutdown;
 
@@ -1856,6 +1905,7 @@ shutdown:
 	destroy_pending_frees(sb);
 	scoutfs_manifest_destroy(sb);
 	scoutfs_btree_destroy(sb);
+	scoutfs_lock_server_destroy(sb);
 
 	/* XXX these should be persistent and reclaimed during recovery */
 	list_for_each_entry_safe(ps, ps_tmp, &server->pending_seqs, head) {

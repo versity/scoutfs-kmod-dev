@@ -58,6 +58,10 @@ int scoutfs_net_sync_request(struct super_block *sb,
 int scoutfs_net_response(struct super_block *sb,
 			 struct scoutfs_net_connection *conn,
 			 u8 cmd, u64 id, int error, void *resp, u16 resp_len);
+int scoutfs_net_response_node(struct super_block *sb,
+			      struct scoutfs_net_connection *conn,
+			      u64 node_id, u8 cmd, u64 id, int error,
+			      void *resp, u16 resp_len);
 void scoutfs_net_shutdown(struct super_block *sb,
 			  struct scoutfs_net_connection *conn);
 void scoutfs_net_free_conn(struct super_block *sb,

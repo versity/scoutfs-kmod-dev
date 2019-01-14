@@ -1019,16 +1019,16 @@ int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
 }
 
 /*
- * Acquire a cluster lock with a global scope in the lock space.
+ * The rename lock is magical because it's global.
  */
-int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
+int scoutfs_lock_rename(struct super_block *sb, int mode, int flags,
 			struct scoutfs_lock **lock)
 {
 	struct scoutfs_lock_name name;
 
 	memset(&name, 0, sizeof(name));
 	name.scope = SCOUTFS_LOCK_SCOPE_GLOBAL;
-	name.type = type;
+	name.type = SCOUTFS_LOCK_TYPE_GLOBAL_RENAME;
 
 	return lock_name_keys(sb, mode, flags, &name, NULL, NULL, lock);
 }

@@ -1524,9 +1524,7 @@ static int scoutfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 
 	/* if dirs are different make sure ancestor relationships are valid */
 	if (old_dir != new_dir) {
-		ret = scoutfs_lock_global(sb, DLM_LOCK_EX, 0,
-					  SCOUTFS_LOCK_TYPE_GLOBAL_RENAME,
-					  &rename_lock);
+		ret = scoutfs_lock_rename(sb, DLM_LOCK_EX, 0, &rename_lock);
 		if (ret)
 			return ret;
 

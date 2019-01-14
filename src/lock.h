@@ -66,7 +66,7 @@ int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
 			struct inode *b, struct scoutfs_lock **b_lock,
 			struct inode *c, struct scoutfs_lock **c_lock,
 			struct inode *d, struct scoutfs_lock **D_lock);
-int scoutfs_lock_global(struct super_block *sb, int mode, int flags, int type,
+int scoutfs_lock_rename(struct super_block *sb, int mode, int flags,
 			struct scoutfs_lock **lock);
 int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 			 u64 node_id, struct scoutfs_lock **lock);

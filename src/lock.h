@@ -1,14 +1,14 @@
 #ifndef _SCOUTFS_LOCK_H_
 #define _SCOUTFS_LOCK_H_
 
-#include <linux/dlm.h>
 #include "key.h"
 #include "tseq.h"
 
 #define SCOUTFS_LKF_REFRESH_INODE	0x01 /* update stale inode from item */
 #define SCOUTFS_LKF_NONBLOCK		0x02 /* only use already held locks */
+#define SCOUTFS_LKF_INVALID		(~((SCOUTFS_LKF_NONBLOCK << 1) - 1))
 
-#define SCOUTFS_LOCK_NR_MODES (DLM_LOCK_EX + 1)
+#define SCOUTFS_LOCK_NR_MODES		SCOUTFS_LOCK_INVALID
 
 /*
  * A few fields (start, end, refresh_gen, granted_mode) are referenced
@@ -16,29 +16,22 @@
  */
 struct scoutfs_lock {
 	struct super_block *sb;
-	struct scoutfs_lock_name name;
 	struct scoutfs_key start;
 	struct scoutfs_key end;
 	struct rb_node node;
 	struct rb_node range_node;
-	unsigned int debug_locks_id;
 	u64 refresh_gen;
 	struct list_head lru_head;
 	wait_queue_head_t waitq;
-	struct work_struct work;
-	struct dlm_lksb lksb;
+	struct work_struct shrink_work;
 	ktime_t grace_deadline;
-	struct delayed_work grace_work;
-	bool grace_pending;
+	unsigned long request_pending:1,
+		      invalidate_pending:1;
 
 	spinlock_t cov_list_lock;
 	struct list_head cov_list;
 
-	int error;
-	int granted_mode;
-	int bast_mode;
-	int work_prev_mode;
-	int work_mode;
+	int mode;
 	unsigned int waiters[SCOUTFS_LOCK_NR_MODES];
 	unsigned int users[SCOUTFS_LOCK_NR_MODES];
 
@@ -50,6 +43,11 @@ struct scoutfs_lock_coverage {
 	struct scoutfs_lock *lock;
 	struct list_head head;
 };
+
+int scoutfs_lock_grant_response(struct super_block *sb,
+				struct scoutfs_net_lock *nl);
+int scoutfs_lock_invalidate_request(struct super_block *sb, u64 net_id,
+				    struct scoutfs_net_lock *nl);
 
 int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
 		       struct inode *inode, struct scoutfs_lock **ret_lock);

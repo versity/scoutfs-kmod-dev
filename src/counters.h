@@ -82,23 +82,26 @@
 	EXPAND_COUNTER(item_shrink_small_split)			\
 	EXPAND_COUNTER(item_shrink_split_range)			\
 	EXPAND_COUNTER(lock_alloc)				\
-	EXPAND_COUNTER(lock_ast)				\
-	EXPAND_COUNTER(lock_ast_edeadlk)			\
-	EXPAND_COUNTER(lock_ast_error)				\
-	EXPAND_COUNTER(lock_bast)				\
-	EXPAND_COUNTER(lock_dlm_call)				\
-	EXPAND_COUNTER(lock_dlm_call_error)			\
 	EXPAND_COUNTER(lock_free)				\
-	EXPAND_COUNTER(lock_grace_enforced)			\
-	EXPAND_COUNTER(lock_grace_expired)			\
+	EXPAND_COUNTER(lock_grace_elapsed)			\
 	EXPAND_COUNTER(lock_grace_extended)			\
+	EXPAND_COUNTER(lock_grace_set)				\
+	EXPAND_COUNTER(lock_grace_wait)				\
+	EXPAND_COUNTER(lock_grant_request)			\
+	EXPAND_COUNTER(lock_grant_response)			\
 	EXPAND_COUNTER(lock_invalidate_clean_item)		\
+	EXPAND_COUNTER(lock_invalidate_coverage)		\
+	EXPAND_COUNTER(lock_invalidate_inode)			\
+	EXPAND_COUNTER(lock_invalidate_request)			\
+	EXPAND_COUNTER(lock_invalidate_response)		\
 	EXPAND_COUNTER(lock_lock)				\
 	EXPAND_COUNTER(lock_lock_error)				\
 	EXPAND_COUNTER(lock_nonblock_eagain)			\
-	EXPAND_COUNTER(lock_shrink)				\
-	EXPAND_COUNTER(lock_write_dirty_item)			\
+	EXPAND_COUNTER(lock_shrink_queued)			\
+	EXPAND_COUNTER(lock_shrink_request_aborted)		\
 	EXPAND_COUNTER(lock_unlock)				\
+	EXPAND_COUNTER(lock_wait)				\
+	EXPAND_COUNTER(lock_write_dirty_item)			\
 	EXPAND_COUNTER(manifest_compact_migrate)		\
 	EXPAND_COUNTER(manifest_hard_stale_error)		\
 	EXPAND_COUNTER(manifest_read_excluded_key)		\

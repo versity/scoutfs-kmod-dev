@@ -17,6 +17,10 @@ int scoutfs_client_get_manifest_root(struct super_block *sb,
 				     struct scoutfs_btree_root *root);
 int scoutfs_client_statfs(struct super_block *sb,
 			  struct scoutfs_net_statfs *nstatfs);
+int scoutfs_client_lock_request(struct super_block *sb,
+				struct scoutfs_net_lock *nl);
+int scoutfs_client_lock_response(struct super_block *sb, u64 net_id,
+				struct scoutfs_net_lock *nl);
 
 int scoutfs_client_wait_node_id(struct super_block *sb);
 int scoutfs_client_setup(struct super_block *sb);

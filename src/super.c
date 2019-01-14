@@ -123,7 +123,7 @@ static void scoutfs_put_super(struct super_block *sb)
 
 	scoutfs_data_destroy(sb);
 
-	scoutfs_unlock(sb, sbi->node_id_lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, sbi->node_id_lock, SCOUTFS_LOCK_WRITE);
 	sbi->node_id_lock = NULL;
 
 	scoutfs_shutdown_trans(sb);
@@ -333,7 +333,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_server_setup(sb) ?:
 	      scoutfs_client_setup(sb) ?:
 	      scoutfs_client_wait_node_id(sb) ?:
-	      scoutfs_lock_node_id(sb, DLM_LOCK_EX, 0, sbi->node_id,
+	      scoutfs_lock_node_id(sb, SCOUTFS_LOCK_WRITE, 0, sbi->node_id,
 				   &sbi->node_id_lock);
 	if (ret)
 		goto out;

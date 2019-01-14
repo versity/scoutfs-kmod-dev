@@ -291,7 +291,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	if (!xat)
 		return -ENOMEM;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &lck);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ, 0, inode, &lck);
 	if (ret)
 		goto out;
 
@@ -301,7 +301,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 			     name, name_len, 0, 0, lck);
 
 	up_read(&si->xattr_rwsem);
-	scoutfs_unlock(sb, lck, DLM_LOCK_PR);
+	scoutfs_unlock(sb, lck, SCOUTFS_LOCK_READ);
 
 	if (ret < 0) {
 		if (ret == -ENOENT)
@@ -385,8 +385,8 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		goto out;
 	}
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &lck);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lck);
 	if (ret)
 		goto out;
 
@@ -466,7 +466,7 @@ release:
 	scoutfs_inode_index_unlock(sb, &ind_locks);
 unlock:
 	up_write(&si->xattr_rwsem);
-	scoutfs_unlock(sb, lck, DLM_LOCK_EX);
+	scoutfs_unlock(sb, lck, SCOUTFS_LOCK_WRITE);
 out:
 	kfree(xat);
 
@@ -509,7 +509,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 		goto out;
 	}
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &lck);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ, 0, inode, &lck);
 	if (ret)
 		goto out;
 
@@ -546,7 +546,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	}
 
 	up_read(&si->xattr_rwsem);
-	scoutfs_unlock(sb, lck, DLM_LOCK_PR);
+	scoutfs_unlock(sb, lck, SCOUTFS_LOCK_READ);
 out:
 	kfree(xat);
 

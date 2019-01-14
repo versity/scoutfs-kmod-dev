@@ -315,11 +315,11 @@ int scoutfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	struct scoutfs_lock *lock = NULL;
 	int ret;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
 	if (ret == 0) {
 		generic_fillattr(inode, stat);
-		scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+		scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 	}
 	return ret;
 }
@@ -406,8 +406,8 @@ int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
 
 	trace_scoutfs_setattr(dentry, attr);
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
 	if (ret)
 		return ret;
 
@@ -452,7 +452,7 @@ int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
 	scoutfs_release_trans(sb);
 	scoutfs_inode_index_unlock(sb, &ind_locks);
 out:
-	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
 	return ret;
 }
 
@@ -612,7 +612,7 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 	struct inode *inode;
 	int ret;
 
-	ret = scoutfs_lock_ino(sb, DLM_LOCK_PR, 0, ino, &lock);
+	ret = scoutfs_lock_ino(sb, SCOUTFS_LOCK_READ, 0, ino, &lock);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -641,7 +641,7 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 	}
 
 out:
-	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 	return inode;
 }
 
@@ -1141,9 +1141,9 @@ int scoutfs_inode_index_try_lock_hold(struct super_block *sb,
 	list_sort(NULL, list, cmp_index_lock);
 
 	list_for_each_entry(ind_lock, list, head) {
-		ret = scoutfs_lock_inode_index(sb, DLM_LOCK_CW, ind_lock->type,
-					       ind_lock->major, ind_lock->ino,
-					       &ind_lock->lock);
+		ret = scoutfs_lock_inode_index(sb, SCOUTFS_LOCK_WRITE_ONLY,
+					       ind_lock->type, ind_lock->major,
+					       ind_lock->ino, &ind_lock->lock);
 		if (ret)
 			goto out;
 	}
@@ -1188,7 +1188,7 @@ void scoutfs_inode_index_unlock(struct super_block *sb, struct list_head *list)
 	struct index_lock *tmp;
 
 	list_for_each_entry_safe(ind_lock, tmp, list, head) {
-		scoutfs_unlock(sb, ind_lock->lock, DLM_LOCK_CW);
+		scoutfs_unlock(sb, ind_lock->lock, SCOUTFS_LOCK_WRITE_ONLY);
 		list_del_init(&ind_lock->head);
 		kfree(ind_lock);
 	}
@@ -1403,7 +1403,7 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	u64 size;
 	int ret;
 
-	ret = scoutfs_lock_ino(sb, DLM_LOCK_EX, 0, ino, &lock);
+	ret = scoutfs_lock_ino(sb, SCOUTFS_LOCK_WRITE, 0, ino, &lock);
 	if (ret)
 		return ret;
 
@@ -1472,7 +1472,7 @@ out:
 	if (release)
 		scoutfs_release_trans(sb);
 	scoutfs_inode_index_unlock(sb, &ind_locks);
-	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
 	return ret;
 }
 

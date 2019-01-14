@@ -43,11 +43,11 @@
  * relatively cheap because reading is going to check the segments
  * anyway.
  *
- * This is copying to userspace while holding a DLM lock.  This is safe
- * because faulting can convert the lock to a higher level while we hold
- * the lower level.  DLM locks don't block tasks in a node, they match
- * and the tasks fall back to local locking.  In this case the spin
- * locks around the item cache.
+ * This is copying to userspace while holding a read lock.  This is safe
+ * because faulting can send a request for a write lock while the read
+ * lock is being used.  The cluster locks don't block tasks in a node,
+ * they match and the tasks fall back to local locking.  In this case
+ * the spin locks around the item cache.
  */
 static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 {
@@ -99,8 +99,9 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 	/* cap nr to the max the ioctl can return to a compat task */
 	walk.nr_entries = min_t(u64, walk.nr_entries, INT_MAX);
 
-	ret = scoutfs_lock_inode_index(sb, DLM_LOCK_PR, type, walk.first.major,
-				       walk.first.ino, &lock);
+	ret = scoutfs_lock_inode_index(sb, SCOUTFS_LOCK_READ, type,
+				       walk.first.major, walk.first.ino,
+				       &lock);
 	if (ret < 0)
 		goto out;
 
@@ -122,7 +123,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 			key = lock->end;
 			scoutfs_key_inc(&key);
 
-			scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+			scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 
 			/*
 			 * XXX This will miss dirty items.  We'd need to
@@ -143,7 +144,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 			key = next_key;
 
-			ret = scoutfs_lock_inode_index(sb, DLM_LOCK_PR,
+			ret = scoutfs_lock_inode_index(sb, SCOUTFS_LOCK_READ,
 						key.sk_type,
 						le64_to_cpu(key.skii_major),
 						le64_to_cpu(key.skii_ino),
@@ -170,7 +171,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 		scoutfs_key_inc(&key);
 	}
 
-	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 
 out:
 	if (nr > 0)
@@ -299,8 +300,8 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 
 	mutex_lock(&inode->i_mutex);
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
 	if (ret)
 		goto out;
 
@@ -344,7 +345,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	}
 
 out:
-	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 
@@ -423,8 +424,8 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 
 	mutex_lock(&inode->i_mutex);
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
 	if (ret)
 		goto out;
 
@@ -464,7 +465,7 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 	current->backing_dev_info = NULL;
 out:
 	scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
-	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 

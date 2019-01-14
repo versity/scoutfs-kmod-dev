@@ -792,15 +792,17 @@ static int scoutfs_readpage(struct file *file, struct page *page)
 	int ret;
 
 	flags = SCOUTFS_LKF_REFRESH_INODE | SCOUTFS_LKF_NONBLOCK;
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, flags, inode, &inode_lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ, flags, inode,
+				 &inode_lock);
 	if (ret < 0) {
 		unlock_page(page);
 		if (ret == -EAGAIN) {
 			flags &= ~SCOUTFS_LKF_NONBLOCK;
-			ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, flags, inode,
-					   &inode_lock);
+			ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ, flags,
+						 inode, &inode_lock);
 			if (ret == 0) {
-				scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+				scoutfs_unlock(sb, inode_lock,
+					       SCOUTFS_LOCK_READ);
 				ret = AOP_TRUNCATED_PAGE;
 			}
 		}
@@ -808,7 +810,7 @@ static int scoutfs_readpage(struct file *file, struct page *page)
 	}
 
 	ret = mpage_readpage(page, scoutfs_get_block);
-	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
 	return ret;
 }
 
@@ -820,14 +822,14 @@ static int scoutfs_readpages(struct file *file, struct address_space *mapping,
 	struct scoutfs_lock *inode_lock = NULL;
 	int ret;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &inode_lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &inode_lock);
 	if (ret)
 		return ret;
 
 	ret = mpage_readpages(mapping, pages, nr_pages, scoutfs_get_block);
 
-	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
 	return ret;
 }
 
@@ -1076,8 +1078,8 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 		goto out;
 	}
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
 	if (ret)
 		goto out;
 
@@ -1166,7 +1168,7 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	}
 
 out:
-	scoutfs_unlock(sb, lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
 	mutex_unlock(&inode->i_mutex);
 
 	trace_scoutfs_data_fallocate(sb, ino, mode, offset, len, ret);
@@ -1199,7 +1201,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	/* XXX overkill? */
 	mutex_lock(&inode->i_mutex);
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, 0, inode, &inode_lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ, 0, inode, &inode_lock);
 	if (ret)
 		goto out;
 
@@ -1240,7 +1242,7 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		blk_off = ext.start + ext.len;
 	}
 
-	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
 out:
 	mutex_unlock(&inode->i_mutex);
 

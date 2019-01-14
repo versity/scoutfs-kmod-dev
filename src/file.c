@@ -41,13 +41,13 @@ ssize_t scoutfs_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	SCOUTFS_DECLARE_PER_TASK_ENTRY(pt_ent);
 	int ret;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &inode_lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &inode_lock);
 	if (ret == 0) {
 		scoutfs_per_task_add(&si->pt_data_lock, &pt_ent, inode_lock);
 		ret = generic_file_aio_read(iocb, iov, nr_segs, pos);
 		scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
-		scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+		scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
 	}
 
 	return ret;
@@ -68,8 +68,8 @@ ssize_t scoutfs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 		return 0;
 
 	mutex_lock(&inode->i_mutex);
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_EX, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &inode_lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &inode_lock);
 	if (ret)
 		goto out;
 
@@ -84,7 +84,7 @@ ssize_t scoutfs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	ret = __generic_file_aio_write(iocb, iov, nr_segs, &iocb->ki_pos);
 out:
 	scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
-	scoutfs_unlock(sb, inode_lock, DLM_LOCK_EX);
+	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_WRITE);
 	mutex_unlock(&inode->i_mutex);
 
 	if (ret > 0 || ret == -EIOCBQUEUED) {
@@ -107,14 +107,14 @@ int scoutfs_permission(struct inode *inode, int mask)
 	if (mask & MAY_NOT_BLOCK)
 		return -ECHILD;
 
-	ret = scoutfs_lock_inode(sb, DLM_LOCK_PR, SCOUTFS_LKF_REFRESH_INODE,
-				 inode, &inode_lock);
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &inode_lock);
 	if (ret)
 		return ret;
 
 	ret = generic_permission(inode, mask);
 
-	scoutfs_unlock(sb, inode_lock, DLM_LOCK_PR);
+	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
 
 	return ret;
 }
@@ -138,7 +138,7 @@ loff_t scoutfs_file_llseek(struct file *file, loff_t offset, int whence)
 		 * items instead of relying on generic_file_llseek()
 		 * trickery.
 		 */
-		ret = scoutfs_lock_inode(sb, DLM_LOCK_PR,
+		ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
 					 SCOUTFS_LKF_REFRESH_INODE, inode,
 					 &lock);
 	case SEEK_SET:
@@ -152,7 +152,7 @@ loff_t scoutfs_file_llseek(struct file *file, loff_t offset, int whence)
 	if (ret == 0)
 		offset = generic_file_llseek(file, offset, whence);
 
-	scoutfs_unlock(sb, lock, DLM_LOCK_PR);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 
 	return ret ? ret : offset;
 }

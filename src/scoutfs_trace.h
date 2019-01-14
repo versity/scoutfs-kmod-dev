@@ -1578,32 +1578,24 @@ DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_shrink_end,
         TP_ARGS(sb, rng, start, end)
 );
 
-#define lock_mode(mode)			\
-	__print_symbolic(mode,		\
-		{ DLM_LOCK_IV,	"IV" },	\
-		{ DLM_LOCK_NL,	"NL" },	\
-		{ DLM_LOCK_CR,	"CR" },	\
-		{ DLM_LOCK_CW,	"CW" },	\
-		{ DLM_LOCK_PR,	"PR" },	\
-		{ DLM_LOCK_PW,	"PW" },	\
-		{ DLM_LOCK_EX,	"EX" })
+#define lock_mode(mode)						\
+	__print_symbolic(mode,					\
+		{ SCOUTFS_LOCK_NULL,		"NULL" },	\
+		{ SCOUTFS_LOCK_READ,		"READ" },	\
+		{ SCOUTFS_LOCK_WRITE,		"WRITE" },	\
+		{ SCOUTFS_LOCK_WRITE_ONLY,	"WRITE_ONLY" })
 
 DECLARE_EVENT_CLASS(scoutfs_lock_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
         TP_ARGS(sb, lck),
         TP_STRUCT__entry(
 		__field(__u64, fsid)
-		__field(u8, name_scope)
-		__field(u8, name_zone)
-		__field(u8, name_type)
-		__field(u64, name_first)
-		__field(u64, name_second)
+		sk_trace_define(start)
+		sk_trace_define(end)
 		__field(u64, refresh_gen)
-		__field(int, error)
-		__field(int, granted_mode)
-		__field(int, bast_mode)
-		__field(int, work_prev_mode)
-		__field(int, work_mode)
+		__field(unsigned char, request_pending)
+		__field(unsigned char, invalidate_pending)
+		__field(int, mode)
 		__field(unsigned int, waiters_cw)
 		__field(unsigned int, waiters_pr)
 		__field(unsigned int, waiters_ex)
@@ -1613,33 +1605,29 @@ DECLARE_EVENT_CLASS(scoutfs_lock_class,
 	),
         TP_fast_assign(
 		__entry->fsid = FSID_ARG(sb);
-		__entry->name_scope = lck->name.scope;
-		__entry->name_zone = lck->name.zone;
-		__entry->name_type = lck->name.type;
-		__entry->name_first = le64_to_cpu(lck->name.first);
-		__entry->name_second = le64_to_cpu(lck->name.second);
-
+		sk_trace_assign(start, &lck->start);
+		sk_trace_assign(end, &lck->end);
 		__entry->refresh_gen = lck->refresh_gen;
-		__entry->error = lck->error;
-		__entry->granted_mode = lck->granted_mode;
-		__entry->bast_mode = lck->bast_mode;
-		__entry->work_prev_mode = lck->work_prev_mode;
-		__entry->work_mode = lck->work_mode;
-		__entry->waiters_pr = lck->waiters[DLM_LOCK_PR];
-		__entry->waiters_ex = lck->waiters[DLM_LOCK_EX];
-		__entry->waiters_cw = lck->waiters[DLM_LOCK_CW];
-		__entry->users_pr = lck->users[DLM_LOCK_PR];
-		__entry->users_ex = lck->users[DLM_LOCK_EX];
-		__entry->users_cw = lck->users[DLM_LOCK_CW];
+		__entry->request_pending = lck->request_pending;
+		__entry->invalidate_pending = lck->invalidate_pending;
+		__entry->mode = lck->mode;
+		__entry->waiters_pr = lck->waiters[SCOUTFS_LOCK_READ];
+		__entry->waiters_ex = lck->waiters[SCOUTFS_LOCK_WRITE];
+		__entry->waiters_cw = lck->waiters[SCOUTFS_LOCK_WRITE_ONLY];
+		__entry->users_pr = lck->users[SCOUTFS_LOCK_READ];
+		__entry->users_ex = lck->users[SCOUTFS_LOCK_WRITE];
+		__entry->users_cw = lck->users[SCOUTFS_LOCK_WRITE_ONLY];
         ),
-        TP_printk("fsid "FSID_FMT" name %u.%u.%u.%llu.%llu refresh_gen %llu error %d granted %d bast %d prev %d work %d waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u",
-		  __entry->fsid, __entry->name_scope, __entry->name_zone,
-		  __entry->name_type, __entry->name_first, __entry->name_second,
-		  __entry->refresh_gen, __entry->error, __entry->granted_mode,
-		  __entry->bast_mode, __entry->work_prev_mode,
-		  __entry->work_mode, __entry->waiters_pr,
-		  __entry->waiters_ex, __entry->waiters_cw, __entry->users_pr,
-		  __entry->users_ex, __entry->users_cw)
+        TP_printk("fsid "FSID_FMT" start "SK_FMT" end "SK_FMT" mode %u reqpnd %u invpnd %u rfrgen %llu waiters: pr %u ex %u cw %u users: pr %u ex %u cw %u",
+		  __entry->fsid, sk_trace_args(start), sk_trace_args(end),
+		  __entry->mode, __entry->request_pending,
+		  __entry->invalidate_pending, __entry->refresh_gen,
+		  __entry->waiters_pr, __entry->waiters_ex, __entry->waiters_cw,
+		  __entry->users_pr, __entry->users_ex, __entry->users_cw)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidate,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
 );
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_free,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
@@ -1649,19 +1637,23 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_alloc,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_ast,
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_grant_response,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_bast,
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_granted,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_work,
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidate_request,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );
-DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_grace_work,
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_invalidated,
+       TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
+       TP_ARGS(sb, lck)
+);
+DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_locked,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
 );

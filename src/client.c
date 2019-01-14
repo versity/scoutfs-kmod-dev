@@ -231,6 +231,55 @@ int scoutfs_client_statfs(struct super_block *sb,
 					sizeof(struct scoutfs_net_statfs));
 }
 
+/* process an incoming grant response from the server */
+static int client_lock_response(struct super_block *sb,
+				struct scoutfs_net_connection *conn,
+				void *resp, unsigned int resp_len,
+				int error, void *data)
+{
+	if (resp_len != sizeof(struct scoutfs_net_lock))
+		return -EINVAL;
+
+	/* XXX error? */
+
+	return scoutfs_lock_grant_response(sb, resp);
+}
+
+/* Send a lock request to the server. */
+int scoutfs_client_lock_request(struct super_block *sb,
+				struct scoutfs_net_lock *nl)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return scoutfs_net_submit_request(sb, client->conn,
+					  SCOUTFS_NET_CMD_LOCK,
+					  nl, sizeof(*nl),
+					  client_lock_response, NULL, NULL);
+}
+
+/* Send a lock response to the server. */
+int scoutfs_client_lock_response(struct super_block *sb, u64 net_id,
+				struct scoutfs_net_lock *nl)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return scoutfs_net_response(sb, client->conn, SCOUTFS_NET_CMD_LOCK,
+				    net_id, 0, nl, sizeof(*nl));
+}
+
+/* The client is receiving a invalidation request from the server */
+static int client_lock(struct super_block *sb,
+		       struct scoutfs_net_connection *conn, u8 cmd, u64 id,
+		       void *arg, u16 arg_len)
+{
+	if (arg_len != sizeof(struct scoutfs_net_lock))
+		return -EINVAL;
+
+	/* XXX error? */
+
+	return scoutfs_lock_invalidate_request(sb, id, arg);
+}
+
 /*
  * Process a greeting response in the client from the server.  This is
  * called for every connected socket on the connection.  The first
@@ -412,6 +461,7 @@ out:
 
 static scoutfs_net_request_t client_req_funcs[] = {
 	[SCOUTFS_NET_CMD_COMPACT]		= client_compact,
+	[SCOUTFS_NET_CMD_LOCK]			= client_lock,
 };
 
 /*

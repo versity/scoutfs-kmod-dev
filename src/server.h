@@ -22,11 +22,16 @@ do {									\
 	__entry->name##_addr & 255,		\
 	__entry->name##_port
 
-#define SNH_FMT	"id %llu data_len %u cmd %u flags 0x%x error %u"
-#define SNH_ARG(nh) le64_to_cpu((nh)->id), le16_to_cpu((nh)->data_len), \
-		    (nh)->cmd, (nh)->flags, (nh)->error
+#define SNH_FMT \
+	"seq %llu recv_seq %llu id %llu data_len %u cmd %u flags 0x%x error %u"
+#define SNH_ARG(nh)							\
+	le64_to_cpu((nh)->seq), le64_to_cpu((nh)->recv_seq),		\
+	le64_to_cpu((nh)->id), le16_to_cpu((nh)->data_len), (nh)->cmd,	\
+	(nh)->flags, (nh)->error
 
 #define snh_trace_define(name)		\
+	__field(__u64, name##_seq)	\
+	__field(__u64, name##_recv_seq)	\
 	__field(__u64, name##_id)	\
 	__field(__u16, name##_data_len)	\
 	__field(__u8, name##_cmd)	\
@@ -37,6 +42,8 @@ do {									\
 do {								\
 	__typeof__(nh) _nh = (nh);				\
 								\
+	__entry->name##_seq = le64_to_cpu(_nh->seq);		\
+	__entry->name##_recv_seq = le64_to_cpu(_nh->recv_seq);		\
 	__entry->name##_id = le64_to_cpu(_nh->id);		\
 	__entry->name##_data_len = le16_to_cpu(_nh->data_len);	\
 	__entry->name##_cmd = _nh->cmd;				\
@@ -44,9 +51,10 @@ do {								\
 	__entry->name##_error = _nh->error;			\
 } while (0)
 
-#define snh_trace_args(name)						   \
-	__entry->name##_id, __entry->name##_data_len, __entry->name##_cmd, \
-	__entry->name##_flags, __entry->name##_error
+#define snh_trace_args(name)						      \
+	__entry->name##_seq, __entry->name##_recv_seq, __entry->name##_id,    \
+	__entry->name##_data_len, __entry->name##_cmd, __entry->name##_flags, \
+	__entry->name##_error
 
 struct scoutfs_net_manifest_entry;
 struct scoutfs_manifest_entry;
@@ -62,7 +70,8 @@ int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
 				 u64 id, struct scoutfs_net_lock *nl);
 
 struct sockaddr_in;
-int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin);
+int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin,
+			 u64 term);
 void scoutfs_server_stop(struct super_block *sb);
 
 int scoutfs_server_setup(struct super_block *sb);

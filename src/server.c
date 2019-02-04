@@ -56,6 +56,7 @@ struct server_info {
 	bool shutting_down;
 	struct completion start_comp;
 	struct sockaddr_in listen_sin;
+	u64 term;
 	struct scoutfs_net_connection *conn;
 
 	/* request processing coordinates committing manifest and alloc */
@@ -1072,11 +1073,16 @@ int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
  * response shuts down the connection.
  *
  * We allocate a new node_id for the first connect attempt from a
- * client.  We update the request node_id for the calling net layer to
- * consume.
+ * client.
  *
  * If a client reconnects they'll send their initially assigned node_id
  * in their greeting request.
+ *
+ * XXX We can lose allocated node_ids here as we record the node_id as
+ * live as we send a valid greeting response.  The client might
+ * disconnect before they receive the response and resent and initial
+ * blank greeting.  We could use a client uuid to associate with
+ * allocated node_ids.
  */
 static int server_greeting(struct super_block *sb,
 			   struct scoutfs_net_connection *conn,
@@ -1088,6 +1094,9 @@ static int server_greeting(struct super_block *sb,
 	DECLARE_SERVER_INFO(sb, server);
 	struct commit_waiter cw;
 	__le64 node_id = 0;
+	bool sent_node_id;
+	bool first_contact;
+	bool farewell;
 	int ret = 0;
 
 	if (arg_len != sizeof(struct scoutfs_net_greeting)) {
@@ -1122,22 +1131,59 @@ static int server_greeting(struct super_block *sb,
 		queue_commit_work(server, &cw);
 		up_read(&server->commit_rwsem);
 		ret = wait_for_commit(&cw);
-		if (ret)
+		if (ret) {
+			node_id = 0;
 			goto out;
+		}
 	} else {
 		node_id = gr->node_id;
 	}
 
 	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
+	greet.server_term = cpu_to_le64(server->term);
 	greet.node_id = node_id;
+	greet.flags = 0;
 out:
 	ret = scoutfs_net_response(sb, conn, cmd, id, ret,
 				   &greet, sizeof(greet));
-	/* give net caller client's new node_id :/ */
-	if (ret == 0 && node_id != 0)
-		gr->node_id = node_id;
+	if (node_id != 0 && ret == 0) {
+		sent_node_id = gr->node_id != 0;
+		first_contact = le64_to_cpu(gr->server_term) != server->term;
+		if (gr->flags & cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_FAREWELL))
+			farewell = true;
+		else
+			farewell = false;
+
+		scoutfs_net_server_greeting(sb, conn, le64_to_cpu(node_id), id,
+					    sent_node_id, first_contact,
+					    farewell);
+	}
+
 	return ret;
+}
+
+/*
+ * The server is receiving a farewell message from a client that is
+ * unmounting.  It won't send any more requests and once it receives our
+ * response it will not reconnect.
+ *
+ * XXX we should make sure that all our requests to the client have finished
+ * before we respond.  Locking will have its own messaging for orderly
+ * shutdown.  That leaves compaction which will be addressed as part of
+ * the larger work of recovering compactions that were in flight when
+ * a client crashed.
+ */
+static int server_farewell(struct super_block *sb,
+			   struct scoutfs_net_connection *conn,
+			   u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	if (arg_len != 0)
+		return -EINVAL;
+
+	scoutfs_net_server_farewell(sb, conn);
+
+	return scoutfs_net_response(sb, conn, cmd, id, 0, NULL, 0);
 }
 
 /* requests sent to clients are tracked so we can free resources */
@@ -1743,6 +1789,7 @@ static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_GET_MANIFEST_ROOT]	= server_get_manifest_root,
 	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
 	[SCOUTFS_NET_CMD_LOCK]			= server_lock,
+	[SCOUTFS_NET_CMD_FAREWELL]		= server_farewell,
 };
 
 static void server_notify_up(struct super_block *sb,
@@ -1880,13 +1927,15 @@ out:
 }
 
 /* XXX can we call start multiple times? */
-int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin)
+int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin,
+			 u64 term)
 {
 	DECLARE_SERVER_INFO(sb, server);
 
 	server->err = 0;
 	server->shutting_down = false;
 	server->listen_sin = *sin;
+	server->term = term;
 	init_completion(&server->start_comp);
 
 	queue_work(server->wq, &server->work);

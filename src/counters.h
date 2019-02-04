@@ -15,6 +15,7 @@
 	EXPAND_COUNTER(btree_read_error)			\
 	EXPAND_COUNTER(btree_stale_read)			\
 	EXPAND_COUNTER(btree_write_error)			\
+	EXPAND_COUNTER(client_farewell_error)			\
 	EXPAND_COUNTER(compact_invalid_request)			\
 	EXPAND_COUNTER(compact_operations)			\
 	EXPAND_COUNTER(compact_segment_busy)			\
@@ -110,6 +111,7 @@
 	EXPAND_COUNTER(net_send_error)				\
 	EXPAND_COUNTER(net_send_messages)			\
 	EXPAND_COUNTER(net_recv_bytes)				\
+	EXPAND_COUNTER(net_recv_dropped_duplicate)		\
 	EXPAND_COUNTER(net_recv_error)				\
 	EXPAND_COUNTER(net_recv_invalid_message)		\
 	EXPAND_COUNTER(net_recv_messages)			\

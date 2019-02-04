@@ -1840,6 +1840,14 @@ DEFINE_EVENT(scoutfs_work_class, scoutfs_net_shutdown_work_exit,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
 );
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_reconn_free_work_enter,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
+DEFINE_EVENT(scoutfs_work_class, scoutfs_net_reconn_free_work_exit,
+        TP_PROTO(struct super_block *sb, u64 data, int ret),
+        TP_ARGS(sb, data, ret)
+);
 DEFINE_EVENT(scoutfs_work_class, scoutfs_net_send_work_enter,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)

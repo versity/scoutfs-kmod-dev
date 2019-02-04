@@ -571,23 +571,53 @@ enum {
  */
 
 /*
- * Greetings verify identity of communicating nodes.  The sender
- * sends their credentials and the receiver verifies them.
+ * Greetings verify identity of communicating nodes.  The sender sends
+ * their credentials and the receiver verifies them.
+ *
+ * @server_term: The raft term that elected the server.  Initially 0
+ * from the client, sent by the server, then sent by the client as it
+ * tries to reconnect.  Used to identify a client reconnecting to a
+ * server that has timed out its connection.
+ *
+ * @node_id: The id of the client.  Initially 0 from the client,
+ * assigned by the server, and sent by the client as it reconnects.
+ * Used by the server to identify reconnecting clients whose existing
+ * state must be dealt with.
  */
 struct scoutfs_net_greeting {
 	__le64 fsid;
 	__le64 format_hash;
+	__le64 server_term;
 	__le64 node_id;
+	__le64 flags;
 } __packed;
+
+#define SCOUTFS_NET_GREETING_FLAG_FAREWELL	(1 << 0)
+#define SCOUTFS_NET_GREETING_FLAG_INVALID	(~(__u64)0 << 1)
 
 /*
  * This header precedes and describes all network messages sent over
- * sockets.  The id is set by the request and sent in the response.
+ * sockets.
+ *
+ * @seq: A sequence number that is increased for each message queued for
+ * send on the sender.  The sender will never reorder messages in the
+ * send queue so this will always increase in recv on the receiver.  The
+ * receiver can use this to drop messages that arrived twice after being
+ * resent across a newly connected socket for a given connection.
+ *
+ * @recv_seq: The sequence number of the last received message.  The
+ * receiver is sending this to the sender in every message.  The sender
+ * uses them to drop responses which have been delivered.
+ *
+ * @id: An increasing identifier that is set in each request.  Responses
+ * specify the request that they're responding to.
  *
  * Error is only set to a translated errno and will only be found in
  * response messages.
  */
 struct scoutfs_net_header {
+	__le64 seq;
+	__le64 recv_seq;
 	__le64 id;
 	__le16 data_len;
 	__u8 cmd;
@@ -612,6 +642,7 @@ enum {
 	SCOUTFS_NET_CMD_STATFS,
 	SCOUTFS_NET_CMD_COMPACT,
 	SCOUTFS_NET_CMD_LOCK,
+	SCOUTFS_NET_CMD_FAREWELL,
 	SCOUTFS_NET_CMD_UNKNOWN,
 };
 

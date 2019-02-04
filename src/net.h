@@ -67,6 +67,19 @@ void scoutfs_net_shutdown(struct super_block *sb,
 void scoutfs_net_free_conn(struct super_block *sb,
 			   struct scoutfs_net_connection *conn);
 
+void scoutfs_net_client_greeting(struct super_block *sb,
+				 struct scoutfs_net_connection *conn,
+				 bool new_server);
+void scoutfs_net_server_greeting(struct super_block *sb,
+				 struct scoutfs_net_connection *conn,
+				 u64 node_id, u64 greeting_id,
+				 bool sent_node_id, bool first_contact,
+				 bool farewell);
+void scoutfs_net_server_farewell(struct super_block *sb,
+				 struct scoutfs_net_connection *conn);
+void scoutfs_net_farewell(struct super_block *sb,
+			  struct scoutfs_net_connection *conn);
+
 int scoutfs_net_setup(struct super_block *sb);
 void scoutfs_net_destroy(struct super_block *sb);
 

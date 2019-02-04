@@ -57,6 +57,12 @@ struct client_info {
 
 	struct scoutfs_quorum_elected_info qei;
 	u64 old_elected_nr;
+
+	u64 server_term;
+
+	bool sending_farewell;
+	int farewell_error;
+	struct completion farewell_comp;
 };
 
 /*
@@ -281,7 +287,8 @@ static int client_greeting(struct super_block *sb,
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_net_greeting *gr = resp;
-	int ret = 0;
+	bool new_server;
+	int ret;
 
 	if (error) {
 		ret = error;
@@ -328,6 +335,11 @@ static int client_greeting(struct super_block *sb,
 		complete(&client->node_id_comp);
 	}
 
+	new_server = le64_to_cpu(gr->server_term) != client->server_term;
+	scoutfs_net_client_greeting(sb, conn, new_server);
+
+	client->server_term = le64_to_cpu(gr->server_term);
+	ret = 0;
 out:
 	return ret;
 }
@@ -398,7 +410,7 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 		goto out;
 
 	if (qei->run_server) {
-		ret = scoutfs_server_start(sb, &qei->sin);
+		ret = scoutfs_server_start(sb, &qei->sin, qei->elected_nr);
 		if (ret) {
 			/* forget that we tried to start the server */
 			memset(qei, 0, sizeof(*qei));
@@ -423,7 +435,11 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	/* send a greeting to verify endpoints of each connection */
 	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
+	greet.server_term = cpu_to_le64(client->server_term);
 	greet.node_id = cpu_to_le64(sbi->node_id);
+	greet.flags = 0;
+	if (client->sending_farewell)
+		greet.flags |= cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_FAREWELL);
 
 	ret = scoutfs_net_submit_request(sb, client->conn,
 					 SCOUTFS_NET_CMD_GREETING,
@@ -537,6 +553,7 @@ int scoutfs_client_setup(struct super_block *sb)
 	init_completion(&client->node_id_comp);
 	atomic_set(&client->shutting_down, 0);
 	INIT_WORK(&client->connect_work, scoutfs_client_connect_worker);
+	init_completion(&client->farewell_comp);
 
 	client->conn = scoutfs_net_alloc_conn(sb, NULL, client_notify_down, 0,
 					      client_req_funcs, "client");
@@ -560,34 +577,89 @@ out:
 	return ret;
 }
 
+/* Once we get a response from the server we can shut down */
+static int client_farewell_response(struct super_block *sb,
+				    struct scoutfs_net_connection *conn,
+				    void *resp, unsigned int resp_len,
+				    int error, void *data)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	if (resp_len != 0)
+		return -EINVAL;
+
+	client->farewell_error = error;
+	complete(&client->farewell_comp);
+
+	return 0;
+}
+
 /*
  * There must be no more callers to the client request functions by the
  * time we get here.
+ *
+ * If we've connected to a server then we send them a farewell request
+ * so that they don't wait for us to reconnect and trigger a timeout.
+ *
+ * This decision is a little racy.  The server considers us connected
+ * when it assigns us a node_id as it processes the greeting.  We can
+ * disconnect before receiving the response and leave without sending a
+ * farewell.  So given that awkward initial race, we also have a bit of
+ * a race where we just test the server_term to see if we've ever gotten
+ * a greeting reply from any server.  We don't try to synchronize with
+ * pending connection attempts.
+ *
+ * The consequences of aborting a mount at just the wrong time and
+ * disconnecting without the farewell handshake depend on what the
+ * server does to timed out clients.  At best it'll spit out a warning
+ * message that a client disconnected but it won't fence us if we didn't
+ * have any persistent state.
  */
 void scoutfs_client_destroy(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
 	struct scoutfs_net_connection *conn;
+	int ret;
 
-	if (client) {
-		/* stop notify_down from queueing connect work */
-		atomic_set(&client->shutting_down, 1);
+	if (client == NULL)
+		return;
 
-		/* make sure worker isn't using the conn */
-		cancel_work_sync(&client->connect_work);
-
-		/* make racing conn use explode */
-		conn = client->conn;
-		client->conn = NULL;
-		scoutfs_net_free_conn(sb, conn);
-
-		/* stop running the server if we were, harmless otherwise */
-		stop_our_server(sb, &client->qei);
-
-		if (client->workq)
-			destroy_workqueue(client->workq);
-		kfree(client);
-		sbi->client_info = NULL;
+	if (client->server_term != 0) {
+		client->sending_farewell = true;
+		ret = scoutfs_net_submit_request(sb, client->conn,
+						 SCOUTFS_NET_CMD_FAREWELL,
+						 NULL, 0,
+						 client_farewell_response,
+						 NULL, NULL);
+		if (ret == 0) {
+			ret = wait_for_completion_interruptible(
+							&client->farewell_comp);
+			if (ret == 0)
+				ret = client->farewell_error;
+		}
+		if (ret) {
+			scoutfs_inc_counter(sb, client_farewell_error);
+			scoutfs_warn(sb, "client saw farewell error %d, server might see client connection time out\n", ret);
+		}
 	}
+
+	/* stop notify_down from queueing connect work */
+	atomic_set(&client->shutting_down, 1);
+
+	/* make sure worker isn't using the conn */
+	cancel_work_sync(&client->connect_work);
+
+	/* make racing conn use explode */
+	conn = client->conn;
+	client->conn = NULL;
+	scoutfs_net_free_conn(sb, conn);
+
+	/* stop running the server if we were, harmless otherwise */
+	stop_our_server(sb, &client->qei);
+
+	if (client->workq)
+		destroy_workqueue(client->workq);
+	kfree(client);
+	sbi->client_info = NULL;
 }

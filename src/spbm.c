@@ -42,6 +42,11 @@ void scoutfs_spbm_init(struct scoutfs_spbm *spbm)
 	spbm->root = RB_ROOT;
 }
 
+bool scoutfs_spbm_empty(struct scoutfs_spbm *spbm)
+{
+	return RB_EMPTY_ROOT(&spbm->root);
+}
+
 enum {
 	/* if a node isn't found then return an allocated new node */
 	SPBM_FIND_ALLOC = 0x1,

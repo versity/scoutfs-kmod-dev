@@ -6,6 +6,7 @@ struct scoutfs_spbm {
 };
 
 void scoutfs_spbm_init(struct scoutfs_spbm *spbm);
+bool scoutfs_spbm_empty(struct scoutfs_spbm *spbm);
 void scoutfs_spbm_destroy(struct scoutfs_spbm *spbm);
 
 int scoutfs_spbm_set(struct scoutfs_spbm *spbm, u64 bit);

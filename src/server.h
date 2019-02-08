@@ -68,6 +68,8 @@ int scoutfs_server_lock_request(struct super_block *sb, u64 node_id,
 				struct scoutfs_net_lock *nl);
 int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
 				 u64 id, struct scoutfs_net_lock *nl);
+int scoutfs_server_lock_recover_request(struct super_block *sb, u64 node_id,
+					struct scoutfs_key *key);
 
 struct sockaddr_in;
 int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin,

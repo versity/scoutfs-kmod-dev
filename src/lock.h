@@ -48,6 +48,8 @@ int scoutfs_lock_grant_response(struct super_block *sb,
 				struct scoutfs_net_lock *nl);
 int scoutfs_lock_invalidate_request(struct super_block *sb, u64 net_id,
 				    struct scoutfs_net_lock *nl);
+int scoutfs_lock_recover_request(struct super_block *sb, u64 net_id,
+				 struct scoutfs_key *key);
 
 int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
 		       struct inode *inode, struct scoutfs_lock **ret_lock);

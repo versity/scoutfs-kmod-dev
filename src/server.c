@@ -1066,6 +1066,39 @@ int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
 					 nl, sizeof(*nl));
 }
 
+static bool invalid_recover(struct scoutfs_net_lock_recover *nlr,
+			    unsigned long bytes)
+{
+	return ((bytes < sizeof(*nlr)) ||
+	        (bytes != offsetof(struct scoutfs_net_lock_recover,
+			       locks[le16_to_cpu(nlr->nr)])));
+}
+
+static int lock_recover_response(struct super_block *sb,
+				 struct scoutfs_net_connection *conn,
+				 void *resp, unsigned int resp_len,
+				 int error, void *data)
+{
+	u64 node_id = scoutfs_net_client_node_id(conn);
+
+	if (invalid_recover(resp, resp_len))
+		return -EINVAL;
+
+	return scoutfs_lock_server_recover_response(sb, node_id, resp);
+}
+
+int scoutfs_server_lock_recover_request(struct super_block *sb, u64 node_id,
+					struct scoutfs_key *key)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+
+	return scoutfs_net_submit_request_node(sb, server->conn, node_id,
+					      SCOUTFS_NET_CMD_LOCK_RECOVER,
+					      key, sizeof(*key),
+					      lock_recover_response,
+					      NULL, NULL);
+}
+
 /*
  * Process an incoming greeting request in the server from the client.
  * We try to send responses to failed greetings so that the sender can
@@ -1083,6 +1116,14 @@ int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
  * disconnect before they receive the response and resent and initial
  * blank greeting.  We could use a client uuid to associate with
  * allocated node_ids.
+ *
+ * XXX The logic of this has gotten convoluted.  The lock server can
+ * send a recovery request so it needs to be called after the core net
+ * greeting call enables messages.  But we want the greeting reply to be
+ * sent first, so we currently queue it on the send queue before
+ * enabling messages.  That means that a lot of errors that happen after
+ * the reply can't be sent to the client.  They'll just see a disconnect
+ * and won't know what's happened.  This all needs to be refactored.
  */
 static int server_greeting(struct super_block *sb,
 			   struct scoutfs_net_connection *conn,
@@ -1098,10 +1139,11 @@ static int server_greeting(struct super_block *sb,
 	bool first_contact;
 	bool farewell;
 	int ret = 0;
+	int err;
 
 	if (arg_len != sizeof(struct scoutfs_net_greeting)) {
 		ret = -EINVAL;
-		goto out;
+		goto send_err;
 	}
 
 	if (gr->fsid != super->hdr.fsid) {
@@ -1109,7 +1151,7 @@ static int server_greeting(struct super_block *sb,
 			     le64_to_cpu(gr->fsid),
 			     le64_to_cpu(super->hdr.fsid));
 		ret = -EINVAL;
-		goto out;
+		goto send_err;
 	}
 
 	if (gr->format_hash != super->format_hash) {
@@ -1117,7 +1159,7 @@ static int server_greeting(struct super_block *sb,
 			     le64_to_cpu(gr->format_hash),
 			     le64_to_cpu(super->format_hash));
 		ret = -EINVAL;
-		goto out;
+		goto send_err;
 	}
 
 	if (gr->node_id == 0) {
@@ -1131,35 +1173,58 @@ static int server_greeting(struct super_block *sb,
 		queue_commit_work(server, &cw);
 		up_read(&server->commit_rwsem);
 		ret = wait_for_commit(&cw);
-		if (ret) {
-			node_id = 0;
-			goto out;
-		}
 	} else {
 		node_id = gr->node_id;
 	}
+
+send_err:
+	err = ret;
+	if (err)
+		node_id = 0;
 
 	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
 	greet.server_term = cpu_to_le64(server->term);
 	greet.node_id = node_id;
 	greet.flags = 0;
-out:
-	ret = scoutfs_net_response(sb, conn, cmd, id, ret,
-				   &greet, sizeof(greet));
-	if (node_id != 0 && ret == 0) {
-		sent_node_id = gr->node_id != 0;
-		first_contact = le64_to_cpu(gr->server_term) != server->term;
-		if (gr->flags & cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_FAREWELL))
-			farewell = true;
-		else
-			farewell = false;
 
-		scoutfs_net_server_greeting(sb, conn, le64_to_cpu(node_id), id,
-					    sent_node_id, first_contact,
-					    farewell);
+	/* queue greeting response to be sent first once messaging enabled */
+	ret = scoutfs_net_response(sb, conn, cmd, id, err,
+				   &greet, sizeof(greet));
+	if (ret == 0 && err)
+		ret = err;
+	if (ret)
+		goto out;
+
+	/* have the net core enable messaging and resend */
+	sent_node_id = gr->node_id != 0;
+	first_contact = le64_to_cpu(gr->server_term) != server->term;
+	if (gr->flags & cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_FAREWELL))
+		farewell = true;
+	else
+		farewell = false;
+
+	scoutfs_net_server_greeting(sb, conn, le64_to_cpu(node_id), id,
+				    sent_node_id, first_contact, farewell);
+
+	/* lock server might send recovery request */
+	if (le64_to_cpu(gr->server_term) != server->term) {
+
+		/* we're now doing two commits per greeting, not great */
+		down_read(&server->commit_rwsem);
+
+		ret = scoutfs_lock_server_greeting(sb, le64_to_cpu(node_id),
+						   gr->server_term != 0);
+		if (ret == 0)
+			queue_commit_work(server, &cw);
+		up_read(&server->commit_rwsem);
+		if (ret == 0)
+			ret = wait_for_commit(&cw);
+		if (ret)
+			goto out;
 	}
 
+out:
 	return ret;
 }
 
@@ -1178,12 +1243,25 @@ static int server_farewell(struct super_block *sb,
 			   struct scoutfs_net_connection *conn,
 			   u8 cmd, u64 id, void *arg, u16 arg_len)
 {
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+	u64 node_id = scoutfs_net_client_node_id(conn);
+	struct commit_waiter cw;
+	int ret;
+
 	if (arg_len != 0)
 		return -EINVAL;
 
 	scoutfs_net_server_farewell(sb, conn);
 
-	return scoutfs_net_response(sb, conn, cmd, id, 0, NULL, 0);
+	down_read(&server->commit_rwsem);
+	ret = scoutfs_lock_server_farewell(sb, node_id);
+	if (ret == 0)
+		queue_commit_work(server, &cw);
+	up_read(&server->commit_rwsem);
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
+	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
 }
 
 /* requests sent to clients are tracked so we can free resources */

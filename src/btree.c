@@ -348,6 +348,7 @@ static void advance_to_next_half(struct scoutfs_btree_ring *bring)
 static size_t super_root_offsets[] = {
 	offsetof(struct scoutfs_super_block, alloc_root),
 	offsetof(struct scoutfs_super_block, manifest.root),
+	offsetof(struct scoutfs_super_block, lock_clients),
 };
 
 #define for_each_super_root(super, i, root)				\

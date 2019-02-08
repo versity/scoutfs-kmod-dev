@@ -273,6 +273,14 @@ struct scoutfs_extent_btree_key {
 } __packed;
 
 /*
+ * The lock server keeps a persistent record of connected clients so that
+ * server failover knows who to wait for before resuming operations.
+ */
+struct scoutfs_lock_client_btree_key {
+	__be64 node_id;
+} __packed;
+
+/*
  * The max number of links defines the max number of entries that we can
  * index in o(log n) and the static list head storage size in the
  * segment block.  We always pay the static storage cost, which is tiny,
@@ -456,6 +464,7 @@ struct scoutfs_super_block {
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
 	struct scoutfs_quorum_config quorum_config;
+	struct scoutfs_btree_root lock_clients;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1
@@ -642,6 +651,7 @@ enum {
 	SCOUTFS_NET_CMD_STATFS,
 	SCOUTFS_NET_CMD_COMPACT,
 	SCOUTFS_NET_CMD_LOCK,
+	SCOUTFS_NET_CMD_LOCK_RECOVER,
 	SCOUTFS_NET_CMD_FAREWELL,
 	SCOUTFS_NET_CMD_UNKNOWN,
 };
@@ -767,6 +777,15 @@ struct scoutfs_net_lock {
 	__u8 old_mode;
 	__u8 new_mode;
 } __packed;
+
+struct scoutfs_net_lock_recover {
+	__le16 nr;
+	struct scoutfs_net_lock locks[0];
+} __packed;
+
+#define SCOUTFS_NET_LOCK_MAX_RECOVER_NR					       \
+	((SCOUTFS_NET_MAX_DATA_LEN - sizeof(struct scoutfs_net_lock_recover)) /\
+	 sizeof(struct scoutfs_net_lock))
 
 /* some enums for tracing */
 enum {

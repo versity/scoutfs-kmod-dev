@@ -260,6 +260,19 @@ int scoutfs_client_lock_response(struct super_block *sb, u64 net_id,
 				    net_id, 0, nl, sizeof(*nl));
 }
 
+/* Send a lock recover response to the server. */
+int scoutfs_client_lock_recover_response(struct super_block *sb, u64 net_id,
+					 struct scoutfs_net_lock_recover *nlr)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+	u16 bytes = offsetof(struct scoutfs_net_lock_recover,
+			     locks[le16_to_cpu(nlr->nr)]);
+
+	return scoutfs_net_response(sb, client->conn,
+				    SCOUTFS_NET_CMD_LOCK_RECOVER,
+				    net_id, 0, nlr, bytes);
+}
+
 /* The client is receiving a invalidation request from the server */
 static int client_lock(struct super_block *sb,
 		       struct scoutfs_net_connection *conn, u8 cmd, u64 id,
@@ -271,6 +284,19 @@ static int client_lock(struct super_block *sb,
 	/* XXX error? */
 
 	return scoutfs_lock_invalidate_request(sb, id, arg);
+}
+
+/* The server is asking us for the client's locks starting with the given key */
+static int client_lock_recover(struct super_block *sb,
+			       struct scoutfs_net_connection *conn,
+			       u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	if (arg_len != sizeof(struct scoutfs_key))
+		return -EINVAL;
+
+	/* XXX error? */
+
+	return scoutfs_lock_recover_request(sb, id, arg);
 }
 
 /*
@@ -508,6 +534,7 @@ out:
 static scoutfs_net_request_t client_req_funcs[] = {
 	[SCOUTFS_NET_CMD_COMPACT]		= client_compact,
 	[SCOUTFS_NET_CMD_LOCK]			= client_lock,
+	[SCOUTFS_NET_CMD_LOCK_RECOVER]		= client_lock_recover,
 };
 
 /*

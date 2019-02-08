@@ -54,6 +54,13 @@
  * lock attempt can't immediately match an existing granted lock.  This
  * is fine for the only rare user which can back out of its lock
  * inversion and retry with a full blocking lock.
+ *
+ * Lock recovery is initiated by the server when it recognizes that
+ * we're reconnecting to it while a previous server left a persistenr
+ * record of us.  We resend all our pending requests which are deferred
+ * until recovery finishes.  The server sends us a recovery request and
+ * we respond with all our locks.  Our resent requests are processed
+ * relative to that lock state we resend.
  */
 
 #define GRACE_PERIOD_KT	ms_to_ktime(2)
@@ -407,7 +414,8 @@ static void lock_remove(struct lock_info *linfo, struct scoutfs_lock *lock)
 }
 
 static struct scoutfs_lock *lock_lookup(struct super_block *sb,
-					 struct scoutfs_key *start)
+					struct scoutfs_key *start,
+					struct scoutfs_lock **next)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct rb_node *node = linfo->lock_tree.rb_node;
@@ -416,16 +424,22 @@ static struct scoutfs_lock *lock_lookup(struct super_block *sb,
 
 	assert_spin_locked(&linfo->lock);
 
+	if (next)
+		*next = NULL;
+
 	while (node) {
 		lock = container_of(node, struct scoutfs_lock, node);
 
 		cmp = scoutfs_key_compare(start, &lock->start);
-		if (cmp < 0)
+		if (cmp < 0) {
+			if (next)
+				*next = lock;
 			node = node->rb_left;
-		else if (cmp > 0)
+		} else if (cmp > 0) {
 			node = node->rb_right;
-		else
+		} else {
 			return lock;
+		}
 	}
 
 	return NULL;
@@ -454,7 +468,7 @@ static struct scoutfs_lock *get_lock(struct super_block *sb,
 
 	assert_spin_locked(&linfo->lock);
 
-	lock = lock_lookup(sb, start);
+	lock = lock_lookup(sb, start, NULL);
 	if (lock)
 		__lock_del_lru(linfo, lock);
 
@@ -599,7 +613,7 @@ int scoutfs_lock_grant_response(struct super_block *sb,
 	spin_lock(&linfo->lock);
 
 	/* lock must already be busy with request_pending */
-	lock = lock_lookup(sb, &nl->key);
+	lock = lock_lookup(sb, &nl->key, NULL);
 	BUG_ON(!lock);
 	BUG_ON(!lock->request_pending);
 
@@ -748,6 +762,58 @@ int scoutfs_lock_invalidate_request(struct super_block *sb, u64 net_id,
 	spin_unlock(&linfo->lock);
 
 	return 0;
+}
+
+/*
+ * The server is asking us to send them as many locks as we can starting
+ * with the given key.  We'll send a response with 0 locks to indicate
+ * that we've sent all our locks.  This is called in client processing
+ * so the client won't try to reconnect to another server until we
+ * return.
+ */
+int scoutfs_lock_recover_request(struct super_block *sb, u64 net_id,
+				 struct scoutfs_key *key)
+{
+	DECLARE_LOCK_INFO(sb, linfo);
+	struct scoutfs_net_lock_recover *nlr;
+	struct scoutfs_lock *lock;
+	struct scoutfs_lock *next;
+	struct rb_node *node;
+	int ret;
+	int i;
+
+	scoutfs_inc_counter(sb, lock_recover_request);
+
+	nlr = kmalloc(offsetof(struct scoutfs_net_lock_recover,
+			       locks[SCOUTFS_NET_LOCK_MAX_RECOVER_NR]),
+		      GFP_NOFS);
+	if (!nlr)
+		return -ENOMEM;
+
+	spin_lock(&linfo->lock);
+
+	lock = lock_lookup(sb, key, &next) ?: next;
+
+	for (i = 0; lock && i < SCOUTFS_NET_LOCK_MAX_RECOVER_NR; i++) {
+
+		nlr->locks[i].key = lock->start;
+		nlr->locks[i].old_mode = lock->mode;
+		nlr->locks[i].new_mode = lock->mode;
+
+		node = rb_next(&lock->node);
+		if (node)
+			lock = rb_entry(node, struct scoutfs_lock, node);
+		else
+			lock = NULL;
+	}
+
+	nlr->nr = cpu_to_le16(i);
+
+	spin_unlock(&linfo->lock);
+
+	ret = scoutfs_client_lock_recover_response(sb, net_id, nlr);
+	kfree(nlr);
+	return ret;
 }
 
 static bool lock_wait_cond(struct super_block *sb, struct scoutfs_lock *lock,

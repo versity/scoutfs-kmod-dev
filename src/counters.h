@@ -98,6 +98,7 @@
 	EXPAND_COUNTER(lock_lock)				\
 	EXPAND_COUNTER(lock_lock_error)				\
 	EXPAND_COUNTER(lock_nonblock_eagain)			\
+	EXPAND_COUNTER(lock_recover_request)			\
 	EXPAND_COUNTER(lock_shrink_queued)			\
 	EXPAND_COUNTER(lock_shrink_request_aborted)		\
 	EXPAND_COUNTER(lock_unlock)				\

@@ -296,7 +296,7 @@ static inline u8 net_err_from_host(struct super_block *sb, int error)
 		static bool warned;
 		if (!warned) {
 			warned = 1;
-			scoutfs_warn(sb, "host errno %d sent as EINVAL\n",
+			scoutfs_warn(sb, "host errno %d sent as EINVAL",
 				     error);
 		}
 

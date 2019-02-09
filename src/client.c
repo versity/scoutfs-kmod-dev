@@ -351,7 +351,7 @@ static int client_greeting(struct super_block *sb,
 	}
 
 	if (sbi->node_id == 0 && gr->node_id == 0) {
-		scoutfs_warn(sb, "server sent node_id 0, client also has 0\n");
+		scoutfs_warn(sb, "server sent node_id 0, client also has 0");
 		ret = -EINVAL;
 		goto out;
 	}
@@ -667,7 +667,7 @@ void scoutfs_client_destroy(struct super_block *sb)
 		}
 		if (ret) {
 			scoutfs_inc_counter(sb, client_farewell_error);
-			scoutfs_warn(sb, "client saw farewell error %d, server might see client connection time out\n", ret);
+			scoutfs_warn(sb, "client saw farewell error %d, server might see client connection time out", ret);
 		}
 	}
 

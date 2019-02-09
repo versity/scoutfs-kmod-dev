@@ -345,7 +345,7 @@ static bool insert_range_node(struct super_block *sb, struct scoutfs_lock *ins)
 		cmp = scoutfs_key_compare_ranges(&ins->start, &ins->end,
 						 &lock->start, &lock->end);
 		if (WARN_ON_ONCE(cmp == 0)) {
-			scoutfs_warn(sb, "inserting lock start "SK_FMT" end "SK_FMT" overlaps with existing lock start "SK_FMT" end "SK_FMT"\n",
+			scoutfs_warn(sb, "inserting lock start "SK_FMT" end "SK_FMT" overlaps with existing lock start "SK_FMT" end "SK_FMT,
 				     SK_ARG(&ins->start), SK_ARG(&ins->end),
 				     SK_ARG(&lock->start), SK_ARG(&lock->end));
 			return false;

@@ -8,14 +8,20 @@
 void __printf(4, 5) scoutfs_msg(struct super_block *sb, const char *prefix,
 				const char *str, const char *fmt, ...);
 
+#define scoutfs_msg_check(sb, pref, str, fmt, args...)	\
+do {							\
+	BUILD_BUG_ON(fmt[sizeof(fmt) - 2] == '\n');	\
+	scoutfs_msg(sb, pref, str, fmt, ##args);	\
+} while (0)
+
 #define scoutfs_err(sb, fmt, args...) \
-	scoutfs_msg(sb, KERN_ERR, " error", fmt, ##args)
+	scoutfs_msg_check(sb, KERN_ERR, " error", fmt, ##args)
 
 #define scoutfs_warn(sb, fmt, args...) \
-	scoutfs_msg(sb, KERN_WARNING, " warning", fmt, ##args)
+	scoutfs_msg_check(sb, KERN_WARNING, " warning", fmt, ##args)
 
 #define scoutfs_info(sb, fmt, args...) \
-	scoutfs_msg(sb, KERN_INFO, "", fmt, ##args)
+	scoutfs_msg_check(sb, KERN_INFO, "", fmt, ##args)
 
 #define scoutfs_bug_on(sb, cond, fmt, args...)				\
 do {									\

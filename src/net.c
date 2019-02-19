@@ -656,6 +656,8 @@ static void scoutfs_net_recv_worker(struct work_struct *work)
 			break;
 		}
 
+		trace_scoutfs_recv_clock_sync(nh.clock_sync_id);
+
 		data_len = le16_to_cpu(nh.data_len);
 
 		scoutfs_inc_counter(sb, net_recv_messages);
@@ -797,6 +799,9 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 		scoutfs_add_counter(sb, net_send_bytes, len);
 		trace_scoutfs_net_send_message(sb, &conn->sockname,
 					       &conn->peername, &msend->nh);
+
+		msend->nh.clock_sync_id = scoutfs_clock_sync_id();
+		trace_scoutfs_send_clock_sync(msend->nh.clock_sync_id);
 
 		ret = sendmsg_full(conn->sock, &msend->nh, len);
 

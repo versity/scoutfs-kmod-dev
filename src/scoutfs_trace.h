@@ -2513,6 +2513,32 @@ DEFINE_EVENT(scoutfs_quorum_block_class, scoutfs_quorum_write_block,
 	TP_ARGS(sb, io_blkno, blk)
 );
 
+/*
+ * We can emit trace events to make it easier to synchronize the
+ * monotonic clocks in trace logs between nodes.  By looking at the send
+ * and recv times of many messages flowing between nodes we can get
+ * surprisingly good estimates of the clock offset between them.
+ */
+DECLARE_EVENT_CLASS(scoutfs_clock_sync_class,
+	TP_PROTO(__le64 clock_sync_id),
+	TP_ARGS(clock_sync_id),
+	TP_STRUCT__entry(
+		__field(__u64, clock_sync_id)
+	),
+	TP_fast_assign(
+		__entry->clock_sync_id = le64_to_cpu(clock_sync_id);
+	),
+	TP_printk("clock_sync_id %016llx", __entry->clock_sync_id)
+);
+DEFINE_EVENT(scoutfs_clock_sync_class, scoutfs_send_clock_sync,
+	TP_PROTO(__le64 clock_sync_id),
+	TP_ARGS(clock_sync_id)
+);
+DEFINE_EVENT(scoutfs_clock_sync_class, scoutfs_recv_clock_sync,
+	TP_PROTO(__le64 clock_sync_id),
+	TP_ARGS(clock_sync_id)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

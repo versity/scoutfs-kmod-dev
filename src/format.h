@@ -625,6 +625,7 @@ struct scoutfs_net_greeting {
  * response messages.
  */
 struct scoutfs_net_header {
+	__le64 clock_sync_id;
 	__le64 seq;
 	__le64 recv_seq;
 	__le64 id;

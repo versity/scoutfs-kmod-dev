@@ -1360,6 +1360,7 @@ int scoutfs_net_bind(struct super_block *sb,
 {
 	struct socket *sock = NULL;
 	int addrlen;
+	int optval;
 	int ret;
 
 	/* caller state machine shouldn't let this happen */
@@ -1367,6 +1368,12 @@ int scoutfs_net_bind(struct super_block *sb,
 		return -EINVAL;
 
 	ret = sock_create_kern(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
+	if (ret)
+		goto out;
+
+	optval = 1;
+	ret = kernel_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+				(char *)&optval, sizeof(optval));
 	if (ret)
 		goto out;
 

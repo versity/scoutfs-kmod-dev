@@ -18,7 +18,7 @@ do {									\
 #define si4_trace_args(name)			\
 	(__entry->name##_addr >> 24),		\
 	(__entry->name##_addr >> 16) & 255,	\
-	(__entry->name##_addr >> 0) & 255,	\
+	(__entry->name##_addr >> 8) & 255,	\
 	__entry->name##_addr & 255,		\
 	__entry->name##_port
 

@@ -69,8 +69,7 @@ struct server_info {
 	struct scoutfs_btree_root stable_manifest_root;
 
 	/* server tracks seq use */
-	spinlock_t seq_lock;
-	struct list_head pending_seqs;
+	struct rw_semaphore seq_rwsem;
 
 	/* server tracks pending frees to be applied during commit */
 	struct rw_semaphore alloc_rwsem;
@@ -862,22 +861,20 @@ out:
 	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
 }
 
-struct pending_seq {
-	struct list_head head;
-	u64 seq;
-};
-
 /*
- * Give the client the next seq for it to use in items in its
- * transaction.  They tell us the seq they just used so we can remove it
- * from pending tracking and possibly include it in get_last_seq
- * replies.
+ * Give the client the next sequence number for their transaction.  They
+ * provide their previous transaction sequence number that they've
+ * committed.
  *
- * The list walk is O(clients) and the message processing rate goes from
- * every committed segment to every sync deadline interval.
+ * We track the sequence numbers of transactions that clients have open.
+ * This limits the transaction sequence numbers that can be returned in
+ * the index of inodes by meta and data transaction numbers.  We
+ * communicate the largest possible sequence number to clients via an
+ * rpc.
  *
- * XXX The pending seq tracking should be persistent so that it survives
- * server failover.
+ * The transaction sequence tracking is stored in a btree so it is
+ * shared across servers.  Final entries are removed when processing a
+ * client's farewell or when it's removed.
  */
 static int server_advance_seq(struct super_block *sb,
 			      struct scoutfs_net_connection *conn,
@@ -886,50 +883,113 @@ static int server_advance_seq(struct super_block *sb,
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct pending_seq *next_ps;
-	struct pending_seq *ps;
 	struct commit_waiter cw;
-	__le64 * __packed their_seq = arg;
+	__le64 their_seq;
 	__le64 next_seq;
+	struct scoutfs_trans_seq_btree_key tsk;
+	u64 node_id = scoutfs_net_client_node_id(conn);
 	int ret;
 
 	if (arg_len != sizeof(__le64)) {
 		ret = -EINVAL;
 		goto out;
 	}
-
-	next_ps = kmalloc(sizeof(struct pending_seq), GFP_NOFS);
-	if (!next_ps) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	memcpy(&their_seq, arg, sizeof(their_seq));
 
 	down_read(&server->commit_rwsem);
-	spin_lock(&server->seq_lock);
+	down_write(&server->seq_rwsem);
 
-	list_for_each_entry(ps, &server->pending_seqs, head) {
-		if (ps->seq == le64_to_cpup(their_seq)) {
-			list_del_init(&ps->head);
-			kfree(ps);
-			break;
-		}
+	if (their_seq != 0) {
+		tsk.trans_seq = le64_to_be64(their_seq);
+		tsk.node_id = cpu_to_be64(node_id);
+
+		ret = scoutfs_btree_delete(sb, &super->trans_seqs,
+					   &tsk, sizeof(tsk));
+		if (ret < 0 && ret != -ENOENT)
+			goto out;
 	}
 
-	next_seq = super->next_seq;
-	le64_add_cpu(&super->next_seq, 1);
+	next_seq = super->next_trans_seq;
+	le64_add_cpu(&super->next_trans_seq, 1);
 
-	next_ps->seq = le64_to_cpu(next_seq);
-	list_add_tail(&next_ps->head, &server->pending_seqs);
+	trace_scoutfs_trans_seq_advance(sb, node_id, le64_to_cpu(their_seq),
+					le64_to_cpu(next_seq));
 
-	spin_unlock(&server->seq_lock);
-	queue_commit_work(server, &cw);
-	up_read(&server->commit_rwsem);
-	ret = wait_for_commit(&cw);
+	tsk.trans_seq = le64_to_be64(next_seq);
+	tsk.node_id = cpu_to_be64(node_id);
+
+	ret = scoutfs_btree_insert(sb, &super->trans_seqs,
+				   &tsk, sizeof(tsk), NULL, 0);
 out:
+	up_write(&server->seq_rwsem);
+	if (ret == 0)
+		queue_commit_work(server, &cw);
+	up_read(&server->commit_rwsem);
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
 	return scoutfs_net_response(sb, conn, cmd, id, ret,
 				    &next_seq, sizeof(next_seq));
 }
 
+/*
+ * Remove any transaction sequences owned by the client.  They must have
+ * committed any final transaction by the time they get here via sending
+ * their farewell message.  This can be called multiple times as the
+ * client's farewell is retransmitted so it's OK to not find any
+ * entries.  This is called with the server commit rwsem held.
+ */
+static int remove_trans_seq(struct super_block *sb, u64 node_id)
+{
+	DECLARE_SERVER_INFO(sb, server);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_trans_seq_btree_key tsk;
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	int ret = 0;
+
+	down_write(&server->seq_rwsem);
+
+	tsk.trans_seq = 0;
+	tsk.node_id = 0;
+
+	for (;;) {
+		ret = scoutfs_btree_next(sb, &super->trans_seqs,
+					 &tsk, sizeof(tsk), &iref);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		memcpy(&tsk, iref.key, iref.key_len);
+		scoutfs_btree_put_iref(&iref);
+
+		if (be64_to_cpu(tsk.node_id) == node_id) {
+			trace_scoutfs_trans_seq_farewell(sb, node_id,
+						be64_to_cpu(tsk.trans_seq));
+			ret = scoutfs_btree_delete(sb, &super->trans_seqs,
+						   &tsk, sizeof(tsk));
+			break;
+		}
+
+		be64_add_cpu(&tsk.trans_seq, 1);
+		tsk.node_id = 0;
+	}
+
+	up_write(&server->seq_rwsem);
+
+	return ret;
+}
+
+/*
+ * Give the calling client the last valid trans_seq that it can return
+ * in results from the indices of trans seqs to inodes.  These indices
+ * promise to only advance so we can't return results past those that
+ * are still outstanding and not yet visible in the indices.  If there
+ * are no outstanding transactions (what?  how?) we give them the max
+ * possible sequence.
+ */
 static int server_get_last_seq(struct super_block *sb,
 			       struct scoutfs_net_connection *conn,
 			       u8 cmd, u64 id, void *arg, u16 arg_len)
@@ -937,8 +997,10 @@ static int server_get_last_seq(struct super_block *sb,
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct pending_seq *ps;
-	__le64 last_seq;
+	struct scoutfs_trans_seq_btree_key tsk;
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	u64 node_id = scoutfs_net_client_node_id(conn);
+	__le64 last_seq = 0;
 	int ret;
 
 	if (arg_len != 0) {
@@ -946,17 +1008,31 @@ static int server_get_last_seq(struct super_block *sb,
 		goto out;
 	}
 
-	spin_lock(&server->seq_lock);
-	ps = list_first_entry_or_null(&server->pending_seqs,
-				      struct pending_seq, head);
-	if (ps) {
-		last_seq = cpu_to_le64(ps->seq - 1);
-	} else {
-		last_seq = super->next_seq;
+	down_read(&server->seq_rwsem);
+
+	tsk.trans_seq = 0;
+	tsk.node_id = 0;
+
+	ret = scoutfs_btree_next(sb, &super->trans_seqs,
+				 &tsk, sizeof(tsk), &iref);
+	if (ret == 0) {
+		if (iref.key_len != sizeof(tsk)) {
+			ret = -EINVAL;
+		} else {
+			memcpy(&tsk, iref.key, iref.key_len);
+			last_seq = cpu_to_le64(be64_to_cpu(tsk.trans_seq) - 1);
+		}
+		scoutfs_btree_put_iref(&iref);
+
+	} else if (ret == -ENOENT) {
+		last_seq = super->next_trans_seq;
 		le64_add_cpu(&last_seq, -1ULL);
+		ret = 0;
 	}
-	spin_unlock(&server->seq_lock);
-	ret = 0;
+
+	trace_scoutfs_trans_seq_last(sb, node_id, le64_to_cpu(last_seq));
+
+	up_read(&server->seq_rwsem);
 out:
 	return scoutfs_net_response(sb, conn, cmd, id, ret,
 				    &last_seq, sizeof(last_seq));
@@ -1254,9 +1330,12 @@ static int server_farewell(struct super_block *sb,
 	scoutfs_net_server_farewell(sb, conn);
 
 	down_read(&server->commit_rwsem);
-	ret = scoutfs_lock_server_farewell(sb, node_id);
+
+	ret = scoutfs_lock_server_farewell(sb, node_id) ?:
+	      remove_trans_seq(sb, node_id);
 	if (ret == 0)
 		queue_commit_work(server, &cw);
+
 	up_read(&server->commit_rwsem);
 	if (ret == 0)
 		ret = wait_for_commit(&cw);
@@ -1920,8 +1999,6 @@ static void scoutfs_server_worker(struct work_struct *work)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_net_connection *conn = NULL;
-	struct pending_seq *ps;
-	struct pending_seq *ps_tmp;
 	DECLARE_WAIT_QUEUE_HEAD(waitq);
 	struct sockaddr_in sin;
 	LIST_HEAD(conn_list);
@@ -1989,12 +2066,6 @@ shutdown:
 	scoutfs_btree_destroy(sb);
 	scoutfs_lock_server_destroy(sb);
 
-	/* XXX these should be persistent and reclaimed during recovery */
-	list_for_each_entry_safe(ps, ps_tmp, &server->pending_seqs, head) {
-		list_del_init(&ps->head);
-		kfree(ps);
-	}
-
 out:
 	scoutfs_net_free_conn(sb, conn);
 
@@ -2049,8 +2120,7 @@ int scoutfs_server_setup(struct super_block *sb)
 	init_llist_head(&server->commit_waiters);
 	INIT_WORK(&server->commit_work, scoutfs_server_commit_func);
 	seqcount_init(&server->stable_seqcount);
-	spin_lock_init(&server->seq_lock);
-	INIT_LIST_HEAD(&server->pending_seqs);
+	init_rwsem(&server->seq_rwsem);
 	init_rwsem(&server->alloc_rwsem);
 	INIT_LIST_HEAD(&server->pending_frees);
 	INIT_LIST_HEAD(&server->clients);

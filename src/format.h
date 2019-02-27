@@ -281,6 +281,15 @@ struct scoutfs_lock_client_btree_key {
 } __packed;
 
 /*
+ * The server tracks transaction sequence numbers that clients have
+ * open.  This limits results that can be returned from the seq indices.
+ */
+struct scoutfs_trans_seq_btree_key {
+	__be64 trans_seq;
+	__be64 node_id;
+} __packed;
+
+/*
  * The max number of links defines the max number of entries that we can
  * index in o(log n) and the static list head storage size in the
  * segment block.  We always pay the static storage cost, which is tiny,
@@ -453,7 +462,7 @@ struct scoutfs_super_block {
 	__le64 format_hash;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
 	__le64 next_ino;
-	__le64 next_seq;
+	__le64 next_trans_seq;
 	__le64 total_blocks;
 	__le64 free_blocks;
 	__le64 alloc_cursor;
@@ -465,6 +474,7 @@ struct scoutfs_super_block {
 	struct scoutfs_manifest manifest;
 	struct scoutfs_quorum_config quorum_config;
 	struct scoutfs_btree_root lock_clients;
+	struct scoutfs_btree_root trans_seqs;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1

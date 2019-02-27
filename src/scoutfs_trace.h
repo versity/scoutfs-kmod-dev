@@ -2539,6 +2539,73 @@ DEFINE_EVENT(scoutfs_clock_sync_class, scoutfs_recv_clock_sync,
 	TP_ARGS(clock_sync_id)
 );
 
+TRACE_EVENT(scoutfs_trans_seq_advance,
+	TP_PROTO(struct super_block *sb, u64 node_id, u64 prev_seq,
+		 u64 next_seq),
+
+	TP_ARGS(sb, node_id, prev_seq, next_seq),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, node_id)
+		__field(__u64, prev_seq)
+		__field(__u64, next_seq)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->node_id = node_id;
+		__entry->prev_seq = prev_seq;
+		__entry->next_seq = next_seq;
+	),
+
+	TP_printk("fsid "FSID_FMT" node_id %llu prev_seq %llu next_seq %llu",
+		  __entry->fsid, __entry->node_id, __entry->prev_seq,
+		  __entry->next_seq)
+);
+
+TRACE_EVENT(scoutfs_trans_seq_farewell,
+	TP_PROTO(struct super_block *sb, u64 node_id, u64 trans_seq),
+
+	TP_ARGS(sb, node_id, trans_seq),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, node_id)
+		__field(__u64, trans_seq)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->node_id = node_id;
+		__entry->trans_seq = trans_seq;
+	),
+
+	TP_printk("fsid "FSID_FMT" node_id %llu trans_seq %llu",
+		  __entry->fsid, __entry->node_id, __entry->trans_seq)
+);
+
+TRACE_EVENT(scoutfs_trans_seq_last,
+	TP_PROTO(struct super_block *sb, u64 node_id, u64 trans_seq),
+
+	TP_ARGS(sb, node_id, trans_seq),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, node_id)
+		__field(__u64, trans_seq)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->node_id = node_id;
+		__entry->trans_seq = trans_seq;
+	),
+
+	TP_printk("fsid "FSID_FMT" node_id %llu trans_seq %llu",
+		  __entry->fsid, __entry->node_id, __entry->trans_seq)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

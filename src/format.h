@@ -39,6 +39,14 @@
 #define SCOUTFS_SUPER_BLKNO ((64ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
 
 /*
+ * A reasonably large region of aligned quorum blocks follow the super
+ * block.
+ */
+#define SCOUTFS_QUORUM_BLKNO		((128ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_QUORUM_BLOCKS		((128ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_QUORUM_MAX_SLOTS	SCOUTFS_QUORUM_BLOCKS
+
+/*
  * Base types used by other structures.
  */
 struct scoutfs_timespec {
@@ -366,6 +374,65 @@ struct scoutfs_xattr {
 #define SCOUTFS_UUID_BYTES 16
 #define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
 
+/*
+ * During each quorum voting interval the fabric has to process 2 reads
+ * and a write for each voting mount.  The only reason we limit the
+ * number of active quorum mounts is to limit the number of IOs per
+ * interval.  We use a pretty conservative interval given that IOs will
+ * generally be faster than our constant and we'll have fewer active
+ * than the max.
+ */
+#define SCOUTFS_QUORUM_MAX_ACTIVE	7
+#define SCOUTFS_QUORUM_IO_LATENCY_MS	10
+#define SCOUTFS_QUORUM_INTERVAL_MS \
+	(SCOUTFS_QUORUM_MAX_ACTIVE * 3 * SCOUTFS_QUORUM_IO_LATENCY_MS)
+
+/*
+ * Each mount that is found in the quorum config in the super block can
+ * write to quorum blocks indicating which mount they vote for as
+ * the leader.
+ *
+ * @config_gen: references the config gen in the super block
+ * @write_nr: incremented for every write, only 0 when never written
+ * @elected_nr: incremented when elected, 0 otherwise
+ * @vote_slot: the active config slot that the writer is voting for
+ */
+struct scoutfs_quorum_block {
+	__le64 fsid;
+	__le64 blkno;
+	__le64 config_gen;
+	__le64 write_nr;
+	__le64 elected_nr;
+	__le32 crc;
+	__u8 vote_slot;
+} __packed;
+
+#define SCOUTFS_QUORUM_MAX_SLOTS	SCOUTFS_QUORUM_BLOCKS
+
+/*
+ * Each quorum voter is described by a slot which corresponds to the
+ * block that the voter will write to.
+ *
+ * The stale flag is used to support config migration.  A new
+ * configuration is written in free slots and the old configuration is
+ * marked stale.  Stale slots can only be reclaimed once we have
+ * evidence that the named mount won't try and write to it by seeing it
+ * write to other slots or connect with the new gen.
+ */
+struct scoutfs_quorum_config {
+	__le64 gen;
+	struct scoutfs_quorum_slot {
+		__u8 name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
+		struct scoutfs_inet_addr addr;
+		__u8 vote_priority;
+		__u8 flags;
+	} __packed slots[SCOUTFS_QUORUM_MAX_SLOTS];
+} __packed;
+
+#define SCOUTFS_QUORUM_SLOT_ACTIVE		(1 << 0)
+#define SCOUTFS_QUORUM_SLOT_STALE		(1 << 1)
+#define SCOUTFS_QUORUM_SLOT_FLAGS_UNKNOWN	(U8_MAX << 2)
+
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
@@ -383,6 +450,7 @@ struct scoutfs_super_block {
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
 	struct scoutfs_inet_addr server_addr;
+	struct scoutfs_quorum_config quorum_config;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1

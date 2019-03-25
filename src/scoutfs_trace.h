@@ -2423,6 +2423,50 @@ DEFINE_EVENT(scoutfs_server_client_count_class, scoutfs_server_client_down,
 	TP_ARGS(sb, node_id, nr_clients)
 );
 
+DECLARE_EVENT_CLASS(scoutfs_quorum_block_class,
+	TP_PROTO(struct super_block *sb, u64 io_blkno,
+		 struct scoutfs_quorum_block *blk),
+
+	TP_ARGS(sb, io_blkno, blk),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, io_blkno)
+		__field(__u64, hdr_blkno)
+		__field(__u64, config_gen)
+		__field(__u64, write_nr)
+		__field(__u64, elected_nr)
+		__field(__u32, crc)
+		__field(__u8, vote_slot)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->io_blkno = io_blkno;
+		__entry->hdr_blkno = le64_to_cpu(blk->blkno);
+		__entry->config_gen = le64_to_cpu(blk->config_gen);
+		__entry->write_nr = le64_to_cpu(blk->write_nr);
+		__entry->elected_nr = le64_to_cpu(blk->elected_nr);
+		__entry->crc = le32_to_cpu(blk->crc);
+		__entry->vote_slot = blk->vote_slot;
+	),
+
+	TP_printk("fsid "FSID_FMT" io_blkno %llu hdr_blkno %llu config_gen %llu write_nr %llu elected_nr %llu crc 0x%08x vote_slot %u",
+		  __entry->fsid, __entry->io_blkno, __entry->hdr_blkno,
+		  __entry->config_gen, __entry->write_nr, __entry->elected_nr,
+		  __entry->crc, __entry->vote_slot)
+);
+DEFINE_EVENT(scoutfs_quorum_block_class, scoutfs_quorum_read_block,
+	TP_PROTO(struct super_block *sb, u64 io_blkno,
+		 struct scoutfs_quorum_block *blk),
+	TP_ARGS(sb, io_blkno, blk)
+);
+DEFINE_EVENT(scoutfs_quorum_block_class, scoutfs_quorum_write_block,
+	TP_PROTO(struct super_block *sb, u64 io_blkno,
+		 struct scoutfs_quorum_block *blk),
+	TP_ARGS(sb, io_blkno, blk)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

@@ -26,6 +26,7 @@ scoutfs-y +=			\
 	net.o			\
 	options.o		\
 	per_task.o		\
+	quorum.o		\
 	scoutfs_trace.o		\
 	seg.o			\
 	server.o		\

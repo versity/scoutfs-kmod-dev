@@ -39,6 +39,25 @@
 #define SCOUTFS_SUPER_BLKNO ((64ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
 
 /*
+ * Base types used by other structures.
+ */
+struct scoutfs_timespec {
+	__le64 sec;
+	__le32 nsec;
+} __packed;
+
+struct scoutfs_betimespec {
+	__be64 sec;
+	__be32 nsec;
+} __packed;
+
+/* XXX ipv6 */
+struct scoutfs_inet_addr {
+	__le32 addr;
+	__le16 port;
+} __packed;
+
+/*
  * This header is stored at the start of btree blocks and the super
  * block for verification.  The crc is calculated by zeroing the crc and
  * padding so the buffer is large and aligned.
@@ -340,22 +359,12 @@ struct scoutfs_xattr {
 	__u8 name[0];
 } __packed;
 
-struct scoutfs_betimespec {
-	__be64 sec;
-	__be32 nsec;
-} __packed;
 
 /* XXX does this exist upstream somewhere? */
 #define member_sizeof(TYPE, MEMBER) (sizeof(((TYPE *)0)->MEMBER))
 
 #define SCOUTFS_UUID_BYTES 16
 #define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
-
-/* XXX ipv6 */
-struct scoutfs_inet_addr {
-	__le32 addr;
-	__le16 port;
-} __packed;
 
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
@@ -378,10 +387,6 @@ struct scoutfs_super_block {
 
 #define SCOUTFS_ROOT_INO 1
 
-struct scoutfs_timespec {
-	__le64 sec;
-	__le32 nsec;
-} __packed;
 
 /*
  * @meta_seq: advanced the first time an inode is updated in a given

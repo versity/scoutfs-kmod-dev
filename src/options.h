@@ -12,6 +12,7 @@ enum {
 	 * the number of items in each block as though the blocks were tiny.
 	 */
 	Opt_btree_force_tiny_blocks,
+	Opt_uniq_name,
 	Opt_err,
 };
 
@@ -20,6 +21,7 @@ struct mount_options
 {
 	struct scoutfs_inet_addr	listen_addr;
 	char				cluster_name[MAX_CLUSTER_NAME_LEN];
+	char uniq_name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
 };
 
 int scoutfs_parse_options(struct super_block *sb, char *options,

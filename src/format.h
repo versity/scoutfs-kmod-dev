@@ -349,6 +349,7 @@ struct scoutfs_betimespec {
 #define member_sizeof(TYPE, MEMBER) (sizeof(((TYPE *)0)->MEMBER))
 
 #define SCOUTFS_UUID_BYTES 16
+#define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
 
 /* XXX ipv6 */
 struct scoutfs_inet_addr {

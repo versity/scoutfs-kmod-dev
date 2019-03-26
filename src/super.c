@@ -97,7 +97,7 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 {
 	struct super_block *sb = dentry->d_inode->i_sb;
 	struct scoutfs_net_statfs nstatfs;
-	__le32 * __packed uuid;
+	__le32 uuid[4];
 	int ret;
 
 	ret = scoutfs_client_statfs(sb, &nstatfs);
@@ -113,7 +113,8 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	kst->f_ffree = kst->f_bfree * 16;
 	kst->f_files = kst->f_ffree + le64_to_cpu(nstatfs.next_ino);
 
-	uuid = (void *)nstatfs.uuid;
+	BUILD_BUG_ON(sizeof(uuid) != sizeof(nstatfs.uuid));
+	memcpy(uuid, &nstatfs, sizeof(uuid));
 	kst->f_fsid.val[0] = le32_to_cpu(uuid[0]) ^ le32_to_cpu(uuid[1]);
 	kst->f_fsid.val[1] = le32_to_cpu(uuid[2]) ^ le32_to_cpu(uuid[3]);
 	kst->f_namelen = SCOUTFS_NAME_LEN;

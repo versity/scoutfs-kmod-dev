@@ -20,6 +20,7 @@
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <linux/log2.h>
+#include <asm/unaligned.h>
 
 #include "format.h"
 #include "counters.h"
@@ -1473,7 +1474,7 @@ static void forget_client_compacts(struct super_block *sb,
 	}
 }
 
-static int segno_in_ents(__le64 segno, struct scoutfs_net_manifest_entry *ents,
+static int segno_in_ents(u64 segno, struct scoutfs_net_manifest_entry *ents,
 			 unsigned int nr)
 {
 	int i;
@@ -1481,42 +1482,44 @@ static int segno_in_ents(__le64 segno, struct scoutfs_net_manifest_entry *ents,
 	for (i = 0; i < nr; i++) {
 		if (ents[i].segno == 0)
 			break;
-		if (segno == ents[i].segno)
+		if (segno == le64_to_cpu(ents[i].segno))
 			return 1;
 	}
 
 	return 0;
 }
 
-static int remove_segnos(struct super_block *sb, __le64 * __packed segnos,
+static int remove_segnos(struct super_block *sb, __le64 *segnos,
 			 unsigned int nr,
 			 struct scoutfs_net_manifest_entry *unless,
 			 unsigned int nr_unless, bool cleanup);
 
 /*
- * Free segnos if they're not found in the unless entries.  If this
- * returns an error then we've cleaned up partial frees on error.  This
- * panics if it sees an error and can't cleanup on error.
+ * Free (unaligned) segnos if they're not found in the unless entries.
+ * If this returns an error then we've cleaned up partial frees on
+ * error.  This panics if it sees an error and can't cleanup on error.
  *
  * There are variants of this for lots of add/del, alloc/remove data
  * structurs.
  */
-static int free_segnos(struct super_block *sb, __le64 * __packed segnos,
+static int free_segnos(struct super_block *sb, __le64 *segnos,
 		       unsigned int nr,
 		       struct scoutfs_net_manifest_entry *unless,
 		       unsigned int nr_unless, bool cleanup)
 
 {
+	u64 segno;
 	int ret = 0;
 	int i;
 
 	for (i = 0; i < nr; i++) {
-		if (segnos[i] == 0)
+		segno = le64_to_cpu(get_unaligned(&segnos[i]));
+		if (segno == 0)
 			break;
-		if (segno_in_ents(segnos[i], unless, nr_unless))
+		if (segno_in_ents(segno, unless, nr_unless))
 			continue;
 
-		ret = free_segno(sb, le64_to_cpu(segnos[i]));
+		ret = free_segno(sb, segno);
 		BUG_ON(ret < 0 && !cleanup);
 		if (ret < 0) {
 			remove_segnos(sb, segnos, i, unless, nr_unless, false);
@@ -1527,8 +1530,9 @@ static int free_segnos(struct super_block *sb, __le64 * __packed segnos,
 	return ret;
 }
 
-static int alloc_segnos(struct super_block *sb, __le64 * __packed segnos,
-		       unsigned int nr)
+/* the segno array can be unaligned */
+static int alloc_segnos(struct super_block *sb, __le64 * segnos,
+			unsigned int nr)
 
 {
 	u64 segno;
@@ -1541,28 +1545,30 @@ static int alloc_segnos(struct super_block *sb, __le64 * __packed segnos,
 			free_segnos(sb, segnos, i, NULL, 0, false);
 			break;
 		}
-		segnos[i] = cpu_to_le64(segno);
+		put_unaligned(cpu_to_le64(segno), &segnos[i]);
 	}
 
 	return ret;
 }
 
-static int remove_segnos(struct super_block *sb, __le64 * __packed segnos,
+static int remove_segnos(struct super_block *sb, __le64 *segnos,
 			 unsigned int nr,
 			 struct scoutfs_net_manifest_entry *unless,
 			 unsigned int nr_unless, bool cleanup)
 
 {
+	u64 segno;
 	int ret = 0;
 	int i;
 
 	for (i = 0; i < nr; i++) {
-		if (segnos[i] == 0)
+		segno = le64_to_cpu(get_unaligned(&segnos[i]));
+		if (segno == 0)
 			break;
-		if (segno_in_ents(segnos[i], unless, nr_unless))
+		if (segno_in_ents(segno, unless, nr_unless))
 			continue;
 
-		ret = remove_segno(sb, le64_to_cpu(segnos[i]));
+		ret = remove_segno(sb, segno);
 		BUG_ON(ret < 0 && !cleanup);
 		if (ret < 0) {
 			free_segnos(sb, segnos, i, unless, nr_unless, false);
@@ -1592,7 +1598,8 @@ static int free_entry_segnos(struct super_block *sb,
 	for (i = 0; i < nr; i++) {
 		if (ents[i].segno == 0)
 			break;
-		if (segno_in_ents(ents[i].segno, unless, nr_unless))
+		if (segno_in_ents(le64_to_cpu(ents[i].segno),
+				  unless, nr_unless))
 			continue;
 
 		ret = free_segno(sb, le64_to_cpu(ents[i].segno));
@@ -1619,7 +1626,8 @@ static int remove_entry_segnos(struct super_block *sb,
 	for (i = 0; i < nr; i++) {
 		if (ents[i].segno == 0)
 		       break;
-		if (segno_in_ents(ents[i].segno, unless, nr_unless))
+		if (segno_in_ents(le64_to_cpu(ents[i].segno),
+				  unless, nr_unless))
 			continue;
 
 		ret = remove_segno(sb, le64_to_cpu(ents[i].segno));

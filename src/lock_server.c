@@ -800,7 +800,7 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 
 	if (ret < 0) {
 		scoutfs_err(sb, "lock server saw err %d while timing out clients, shutting down", ret);
-		scoutfs_server_stop(sb);
+		scoutfs_server_abort(sb);
 	}
 }
 
@@ -870,7 +870,7 @@ int scoutfs_lock_server_farewell(struct super_block *sb, u64 node_id)
 out:
 	if (ret < 0) {
 		scoutfs_err(sb, "lock server err %d during node %llu farewell, shutting down", ret, node_id);
-		scoutfs_server_stop(sb);
+		scoutfs_server_abort(sb);
 	}
 
 	return ret;

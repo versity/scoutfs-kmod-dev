@@ -75,8 +75,6 @@ void scoutfs_net_server_greeting(struct super_block *sb,
 				 u64 node_id, u64 greeting_id,
 				 bool sent_node_id, bool first_contact,
 				 bool farewell);
-void scoutfs_net_server_farewell(struct super_block *sb,
-				 struct scoutfs_net_connection *conn);
 void scoutfs_net_farewell(struct super_block *sb,
 			  struct scoutfs_net_connection *conn);
 

@@ -392,7 +392,8 @@ static inline int first_slot_flags(struct scoutfs_quorum_config *conf,
  */
 static int write_quorum_block(struct super_block *sb, __le64 fsid,
 			      __le64 config_gen, u8 our_slot, __le64 write_nr,
-			      u64 elected_nr, u8 vote_slot)
+			      u64 elected_nr, u64 unmount_barrier,
+			      u8 vote_slot)
 {
 	struct scoutfs_quorum_block *blk;
 	struct buffer_head *bh;
@@ -416,6 +417,7 @@ static int write_quorum_block(struct super_block *sb, __le64 fsid,
 	blk->config_gen = config_gen;
 	blk->write_nr = write_nr;
 	blk->elected_nr = cpu_to_le64(elected_nr);
+	blk->unmount_barrier = cpu_to_le64(unmount_barrier);
 	blk->vote_slot = vote_slot;
 
 	blk->crc = quorum_block_crc(blk);
@@ -473,8 +475,8 @@ static int fence_other_elected(struct super_block *sb,
 			scoutfs_inc_counter(sb, quorum_fenced);
 
 			ret = write_quorum_block(sb, super->hdr.fsid,
-						 conf->gen, i, blk.write_nr,
-						 0, i);
+					conf->gen, i, blk.write_nr, 0,
+					le64_to_cpu(blk.unmount_barrier), i);
 			if (ret)
 				break;
 		}
@@ -509,9 +511,13 @@ struct quorum_block_history {
  * When we return success we update the caller's elected info with the
  * most recent elected leader we found, which may well be long gone.  We
  * return -ENOENT if we didn't find any elected leaders.
+ *
+ * If we return success because we saw a larger unmount barrier we set
+ * elected_nr to 0 and fill the unmount_barrier.
  */
 int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 			    u64 old_elected_nr, ktime_t timeout_abs,
+			    bool unmounting, u64 our_umb,
 			    struct scoutfs_quorum_elected_info *qei)
 {
 	struct scoutfs_super_block *super = NULL;
@@ -524,6 +530,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 	ktime_t now;
 	__le64 write_nr = 0;
 	u64 elected_nr = 0;
+	u64 unmount_barrier = 0;
 	int vote_streak = 0;
 	int vote_slot;
 	int our_slot;
@@ -551,13 +558,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 			goto out;
 		conf = &super->quorum_config;
 
-		/* allow a single vote majority when 1 or 2 active */
-		if (nr_active <= 2)
-			majority = 1;
-		else if (nr_active & 1)
-			majority = (nr_active + 1) / 2;
-		else
-			majority = (nr_active / 2) + 1;
+		majority = scoutfs_quorum_majority(sb, conf);
 
 		readahead_quorum_blocks(sb);
 
@@ -590,6 +591,8 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 				qei->config_gen = blk.config_gen;
 				qei->write_nr = blk.write_nr;
 				qei->elected_nr = le64_to_cpu(blk.elected_nr);
+				qei->unmount_barrier =
+					le64_to_cpu(blk.unmount_barrier);
 				qei->config_slot = i;
 			}
 		}
@@ -639,11 +642,22 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 		nr_votes = 0;
 		write_nr = cpu_to_le64(1);
 		elected_nr = 0;
+		unmount_barrier = 0;
 
 		for_each_active_block(sb, super, conf, hist, hi, &blk, slot, i){
 			/* count our votes (maybe including from us) */
 			if (hi->writing >= 2 && blk.vote_slot == our_slot)
 				nr_votes++;
+
+			/* can finish unmounting if members all left */
+			if (unmounting &&
+			    le64_to_cpu(blk.unmount_barrier) > our_umb) {
+				qei->elected_nr = 0;
+				qei->unmount_barrier =
+					le64_to_cpu(blk.unmount_barrier);
+				ret = 0;
+				goto out;
+			}
 
 			/* sample existing fields for our write */
 			if (i == our_slot) {
@@ -652,6 +666,8 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 			}
 			elected_nr = max(elected_nr,
 					 le64_to_cpu(blk.elected_nr));
+			unmount_barrier = max(unmount_barrier,
+					      le64_to_cpu(blk.unmount_barrier));
 		}
 
 
@@ -667,7 +683,8 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 			elected_nr = 0;
 
 		write_quorum_block(sb, super->hdr.fsid, conf->gen, our_slot,
-				   write_nr, elected_nr, vote_slot);
+				   write_nr, elected_nr, unmount_barrier,
+				   vote_slot);
 
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule_hrtimeout(&expires, HRTIMER_MODE_ABS);
@@ -714,5 +731,65 @@ int scoutfs_quorum_clear_elected(struct super_block *sb,
 
 	return write_quorum_block(sb, super->hdr.fsid, qei->config_gen,
 				  qei->config_slot, qei->write_nr, 0,
+				  qei->unmount_barrier, qei->config_slot);
+}
+
+int scoutfs_quorum_update_barrier(struct super_block *sb,
+				  struct scoutfs_quorum_elected_info *qei,
+				  u64 unmount_barrier)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+
+	qei->unmount_barrier = unmount_barrier;
+
+	return write_quorum_block(sb, super->hdr.fsid, qei->config_gen,
+				  qei->config_slot, qei->write_nr,
+				  qei->elected_nr, qei->unmount_barrier,
 				  qei->config_slot);
+}
+
+/*
+ * If there's only one or two active slots then a single vote is sufficient
+ * for a majority.
+ */
+int scoutfs_quorum_majority(struct super_block *sb,
+			    struct scoutfs_quorum_config *conf)
+{
+	struct scoutfs_quorum_slot *slot;
+	int nr_active = 0;
+	int majority;
+	int i;
+
+	for (i = 0; i < SCOUTFS_QUORUM_MAX_SLOTS; i++) {
+		slot = &conf->slots[i];
+
+		if (slot->flags & SCOUTFS_QUORUM_SLOT_ACTIVE)
+			nr_active++;
+	}
+
+	if (nr_active <= 2)
+		majority = 1;
+	else if (nr_active & 1)
+		majority = (nr_active + 1) / 2;
+	else
+		majority = (nr_active / 2) + 1;
+
+	return majority;
+}
+
+bool scoutfs_quorum_voting_member(struct super_block *sb,
+				  struct scoutfs_quorum_config *conf,
+				  char *name)
+{
+	struct scoutfs_quorum_slot *slot;
+	int i;
+
+	for (i = 0; i < SCOUTFS_QUORUM_MAX_SLOTS; i++) {
+		slot = &conf->slots[i];
+
+		if (strcmp(slot->name, name) == 0)
+			return true;
+	}
+
+	return false;
 }

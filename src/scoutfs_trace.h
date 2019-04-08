@@ -2482,6 +2482,7 @@ DECLARE_EVENT_CLASS(scoutfs_quorum_block_class,
 		__field(__u64, config_gen)
 		__field(__u64, write_nr)
 		__field(__u64, elected_nr)
+		__field(__u64, unmount_barrier)
 		__field(__u32, crc)
 		__field(__u8, vote_slot)
 	),
@@ -2493,14 +2494,15 @@ DECLARE_EVENT_CLASS(scoutfs_quorum_block_class,
 		__entry->config_gen = le64_to_cpu(blk->config_gen);
 		__entry->write_nr = le64_to_cpu(blk->write_nr);
 		__entry->elected_nr = le64_to_cpu(blk->elected_nr);
+		__entry->unmount_barrier = le64_to_cpu(blk->unmount_barrier);
 		__entry->crc = le32_to_cpu(blk->crc);
 		__entry->vote_slot = blk->vote_slot;
 	),
 
-	TP_printk("fsid "FSID_FMT" io_blkno %llu hdr_blkno %llu config_gen %llu write_nr %llu elected_nr %llu crc 0x%08x vote_slot %u",
+	TP_printk("fsid "FSID_FMT" io_blkno %llu hdr_blkno %llu config_gen %llu write_nr %llu elected_nr %llu umb %llu crc 0x%08x vote_slot %u",
 		  __entry->fsid, __entry->io_blkno, __entry->hdr_blkno,
 		  __entry->config_gen, __entry->write_nr, __entry->elected_nr,
-		  __entry->crc, __entry->vote_slot)
+		  __entry->unmount_barrier, __entry->crc, __entry->vote_slot)
 );
 DEFINE_EVENT(scoutfs_quorum_block_class, scoutfs_quorum_read_block,
 	TP_PROTO(struct super_block *sb, u64 io_blkno,

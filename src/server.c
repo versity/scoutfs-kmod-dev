@@ -35,6 +35,7 @@
 #include "net.h"
 #include "lock_server.h"
 #include "endian_swap.h"
+#include "quorum.h"
 
 /*
  * Every active mount can act as the server that listens on a net
@@ -60,6 +61,8 @@ struct server_info {
 	u64 term;
 	struct scoutfs_net_connection *conn;
 
+	struct scoutfs_quorum_elected_info qei;
+
 	/* request processing coordinates committing manifest and alloc */
 	struct rw_semaphore commit_rwsem;
 	struct llist_head commit_waiters;
@@ -84,6 +87,11 @@ struct server_info {
 	unsigned long nr_compacts;
 	struct list_head compacts;
 	struct work_struct compact_work;
+
+	/* track clients waiting in unmmount for farewell response */
+	struct mutex farewell_mutex;
+	struct list_head farewell_requests;
+	struct work_struct farewell_work;
 };
 
 #define DECLARE_SERVER_INFO(sb, name) \
@@ -1176,6 +1184,46 @@ int scoutfs_server_lock_recover_request(struct super_block *sb, u64 node_id,
 					      NULL, NULL);
 }
 
+static int insert_mounted_client(struct super_block *sb, u64 node_id,
+				 char *name)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_mounted_client_btree_key mck;
+	struct scoutfs_mounted_client_btree_val mcv;
+
+	mck.node_id = cpu_to_be64(node_id);
+	strncpy(mcv.name, name, sizeof(mcv.name));
+
+	return scoutfs_btree_insert(sb, &super->mounted_clients,
+				    &mck, sizeof(mck), &mcv, sizeof(mcv));
+}
+
+/*
+ * Remove the record of a mounted client.  The record can already be
+ * removed if we're processing a farewell on behalf of a client that
+ * already had a previous server process its farewell.
+ *
+ * When we remove the last mounted client that's voting we write a new
+ * quorum block with the updated unmount_barrier.
+ *
+ * The caller has to serialize with farewell processing.
+ */
+static int delete_mounted_client(struct super_block *sb, u64 node_id)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_mounted_client_btree_key mck;
+	int ret;
+
+	mck.node_id = cpu_to_be64(node_id);
+
+	ret = scoutfs_btree_delete(sb, &super->mounted_clients,
+				   &mck, sizeof(mck));
+	if (ret == -ENOENT)
+		ret = 0;
+
+	return ret;
+}
+
 /*
  * Process an incoming greeting request in the server from the client.
  * We try to send responses to failed greetings so that the sender can
@@ -1247,9 +1295,17 @@ static int server_greeting(struct super_block *sb,
 		le64_add_cpu(&super->next_node_id, 1);
 		spin_unlock(&server->lock);
 
-		queue_commit_work(server, &cw);
+		mutex_lock(&server->farewell_mutex);
+		ret = insert_mounted_client(sb, le64_to_cpu(node_id), gr->name);
+		mutex_unlock(&server->farewell_mutex);
+
+		if (ret == 0)
+			queue_commit_work(server, &cw);
 		up_read(&server->commit_rwsem);
-		ret = wait_for_commit(&cw);
+		if (ret == 0) {
+			ret = wait_for_commit(&cw);
+			queue_work(server->wq, &server->farewell_work);
+		}
 	} else {
 		node_id = gr->node_id;
 	}
@@ -1259,9 +1315,11 @@ send_err:
 	if (err)
 		node_id = 0;
 
+	memset(greet.name, 0, sizeof(greet.name));
 	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
 	greet.server_term = cpu_to_le64(server->term);
+	greet.unmount_barrier = cpu_to_le64(server->qei.unmount_barrier);
 	greet.node_id = node_id;
 	greet.flags = 0;
 
@@ -1305,6 +1363,223 @@ out:
 	return ret;
 }
 
+struct farewell_request {
+	struct list_head entry;
+	u64 net_id;
+	u64 node_id;
+};
+
+static bool invalid_mounted_client_item(struct scoutfs_btree_item_ref *iref)
+{
+	return (iref->key_len !=
+			sizeof(struct scoutfs_mounted_client_btree_key)) ||
+	       (iref->val_len !=
+			sizeof(struct scoutfs_mounted_client_btree_val));
+}
+
+/*
+ * This work processes farewell requests asynchronously.  Requests from
+ * voting quorum members can be held until they're no longer needed to
+ * vote for quorum and elect a server to process farewell requests.
+ *
+ * This will hold farewell requests from voting clients until either it
+ * isn't needed for quorum because a majority remains without it, or it
+ * won't be needed for quorum because all the remaining mounted clients
+ * are voting and waiting for farewell.
+ *
+ * When we remove the last mounted client record for the last voting
+ * client then we increase the unmount_barrier and write it to the
+ * server's quorum block.  If voting clients don't get their farewell
+ * response they'll attempt to form quorum again to start the server for
+ * their farewell response but will find the increased umount_barrier.
+ * The'll know that their farewell has been processed and they can exit
+ * without forming quorum.
+ *
+ * Responses that are waiting for clients who aren't voting are
+ * immediately sent.  Clients that don't have a mounted client record
+ * have already had their farewell processed by another server and can
+ * proceed.
+ *
+ * This can trust the quorum config found in the super that was read
+ * when the server started.  Only the current server can rewrite the
+ * working config.
+ *
+ * Farewell responses are unique in that sending them causes the server
+ * to shutdown the connection to the client next time the socket
+ * disconnects.  If the socket is destroyed before the client gets the
+ * response they'll reconnect and we'll see them as a brand new client
+ * who immediately sends a farewell.  It'll be processed and it all
+ * works out.
+ *
+ * If this worker sees an error it assumes that this sever is done for
+ * and that another had better take its place.
+ */
+static void farewell_worker(struct work_struct *work)
+{
+	struct server_info *server = container_of(work, struct server_info,
+						  farewell_work);
+	struct super_block *sb = server->sb;
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_quorum_config *conf = &super->quorum_config;
+	struct scoutfs_mounted_client_btree_key mck;
+	struct scoutfs_mounted_client_btree_val *mcv;
+	struct farewell_request *tmp;
+	struct farewell_request *fw;
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct commit_waiter cw;
+	unsigned int nr_unmounting = 0;
+	unsigned int nr_mounted = 0;
+	unsigned int majority;
+	LIST_HEAD(reqs);
+	LIST_HEAD(send);
+	bool deleted = false;
+	bool voting;
+	bool more_reqs;
+	int ret;
+
+	majority = scoutfs_quorum_majority(sb, conf);
+
+	/* grab all the requests that are waiting */
+	mutex_lock(&server->farewell_mutex);
+	list_splice_init(&server->farewell_requests, &reqs);
+	mutex_unlock(&server->farewell_mutex);
+
+	/* count how many reqs requests are from voting clients */
+	nr_unmounting = 0;
+	list_for_each_entry_safe(fw, tmp, &reqs, entry) {
+		mck.node_id = cpu_to_be64(fw->node_id);
+		ret = scoutfs_btree_lookup(sb, &super->mounted_clients,
+					   &mck, sizeof(mck), &iref);
+		if (ret == 0 && invalid_mounted_client_item(&iref)) {
+			scoutfs_btree_put_iref(&iref);
+			ret = -EIO;
+		}
+		if (ret < 0) {
+			if (ret == -ENOENT) {
+				list_move_tail(&fw->entry, &send);
+				continue;
+			}
+			goto out;
+		}
+
+		mcv = iref.val;
+		voting = scoutfs_quorum_voting_member(sb, conf, mcv->name);
+		scoutfs_btree_put_iref(&iref);
+
+		if (!voting) {
+			list_move_tail(&fw->entry, &send);
+			continue;
+		}
+
+		nr_unmounting++;
+	}
+
+	/* see how many mounted clients could vote for quorum */
+	memset(&mck, 0, sizeof(mck));
+	for (;;) {
+		ret = scoutfs_btree_next(sb, &super->mounted_clients,
+					 &mck, sizeof(mck), &iref);
+		if (ret == 0 && invalid_mounted_client_item(&iref)) {
+			scoutfs_btree_put_iref(&iref);
+			ret = -EIO;
+		}
+		if (ret != 0) {
+			if (ret == -ENOENT)
+				break;
+			goto out;
+		}
+
+		memcpy(&mck, iref.key, sizeof(mck));
+		mcv = iref.val;
+
+		if (scoutfs_quorum_voting_member(sb, conf, mcv->name))
+			nr_mounted++;
+
+		scoutfs_btree_put_iref(&iref);
+		be64_add_cpu(&mck.node_id, 1);
+
+	}
+
+	/* send as many responses as we can to maintain quorum */
+	while ((fw = list_first_entry_or_null(&reqs, struct farewell_request,
+					      entry)) &&
+	       (nr_mounted > majority || nr_unmounting >= nr_mounted)) {
+
+		list_move_tail(&fw->entry, &send);
+		nr_mounted--;
+		nr_unmounting--;
+		deleted = true;
+	}
+
+	/* process and send farewell responses */
+	list_for_each_entry_safe(fw, tmp, &send, entry) {
+
+		down_read(&server->commit_rwsem);
+
+		ret = scoutfs_lock_server_farewell(sb, fw->node_id) ?:
+		      remove_trans_seq(sb, fw->node_id) ?:
+		      delete_mounted_client(sb, fw->node_id);
+		if (ret == 0)
+			queue_commit_work(server, &cw);
+
+		up_read(&server->commit_rwsem);
+		if (ret == 0)
+			ret = wait_for_commit(&cw);
+		if (ret)
+			goto out;
+	}
+
+	/* update the unmount barrier the first time we delete all mounted */
+	if (deleted && nr_mounted == 0) {
+		ret = scoutfs_quorum_update_barrier(sb, &server->qei,
+					server->qei.unmount_barrier + 1);
+		if (ret)
+			goto out;
+	}
+
+	/* and finally send all the responses */
+	list_for_each_entry_safe(fw, tmp, &send, entry) {
+
+		ret = scoutfs_net_response_node(sb, server->conn, fw->node_id,
+						SCOUTFS_NET_CMD_FAREWELL,
+						fw->net_id, 0, NULL, 0);
+		if (ret)
+			break;
+
+		list_del_init(&fw->entry);
+		kfree(fw);
+	}
+
+	ret = 0;
+out:
+	mutex_lock(&server->farewell_mutex);
+	more_reqs = !list_empty(&server->farewell_requests);
+	list_splice_init(&reqs, &server->farewell_requests);
+	list_splice_init(&send, &server->farewell_requests);
+	mutex_unlock(&server->farewell_mutex);
+
+	if (ret < 0)
+		stop_server(server);
+	else if (more_reqs && !server->shutting_down)
+		queue_work(server->wq, &server->farewell_work);
+}
+
+static void free_farewell_requests(struct super_block *sb, u64 node_id)
+{
+	struct server_info *server = SCOUTFS_SB(sb)->server_info;
+	struct farewell_request *tmp;
+	struct farewell_request *fw;
+
+	mutex_lock(&server->farewell_mutex);
+	list_for_each_entry_safe(fw, tmp, &server->farewell_requests, entry) {
+		if (node_id == 0 || fw->node_id == node_id) {
+			list_del_init(&fw->entry);
+			kfree(fw);
+		}
+	}
+	mutex_unlock(&server->farewell_mutex);
+}
+
 /*
  * The server is receiving a farewell message from a client that is
  * unmounting.  It won't send any more requests and once it receives our
@@ -1322,26 +1597,28 @@ static int server_farewell(struct super_block *sb,
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 	u64 node_id = scoutfs_net_client_node_id(conn);
-	struct commit_waiter cw;
-	int ret;
+	struct farewell_request *fw;
 
 	if (arg_len != 0)
 		return -EINVAL;
 
-	scoutfs_net_server_farewell(sb, conn);
+	/* XXX tear down if we fence, or if we shut down */
 
-	down_read(&server->commit_rwsem);
+	fw = kmalloc(sizeof(struct farewell_request), GFP_NOFS);
+	if (fw == NULL)
+		return -ENOMEM;
 
-	ret = scoutfs_lock_server_farewell(sb, node_id) ?:
-	      remove_trans_seq(sb, node_id);
-	if (ret == 0)
-		queue_commit_work(server, &cw);
+	fw->node_id = node_id;
+	fw->net_id = id;
 
-	up_read(&server->commit_rwsem);
-	if (ret == 0)
-		ret = wait_for_commit(&cw);
+	mutex_lock(&server->farewell_mutex);
+	list_add_tail(&fw->entry, &server->farewell_requests);
+	mutex_unlock(&server->farewell_mutex);
 
-	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
+	queue_work(server->wq, &server->farewell_work);
+
+	/* response will be sent later */
+	return 0;
 }
 
 /* requests sent to clients are tracked so we can free resources */
@@ -1992,6 +2269,8 @@ static void server_notify_down(struct super_block *sb,
 						 server->nr_clients);
 		spin_unlock(&server->lock);
 
+		free_farewell_requests(sb, node_id);
+
 		forget_client_compacts(sb, sci);
 		try_queue_compact(server);
 	} else {
@@ -2085,7 +2364,7 @@ out:
 
 /* XXX can we call start multiple times? */
 int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin,
-			 u64 term)
+			 u64 term, struct scoutfs_quorum_elected_info *qei)
 {
 	DECLARE_SERVER_INFO(sb, server);
 
@@ -2093,6 +2372,7 @@ int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin,
 	server->shutting_down = false;
 	server->listen_sin = *sin;
 	server->term = term;
+	server->qei = *qei;
 	init_completion(&server->start_comp);
 
 	queue_work(server->wq, &server->work);
@@ -2101,7 +2381,22 @@ int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin,
 	return server->err;
 }
 
-void scoutfs_server_stop(struct super_block *sb)
+/*
+ * Start shutdown on the server but don't want for it to finish.
+ */
+void scoutfs_server_abort(struct super_block *sb)
+{
+	DECLARE_SERVER_INFO(sb, server);
+
+	stop_server(server);
+}
+
+/*
+ * Once the server is stopped we give the caller our election info
+ * which might have been modified while we were running.
+ */
+void scoutfs_server_stop(struct super_block *sb,
+			 struct scoutfs_quorum_elected_info *qei)
 {
 	DECLARE_SERVER_INFO(sb, server);
 
@@ -2109,6 +2404,8 @@ void scoutfs_server_stop(struct super_block *sb)
 	/* XXX not sure both are needed */
 	cancel_work_sync(&server->work);
 	cancel_work_sync(&server->commit_work);
+
+	*qei = server->qei;
 }
 
 int scoutfs_server_setup(struct super_block *sb)
@@ -2135,6 +2432,9 @@ int scoutfs_server_setup(struct super_block *sb)
 	server->compacts_per_client = 2;
 	INIT_LIST_HEAD(&server->compacts);
 	INIT_WORK(&server->compact_work, scoutfs_server_compact_worker);
+	mutex_init(&server->farewell_mutex);
+	INIT_LIST_HEAD(&server->farewell_requests);
+	INIT_WORK(&server->farewell_work, farewell_worker);
 
 	server->wq = alloc_workqueue("scoutfs_server",
 				     WQ_UNBOUND | WQ_NON_REENTRANT, 0);
@@ -2163,6 +2463,10 @@ void scoutfs_server_destroy(struct super_block *sb)
 		cancel_work_sync(&server->work);
 		/* recv work/compaction could have left commit_work queued */
 		cancel_work_sync(&server->commit_work);
+
+		/* pending farewell requests are another server's problem */
+		cancel_work_sync(&server->farewell_work);
+		free_farewell_requests(sb, 0);
 
 		trace_scoutfs_server_workqueue_destroy(sb, 0, 0);
 		destroy_workqueue(server->wq);

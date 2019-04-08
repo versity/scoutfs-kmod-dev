@@ -100,7 +100,7 @@ struct scoutfs_net_connection {
 		      established:1,	/* added sends queue send work */
 		      shutting_down:1,	/* shutdown work has been queued */
 		      saw_greeting:1,	/* saw greeting on this sock */
-		      saw_farewell:1,	/* saw farewell request from client */
+		      saw_farewell:1,	/* saw farewell response to client */
 		      reconn_wait:1,	/* shutdown, waiting for reconnect */
 		      reconn_freeing:1;	/* waiting done, setter frees */
 	unsigned long reconn_deadline;
@@ -786,6 +786,11 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 		if (msend->dead) {
 			free_msend(ninf, msend);
 			continue;
+		}
+
+		if ((msend->nh.cmd == SCOUTFS_NET_CMD_FAREWELL) &&
+		    nh_is_response(&msend->nh)) {
+			conn->saw_farewell = 1;
 		}
 
 		msend->nh.recv_seq =
@@ -1628,22 +1633,6 @@ restart:
 	if (conn->notify_up && first_contact)
 		conn->notify_up(sb, conn, conn->info, node_id);
 }
-
-/*
- * The server has received a farewell message and is sending a response.
- * All we do is mark the connection so that it is freed the next time it
- * is shutdown, presumably as the client disconnects after receiving the
- * response.  The server caller has cleaned up all the state it had
- * associated with the client.
- */
-void scoutfs_net_server_farewell(struct super_block *sb,
-				 struct scoutfs_net_connection *conn)
-{
-	spin_lock(&conn->lock);
-	conn->saw_farewell = 1;
-	spin_unlock(&conn->lock);
-}
-
 
 /*
  * Submit a request down the connection.  It's up to the caller to

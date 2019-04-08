@@ -350,6 +350,7 @@ static size_t super_root_offsets[] = {
 	offsetof(struct scoutfs_super_block, manifest.root),
 	offsetof(struct scoutfs_super_block, lock_clients),
 	offsetof(struct scoutfs_super_block, trans_seqs),
+	offsetof(struct scoutfs_super_block, mounted_clients),
 };
 
 #define for_each_super_root(super, i, root)				\

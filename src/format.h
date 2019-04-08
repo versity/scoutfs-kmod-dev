@@ -48,6 +48,8 @@
 #define SCOUTFS_QUORUM_BLOCKS		((128ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
 #define SCOUTFS_QUORUM_MAX_SLOTS	SCOUTFS_QUORUM_BLOCKS
 
+#define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
+
 /*
  * Base types used by other structures.
  */
@@ -290,6 +292,18 @@ struct scoutfs_trans_seq_btree_key {
 } __packed;
 
 /*
+ * The server keeps a persistent record of mounted clients.
+ */
+struct scoutfs_mounted_client_btree_key {
+	__be64 node_id;
+} __packed;
+
+struct scoutfs_mounted_client_btree_val {
+	__u8 name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
+} __packed;
+
+
+/*
  * The max number of links defines the max number of entries that we can
  * index in o(log n) and the static list head storage size in the
  * segment block.  We always pay the static storage cost, which is tiny,
@@ -395,7 +409,6 @@ struct scoutfs_xattr {
 #define member_sizeof(TYPE, MEMBER) (sizeof(((TYPE *)0)->MEMBER))
 
 #define SCOUTFS_UUID_BYTES 16
-#define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
 
 /*
  * During each quorum voting interval the fabric has to process 2 reads
@@ -418,6 +431,7 @@ struct scoutfs_xattr {
  * @config_gen: references the config gen in the super block
  * @write_nr: incremented for every write, only 0 when never written
  * @elected_nr: incremented when elected, 0 otherwise
+ * @unmount_barrier: incremented by servers when all members have unmounted
  * @vote_slot: the active config slot that the writer is voting for
  */
 struct scoutfs_quorum_block {
@@ -426,6 +440,7 @@ struct scoutfs_quorum_block {
 	__le64 config_gen;
 	__le64 write_nr;
 	__le64 elected_nr;
+	__le64 unmount_barrier;
 	__le32 crc;
 	__u8 vote_slot;
 } __packed;
@@ -475,6 +490,7 @@ struct scoutfs_super_block {
 	struct scoutfs_quorum_config quorum_config;
 	struct scoutfs_btree_root lock_clients;
 	struct scoutfs_btree_root trans_seqs;
+	struct scoutfs_btree_root mounted_clients;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1
@@ -593,10 +609,18 @@ enum {
  * Greetings verify identity of communicating nodes.  The sender sends
  * their credentials and the receiver verifies them.
  *
+ * @name: The client sends its unique name to the server.
+ *
  * @server_term: The raft term that elected the server.  Initially 0
  * from the client, sent by the server, then sent by the client as it
  * tries to reconnect.  Used to identify a client reconnecting to a
  * server that has timed out its connection.
+ *
+ * @unmount_barrier: Incremented every time the remaining majority of
+ * quorum members all agree to leave.  The server tells a quorum member
+ * the value that it's connecting under so that if the client sees the
+ * value increase in a quorum block it knows that the server has
+ * processed its farewell and can safely unmount.
  *
  * @node_id: The id of the client.  Initially 0 from the client,
  * assigned by the server, and sent by the client as it reconnects.
@@ -604,9 +628,11 @@ enum {
  * state must be dealt with.
  */
 struct scoutfs_net_greeting {
+	__u8 name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
 	__le64 fsid;
 	__le64 format_hash;
 	__le64 server_term;
+	__le64 unmount_barrier;
 	__le64 node_id;
 	__le64 flags;
 } __packed;

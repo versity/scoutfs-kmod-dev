@@ -59,6 +59,7 @@ struct client_info {
 	u64 old_elected_nr;
 
 	u64 server_term;
+	u64 greeting_umb;
 
 	bool sending_farewell;
 	int farewell_error;
@@ -365,22 +366,27 @@ static int client_greeting(struct super_block *sb,
 	scoutfs_net_client_greeting(sb, conn, new_server);
 
 	client->server_term = le64_to_cpu(gr->server_term);
+	client->greeting_umb = le64_to_cpu(gr->unmount_barrier);
 	ret = 0;
 out:
 	return ret;
 }
 
 /*
- * If the previous election told us to start the server then stop it
- * and wipe the old election info.  If we're not fast enough to clear
- * the election block then the next server might fence us.  Should
- * be very unlikely as election requires multiple RMW cycles.
+ * If the previous election told us to start the server then stop it and
+ * clear the indication that we were elected.   We get the current
+ * version of the election info from the server because they might have
+ * modified it while they were running. the old election info.
+ *
+ * If we're not fast enough to clear the election from the quorum block
+ * then the next server might fence us.  Should be very unlikely as
+ * election requires multiple RMW cycles.
  */
 static void stop_our_server(struct super_block *sb,
 			    struct scoutfs_quorum_elected_info *qei)
 {
 	if (qei->run_server) {
-		scoutfs_server_stop(sb);
+		scoutfs_server_stop(sb, qei);
 		scoutfs_quorum_clear_elected(sb, qei);
 		memset(qei, 0, sizeof(*qei));
 	}
@@ -431,12 +437,22 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 
 	ret = scoutfs_quorum_election(sb, opts->uniq_name,
 				      client->old_elected_nr,
-			              timeout_abs, qei);
+			              timeout_abs, client->sending_farewell,
+				      client->greeting_umb, qei);
 	if (ret)
 		goto out;
 
+	/* we saw that the server wrote a new unmount barrier */
+	if (client->sending_farewell && qei->elected_nr == 0 &&
+	    qei->unmount_barrier > client->greeting_umb) {
+		client->farewell_error = 0;
+		complete(&client->farewell_comp);
+		ret = 0;
+		goto out;
+	}
+
 	if (qei->run_server) {
-		ret = scoutfs_server_start(sb, &qei->sin, qei->elected_nr);
+		ret = scoutfs_server_start(sb, &qei->sin, qei->elected_nr, qei);
 		if (ret) {
 			/* forget that we tried to start the server */
 			memset(qei, 0, sizeof(*qei));
@@ -459,9 +475,11 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	client->old_elected_nr = 0;
 
 	/* send a greeting to verify endpoints of each connection */
+	memcpy(greet.name, opts->uniq_name, sizeof(greet.name));
 	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
 	greet.server_term = cpu_to_le64(client->server_term);
+	greet.unmount_barrier = 0;
 	greet.node_id = cpu_to_le64(sbi->node_id);
 	greet.flags = 0;
 	if (client->sending_farewell)

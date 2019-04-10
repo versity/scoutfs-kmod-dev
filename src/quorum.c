@@ -297,7 +297,8 @@ static bool invalid_quorum_block(struct scoutfs_super_block *super,
 	return quorum_block_crc(blk) != blk->crc ||
 	       blk->fsid != super->hdr.fsid ||
 	       le64_to_cpu(blk->blkno) != bh->b_blocknr ||
-	       blk->vote_slot >= SCOUTFS_QUORUM_MAX_SLOTS;
+	       blk->vote_slot >= SCOUTFS_QUORUM_MAX_SLOTS ||
+	       (blk->flags & SCOUTFS_QUORUM_BLOCK_FLAGS_UNKNOWN);
 }
 
 /*
@@ -393,7 +394,7 @@ static inline int first_slot_flags(struct scoutfs_quorum_config *conf,
 static int write_quorum_block(struct super_block *sb, __le64 fsid,
 			      __le64 config_gen, u8 our_slot, __le64 write_nr,
 			      u64 elected_nr, u64 unmount_barrier,
-			      u8 vote_slot)
+			      u8 vote_slot, u8 flags)
 {
 	struct scoutfs_quorum_block *blk;
 	struct buffer_head *bh;
@@ -419,6 +420,7 @@ static int write_quorum_block(struct super_block *sb, __le64 fsid,
 	blk->elected_nr = cpu_to_le64(elected_nr);
 	blk->unmount_barrier = cpu_to_le64(unmount_barrier);
 	blk->vote_slot = vote_slot;
+	blk->flags = flags;
 
 	blk->crc = quorum_block_crc(blk);
 
@@ -464,19 +466,24 @@ static int fence_other_elected(struct super_block *sb,
 {
 	struct scoutfs_quorum_config *conf = &super->quorum_config;
 	struct scoutfs_quorum_block blk;
+	u8 flags;
 	int ret;
 	int i;
 
 	for_each_block(sb, super, i, &blk) {
 		if (i != our_slot &&
-		    le64_to_cpu(blk.elected_nr) > 0 &&
+		    (blk.flags & SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED) &&
 		    le64_to_cpu(blk.elected_nr) <= elected_nr) {
 			scoutfs_err(sb, "would have fenced");
 			scoutfs_inc_counter(sb, quorum_fenced);
 
+			flags = blk.flags & ~SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED;
+
 			ret = write_quorum_block(sb, super->hdr.fsid,
-					conf->gen, i, blk.write_nr, 0,
-					le64_to_cpu(blk.unmount_barrier), i);
+					conf->gen, i, blk.write_nr,
+					le64_to_cpu(blk.elected_nr),
+					le64_to_cpu(blk.unmount_barrier), i,
+					flags);
 			if (ret)
 				break;
 		}
@@ -531,6 +538,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 	__le64 write_nr = 0;
 	u64 elected_nr = 0;
 	u64 unmount_barrier = 0;
+	u8 flags = 0;
 	int vote_streak = 0;
 	int vote_slot;
 	int our_slot;
@@ -586,6 +594,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 
 			/* find the most recently elected leader */
 			if ((blk.config_gen == conf->gen) &&
+			    (blk.flags & SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED) &&
 			    (le64_to_cpu(blk.elected_nr) > qei->elected_nr)){
 				addr_to_sin(&qei->sin, &slot->addr);
 				qei->config_gen = blk.config_gen;
@@ -594,6 +603,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 				qei->unmount_barrier =
 					le64_to_cpu(blk.unmount_barrier);
 				qei->config_slot = i;
+				qei->flags = blk.flags;
 			}
 		}
 
@@ -605,7 +615,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 		 * most recent, or we couldn't fence, then we fall back
 		 * to participating in the election.
 		 */
-		if (elected_nr != 0) {
+		if (flags & SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED) {
 			if (qei->write_nr == write_nr &&
 			    qei->elected_nr == elected_nr &&
 			    qei->config_slot == our_slot) {
@@ -643,6 +653,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 		write_nr = cpu_to_le64(1);
 		elected_nr = 0;
 		unmount_barrier = 0;
+		flags = 0;
 
 		for_each_active_block(sb, super, conf, hist, hi, &blk, slot, i){
 			/* count our votes (maybe including from us) */
@@ -677,14 +688,14 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 		else
 			vote_streak = 0;
 
-		if (vote_streak >= 2)
+		if (vote_streak >= 2) {
+			flags |= SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED;
 			elected_nr++;
-		else
-			elected_nr = 0;
+		}
 
 		write_quorum_block(sb, super->hdr.fsid, conf->gen, our_slot,
 				   write_nr, elected_nr, unmount_barrier,
-				   vote_slot);
+				   vote_slot, flags);
 
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule_hrtimeout(&expires, HRTIMER_MODE_ABS);
@@ -705,14 +716,14 @@ out:
 
 /*
  * The calling server is shutting down and has finished modifying
- * persistent state.  We clear elected_nr from our quorum block so that
- * mounts won't try to connect and so that the next next leader won't
- * try to fence.
+ * persistent state.  We clear the elected flag from our quorum block so
+ * that mounts won't try to connect and so that the next next leader
+ * won't try to fence.
  *
  * By definition nothing has written to the slot since we wrote our
- * elected_nr and the slot could not have been reclaimed.  To reclaim
- * the slot would have required proving that we were gone or fencing
- * us.
+ * elected quorum block and the slot could not have been reclaimed.  To
+ * reclaim the slot would have required proving that we were gone or
+ * fencing us.
  *
  * If this fails then the mount is in trouble because it'll probably be
  * fenced by the next elected leader.
@@ -729,9 +740,12 @@ int scoutfs_quorum_clear_elected(struct super_block *sb,
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 
+	qei->flags &= ~SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED;
+
 	return write_quorum_block(sb, super->hdr.fsid, qei->config_gen,
-				  qei->config_slot, qei->write_nr, 0,
-				  qei->unmount_barrier, qei->config_slot);
+				  qei->config_slot, qei->write_nr,
+				  qei->elected_nr, qei->unmount_barrier,
+				  qei->config_slot, qei->flags);
 }
 
 int scoutfs_quorum_update_barrier(struct super_block *sb,
@@ -745,7 +759,7 @@ int scoutfs_quorum_update_barrier(struct super_block *sb,
 	return write_quorum_block(sb, super->hdr.fsid, qei->config_gen,
 				  qei->config_slot, qei->write_nr,
 				  qei->elected_nr, qei->unmount_barrier,
-				  qei->config_slot);
+				  qei->config_slot, qei->flags);
 }
 
 /*

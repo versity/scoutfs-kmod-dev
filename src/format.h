@@ -443,7 +443,11 @@ struct scoutfs_quorum_block {
 	__le64 unmount_barrier;
 	__le32 crc;
 	__u8 vote_slot;
+	__u8 flags;
 } __packed;
+
+#define SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED	(1 << 0)
+#define SCOUTFS_QUORUM_BLOCK_FLAGS_UNKNOWN	(U8_MAX << 1)
 
 #define SCOUTFS_QUORUM_MAX_SLOTS	SCOUTFS_QUORUM_BLOCKS
 

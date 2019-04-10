@@ -9,6 +9,7 @@ struct scoutfs_quorum_elected_info {
 	u64 unmount_barrier;
 	unsigned int config_slot;
 	bool run_server;
+	u8 flags;
 };
 
 int scoutfs_quorum_election(struct super_block *sb, char *our_name,

@@ -21,11 +21,11 @@ Learn more in the [white paper](https://docs.wixstatic.com/ugd/aaa89b_88a5cc84be
 
 # Current Status
 
-**Initial Alpha Open Source Release**
+**Alpha Open Source Development**
 
-scoutfs is under heavy active development.  We're releasing before it's
-completely polished to give the community an opportunity to affect the
-design and implementation.  Nothing is cast in stone. 
+scoutfs is under heavy active development.  We're developing it in the
+open to give the community an opportunity to affect the design and
+implementation.
 
 The core architectural design elements are in place.  Much surrounding
 functionality hasn't been implemented.  It's appropriate for early
@@ -60,9 +60,6 @@ for all discussion of scoutfs.
 running, experience will be needed to fill in the gaps.  We're happy to
 help on the mailing list.**
 
-__Some software components (pacemaker?) may be packaged seperately by
-distributions.__
-
 The requirements for running scoutfs on a small cluster are:
 
  1. One or more nodes running x86-64 CentOS/RHEL 7.4 (or 7.3)
@@ -71,35 +68,14 @@ The requirements for running scoutfs on a small cluster are:
 
 The steps for getting scoutfs mounted and operational are:
 
- 1. Configure pacemaker clustering and the kernel DLM for locking
- 2. Get the kernel module running on the nodes
- 3. Make a new filesystem on the device with the userspace utilities
- 4. Mount the device on all the nodes
+ 1. Get the kernel module running on the nodes
+ 2. Make a new filesystem on the device with the userspace utilities
+ 3. Mount the device on all the nodes
 
 In this example we run all of these commands on two nodes.  The block
-device name is the same on all the nodes.  The listen= mount option is
-given the local IP address of each node. 
+device name is the same on all the nodes.
 
-1. Configure and Start the DLM
-
-
-   ```shell
-   yum install pcs pacemaker fence-agents-all
-   firewall-cmd --permanent --add-service=high-availability
-   firewall-cmd --add-service=high-availability
-   passwd hacluster
-   systemctl start pcsd.service
-   systemctl enable pcsd.service
-   pcs cluster auth node1 node2
-   pcs cluster setup --start --name scoutfs node1 node2
-   pcs cluster enable
-
-   yum install dlm
-   systemctl enable dlm
-   systemctl start dlm
-   ```
-
-2. Get the Kernel Module and Userspace Binaries
+1. Get the Kernel Module and Userspace Binaries
 
    * Either use snapshot RPMs built from git by Versity:
 
@@ -123,23 +99,29 @@ given the local IP address of each node.
 
    ```
 
-3. Make a New Filesystem (**destroys contents, no questions asked**) 
+2. Make a New Filesystem (**destroys contents, no questions asked**)
+
+   We specify that every node will participate in quorum voting by
+   configuring each in the super block with options to mkfs.
 
    ```shell
-   scoutfs mkfs /dev/shared_block_device
+   scoutfs mkfs -o quorum_slot node1:0:172.16.1.1 \
+		-o quorum_slot node2:0:172.16.1.2 /dev/shared_block_device
    ```
 
 
-4. Mount the Filesystem 
+3. Mount the Filesystem
+
+   Each mounting node provides the name that was given to the
+   quorum\_slot option to mkfs.
 
    ```shell
    mkdir /mnt/scoutfs
-   mount -t scoutfs -o cluster=scoutfs,listen=node_ip_address \
-	/dev/shared_block_device /mnt/scoutfs
+   mount -t scoutfs -o uniq_name=$NODENAME /dev/shared_block_device /mnt/scoutfs
 
    ```
 
-5. For Kicks, Observe the Metadata Change Index
+4. For Kicks, Observe the Metadata Change Index
 
    The `meta_seq` index tracks the inodes that are changed in each
    transaction.

@@ -72,8 +72,6 @@ int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
 			 u64 node_id, struct scoutfs_lock **lock);
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
 		    int level);
-void scoutfs_unlock_flags(struct super_block *sb, struct scoutfs_lock *lock,
-			  int level, int flags);
 
 void scoutfs_lock_init_coverage(struct scoutfs_lock_coverage *cov);
 void scoutfs_lock_add_coverage(struct super_block *sb,

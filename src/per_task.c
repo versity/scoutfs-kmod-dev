@@ -62,7 +62,27 @@ void scoutfs_per_task_add(struct scoutfs_per_task *pt,
 	spin_unlock(&pt->lock);
 }
 
-void scoutfs_per_task_del(struct scoutfs_per_task *pt,
+/*
+ * Add the entry to the per-task list if the task didn't already have an
+ * entry on the list.  Returns true if the entry was added, false if it
+ * wasn't.
+ */
+bool scoutfs_per_task_add_excl(struct scoutfs_per_task *pt,
+			       struct scoutfs_per_task_entry *ent, void *ptr)
+{
+	if (!scoutfs_per_task_get(pt)) {
+		scoutfs_per_task_add(pt, ent, ptr);
+		return true;
+	}
+
+	return false;
+}
+
+/*
+ * Return true if the entry was found on the list and was deleted,
+ * returns false if the entry wasn't present on a list.
+ */
+bool scoutfs_per_task_del(struct scoutfs_per_task *pt,
 			  struct scoutfs_per_task_entry *ent)
 {
 	BUG_ON(!list_empty(&ent->head) && ent->task != current);
@@ -71,11 +91,21 @@ void scoutfs_per_task_del(struct scoutfs_per_task *pt,
 		spin_lock(&pt->lock);
 		list_del_init(&ent->head);
 		spin_unlock(&pt->lock);
+		return true;
 	}
+
+	return false;
 }
 
 void scoutfs_per_task_init(struct scoutfs_per_task *pt)
 {
 	spin_lock_init(&pt->lock);
 	INIT_LIST_HEAD(&pt->list);
+}
+
+void scoutfs_per_task_init_entry(struct scoutfs_per_task_entry *ent)
+{
+	INIT_LIST_HEAD(&ent->head);
+	ent->task = NULL;
+	ent->ptr = NULL;
 }

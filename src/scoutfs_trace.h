@@ -514,6 +514,45 @@ TRACE_EVENT(scoutfs_data_truncate_items,
 		  __entry->iblock, __entry->last, __entry->offline)
 );
 
+TRACE_EVENT(scoutfs_data_wait_check,
+	TP_PROTO(struct super_block *sb, __u64 ino, __u64 pos, __u64 len,
+		 __u8 sef, __u8 op, __u64 ext_start, __u64 ext_len,
+		 __u8 ext_flags, int ret),
+
+	TP_ARGS(sb, ino, pos, len, sef, op, ext_start, ext_len, ext_flags, ret),
+
+	TP_STRUCT__entry(
+		__field(__u64, fsid)
+		__field(__u64, ino)
+		__field(__u64, pos)
+		__field(__u64, len)
+		__field(__u8, sef)
+		__field(__u8, op)
+		__field(__u64, ext_start)
+		__field(__u64, ext_len)
+		__field(__u8, ext_flags)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->fsid = FSID_ARG(sb);
+		__entry->ino = ino;
+		__entry->pos = pos;
+		__entry->len = len;
+		__entry->sef = sef;
+		__entry->op = op;
+		__entry->ext_start = ext_start;
+		__entry->ext_len = ext_len;
+		__entry->ext_flags = ext_flags;
+		__entry->ret = ret;
+	),
+
+	TP_printk(FSID_FMT" ino %llu pos %llu len %llu sef 0x%x op 0x%x ext_start %llu ext_len %llu ext_flags 0x%x ret %d",
+			__entry->fsid, __entry->ino, __entry->pos, __entry->len,
+			__entry->sef, __entry->op, __entry->ext_start,
+			__entry->ext_len, __entry->ext_flags, __entry->ret)
+);
+
 TRACE_EVENT(scoutfs_sync_fs,
 	TP_PROTO(struct super_block *sb, int wait),
 

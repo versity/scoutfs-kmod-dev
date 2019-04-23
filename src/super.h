@@ -6,6 +6,7 @@
 
 #include "format.h"
 #include "options.h"
+#include "data.h"
 
 struct scoutfs_counters;
 struct scoutfs_triggers;
@@ -48,6 +49,9 @@ struct scoutfs_sb_info {
 
 	wait_queue_head_t trans_hold_wq;
 	struct task_struct *trans_task;
+
+	/* tracks tasks waiting for data extents */
+	struct scoutfs_data_wait_root data_wait_root;
 
 	spinlock_t trans_write_lock;
 	u64 trans_write_count;

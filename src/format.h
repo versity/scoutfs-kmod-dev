@@ -390,8 +390,9 @@ struct scoutfs_file_extent {
 	__u8 flags;
 } __packed;
 
-#define SEF_OFFLINE	0x1
-#define SEF_UNWRITTEN	0x2
+#define SEF_OFFLINE	(1 << 0)
+#define SEF_UNWRITTEN	(1 << 1)
+#define SEF_UNKNOWN	(U8_MAX << 2)
 
 /*
  * The first xattr part item has a header that describes the xattr.  The

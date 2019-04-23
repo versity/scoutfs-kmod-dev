@@ -732,9 +732,9 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	if (ext.len)
 		trace_scoutfs_data_get_block_intersection(sb, &ext);
 
-	/* fail read and write if it's offline and we're not staging */
-	if ((ext.flags & SEF_OFFLINE) && !si->staging) {
-		ret = -EINVAL;
+	/* non-staging callers should have waited on offline blocks */
+	if (WARN_ON_ONCE((ext.flags & SEF_OFFLINE) && !si->staging)) {
+		ret = -EIO;
 		goto out;
 	}
 
@@ -780,14 +780,28 @@ out:
 /*
  * This is almost never used.  We can't block on a cluster lock while
  * holding the page lock because lock invalidation gets the page lock
- * while blocking locks.  If we can't use an existing lock then we drop
- * the page lock and try again.
+ * while blocking locks.  If a non blocking lock attempt fails we unlock
+ * the page and block acquiring the lock.  We unlocked the page so it
+ * could have been truncated away, or whatever, so we return
+ * AOP_TRUNCATED_PAGE to have the caller try again.
+ *
+ * A similar process happens if we try to read from an offline extent
+ * that a caller hasn't already waited for.  Instead of blocking
+ * acquiring the lock we block waiting for the offline extent.  The page
+ * lock protects the page from release while we're checking and
+ * reading the extent.
+ *
+ * We can return errors from locking and checking offline extents.  The
+ * page is unlocked if we return an error.
  */
 static int scoutfs_readpage(struct file *file, struct page *page)
 {
 	struct inode *inode = file->f_inode;
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *inode_lock = NULL;
+	SCOUTFS_DECLARE_PER_TASK_ENTRY(pt_ent);
+	DECLARE_DATA_WAIT(dw);
 	int flags;
 	int ret;
 
@@ -809,27 +823,77 @@ static int scoutfs_readpage(struct file *file, struct page *page)
 		return ret;
 	}
 
+	if (scoutfs_per_task_add_excl(&si->pt_data_lock, &pt_ent, inode_lock)) {
+		ret = scoutfs_data_wait_check(inode, page_offset(page),
+					      PAGE_CACHE_SIZE, SEF_OFFLINE,
+					      SCOUTFS_IOC_DWO_READ, &dw,
+					      inode_lock);
+		if (ret != 0) {
+			unlock_page(page);
+			scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
+			scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
+		}
+		if (ret > 0) {
+			ret = scoutfs_data_wait(inode, &dw);
+			if (ret == 0)
+				ret = AOP_TRUNCATED_PAGE;
+		}
+		if (ret != 0)
+			return ret;
+	}
+
 	ret = mpage_readpage(page, scoutfs_get_block);
+
 	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
+	scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
+
 	return ret;
 }
 
+/*
+ * This is used for opportunistic read-ahead which can throw the pages
+ * away if it needs to.  If the caller didn't deal with offline extents
+ * then we drop those pages rather than trying to wait.  Whoever is
+ * staging offline extents should be doing it in enormous chunks so that
+ * read-ahead can ramp up within each staged region.  The check for
+ * offline extents is cheap when the inode has no offline extents.
+ */
 static int scoutfs_readpages(struct file *file, struct address_space *mapping,
 			     struct list_head *pages, unsigned nr_pages)
 {
 	struct inode *inode = file->f_inode;
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *inode_lock = NULL;
+	struct page *page;
+	struct page *tmp;
 	int ret;
 
 	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
 				 SCOUTFS_LKF_REFRESH_INODE, inode, &inode_lock);
 	if (ret)
-		return ret;
+		goto out;
+
+	list_for_each_entry_safe(page, tmp, pages, lru) {
+		ret = scoutfs_data_wait_check(inode, page_offset(page),
+					      PAGE_CACHE_SIZE, SEF_OFFLINE,
+					      SCOUTFS_IOC_DWO_READ, NULL,
+					      inode_lock);
+		if (ret < 0)
+			goto out;
+		if (ret > 0) {
+			list_del(&page->lru);
+			page_cache_release(page);
+			if (--nr_pages == 0) {
+				ret = 0;
+				goto out;
+			}
+		}
+	}
 
 	ret = mpage_readpages(mapping, pages, nr_pages, scoutfs_get_block);
-
+out:
 	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
+	BUG_ON(!list_empty(pages));
 	return ret;
 }
 
@@ -1245,6 +1309,239 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
 out:
 	mutex_unlock(&inode->i_mutex);
+
+	return ret;
+}
+
+/*
+ * Insert a new waiter.  This supports multiple tasks waiting for the
+ * same ino and iblock by also comparing waiters by their addresses.
+ */
+static void insert_offline_waiting(struct rb_root *root,
+				   struct scoutfs_data_wait *ins)
+{
+	struct rb_node **node = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct scoutfs_data_wait *dw;
+	int cmp;
+
+	while (*node) {
+		parent = *node;
+		dw = rb_entry(*node, struct scoutfs_data_wait, node);
+
+		cmp = scoutfs_cmp_u64s(ins->ino, dw->ino) ?:
+		      scoutfs_cmp_u64s(ins->iblock, dw->iblock) ?:
+		      scoutfs_cmp(ins, dw);
+		if (cmp < 0)
+			node = &(*node)->rb_left;
+		else
+			node = &(*node)->rb_right;
+	}
+
+	rb_link_node(&ins->node, parent, node);
+	rb_insert_color(&ins->node, root);
+}
+
+static struct scoutfs_data_wait *next_data_wait(struct rb_root *root, u64 ino,
+						u64 iblock)
+{
+	struct rb_node **node = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct scoutfs_data_wait *next = NULL;
+	struct scoutfs_data_wait *dw;
+	int cmp;
+
+	while (*node) {
+		parent = *node;
+		dw = rb_entry(*node, struct scoutfs_data_wait, node);
+
+		/* go left when ino/iblock are equal to get first task */
+		cmp = scoutfs_cmp_u64s(ino, dw->ino) ?:
+		      scoutfs_cmp_u64s(iblock, dw->iblock);
+		if (cmp <= 0) {
+			node = &(*node)->rb_left;
+			next = dw;
+		} else if (cmp > 0) {
+			node = &(*node)->rb_right;
+		}
+	}
+
+	return next;
+}
+
+static struct scoutfs_data_wait *dw_next(struct scoutfs_data_wait *dw)
+{
+	struct rb_node *node = rb_next(&dw->node);
+	if (node)
+		return container_of(node, struct scoutfs_data_wait, node);
+	return NULL;
+}
+
+/*
+ * Check if we should wait by looking for extents whose flags match.
+ * Returns 0 if no extents were found or any error encountered.
+ *
+ * The caller must have locked the extents before calling, both across
+ * mounts and within this mount.
+ *
+ * Returns 1 if any file extents in the caller's region matched.  If the
+ * wait struct is provided then it is initialized to be woken when the
+ * extents change after the caller unlocks after the check.  The caller
+ * must come through _data_wait() to clean up the wait struct if we set
+ * it up.
+ */
+int scoutfs_data_wait_check(struct inode *inode, loff_t pos, loff_t len,
+			    u8 sef, u8 op, struct scoutfs_data_wait *dw,
+			    struct scoutfs_lock *lock)
+{
+	struct super_block *sb = inode->i_sb;
+	DECLARE_DATA_WAIT_ROOT(sb, rt);
+	DECLARE_DATA_WAITQ(inode, wq);
+	struct scoutfs_extent ext = {0,};
+	u64 iblock;
+	u64 last_block;
+	u64 on;
+	u64 off;
+	int ret = 0;
+
+	if (WARN_ON_ONCE(sef & SEF_UNKNOWN) ||
+	    WARN_ON_ONCE(op & SCOUTFS_IOC_DWO_UNKNOWN) ||
+	    WARN_ON_ONCE(dw && !RB_EMPTY_NODE(&dw->node)) ||
+	    WARN_ON_ONCE(pos + len < pos)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if ((sef & SEF_OFFLINE)) {
+		scoutfs_inode_get_onoff(inode, &on, &off);
+		if (off == 0) {
+			ret = 0;
+			goto out;
+		}
+	}
+
+	iblock = pos >> SCOUTFS_BLOCK_SHIFT;
+	last_block = (pos + len - 1) >> SCOUTFS_BLOCK_SHIFT;
+
+	while(iblock <= last_block) {
+		scoutfs_extent_init(&ext, SCOUTFS_FILE_EXTENT_TYPE,
+				    scoutfs_ino(inode), iblock, 1, 0, 0);
+		ret = scoutfs_extent_next(sb, data_extent_io, &ext, lock);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		if (ext.start > last_block)
+			break;
+
+		if (sef & ext.flags) {
+			if (dw) {
+				dw->chg = atomic64_read(&wq->changed);
+				dw->ino = scoutfs_ino(inode);
+				dw->iblock = max(iblock, ext.start);
+				dw->op = op;
+
+				spin_lock(&rt->lock);
+				insert_offline_waiting(&rt->root, dw);
+				spin_unlock(&rt->lock);
+			}
+
+			ret = 1;
+			break;
+		}
+
+		iblock = ext.start + ext.len;
+	}
+
+out:
+	trace_scoutfs_data_wait_check(sb, scoutfs_ino(inode), pos, len,
+				      sef, op, ext.start, ext.len, ext.flags,
+				      ret);
+	return ret;
+}
+
+bool scoutfs_data_wait_found(struct scoutfs_data_wait *dw)
+{
+	return !RB_EMPTY_NODE(&dw->node);
+}
+
+int scoutfs_data_wait_check_iov(struct inode *inode, const struct iovec *iov,
+				unsigned long nr_segs, loff_t pos, u8 sef,
+				u8 op, struct scoutfs_data_wait *dw,
+				struct scoutfs_lock *lock)
+{
+	unsigned long i;
+	int ret = 0;
+
+	for (i = 0; i < nr_segs; i++) {
+		if (iov[i].iov_len == 0)
+			continue;
+
+		ret = scoutfs_data_wait_check(inode, pos, iov[i].iov_len, sef,
+					      op, dw, lock);
+		if (ret != 0)
+			break;
+
+		pos += iov[i].iov_len;
+	}
+
+	return ret;
+}
+
+int scoutfs_data_wait(struct inode *inode, struct scoutfs_data_wait *dw)
+{
+	DECLARE_DATA_WAIT_ROOT(inode->i_sb, rt);
+	DECLARE_DATA_WAITQ(inode, wq);
+	int ret;
+
+	ret = wait_event_interruptible(wq->waitq,
+					atomic64_read(&wq->changed) != dw->chg);
+
+	spin_lock(&rt->lock);
+	rb_erase(&dw->node, &rt->root);
+	RB_CLEAR_NODE(&dw->node);
+	spin_unlock(&rt->lock);
+
+	return ret;
+}
+
+void scoutfs_data_wait_changed(struct inode *inode)
+{
+	DECLARE_DATA_WAITQ(inode, wq);
+
+	atomic64_inc(&wq->changed);
+	wake_up(&wq->waitq);
+}
+
+int scoutfs_data_waiting(struct super_block *sb, u64 ino, u64 iblock,
+			 struct scoutfs_ioctl_data_waiting_entry *dwe,
+			 unsigned int nr)
+{
+	DECLARE_DATA_WAIT_ROOT(sb, rt);
+	struct scoutfs_data_wait *dw;
+	int ret = 0;
+
+	spin_lock(&rt->lock);
+
+	dw = next_data_wait(&rt->root, ino, iblock);
+	while (dw && ret < nr) {
+
+		dwe->ino = dw->ino;
+		dwe->iblock = dw->iblock;
+		dwe->op = dw->op;
+
+		while ((dw = dw_next(dw)) &&
+		       (dw->ino == dwe->ino && dw->iblock == dwe->iblock)) {
+			dwe->op |= dw->op;
+		}
+
+		dwe++;
+		ret++;
+	}
+
+	spin_unlock(&rt->lock);
 
 	return ret;
 }

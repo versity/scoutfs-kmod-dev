@@ -39,15 +39,40 @@ ssize_t scoutfs_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *inode_lock = NULL;
 	SCOUTFS_DECLARE_PER_TASK_ENTRY(pt_ent);
+	DECLARE_DATA_WAIT(dw);
 	int ret;
 
+retry:
 	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
 				 SCOUTFS_LKF_REFRESH_INODE, inode, &inode_lock);
-	if (ret == 0) {
-		scoutfs_per_task_add(&si->pt_data_lock, &pt_ent, inode_lock);
-		ret = generic_file_aio_read(iocb, iov, nr_segs, pos);
-		scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
-		scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
+	if (ret)
+		goto out;
+
+	if (scoutfs_per_task_add_excl(&si->pt_data_lock, &pt_ent, inode_lock)) {
+		/* protect checked extents from stage/release */
+		mutex_lock(&inode->i_mutex);
+		atomic_inc(&inode->i_dio_count);
+		mutex_unlock(&inode->i_mutex);
+
+		ret = scoutfs_data_wait_check_iov(inode, iov, nr_segs, pos,
+						  SEF_OFFLINE,
+						  SCOUTFS_IOC_DWO_READ,
+						  &dw, inode_lock);
+		if (ret != 0)
+			goto out;
+	}
+
+	ret = generic_file_aio_read(iocb, iov, nr_segs, pos);
+
+out:
+	if (scoutfs_per_task_del(&si->pt_data_lock, &pt_ent))
+		inode_dio_done(inode);
+	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_READ);
+
+	if (scoutfs_data_wait_found(&dw)) {
+		ret = scoutfs_data_wait(inode, &dw);
+		if (ret == 0)
+			goto retry;
 	}
 
 	return ret;
@@ -62,11 +87,13 @@ ssize_t scoutfs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *inode_lock = NULL;
 	SCOUTFS_DECLARE_PER_TASK_ENTRY(pt_ent);
+	DECLARE_DATA_WAIT(dw);
 	int ret;
 
 	if (iocb->ki_left == 0) /* Does this even happen? */
 		return 0;
 
+retry:
 	mutex_lock(&inode->i_mutex);
 	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
 				 SCOUTFS_LKF_REFRESH_INODE, inode, &inode_lock);
@@ -77,15 +104,30 @@ ssize_t scoutfs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	if (ret)
 		goto out;
 
-	scoutfs_per_task_add(&si->pt_data_lock, &pt_ent, inode_lock);
+	if (scoutfs_per_task_add_excl(&si->pt_data_lock, &pt_ent, inode_lock)) {
+		/* data_version is per inode, whole file must be online */
+		ret = scoutfs_data_wait_check(inode, 0, i_size_read(inode),
+					      SEF_OFFLINE,
+					      SCOUTFS_IOC_DWO_WRITE,
+					      &dw, inode_lock);
+		if (ret != 0)
+			goto out;
+	}
 
 	/* XXX: remove SUID bit */
 
 	ret = __generic_file_aio_write(iocb, iov, nr_segs, &iocb->ki_pos);
+
 out:
 	scoutfs_per_task_del(&si->pt_data_lock, &pt_ent);
 	scoutfs_unlock(sb, inode_lock, SCOUTFS_LOCK_WRITE);
 	mutex_unlock(&inode->i_mutex);
+
+	if (scoutfs_data_wait_found(&dw)) {
+		ret = scoutfs_data_wait(inode, &dw);
+		if (ret == 0)
+			goto retry;
+	}
 
 	if (ret > 0 || ret == -EIOCBQUEUED) {
 		ssize_t err;

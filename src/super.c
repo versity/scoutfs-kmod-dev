@@ -339,6 +339,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	spin_lock_init(&sbi->next_ino_lock);
 	init_waitqueue_head(&sbi->trans_hold_wq);
+	spin_lock_init(&sbi->data_wait_root.lock);
+	sbi->data_wait_root.root = RB_ROOT;
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_DELAYED_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);

@@ -70,6 +70,8 @@ static void scoutfs_inode_ctor(void *obj)
 	seqcount_init(&ci->seqcount);
 	ci->staging = false;
 	scoutfs_per_task_init(&ci->pt_data_lock);
+	atomic64_set(&ci->data_waitq.changed, 0);
+	init_waitqueue_head(&ci->data_waitq.waitq);
 	init_rwsem(&ci->xattr_rwsem);
 	RB_CLEAR_NODE(&ci->writeback_node);
 	spin_lock_init(&ci->ino_alloc.lock);
@@ -340,6 +342,9 @@ static int set_inode_size(struct inode *inode, struct scoutfs_lock *lock,
 	if (ret)
 		return ret;
 
+	if (new_size != i_size_read(inode))
+		scoutfs_inode_inc_data_version(inode);
+
 	truncate_setsize(inode, new_size);
 	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
 	if (truncate)
@@ -394,11 +399,22 @@ int scoutfs_complete_truncate(struct inode *inode, struct scoutfs_lock *lock)
 	return ret ? ret : err;
 }
 
+/*
+ * If we're changing the file size than the contents of the file are
+ * changing and we increment the data_version.  This would prevent
+ * staging because the data_version is per-inode today, not per-extent.
+ * So if there are any offline extents within the new size then we need
+ * to stage them before we truncate.  And this is called with the
+ * i_mutex held which would prevent staging so we release it and
+ * re-acquire it.  Ideally we'd fix this so that we can acquire the lock
+ * instead of the caller.
+ */
 int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_lock *lock = NULL;
+	DECLARE_DATA_WAIT(dw);
 	LIST_HEAD(ind_locks);
 	bool truncate = false;
 	u64 attr_size;
@@ -406,6 +422,7 @@ int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
 
 	trace_scoutfs_setattr(dentry, attr);
 
+retry:
 	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
 				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
 	if (ret)
@@ -426,6 +443,28 @@ int scoutfs_setattr(struct dentry *dentry, struct iattr *attr)
 		ret = scoutfs_complete_truncate(inode, lock);
 		if (ret)
 			goto out;
+
+		/* data_version is per inode, all must be online */
+		if (attr_size > 0 && attr_size != i_size_read(inode)) {
+			ret = scoutfs_data_wait_check(inode, 0, attr_size,
+						SEF_OFFLINE,
+						SCOUTFS_IOC_DWO_CHANGE_SIZE,
+						&dw, lock);
+			if (ret < 0)
+				goto out;
+			if (scoutfs_data_wait_found(&dw)) {
+				scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
+
+				/* XXX callee locks instead? */
+				mutex_unlock(&inode->i_mutex);
+				ret = scoutfs_data_wait(inode, &dw);
+				mutex_lock(&inode->i_mutex);
+
+				if (ret == 0)
+					goto retry;
+				goto out;
+			}
+		}
 
 		/* truncating to current size truncates extents past size */
 		truncate = i_size_read(inode) >= attr_size;
@@ -532,6 +571,10 @@ void scoutfs_inode_add_onoff(struct inode *inode, s64 on, s64 off)
 		write_seqcount_end(&si->seqcount);
 		preempt_enable();
 	}
+
+	/* any time offline extents decreased we try and wake waiters */
+	if (inode && off < 0)
+		scoutfs_data_wait_changed(inode);
 }
 
 static u64 read_seqcount_u64(struct inode *inode, u64 *val)

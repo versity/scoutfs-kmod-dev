@@ -541,6 +541,56 @@ static long scoutfs_ioc_item_cache_keys(struct file *file, unsigned long arg)
 	return ret ?: total;
 }
 
+static bool inc_wrapped(u64 *ino, u64 *iblock)
+{
+	return (++(*iblock) == 0) && (++(*ino) == 0);
+}
+
+static long scoutfs_ioc_data_waiting(struct file *file, unsigned long arg)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+	struct scoutfs_ioctl_data_waiting idw;
+	struct scoutfs_ioctl_data_waiting_entry __user *udwe;
+	struct scoutfs_ioctl_data_waiting_entry dwe[16];
+	unsigned int nr;
+	int total;
+	int ret;
+
+	if (copy_from_user(&idw, (void __user *)arg, sizeof(idw)))
+		return -EFAULT;
+
+	if (idw.flags & SCOUTFS_IOC_DATA_WAITING_FLAGS_UNKNOWN)
+		return -EINVAL;
+
+	udwe = (void __user *)(long)idw.ents_ptr;
+	total = 0;
+	ret = 0;
+	while (idw.ents_nr && !inc_wrapped(&idw.after_ino, &idw.after_iblock)) {
+		nr = min_t(size_t, idw.ents_nr, ARRAY_SIZE(dwe));
+
+		ret = scoutfs_data_waiting(sb, idw.after_ino, idw.after_iblock,
+					   dwe, nr);
+		BUG_ON(ret > nr); /* stack overflow \o/ */
+		if (ret <= 0)
+			break;
+
+		if (copy_to_user(udwe, dwe, ret * sizeof(dwe[0]))) {
+			ret = -EFAULT;
+			break;
+		}
+
+		idw.after_ino = dwe[ret - 1].ino;
+		idw.after_iblock = dwe[ret - 1].iblock;
+
+		udwe += ret;
+		idw.ents_nr -= ret;
+		total += ret;
+		ret = 0;
+	}
+
+	return ret ?: total;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -556,6 +606,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_stat_more(file, arg);
 	case SCOUTFS_IOC_ITEM_CACHE_KEYS:
 		return scoutfs_ioc_item_cache_keys(file, arg);
+	case SCOUTFS_IOC_DATA_WAITING:
+		return scoutfs_ioc_data_waiting(file, arg);
 	}
 
 	return -ENOTTY;

@@ -32,6 +32,7 @@
 #include "triggers.h"
 #include "tseq.h"
 #include "client.h"
+#include "data.h"
 
 /*
  * scoutfs uses a lock service to manage item cache consistency between
@@ -126,8 +127,10 @@ static void invalidate_inode(struct super_block *sb, u64 ino)
 	inode = scoutfs_ilookup(sb, ino);
 	if (inode) {
 		scoutfs_inc_counter(sb, lock_invalidate_inode);
-		if (S_ISREG(inode->i_mode))
+		if (S_ISREG(inode->i_mode)) {
 			truncate_inode_pages(inode->i_mapping, 0);
+			scoutfs_data_wait_changed(inode);
+		}
 		iput(inode);
 	}
 }

@@ -6,6 +6,7 @@
 #include "per_task.h"
 #include "count.h"
 #include "format.h"
+#include "data.h"
 
 struct scoutfs_lock;
 
@@ -48,8 +49,10 @@ struct scoutfs_inode_info {
 	seqcount_t seqcount;
 	bool staging;			/* holder of i_mutex is staging */
 	struct scoutfs_per_task pt_data_lock;
+	struct scoutfs_data_waitq data_waitq;
 	struct rw_semaphore xattr_rwsem;
 	struct rb_node writeback_node;
+
 	struct inode inode;
 };
 

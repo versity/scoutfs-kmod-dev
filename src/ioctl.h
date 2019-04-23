@@ -229,4 +229,28 @@ enum {
 #define SCOUTFS_IOC_ITEM_CACHE_KEYS _IOW(SCOUTFS_IOCTL_MAGIC, 8, \
 					 struct scoutfs_ioctl_item_cache_keys)
 
+struct scoutfs_ioctl_data_waiting_entry {
+	__u64 ino;
+	__u64 iblock;
+	__u8 op;
+} __packed;
+
+#define SCOUTFS_IOC_DWO_READ		(1 << 0)
+#define SCOUTFS_IOC_DWO_WRITE		(1 << 1)
+#define SCOUTFS_IOC_DWO_CHANGE_SIZE	(1 << 2)
+#define SCOUTFS_IOC_DWO_UNKNOWN		(U8_MAX << 3)
+
+struct scoutfs_ioctl_data_waiting {
+	__u64 flags;
+	__u64 after_ino;
+	__u64 after_iblock;
+	__u64 ents_ptr;
+	__u16 ents_nr;
+} __packed;
+
+#define SCOUTFS_IOC_DATA_WAITING_FLAGS_UNKNOWN		(U8_MAX << 0)
+
+#define SCOUTFS_IOC_DATA_WAITING _IOW(SCOUTFS_IOCTL_MAGIC, 9, \
+				      struct scoutfs_ioctl_data_waiting)
+
 #endif

@@ -343,12 +343,18 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	INIT_DELAYED_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
 
-
 	ret = scoutfs_parse_options(sb, data, &opts);
 	if (ret)
 		goto out;
 
 	sbi->opts = opts;
+
+	ret = sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE);
+	if (ret != SCOUTFS_BLOCK_SIZE) {
+		scoutfs_err(sb, "failed to set blocksize, returned %d", ret);
+		ret = -EIO;
+		goto out;
+	}
 
 	ret = scoutfs_setup_sysfs(sb) ?:
 	      scoutfs_setup_counters(sb) ?:

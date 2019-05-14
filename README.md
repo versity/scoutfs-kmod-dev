@@ -105,8 +105,8 @@ device name is the same on all the nodes.
    configuring each in the super block with options to mkfs.
 
    ```shell
-   scoutfs mkfs -o quorum_slot node1:0:172.16.1.1 \
-		-o quorum_slot node2:0:172.16.1.2 /dev/shared_block_device
+   scoutfs mkfs --quorum_slot node1:0:172.16.1.1 \
+		--quorum_slot node2:0:172.16.1.2 /dev/shared_block_device
    ```
 
 

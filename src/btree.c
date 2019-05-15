@@ -754,6 +754,12 @@ retry:
 	if (le64_to_cpu(bring->next_block) == le64_to_cpu(bring->nr_blocks))
 		bring->next_block = 0;
 
+	trace_scoutfs_btree_dirty_block(sb, blkno, seq,
+		le64_to_cpu(bring->next_block), le64_to_cpu(bring->next_seq),
+		bti->cur_dirtied, bti->old_dirtied,
+		bt ? le64_to_cpu(bt->hdr.blkno) : 0,
+		bt ? le64_to_cpu(bt->hdr.seq) : 0);
+
 	/* force advancing if migration's done and we didn't just wrap */
 	if (all_roots_migrated(super) && !first_block_in_half(bring) &&
 	    scoutfs_trigger(sb, BTREE_ADVANCE_RING_HALF))

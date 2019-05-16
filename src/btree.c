@@ -750,10 +750,10 @@ retry:
 	if (!bti->first_dirty_bh)
 		bti->first_dirty_bh = bh;
 
-	if (blkno_is_current(bring, blkno))
-		bti->cur_dirtied++;
-	else
+	if (ref && !blkno_is_current(bring, le64_to_cpu(ref->blkno)))
 		bti->old_dirtied++;
+	else
+		bti->cur_dirtied++;
 
 	/* wrap next block and increase next seq */
 	le64_add_cpu(&bring->next_block, 1);

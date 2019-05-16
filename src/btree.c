@@ -1646,7 +1646,7 @@ int scoutfs_btree_write_dirty(struct super_block *sb)
 
 			ret = btree_walk(sb, root,
 					 BTW_DIRTY | BTW_NEXT | BTW_MIGRATE,
-					 walk_key, walk_len, 0, &bt,
+					 walk_key, walk_len, 0, NULL,
 					 iter_key, &iter_len);
 			if (ret < 0)
 				goto out;

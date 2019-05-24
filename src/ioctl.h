@@ -253,4 +253,22 @@ struct scoutfs_ioctl_data_waiting {
 #define SCOUTFS_IOC_DATA_WAITING _IOW(SCOUTFS_IOCTL_MAGIC, 9, \
 				      struct scoutfs_ioctl_data_waiting)
 
+/*
+ * If i_size is set then data_version must be non-zero.  If the offline
+ * flag is set then i_size must be set and a offline extent will be
+ * created from offset 0 to i_size.
+ */
+struct scoutfs_ioctl_setattr_more {
+	__u64 data_version;
+	__u64 i_size;
+	__u64 flags;
+	struct scoutfs_timespec ctime;
+} __packed;
+
+#define SCOUTFS_IOC_SETATTR_MORE_OFFLINE		(1 << 0)
+#define SCOUTFS_IOC_SETATTR_MORE_UNKNOWN		(U8_MAX << 1)
+
+#define SCOUTFS_IOC_SETATTR_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 10, \
+				      struct scoutfs_ioctl_setattr_more)
+
 #endif

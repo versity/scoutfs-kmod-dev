@@ -32,6 +32,7 @@
 #include "client.h"
 #include "lock.h"
 #include "manifest.h"
+#include "trans.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -591,6 +592,98 @@ static long scoutfs_ioc_data_waiting(struct file *file, unsigned long arg)
 	return ret ?: total;
 }
 
+/*
+ * This is used when restoring files, it lets the caller set all the
+ * inode attributes which are otherwise unreachable.  Changing the file
+ * size can only be done for regular files with a data_version of 0.
+ */
+static long scoutfs_ioc_setattr_more(struct file *file, unsigned long arg)
+{
+	struct inode *inode = file->f_inode;
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_ioctl_setattr_more __user *usm = (void __user *)arg;
+	struct scoutfs_ioctl_setattr_more sm;
+	struct scoutfs_lock *lock = NULL;
+	LIST_HEAD(ind_locks);
+	bool set_data_seq;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN)) {
+		ret = -EPERM;
+		goto out;
+	}
+
+	if (!(file->f_mode & FMODE_WRITE)) {
+		ret = -EBADF;
+		goto out;
+	}
+
+	if (copy_from_user(&sm, usm, sizeof(sm))) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	if ((sm.i_size > 0 && sm.data_version == 0) ||
+	    ((sm.flags & SCOUTFS_IOC_SETATTR_MORE_OFFLINE) && !sm.i_size) ||
+	    (sm.flags & SCOUTFS_IOC_SETATTR_MORE_UNKNOWN)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = mnt_want_write_file(file);
+	if (ret)
+		goto out;
+
+	mutex_lock(&inode->i_mutex);
+
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
+	if (ret)
+		goto unlock;
+
+	/* can only change size/dv on untouched regular files */
+	if ((sm.i_size != 0 || sm.data_version != 0) &&
+	    ((!S_ISREG(inode->i_mode) ||
+	      scoutfs_inode_data_version(inode) != 0))) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	/* setting only so we don't see 0 data seq with nonzero data_version */
+	set_data_seq = sm.data_version != 0 ? true : false;
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, set_data_seq,
+					    SIC_SETATTR_MORE());
+	if (ret)
+		goto unlock;
+
+	if (sm.flags & SCOUTFS_IOC_SETATTR_MORE_OFFLINE) {
+		ret = scoutfs_data_init_offline_extent(inode, sm.i_size, lock);
+		if (ret)
+			goto release;
+	}
+
+	if (sm.data_version)
+		scoutfs_inode_set_data_version(inode, sm.data_version);
+	if (sm.i_size)
+		i_size_write(inode, sm.i_size);
+	inode->i_ctime.tv_sec = le64_to_cpu(sm.ctime.sec);
+	inode->i_ctime.tv_nsec = le32_to_cpu(sm.ctime.nsec);
+
+	scoutfs_update_inode_item(inode, lock, &ind_locks);
+	ret = 0;
+
+release:
+	scoutfs_release_trans(sb);
+unlock:
+	scoutfs_inode_index_unlock(sb, &ind_locks);
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
+	mutex_unlock(&inode->i_mutex);
+	mnt_drop_write_file(file);
+out:
+
+	return ret;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -608,6 +701,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_item_cache_keys(file, arg);
 	case SCOUTFS_IOC_DATA_WAITING:
 		return scoutfs_ioc_data_waiting(file, arg);
+	case SCOUTFS_IOC_SETATTR_MORE:
+		return scoutfs_ioc_setattr_more(file, arg);
 	}
 
 	return -ENOTTY;

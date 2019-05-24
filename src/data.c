@@ -1239,6 +1239,49 @@ out:
 	return ret;
 }
 
+/*
+ * A special case of initialzing a single large offline extent.  This
+ * chooses not to deal with any existing extents.  It can only be used
+ * on regular files with no data extents.  It's used to restore a file
+ * with an offline extent which can then trigger staging.
+ *
+ * The caller has taken care of locking and holding a transaction.
+ *
+ * This could be an fallocate mode.
+ */
+int scoutfs_data_init_offline_extent(struct inode *inode, u64 size,
+				     struct scoutfs_lock *lock)
+
+{
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_extent ext;
+	u64 ino = scoutfs_ino(inode);
+	u64 len;
+	int ret;
+
+	if (!S_ISREG(inode->i_mode)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	scoutfs_extent_init(&ext, SCOUTFS_FILE_EXTENT_TYPE, ino, 0, 1, 0, 0);
+	ret = scoutfs_extent_next(sb, data_extent_io, &ext, lock);
+	if (ret != -ENOENT) {
+		if (ret == 0)
+			ret = -EINVAL;
+		goto out;
+	}
+
+	len = (size + SCOUTFS_BLOCK_SIZE - 1) >> SCOUTFS_BLOCK_SHIFT;
+	scoutfs_extent_init(&ext, SCOUTFS_FILE_EXTENT_TYPE, ino,
+			    0, len, 0, SEF_OFFLINE);
+	ret = scoutfs_extent_add(sb, data_extent_io, &ext, lock);
+	if (ret == 0)
+		scoutfs_inode_add_onoff(inode, 0, len);
+out:
+	return ret;
+}
+
 
 /*
  * Return all the file's extents whose blocks overlap with the caller's

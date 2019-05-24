@@ -103,6 +103,7 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 void scoutfs_inode_set_meta_seq(struct inode *inode);
 void scoutfs_inode_set_data_seq(struct inode *inode);
 void scoutfs_inode_inc_data_version(struct inode *inode);
+void scoutfs_inode_set_data_version(struct inode *inode, u64 data_version);
 void scoutfs_inode_add_onoff(struct inode *inode, s64 on, s64 off);
 u64 scoutfs_inode_meta_seq(struct inode *inode);
 u64 scoutfs_inode_data_seq(struct inode *inode);

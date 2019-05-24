@@ -313,4 +313,19 @@ static inline const struct scoutfs_item_count SIC_FALLOCATE_ONE(void)
 	return cnt;
 }
 
+/*
+ * ioc_setattr_more can dirty the inode and add a single offline extent.
+ */
+static inline const struct scoutfs_item_count SIC_SETATTR_MORE(void)
+{
+	struct scoutfs_item_count cnt = {0,};
+
+	__count_dirty_inode(&cnt);
+
+	cnt.items++;
+	cnt.vals += sizeof(struct scoutfs_file_extent);
+
+	return cnt;
+}
+
 #endif

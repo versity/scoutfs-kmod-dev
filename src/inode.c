@@ -540,6 +540,17 @@ void scoutfs_inode_inc_data_version(struct inode *inode)
 	preempt_enable();
 }
 
+void scoutfs_inode_set_data_version(struct inode *inode, u64 data_version)
+{
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
+
+	preempt_disable();
+	write_seqcount_begin(&si->seqcount);
+	si->data_version = data_version;
+	write_seqcount_end(&si->seqcount);
+	preempt_enable();
+}
+
 void scoutfs_inode_add_onoff(struct inode *inode, s64 on, s64 off)
 {
 	struct scoutfs_inode_info *si;

@@ -29,6 +29,7 @@
 #include "quorum.h"
 #include "server.h"
 #include "net.h"
+#include "sysfs.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -62,6 +63,19 @@
  *  - add temporary priority for choosing a specific mount as a leader
  *  - add config rotation (write new config, reclaim stale slots)
  */
+
+struct quorum_info {
+	struct scoutfs_sysfs_attrs ssa;
+
+	bool is_leader;
+	struct sockaddr_in conf_addr;
+	u16 conf_port;
+};
+
+#define DECLARE_QUORUM_INFO(sb, name) \
+	struct quorum_info *name = SCOUTFS_SB(sb)->quorum_info
+#define DECLARE_QUORUM_INFO_KOBJ(kobj, name) \
+	DECLARE_QUORUM_INFO(SCOUTFS_SYSFS_ATTRS_SB(kobj), name)
 
 static void addr_to_sin(struct sockaddr_in *sin, struct scoutfs_inet_addr *addr)
 {
@@ -527,6 +541,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 			    bool unmounting, u64 our_umb,
 			    struct scoutfs_quorum_elected_info *qei)
 {
+	DECLARE_QUORUM_INFO(sb, qinf);
 	struct scoutfs_super_block *super = NULL;
 	struct scoutfs_quorum_config *conf;
 	struct scoutfs_quorum_slot *slot;
@@ -565,6 +580,16 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 		if (ret)
 			goto out;
 		conf = &super->quorum_config;
+
+		/* update sysfs with most recently seen config */
+		if (our_slot >= 0) {
+			slot = &conf->slots[our_slot];
+			addr_to_sin(&qinf->conf_addr, &slot->addr);
+			qinf->conf_port = le16_to_cpu(slot->addr.port);
+		} else {
+			memset(&qinf->conf_addr, 0, sizeof(qinf->conf_addr));
+			qinf->conf_port = 0;
+		}
 
 		majority = scoutfs_quorum_majority(sb, conf);
 
@@ -623,6 +648,7 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 							  elected_nr);
 				if (ret == 0) {
 					qei->run_server = true;
+					qinf->is_leader = true;
 					goto out;
 				}
 
@@ -739,8 +765,10 @@ int scoutfs_quorum_clear_elected(struct super_block *sb,
 				 struct scoutfs_quorum_elected_info *qei)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	DECLARE_QUORUM_INFO(sb, qinf);
 
 	qei->flags &= ~SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED;
+	qinf->is_leader = false;
 
 	return write_quorum_block(sb, super->hdr.fsid, qei->config_gen,
 				  qei->config_slot, qei->write_nr,
@@ -806,4 +834,74 @@ bool scoutfs_quorum_voting_member(struct super_block *sb,
 	}
 
 	return false;
+}
+
+static ssize_t is_leader_show(struct kobject *kobj,
+			      struct kobj_attribute *attr, char *buf)
+{
+	DECLARE_QUORUM_INFO_KOBJ(kobj, qinf);
+
+	return snprintf(buf, PAGE_SIZE, "%u", !!qinf->is_leader);
+}
+SCOUTFS_ATTR_RO(is_leader);
+
+static ssize_t ipv4_addr_show(struct kobject *kobj,
+			      struct kobj_attribute *attr, char *buf)
+{
+	DECLARE_QUORUM_INFO_KOBJ(kobj, qinf);
+
+	return snprintf(buf, PAGE_SIZE, "%pIS", &qinf->conf_addr);
+}
+SCOUTFS_ATTR_RO(ipv4_addr);
+
+static ssize_t ipv4_port_show(struct kobject *kobj,
+			      struct kobj_attribute *attr, char *buf)
+{
+	DECLARE_QUORUM_INFO_KOBJ(kobj, qinf);
+
+	return snprintf(buf, PAGE_SIZE, "%u", qinf->conf_port);
+}
+SCOUTFS_ATTR_RO(ipv4_port);
+
+static struct attribute *quorum_attrs[] = {
+	SCOUTFS_ATTR_PTR(is_leader),
+	SCOUTFS_ATTR_PTR(ipv4_addr),
+	SCOUTFS_ATTR_PTR(ipv4_port),
+	NULL,
+};
+
+int scoutfs_quorum_setup(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct quorum_info *qinf;
+	int ret;
+
+	qinf = kzalloc(sizeof(struct quorum_info), GFP_KERNEL);
+	if (!qinf) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	scoutfs_sysfs_init_attrs(sb, &qinf->ssa);
+
+	sbi->quorum_info = qinf;
+
+	ret = scoutfs_sysfs_create_attrs(sb, &qinf->ssa, quorum_attrs,
+					 "quorum");
+out:
+	if (ret)
+		scoutfs_quorum_destroy(sb);
+
+	return 0;
+}
+
+void scoutfs_quorum_destroy(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct quorum_info *qinf = SCOUTFS_SB(sb)->quorum_info;
+
+	if (qinf) {
+		scoutfs_sysfs_destroy_attrs(sb, &qinf->ssa);
+		kfree(qinf);
+		sbi->quorum_info = NULL;
+	}
 }

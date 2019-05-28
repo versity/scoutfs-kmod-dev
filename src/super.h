@@ -46,6 +46,7 @@ struct scoutfs_sb_info {
 	struct inode_sb_info *inode_sb_info;
 	struct btree_info *btree_info;
 	struct net_info *net_info;
+	struct quorum_info *quorum_info;
 
 	wait_queue_head_t trans_hold_wq;
 	struct task_struct *trans_task;

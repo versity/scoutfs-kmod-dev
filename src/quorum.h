@@ -27,4 +27,6 @@ bool scoutfs_quorum_voting_member(struct super_block *sb,
 				  struct scoutfs_quorum_config *conf,
 				  char *name);
 
+int scoutfs_quorum_setup(struct super_block *sb);
+void scoutfs_quorum_destroy(struct super_block *sb);
 #endif

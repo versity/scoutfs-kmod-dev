@@ -103,6 +103,89 @@ static void kobj_del_put_wait(struct kobject *kobj, struct completion *comp)
 #define shutdown_kobj(sfinfo, _name) \
 	kobj_del_put_wait(&sfsinfo->_name##_kobj, &sfsinfo->_name##_comp)
 
+static void scoutfs_sysfs_release(struct kobject *kobj)
+{
+	DECLARE_SCOUTFS_SYSFS_ATTRS(ssa, kobj);
+
+	complete(&ssa->comp);
+}
+
+void scoutfs_sysfs_init_attrs(struct super_block *sb,
+			      struct scoutfs_sysfs_attrs *ssa)
+{
+	ssa->name = NULL;
+}
+
+/*
+ *  If this returns success then the file will be visible and show can
+ *  be called until unmount.
+ */
+int scoutfs_sysfs_create_attrs(struct super_block *sb,
+			       struct scoutfs_sysfs_attrs *ssa,
+			       struct attribute **attrs, char *fmt, ...)
+{
+	va_list args;
+	size_t name_len;
+	size_t size;
+	int ret;
+
+	/* ssa should have seen init or destroy */
+	if (WARN_ON_ONCE(ssa->name != NULL))
+		return -EINVAL;
+
+	ssa->sb = sb;
+	init_completion(&ssa->comp);
+	ssa->ktype.default_attrs = attrs;
+	ssa->ktype.sysfs_ops = &kobj_sysfs_ops;
+	ssa->ktype.release = scoutfs_sysfs_release;
+
+	va_start(args, fmt);
+	name_len = vsnprintf(NULL, 0, fmt, args);
+	va_end(args);
+	if (WARN_ON_ONCE(name_len < 1 || name_len > NAME_MAX)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	size = name_len + 1; /* with null */
+
+	ssa->name = kmalloc(size, GFP_KERNEL);
+	if (!ssa->name) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	va_start(args, fmt);
+	ret = vsnprintf(ssa->name, size, fmt, args);
+	va_end(args);
+	if (ret != name_len) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = kobject_init_and_add(&ssa->kobj, &ssa->ktype,
+				   scoutfs_sysfs_sb_dir(sb), "%s", ssa->name);
+out:
+	if (ret) {
+		kfree(ssa->name);
+		ssa->name = NULL;
+	}
+
+	return ret;
+}
+
+void scoutfs_sysfs_destroy_attrs(struct super_block *sb,
+				 struct scoutfs_sysfs_attrs *ssa)
+{
+	if (ssa->name) {
+		kobject_del(&ssa->kobj);
+		kobject_put(&ssa->kobj);
+		wait_for_completion(&ssa->comp);
+		kfree(ssa->name);
+		ssa->name = NULL;
+	}
+}
+
 /*
  * Only the return from kobj_init_and_add() tells us if the kobj needs
  * to be cleaned up or not.  This must manually clean up the kobjs and

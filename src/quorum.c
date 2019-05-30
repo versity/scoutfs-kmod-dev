@@ -256,6 +256,13 @@ out:
 	return ret;
 }
 
+enum {
+        BH_ScoutfsTraced = BH_PrivateStart,
+};
+
+BUFFER_FNS(ScoutfsTraced, scoutfs_traced)	/* has been traced */
+TAS_BUFFER_FNS(ScoutfsTraced, scoutfs_traced)
+
 /*
  * The caller is about to read the current version of a set of quorum
  * blocks.  We invalidate all the quorum blocks in the cache and
@@ -279,6 +286,7 @@ static void readahead_quorum_blocks(struct super_block *sb)
 
 		lock_buffer(bh);
 		clear_buffer_uptodate(bh);
+		clear_buffer_scoutfs_traced(bh);
 		unlock_buffer(bh);
 
 		ll_rw_block(READA | REQ_META | REQ_PRIO, 1, &bh);
@@ -346,7 +354,8 @@ static int read_quorum_block(struct super_block *sb,
 	if (blk->write_nr == 0)
 		goto out;
 
-	trace_scoutfs_quorum_read_block(sb, bh->b_blocknr, blk);
+	if (!test_set_buffer_scoutfs_traced(bh))
+		trace_scoutfs_quorum_read_block(sb, bh->b_blocknr, blk);
 
 	if (invalid_quorum_block(super, bh, blk)) {
 		scoutfs_inc_counter(sb, quorum_read_invalid_block);

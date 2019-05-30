@@ -16,6 +16,8 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 			    u64 old_elected_nr, ktime_t timeout_abs,
 			    bool unmounting, u64 our_umb,
 			    struct scoutfs_quorum_elected_info *qei);
+int scoutfs_quorum_set_listening(struct super_block *sb,
+				 struct scoutfs_quorum_elected_info *qei);
 int scoutfs_quorum_clear_elected(struct super_block *sb,
 				 struct scoutfs_quorum_elected_info *qei);
 int scoutfs_quorum_update_barrier(struct super_block *sb,

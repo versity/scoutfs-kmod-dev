@@ -58,6 +58,13 @@
  * server.  This ensures that racing elected leaders will always result
  * in fencing all but the most recent.
  *
+ * Once the elected leader verifies its written elected block it tries
+ * to start up the server.  Once it's listening it writes another quorum
+ * block that indicates that it's listening.  Once mounts see that
+ * they'll try to connect.  If the server takes too long to write its
+ * listening flag the mounts may decide that the leader has died and try
+ * to elect a new leader.
+ *
  * XXX:
  *  - actually fence
  *  - add temporary priority for choosing a specific mount as a leader
@@ -667,9 +674,10 @@ int scoutfs_quorum_election(struct super_block *sb, char *our_name,
 			vote_streak = 0;
 		}
 
-		/* return if we found a new leader or ran out of time */
-		if (qei->elected_nr > old_elected_nr ||
-		     ktime_after(now, timeout_abs)) {
+		/* return if we found a new listening leader or timed out */
+		if (((qei->elected_nr > old_elected_nr) &&
+		     (qei->flags & SCOUTFS_QUORUM_BLOCK_FLAG_LISTENING)) ||
+		    ktime_after(now, timeout_abs)) {
 			if (qei->elected_nr > 0) {
 				scoutfs_inc_counter(sb, quorum_found_leader);
 				ret = 0;
@@ -747,6 +755,26 @@ out:
 	}
 
 	return ret;
+}
+
+/*
+ * The calling server has successfully started and is listening for
+ * collections.   It writes a new block to communicate to the other
+ * mounts that they should now try to connect.  We do increase the write_nr
+ * here to still indicate that we're alive.
+ */
+int scoutfs_quorum_set_listening(struct super_block *sb,
+				 struct scoutfs_quorum_elected_info *qei)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+
+	qei->flags |= SCOUTFS_QUORUM_BLOCK_FLAG_LISTENING;
+	le64_add_cpu(&qei->write_nr, 1);
+
+	return write_quorum_block(sb, super->hdr.fsid, qei->config_gen,
+				  qei->config_slot, qei->write_nr,
+				  qei->elected_nr, qei->unmount_barrier,
+				  qei->config_slot, qei->flags);
 }
 
 /*

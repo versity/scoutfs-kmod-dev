@@ -2334,8 +2334,12 @@ static void scoutfs_server_worker(struct work_struct *work)
 	server->conn = conn;
 	scoutfs_net_listen(sb, conn);
 
-	/* wait_event/wake_up provide barriers */
-	wait_event_interruptible(server->waitq, server->shutting_down);
+	ret = scoutfs_quorum_set_listening(sb, &server->qei);
+
+	if (ret == 0) {
+		/* wait_event/wake_up provide barriers */
+		wait_event_interruptible(server->waitq, server->shutting_down);
+	}
 
 	scoutfs_info(sb, "server shutting down on "SIN_FMT, SIN_ARG(&sin));
 

@@ -133,6 +133,16 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	return 0;
 }
 
+static int scoutfs_show_options(struct seq_file *seq, struct dentry *root)
+{
+	struct super_block *sb = root->d_sb;
+	struct mount_options *opts = &SCOUTFS_SB(sb)->opts;
+
+	seq_printf(seq, ",uniq_name=%s", opts->uniq_name);
+
+	return 0;
+}
+
 static int scoutfs_sync_fs(struct super_block *sb, int wait)
 {
 	trace_scoutfs_sync_fs(sb, wait);
@@ -190,6 +200,7 @@ static const struct super_operations scoutfs_super_ops = {
 	.destroy_inode = scoutfs_destroy_inode,
 	.sync_fs = scoutfs_sync_fs,
 	.statfs = scoutfs_statfs,
+	.show_options = scoutfs_show_options,
 	.put_super = scoutfs_put_super,
 };
 

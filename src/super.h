@@ -7,6 +7,7 @@
 #include "format.h"
 #include "options.h"
 #include "data.h"
+#include "sysfs.h"
 
 struct scoutfs_counters;
 struct scoutfs_triggers;
@@ -75,6 +76,7 @@ struct scoutfs_sb_info {
 
 	struct mount_options opts;
 	struct options_sb_info *options;
+	struct scoutfs_sysfs_attrs mopts_ssa;
 
 	struct dentry *debug_root;
 

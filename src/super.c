@@ -143,6 +143,21 @@ static int scoutfs_show_options(struct seq_file *seq, struct dentry *root)
 	return 0;
 }
 
+static ssize_t uniq_name_show(struct kobject *kobj,
+			      struct kobj_attribute *attr, char *buf)
+{
+	struct super_block *sb = SCOUTFS_SYSFS_ATTRS_SB(kobj);
+	struct mount_options *opts = &SCOUTFS_SB(sb)->opts;
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", opts->uniq_name);
+}
+SCOUTFS_ATTR_RO(uniq_name);
+
+static struct attribute *mount_options_attrs[] = {
+	SCOUTFS_ATTR_PTR(uniq_name),
+	NULL,
+};
+
 static int scoutfs_sync_fs(struct super_block *sb, int wait)
 {
 	trace_scoutfs_sync_fs(sb, wait);
@@ -185,6 +200,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_item_destroy(sb);
 	scoutfs_destroy_triggers(sb);
 	scoutfs_options_destroy(sb);
+	scoutfs_sysfs_destroy_attrs(sb, &sbi->mopts_ssa);
 	debugfs_remove(sbi->debug_root);
 	scoutfs_destroy_counters(sb);
 	scoutfs_destroy_sysfs(sb);
@@ -357,6 +373,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&sbi->trans_write_lock);
 	INIT_DELAYED_WORK(&sbi->trans_write_work, scoutfs_trans_write_func);
 	init_waitqueue_head(&sbi->trans_write_wq);
+	scoutfs_sysfs_init_attrs(sb, &sbi->mopts_ssa);
 
 	ret = scoutfs_parse_options(sb, data, &opts);
 	if (ret)
@@ -376,6 +393,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_read_super(sb, &SCOUTFS_SB(sb)->super) ?:
 	      scoutfs_debugfs_setup(sb) ?:
 	      scoutfs_options_setup(sb) ?:
+	      scoutfs_sysfs_create_attrs(sb, &sbi->mopts_ssa,
+				mount_options_attrs, "mount_options") ?:
 	      scoutfs_setup_triggers(sb) ?:
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:

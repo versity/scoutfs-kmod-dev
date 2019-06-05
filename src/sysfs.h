@@ -1,6 +1,8 @@
 #ifndef _SCOUTFS_SYSFS_H_
 #define _SCOUTFS_SYSFS_H_
 
+#include <linux/kobject.h>
+
 /*
  * We have some light wrappers around sysfs attributes to make it safe
  * to tear down the attributes before freeing the data they describe.

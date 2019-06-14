@@ -533,9 +533,10 @@ int scoutfs_removexattr(struct dentry *dentry, const char *name)
 	return scoutfs_xattr_set(dentry, name, NULL, 0, XATTR_REPLACE);
 }
 
-ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
+ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
+			    size_t size, __u32 *hash_pos, __u64 *id_pos,
+			    bool e_range, bool hidden)
 {
-	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_xattr *xat = NULL;
@@ -543,10 +544,15 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct scoutfs_key key;
 	struct prefix_tags tgs;
 	unsigned int bytes;
-	ssize_t total;
-	u32 name_hash;
-	u64 id;
+	ssize_t total = 0;
+	u32 name_hash = 0;
+	u64 id = 0;
 	int ret;
+
+	if (hash_pos)
+		name_hash = *hash_pos;
+	if (id_pos)
+		id = *id_pos;
 
 	/* need a buffer large enough for all possible names */
 	bytes = sizeof(struct scoutfs_xattr) + SCOUTFS_XATTR_MAX_NAME_LEN;
@@ -562,10 +568,6 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 	down_read(&si->xattr_rwsem);
 
-	name_hash = 0;
-	id = 0;
-	total = 0;
-
 	for (;;) {
 		ret = get_next_xattr(inode, &key, xat, bytes,
 				     NULL, 0, name_hash, id, lck);
@@ -575,12 +577,14 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 			break;
 		}
 
-		if (parse_tags(xat->name, &tgs) != 0 || !tgs.hide) {
-			total += xat->name_len + 1;
+		if (hidden || parse_tags(xat->name, &tgs) != 0 || !tgs.hide) {
 
 			if (size) {
-				if (total > size) {
-					ret = -ERANGE;
+				if ((total + xat->name_len + 1) > size) {
+					if (e_range)
+						ret = -ERANGE;
+					else
+						ret = total;
 					break;
 				}
 
@@ -588,6 +592,8 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 				buffer += xat->name_len;
 				*(buffer++) = '\0';
 			}
+
+			total += xat->name_len + 1;
 		}
 
 		name_hash = le64_to_cpu(key.skx_name_hash);
@@ -599,7 +605,20 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 out:
 	kfree(xat);
 
+	if (hash_pos)
+		*hash_pos = name_hash;
+	if (id_pos)
+		*id_pos = id;
+
 	return ret;
+}
+
+ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
+{
+	struct inode *inode = dentry->d_inode;
+
+	return scoutfs_list_xattrs(inode, buffer, size,
+				   NULL, NULL, true, false);
 }
 
 /*

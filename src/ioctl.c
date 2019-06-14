@@ -33,6 +33,7 @@
 #include "lock.h"
 #include "manifest.h"
 #include "trans.h"
+#include "xattr.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -684,6 +685,68 @@ out:
 	return ret;
 }
 
+static long scoutfs_ioc_listxattr_raw(struct file *file, unsigned long arg)
+{
+	struct inode *inode = file->f_inode;
+	struct scoutfs_ioctl_listxattr_raw __user *ulxr = (void __user *)arg;
+	struct scoutfs_ioctl_listxattr_raw lxr;
+	struct page *page = NULL;
+	unsigned int bytes;
+	int total = 0;
+	int ret;
+
+	if (!(file->f_mode & FMODE_READ)) {
+		ret = -EBADF;
+		goto out;
+	}
+
+	if (!capable(CAP_SYS_ADMIN)) {
+		ret = -EBADF;
+		goto out;
+	}
+
+	if (copy_from_user(&lxr, ulxr, sizeof(lxr))) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	page = alloc_page(GFP_KERNEL);
+	if (!page) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	while (lxr.buf_bytes) {
+		bytes = min_t(int, lxr.buf_bytes, PAGE_SIZE);
+		ret = scoutfs_list_xattrs(inode, page_address(page), bytes,
+					  &lxr.hash_pos, &lxr.id_pos,
+					  false, true);
+		if (ret <= 0)
+			break;
+
+		if (copy_to_user((void __user *)lxr.buf_ptr,
+				 page_address(page), ret)) {
+			ret = -EFAULT;
+			break;
+		}
+
+		lxr.buf_ptr += ret;
+		lxr.buf_bytes -= ret;
+		total += ret;
+		ret = 0;
+	}
+
+out:
+	if (page)
+		__free_page(page);
+
+	if (ret == 0 && (__put_user(lxr.hash_pos, &ulxr->hash_pos) ||
+			 __put_user(lxr.id_pos, &ulxr->id_pos)))
+		ret = -EFAULT;
+
+	return ret ?: total;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -703,6 +766,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_data_waiting(file, arg);
 	case SCOUTFS_IOC_SETATTR_MORE:
 		return scoutfs_ioc_setattr_more(file, arg);
+	case SCOUTFS_IOC_LISTXATTR_RAW:
+		return scoutfs_ioc_listxattr_raw(file, arg);
 	}
 
 	return -ENOTTY;

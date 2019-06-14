@@ -271,4 +271,14 @@ struct scoutfs_ioctl_setattr_more {
 #define SCOUTFS_IOC_SETATTR_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 10, \
 				      struct scoutfs_ioctl_setattr_more)
 
+struct scoutfs_ioctl_listxattr_raw {
+	__u64 id_pos;
+	__u64 buf_ptr;
+	__u32 buf_bytes;
+	__u32 hash_pos;
+} __packed;
+
+#define SCOUTFS_IOC_LISTXATTR_RAW _IOW(SCOUTFS_IOCTL_MAGIC, 11, \
+				       struct scoutfs_ioctl_listxattr_raw)
+
 #endif

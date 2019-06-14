@@ -81,12 +81,51 @@ static void init_xattr_key(struct scoutfs_key *key, u64 ino, u32 name_hash,
 	};
 }
 
+#define SCOUTFS_XATTR_PREFIX		"scoutfs."
+#define SCOUTFS_XATTR_PREFIX_LEN	(sizeof(SCOUTFS_XATTR_PREFIX) - 1)
+
 static int unknown_prefix(const char *name)
 {
 	return strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN) &&
 	       strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN) &&
 	       strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN) &&
-	       strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN);
+	       strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN)&&
+	       strncmp(name, SCOUTFS_XATTR_PREFIX, SCOUTFS_XATTR_PREFIX_LEN);
+}
+
+struct prefix_tags {
+	unsigned long hide:1;
+};
+
+#define HIDE_TAG	"hide."
+#define HIDE_TAG_LEN	(sizeof(HIDE_TAG) - 1)
+
+static int parse_tags(const char *name, struct prefix_tags *tgs)
+{
+	bool found;
+
+	memset(tgs, 0, sizeof(struct prefix_tags));
+
+	if (strncmp(name, SCOUTFS_XATTR_PREFIX, SCOUTFS_XATTR_PREFIX_LEN))
+		return 0;
+	name += SCOUTFS_XATTR_PREFIX_LEN;
+
+	found = false;
+	for (;;) {
+		if (!strncmp(name, HIDE_TAG, HIDE_TAG_LEN)) {
+			if (++tgs->hide == 0)
+				return -EINVAL;
+			name += HIDE_TAG_LEN;
+		} else {
+			/* only reason to use scoutfs. is tags */
+			if (!found)
+				return -EINVAL;
+			break;
+		}
+		found = true;
+	}
+
+	return 0;
 }
 
 /*
@@ -355,6 +394,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct scoutfs_lock *lck = NULL;
 	size_t name_len = strlen(name);
 	struct scoutfs_key key;
+	struct prefix_tags tgs;
 	LIST_HEAD(ind_locks);
 	LIST_HEAD(saved);
 	u8 found_parts;
@@ -377,6 +417,12 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;
+
+	if (parse_tags(name, &tgs) != 0)
+		return -EINVAL;
+
+	if (tgs.hide && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bytes = sizeof(struct scoutfs_xattr) + name_len + size;
 	xat = kmalloc(bytes, GFP_NOFS);
@@ -495,6 +541,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_lock *lck = NULL;
 	struct scoutfs_key key;
+	struct prefix_tags tgs;
 	unsigned int bytes;
 	ssize_t total;
 	u32 name_hash;
@@ -528,17 +575,19 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 			break;
 		}
 
-		total += xat->name_len + 1;
+		if (parse_tags(xat->name, &tgs) != 0 || !tgs.hide) {
+			total += xat->name_len + 1;
 
-		if (size) {
-			if (total > size) {
-				ret = -ERANGE;
-				break;
+			if (size) {
+				if (total > size) {
+					ret = -ERANGE;
+					break;
+				}
+
+				memcpy(buffer, xat->name, xat->name_len);
+				buffer += xat->name_len;
+				*(buffer++) = '\0';
 			}
-
-			memcpy(buffer, xat->name, xat->name_len);
-			buffer += xat->name_len;
-			*(buffer++) = '\0';
 		}
 
 		name_hash = le64_to_cpu(key.skx_name_hash);

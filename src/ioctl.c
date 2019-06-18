@@ -34,6 +34,7 @@
 #include "manifest.h"
 #include "trans.h"
 #include "xattr.h"
+#include "hash.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -747,6 +748,100 @@ out:
 	return ret ?: total;
 }
 
+/*
+ * Return the inode numbers of inodes which might contain the given
+ * named xattr.  This will only find scoutfs xattrs with the index tag
+ * but we don't check that the callers xattr name contains the tag and
+ * search for it regardless.
+ */
+static long scoutfs_ioc_find_xattrs(struct file *file, unsigned long arg)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+	struct scoutfs_ioctl_find_xattrs __user *ufx = (void __user *)arg;
+	struct scoutfs_ioctl_find_xattrs fx;
+	struct scoutfs_lock *lock = NULL;
+	struct scoutfs_key last;
+	struct scoutfs_key key;
+	char *name = NULL;
+	int total = 0;
+	u64 hash;
+	u64 ino;
+	int ret;
+
+	if (!(file->f_mode & FMODE_READ)) {
+		ret = -EBADF;
+		goto out;
+	}
+
+	if (!capable(CAP_SYS_ADMIN)) {
+		ret = -EPERM;
+		goto out;
+	}
+
+	if (copy_from_user(&fx, ufx, sizeof(fx))) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	if (fx.name_bytes > SCOUTFS_XATTR_MAX_NAME_LEN) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	name = kmalloc(fx.name_bytes, GFP_KERNEL);
+	if (!name) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	if (copy_from_user(name, (void __user *)fx.name_ptr, fx.name_bytes)) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	hash = scoutfs_hash64(name, fx.name_bytes);
+	scoutfs_xattr_index_key(&key, hash, fx.next_ino, 0);
+	scoutfs_xattr_index_key(&last, hash, U64_MAX, U64_MAX);
+	ino = 0;
+
+	ret = scoutfs_lock_xattr_index(sb, SCOUTFS_LOCK_READ, 0, hash, &lock);
+	if (ret < 0)
+		goto out;
+
+	while (fx.nr_inodes) {
+
+		ret = scoutfs_item_next(sb, &key, &last, NULL, lock);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		/* xattrs hashes can collide and add multiple entries */
+		if (le64_to_cpu(key.skxi_ino) != ino) {
+			ino = le64_to_cpu(key.skxi_ino);
+			if (put_user(ino, (u64 __user *)fx.inodes_ptr)) {
+				ret = -EFAULT;
+				break;
+			}
+
+			fx.inodes_ptr += sizeof(u64);
+			fx.nr_inodes--;
+			total++;
+			ret = 0;
+		}
+
+		scoutfs_key_inc(&key);
+	}
+
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
+
+out:
+	kfree(name);
+
+	return ret ?: total;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -768,6 +863,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_setattr_more(file, arg);
 	case SCOUTFS_IOC_LISTXATTR_RAW:
 		return scoutfs_ioc_listxattr_raw(file, arg);
+	case SCOUTFS_IOC_FIND_XATTRS:
+		return scoutfs_ioc_find_xattrs(file, arg);
 	}
 
 	return -ENOTTY;

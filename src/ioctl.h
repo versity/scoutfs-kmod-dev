@@ -281,4 +281,34 @@ struct scoutfs_ioctl_listxattr_raw {
 #define SCOUTFS_IOC_LISTXATTR_RAW _IOW(SCOUTFS_IOCTL_MAGIC, 11, \
 				       struct scoutfs_ioctl_listxattr_raw)
 
+/*
+ * Return the inode numbers of inodes which might contain the given
+ * named xattr.  The inode may not have a set xattr with that name, the
+ * caller must check the returned inodes to see if they match.
+ *
+ * @next_ino: The next inode number that could be returned.  Initialized
+ * to 0 when first searching and set to one past the last inode number
+ * returned to continue searching.
+ * @name_ptr: The address of the name of the xattr to search for.  It does
+ * not need to be null terminated.
+ * @inodes_ptr: The address of the array of uint64_t inode numbers in which
+ * to store inode numbers that may contain the xattr.  EFAULT may be returned
+ * if this address is not naturally aligned.
+ * @name_bytes: The number of non-null bytes found in the name at name_ptr.
+ * @nr_inodes: The number of elements in the array found at inodes_ptr.
+ *
+ * This requires the CAP_SYS_ADMIN capability and will return -EPERM if
+ * it's not granted.
+ */
+struct scoutfs_ioctl_find_xattrs {
+	__u64 next_ino;
+	__u64 name_ptr;
+	__u64 inodes_ptr;
+	__u16 name_bytes;
+	__u16 nr_inodes;
+} __packed;
+
+#define SCOUTFS_IOC_FIND_XATTRS _IOW(SCOUTFS_IOCTL_MAGIC, 12, \
+				       struct scoutfs_ioctl_find_xattrs)
+
 #endif

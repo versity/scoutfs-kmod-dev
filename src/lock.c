@@ -33,6 +33,7 @@
 #include "tseq.h"
 #include "client.h"
 #include "data.h"
+#include "xattr.h"
 
 /*
  * scoutfs uses a lock service to manage item cache consistency between
@@ -1155,6 +1156,24 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 	scoutfs_lock_get_index_item_range(type, major, ino, &start, &end);
 
 	return lock_key_range(sb, mode, 0, &start, &end, ret_lock);
+}
+
+/*
+ * Today we lock a hash value entirely. If we went to finer grained ino
+ * locking as well we'd need to check the manifest to find the next
+ * possible ino to lock so that we didn't try to iterate over all of
+ * them.
+ */
+int scoutfs_lock_xattr_index(struct super_block *sb, int mode, int flags,
+			     u64 hash, struct scoutfs_lock **ret_lock)
+{
+	struct scoutfs_key start;
+	struct scoutfs_key end;
+
+	scoutfs_xattr_index_key(&start, hash, 0, 0);
+	scoutfs_xattr_index_key(&end, hash, U64_MAX, U64_MAX);
+
+	return lock_key_range(sb, mode, flags, &start, &end, ret_lock);
 }
 
 /*

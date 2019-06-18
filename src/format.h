@@ -108,6 +108,11 @@ struct scoutfs_key {
 #define skii_major	_sk_second
 #define skii_ino	_sk_third
 
+/* xattr index */
+#define skxi_hash	_sk_first
+#define skxi_ino	_sk_second
+#define skxi_id		_sk_third
+
 /* node free extent */
 #define sknf_node_id	_sk_first
 #define sknf_major	_sk_second
@@ -351,15 +356,19 @@ struct scoutfs_segment_block {
  * Keys are first sorted by major key zones.
  */
 #define SCOUTFS_INODE_INDEX_ZONE		1
-#define SCOUTFS_NODE_ZONE			2
-#define SCOUTFS_FS_ZONE				3
-#define SCOUTFS_LOCK_ZONE			4
+#define SCOUTFS_XATTR_INDEX_ZONE		2
+#define SCOUTFS_NODE_ZONE			3
+#define SCOUTFS_FS_ZONE				4
+#define SCOUTFS_LOCK_ZONE			5
 #define SCOUTFS_MAX_ZONE			8 /* power of 2 is efficient */
 
 /* inode index zone */
 #define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	1
 #define SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE	2
 #define SCOUTFS_INODE_INDEX_NR			3 /* don't forget to update */
+
+/* xattr index zone */
+#define SCOUTFS_XATTR_INDEX_NAME_TYPE		1
 
 /* node zone (also used in server alloc btree) */
 #define SCOUTFS_FREE_EXTENT_BLKNO_TYPE		1

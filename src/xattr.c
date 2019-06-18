@@ -25,6 +25,7 @@
 #include "trans.h"
 #include "xattr.h"
 #include "lock.h"
+#include "hash.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -94,38 +95,56 @@ static int unknown_prefix(const char *name)
 }
 
 struct prefix_tags {
-	unsigned long hide:1;
+	unsigned long hide:1,
+		      indx:1;
 };
 
 #define HIDE_TAG	"hide."
-#define HIDE_TAG_LEN	(sizeof(HIDE_TAG) - 1)
+#define INDX_TAG	"indx."
+#define TAG_LEN		(sizeof(HIDE_TAG) - 1)
 
-static int parse_tags(const char *name, struct prefix_tags *tgs)
+static int parse_tags(const char *name, unsigned int name_len,
+		      struct prefix_tags *tgs)
 {
 	bool found;
 
 	memset(tgs, 0, sizeof(struct prefix_tags));
 
-	if (strncmp(name, SCOUTFS_XATTR_PREFIX, SCOUTFS_XATTR_PREFIX_LEN))
+	if ((name_len < (SCOUTFS_XATTR_PREFIX_LEN + TAG_LEN + 1)) ||
+	    strncmp(name, SCOUTFS_XATTR_PREFIX, SCOUTFS_XATTR_PREFIX_LEN))
 		return 0;
 	name += SCOUTFS_XATTR_PREFIX_LEN;
 
 	found = false;
 	for (;;) {
-		if (!strncmp(name, HIDE_TAG, HIDE_TAG_LEN)) {
+		if (!strncmp(name, HIDE_TAG, TAG_LEN)) {
 			if (++tgs->hide == 0)
 				return -EINVAL;
-			name += HIDE_TAG_LEN;
+		} else if (!strncmp(name, INDX_TAG, TAG_LEN)) {
+			if (++tgs->indx == 0)
+				return -EINVAL;
 		} else {
 			/* only reason to use scoutfs. is tags */
 			if (!found)
 				return -EINVAL;
 			break;
 		}
+		name += TAG_LEN;
 		found = true;
 	}
 
 	return 0;
+}
+
+void scoutfs_xattr_index_key(struct scoutfs_key *key,
+			     u64 hash, u64 ino, u64 id)
+{
+	scoutfs_key_set_zeros(key);
+	key->sk_zone = SCOUTFS_XATTR_INDEX_ZONE;
+	key->skxi_hash = cpu_to_le64(hash);
+	key->sk_type = SCOUTFS_XATTR_INDEX_NAME_TYPE;
+	key->skxi_ino = cpu_to_le64(ino);
+	key->skxi_id = cpu_to_le64(id);
 }
 
 /*
@@ -390,18 +409,24 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct inode *inode = dentry->d_inode;
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
+	const u64 ino = scoutfs_ino(inode);
 	struct scoutfs_xattr *xat = NULL;
+	struct scoutfs_lock *indx_lock = NULL;
 	struct scoutfs_lock *lck = NULL;
 	size_t name_len = strlen(name);
+	struct scoutfs_key indx_key;
 	struct scoutfs_key key;
 	struct prefix_tags tgs;
+	bool undo_indx = false;
 	LIST_HEAD(ind_locks);
 	LIST_HEAD(saved);
 	u8 found_parts;
 	unsigned int bytes;
 	u64 ind_seq;
-	u64 id;
+	u64 hash;
+	u64 id = 0;
 	int ret;
+	int err;
 
 	trace_scoutfs_xattr_set(sb, name_len, value, size, flags);
 
@@ -418,10 +443,10 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;
 
-	if (parse_tags(name, &tgs) != 0)
+	if (parse_tags(name, name_len, &tgs) != 0)
 		return -EINVAL;
 
-	if (tgs.hide && !capable(CAP_SYS_ADMIN))
+	if ((tgs.hide || tgs.indx) && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 	bytes = sizeof(struct scoutfs_xattr) + name_len + size;
@@ -472,13 +497,22 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		memcpy(&xat->name[xat->name_len], value, size);
 	}
 
+	if (tgs.indx && !(found_parts && value)) {
+		hash = scoutfs_hash64(name, name_len);
+		ret = scoutfs_lock_xattr_index(sb, SCOUTFS_LOCK_WRITE_ONLY, 0,
+					       hash, &indx_lock);
+		if (ret < 0)
+			goto unlock;
+	}
+
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 	      scoutfs_inode_index_prepare(sb, &ind_locks, inode, false) ?:
 	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
 						SIC_XATTR_SET(found_parts,
 							      value != NULL,
-							      name_len, size));
+							      name_len, size,
+							      tgs.indx));
 	if (ret > 0)
 		goto retry;
 	if (ret)
@@ -487,6 +521,22 @@ retry:
 	ret = scoutfs_dirty_inode_item(inode, lck);
 	if (ret < 0)
 		goto release;
+
+	if (tgs.indx && !(found_parts && value)) {
+		if (found_parts)
+			id = le64_to_cpu(key.skx_id);
+		hash = scoutfs_hash64(name, name_len);
+		scoutfs_xattr_index_key(&indx_key, hash, ino, id);
+		if (value)
+			ret = scoutfs_item_create_force(sb, &indx_key, NULL,
+							indx_lock);
+		else
+			ret = scoutfs_item_delete_force(sb, &indx_key,
+							indx_lock);
+		if (ret < 0)
+			goto release;
+		undo_indx = true;
+	}
 
 	ret = 0;
 	if (found_parts)
@@ -508,10 +558,21 @@ retry:
 	ret = 0;
 
 release:
+	if (ret < 0 && undo_indx) {
+		if (value)
+			err = scoutfs_item_delete_force(sb, &indx_key,
+							indx_lock);
+		else
+			err = scoutfs_item_create_force(sb, &indx_key, NULL,
+							indx_lock);
+		BUG_ON(err);
+	}
+
 	scoutfs_release_trans(sb);
 	scoutfs_inode_index_unlock(sb, &ind_locks);
 unlock:
 	up_write(&si->xattr_rwsem);
+	scoutfs_unlock(sb, indx_lock, SCOUTFS_LOCK_WRITE_ONLY);
 	scoutfs_unlock(sb, lck, SCOUTFS_LOCK_WRITE);
 out:
 	kfree(xat);
@@ -577,7 +638,9 @@ ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 			break;
 		}
 
-		if (hidden || parse_tags(xat->name, &tgs) != 0 || !tgs.hide) {
+		if (hidden ||
+		    parse_tags(xat->name, xat->name_len, &tgs) != 0 ||
+		    !tgs.hide) {
 
 			if (size) {
 				if ((total + xat->name_len + 1) > size) {
@@ -624,54 +687,86 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 /*
  * Delete all the xattr items associated with this inode.  The inode is
  * dead so we don't need the xattr rwsem.
- *
- * XXX This isn't great because it reads in all the items so that it can
- * create deletion items for each.  It would be better to have the
- * caller create range deletion items for all the items covered by the
- * inode.  That wouldn't require reading at all.
  */
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		       struct scoutfs_lock *lock)
 {
+	struct scoutfs_lock *indx_lock = NULL;
+	struct scoutfs_xattr *xat = NULL;
+	struct scoutfs_key indx_key;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
-	unsigned int items = 16;
-	bool holding = false;
+	struct prefix_tags tgs;
+	bool release = false;
+	unsigned int bytes;
+	struct kvec val;
+	u64 hash;
 	int ret;
+
+	/* need a buffer large enough for all possible names */
+	bytes = sizeof(struct scoutfs_xattr) + SCOUTFS_XATTR_MAX_NAME_LEN;
+	xat = kmalloc(bytes, GFP_NOFS);
+	if (!xat) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	init_xattr_key(&key, ino, 0, 0);
 	init_xattr_key(&last, ino, U32_MAX, U64_MAX);
 
 	for (;;) {
-		ret = scoutfs_item_next(sb, &key, &last, NULL, lock);
+		kvec_init(&val, (void *)xat, bytes);
+		ret = scoutfs_item_next(sb, &key, &last, &val, lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		if (!holding) {
-			ret = scoutfs_hold_trans(sb, SIC_EXACT(items, 0));
-			if (ret)
+		if (key.skx_part != 0 ||
+		    parse_tags(xat->name, xat->name_len, &tgs) != 0)
+			memset(&tgs, 0, sizeof(tgs));
+
+		if (tgs.indx) {
+			hash = scoutfs_hash64(xat->name, xat->name_len);
+			scoutfs_xattr_index_key(&indx_key, hash, ino,
+						le64_to_cpu(key.skx_id));
+			ret = scoutfs_lock_xattr_index(sb,
+						      SCOUTFS_LOCK_WRITE_ONLY,
+						      0, hash, &indx_lock);
+			if (ret < 0)
 				break;
-			holding = true;
 		}
+
+		ret = scoutfs_hold_trans(sb, SIC_EXACT(2, 0));
+		if (ret < 0)
+			break;
+		release = true;
 
 		ret = scoutfs_item_delete(sb, &key, lock);
-		if (ret)
+		if (ret < 0)
 			break;
 
-		if (--items == 0) {
-			scoutfs_release_trans(sb);
-			holding = false;
-			items = 16;
+		if (tgs.indx) {
+		       ret = scoutfs_item_delete_force(sb, &indx_key,
+						       indx_lock);
+		       if (ret < 0)
+			       break;
 		}
+
+		scoutfs_release_trans(sb);
+		release = false;
+
+		scoutfs_unlock(sb, indx_lock, SCOUTFS_LOCK_WRITE_ONLY);
+		indx_lock = NULL;
 
 		/* don't need to inc, next won't see deleted item */
 	}
 
-	if (holding)
+	if (release)
 		scoutfs_release_trans(sb);
-
+	scoutfs_unlock(sb, indx_lock, SCOUTFS_LOCK_WRITE_ONLY);
+	kfree(xat);
+out:
 	return ret;
 }

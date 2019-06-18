@@ -205,12 +205,14 @@ static inline const struct scoutfs_item_count SIC_RENAME(unsigned old_len,
  * item with the header and name.  Any previously existing items are
  * deleted which dirties their key but removes their value.  The two
  * sets of items are indexed by different ids so their items don't
- * overlap.
+ * overlap.  If the xattr name is indexed then we modify one xattr index
+ * item.
  */
 static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned old_parts,
 							    bool creating,
 							    unsigned name_len,
-							    unsigned size)
+							    unsigned size,
+							    bool indexed)
 {
 	struct scoutfs_item_count cnt = {0,};
 	unsigned int new_parts;
@@ -219,6 +221,8 @@ static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned old_parts,
 
 	if (old_parts)
 		cnt.items += old_parts;
+	if (indexed)
+		cnt.items++;
 
 	if (creating) {
 		new_parts = SCOUTFS_XATTR_NR_PARTS(name_len, size)

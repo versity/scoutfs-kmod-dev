@@ -61,6 +61,8 @@ void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
 int scoutfs_lock_inode_index(struct super_block *sb, int mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock);
+int scoutfs_lock_xattr_index(struct super_block *sb, int mode, int flags,
+			     u64 hash, struct scoutfs_lock **ret_lock);
 int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
 			struct inode *a, struct scoutfs_lock **a_lock,
 			struct inode *b, struct scoutfs_lock **b_lock,

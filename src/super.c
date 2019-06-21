@@ -343,6 +343,24 @@ static int scoutfs_debugfs_setup(struct super_block *sb)
 	return 0;
 }
 
+/*
+ * Calculate a random id for the mount very early, it's used in tracing
+ * and message output.  The system assumes that a rid of 0 can't exist.  We're
+ * also paranoid and avoid rids that are likely the result of bad rng.
+ */
+static int assign_random_id(struct scoutfs_sb_info *sbi)
+{
+	unsigned int attempts = 0;
+
+	do {
+		if (++attempts == 100)
+			return -EIO;
+		get_random_bytes(&sbi->rid, sizeof(sbi->rid));
+	} while (sbi->rid == 0 || sbi->rid == ~0ULL);
+
+	return 0;
+}
+
 static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct scoutfs_sb_info *sbi;
@@ -365,6 +383,10 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->sb = sb;
 	if (!sbi)
 		return -ENOMEM;
+
+	ret = assign_random_id(sbi);
+	if (ret < 0)
+		return ret;
 
 	spin_lock_init(&sbi->next_ino_lock);
 	init_waitqueue_head(&sbi->trans_hold_wq);

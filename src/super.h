@@ -91,6 +91,40 @@ static inline struct scoutfs_sb_info *SCOUTFS_SB(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
+static inline bool SCOUTFS_HAS_SBI(struct super_block *sb)
+{
+	return (sb != NULL) && (SCOUTFS_SB(sb) != NULL);
+}
+
+/*
+ * A small string embedded in messages that's used to identify a
+ * specific mount.  It's the three most significant bytes of the fsid
+ * and the rid.  That gives us a strong chance of avoiding collisions
+ * with typical numbers of mounts.  We give it a bit of structure to
+ * make it searchable and to be able to identify format changes, should
+ * we need to.  The fsid will be 0 until the super has been read and the
+ * fsid discovered.
+ */
+#define SCSBF		"f.%.06x.r.%.06x"
+#define SCSB_SHIFT	(64 - (8 * 3))
+#define SCSB_LEFR_ARGS(fsid, rid)					    \
+	(int)(le64_to_cpu(fsid) >> SCSB_SHIFT),				    \
+	(int)(le64_to_cpu(rid) >> SCSB_SHIFT)
+#define SCSB_ARGS(sb)							    \
+	(int)(le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid) >> SCSB_SHIFT),   \
+	(int)(SCOUTFS_SB(sb)->rid >> SCSB_SHIFT)
+#define SCSB_TRACE_FIELDS	\
+	__field(__u64, fsid)	\
+	__field(__u64, rid)
+#define SCSB_TRACE_ASSIGN(sb)						\
+	__entry->fsid = SCOUTFS_HAS_SBI(sb) ?				\
+			le64_to_cpu(SCOUTFS_SB(sb)->super.hdr.fsid) : 0;\
+	__entry->rid = SCOUTFS_HAS_SBI(sb) ?				\
+		       SCOUTFS_SB(sb)->rid : 0;
+#define SCSB_TRACE_ARGS				\
+	(int)(__entry->fsid >> SCSB_SHIFT),	\
+	(int)(__entry->rid >> SCSB_SHIFT)
+
 int scoutfs_read_super(struct super_block *sb,
 		       struct scoutfs_super_block *super_res);
 void scoutfs_advance_dirty_super(struct super_block *sb);

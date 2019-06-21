@@ -18,9 +18,7 @@ void scoutfs_msg(struct super_block *sb, const char *prefix, const char *str,
         vaf.fmt = fmt;
         vaf.va = &args;
 
-        printk("%sscoutfs (%s %u:%u)%s: %pV\n", prefix,
-	       sb->s_id, MAJOR(sb->s_bdev->bd_dev), MINOR(sb->s_bdev->bd_dev),
-	       str, &vaf);
+        printk("%sscoutfs "SCSBF"%s: %pV\n", prefix, SCSB_ARGS(sb), str, &vaf);
 
         va_end(args);
 }

@@ -325,16 +325,16 @@ out:
 	return ret;
 }
 
+/*
+ * This needs to be setup after reading the super because it uses the
+ * fsid found in the super block.
+ */
 static int scoutfs_debugfs_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	char name[32];
 
-	/*
-	 * XXX: Move the name variable to sbi and use it in
-	 * init_lock_info as well.
-	 */
-	snprintf(name, 32, "%llx", le64_to_cpu(sbi->super.hdr.fsid));
+	snprintf(name, ARRAY_SIZE(name), SCSBF, SCSB_ARGS(sb));
 
 	sbi->debug_root = debugfs_create_dir(name, scoutfs_debugfs_root);
 	if (!sbi->debug_root)
@@ -410,10 +410,10 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 		goto out;
 	}
 
-	ret = scoutfs_setup_sysfs(sb) ?:
-	      scoutfs_setup_counters(sb) ?:
-	      scoutfs_read_super(sb, &SCOUTFS_SB(sb)->super) ?:
+	ret = scoutfs_read_super(sb, &SCOUTFS_SB(sb)->super) ?:
 	      scoutfs_debugfs_setup(sb) ?:
+	      scoutfs_setup_sysfs(sb) ?:
+	      scoutfs_setup_counters(sb) ?:
 	      scoutfs_options_setup(sb) ?:
 	      scoutfs_sysfs_create_attrs(sb, &sbi->mopts_ssa,
 				mount_options_attrs, "mount_options") ?:

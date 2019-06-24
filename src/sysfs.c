@@ -204,10 +204,9 @@ int scoutfs_setup_sysfs(struct super_block *sb)
 	sfsinfo->sb = sb;
 	sbi->sfsinfo = sfsinfo;
 
-	/* XXX can have multiple mounts of a  device, need mount id */
 	init_completion(&sfsinfo->sb_id_comp);
 	ret = kobject_init_and_add(&sfsinfo->sb_id_kobj, &sb_id_ktype,
-				   &scoutfs_kset->kobj, "%s", sb->s_id);
+				   &scoutfs_kset->kobj, SCSBF, SCSB_ARGS(sb));
 	if (ret)
 		kfree(sfsinfo);
 

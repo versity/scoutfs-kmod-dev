@@ -63,8 +63,8 @@
 
 /*
  * The largest extent that we'll store in a single item.  This will
- * determine the granularity of interleaved concurrent allocations on a
- * node.  Sequential max length allocations could still see contiguous
+ * determine the granularity of interleaved concurrent allocations in a
+ * mount.  Sequential max length allocations could still see contiguous
  * physical extent allocations.  It limits the amount of IO needed to
  * invalidate a lock.  And it determines the granularity of parallel
  * writes to a file between nodes.
@@ -100,12 +100,12 @@ static void init_file_extent_key(struct scoutfs_key *key, u64 ino, u64 last)
 	};
 }
 
-static void init_free_extent_key(struct scoutfs_key *key, u8 type, u64 node_id,
+static void init_free_extent_key(struct scoutfs_key *key, u8 type, u64 rid,
 				 u64 major, u64 minor)
 {
 	*key = (struct scoutfs_key) {
-		.sk_zone = SCOUTFS_NODE_ZONE,
-		.sknf_node_id = cpu_to_le64(node_id),
+		.sk_zone = SCOUTFS_RID_ZONE,
+		.sknf_rid = cpu_to_le64(rid),
 		.sk_type = type,
 		.sknf_major = cpu_to_le64(major),
 		.sknf_minor = cpu_to_le64(minor),
@@ -135,7 +135,7 @@ static int init_extent_from_item(struct scoutfs_extent *ext,
 		flags = fex->flags;
 
 	} else {
-		owner = le64_to_cpu(key->sknf_node_id);
+		owner = le64_to_cpu(key->sknf_rid);
 		start = le64_to_cpu(key->sknf_major);
 		len = le64_to_cpu(key->sknf_minor);
 		if (key->sk_type == SCOUTFS_FREE_EXTENT_BLOCKS_TYPE)
@@ -159,7 +159,7 @@ static int init_extent_from_item(struct scoutfs_extent *ext,
  * keeping their _BLOCKS_ item in sync with the primary _BLKNO_ item
  * that callers operate on.
  *
- * The count of free blocks stored in node items is kept consistent by
+ * The count of free blocks stored in items is kept consistent by
  * updating the count every time we create or delete items.  Updated
  * extents are deleted and then recreated so the count can bounce around
  * a bit, but it's OK for it to be imprecise at the margins.
@@ -315,9 +315,9 @@ static s64 truncate_one_extent(struct super_block *sb, struct inode *inode,
 	/* free an allocated mapping */
 	if (rem.map) {
 		scoutfs_extent_init(&fr, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
-				    sbi->node_id, rem.map, rem.len, 0, 0);
+				    sbi->rid, rem.map, rem.len, 0, 0);
 		ret = scoutfs_extent_add(sb, data_extent_io, &fr,
-					 sbi->node_id_lock);
+					 sbi->rid_lock);
 		if (ret)
 			goto out;
 		rem_fr = true;
@@ -360,7 +360,7 @@ out:
 			       SC_DATA_EXTENT_TRUNC_CLEANUP,
 			       corrupt_data_extent_trunc_cleanup, &rem);
 	scoutfs_extent_cleanup(ret < 0 && rem_fr, scoutfs_extent_remove, sb,
-			       data_extent_io, &fr, sbi->node_id_lock,
+			       data_extent_io, &fr, sbi->rid_lock,
 			       SC_DATA_EXTENT_TRUNC_CLEANUP,
 			       corrupt_data_extent_trunc_cleanup, &rem);
 
@@ -457,9 +457,9 @@ static int get_server_extent(struct super_block *sb)
 		goto out;
 
 	scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
-			    sbi->node_id, start, len, 0, 0);
+			    sbi->rid, start, len, 0, 0);
 	trace_scoutfs_data_get_server_extent(sb, &ext);
-	ret = scoutfs_extent_add(sb, data_extent_io, &ext, sbi->node_id_lock);
+	ret = scoutfs_extent_add(sb, data_extent_io, &ext, sbi->rid_lock);
 	/* XXX don't free extent on error, crash recovery with server */
 
 out:
@@ -488,14 +488,14 @@ static int find_free_extent(struct super_block *sb, u64 len,
 	for (;;) {
 		/* first try to find the first sufficient extent */
 		scoutfs_extent_init(ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
-				    sbi->node_id, 0, len, 0, 0);
+				    sbi->rid, 0, len, 0, 0);
 		ret = scoutfs_extent_next(sb, data_extent_io, ext,
-					  sbi->node_id_lock);
+					  sbi->rid_lock);
 
 		/* if none big enough, look for last largest smaller */
 		if (ret == -ENOENT && len > 1)
 			ret = scoutfs_extent_prev(sb, data_extent_io, ext,
-						  sbi->node_id_lock);
+						  sbi->rid_lock);
 
 		/* ask the server for more if we think it'll help */
 		if (ret == -ENOENT || ext->len < len) {
@@ -510,7 +510,7 @@ static int find_free_extent(struct super_block *sb, u64 len,
 
 	if (ret == 0)
 		scoutfs_extent_init(ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE,
-				    sbi->node_id, ext->start,
+				    sbi->rid, ext->start,
 				    min(ext->len, len), 0, 0);
 
 	trace_scoutfs_data_find_free_extent(sb, ext);
@@ -587,7 +587,7 @@ static int alloc_block(struct super_block *sb, struct inode *inode,
 			    iblock, 1, fr.start, 0);
 
 	/* remove the free extent that we're allocating */
-	ret = scoutfs_extent_remove(sb, data_extent_io, &fr, sbi->node_id_lock);
+	ret = scoutfs_extent_remove(sb, data_extent_io, &fr, sbi->rid_lock);
 	if (ret)
 		goto out;
 	add_fr = true;
@@ -631,7 +631,7 @@ out:
 			       SC_DATA_EXTENT_ALLOC_CLEANUP,
 			       corrupt_data_extent_alloc_cleanup, &blk);
 	scoutfs_extent_cleanup(ret < 0 && add_fr, scoutfs_extent_add, sb,
-			       data_extent_io, &fr, sbi->node_id_lock,
+			       data_extent_io, &fr, sbi->rid_lock,
 			       SC_DATA_EXTENT_ALLOC_CLEANUP,
 			       corrupt_data_extent_alloc_cleanup, &blk);
 
@@ -1069,7 +1069,7 @@ static s64 fallocate_one_extent(struct super_block *sb, u64 ino, u64 start,
 	if (WARN_ON_ONCE(ret))
 		goto out;
 
-	ret = scoutfs_extent_remove(sb, data_extent_io, &fr, sbi->node_id_lock);
+	ret = scoutfs_extent_remove(sb, data_extent_io, &fr, sbi->rid_lock);
 	if (ret)
 		goto out;
 	add_fr = true;
@@ -1093,7 +1093,7 @@ out:
 			       SC_DATA_EXTENT_FALLOCATE_CLEANUP,
 			       corrupt_data_extent_fallocate_cleanup, &fal);
 	scoutfs_extent_cleanup(ret < 0 && add_fr, scoutfs_extent_add, sb,
-			       data_extent_io, &fr, sbi->node_id_lock,
+			       data_extent_io, &fr, sbi->rid_lock,
 			       SC_DATA_EXTENT_FALLOCATE_CLEANUP,
 			       corrupt_data_extent_alloc_cleanup, &fal);
 	return ret;
@@ -1649,9 +1649,9 @@ static void scoutfs_data_return_server_extents_worker(struct work_struct *work)
 	       free > NODE_FREE_HIGH_WATER_BLOCKS) {
 
 		scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE,
-				    sbi->node_id, 0, 1, 0, 0);
+				    sbi->rid, 0, 1, 0, 0);
 		ret = scoutfs_extent_next(sb, data_extent_io, &ext,
-					  sbi->node_id_lock);
+					  sbi->rid_lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -1664,7 +1664,7 @@ static void scoutfs_data_return_server_extents_worker(struct work_struct *work)
 		ext.len = min(ext.len, free - NODE_FREE_HIGH_WATER_BLOCKS);
 
 		ret = scoutfs_extent_remove(sb, data_extent_io, &ext,
-					    sbi->node_id_lock);
+					    sbi->rid_lock);
 		if (ret)
 			break;
 

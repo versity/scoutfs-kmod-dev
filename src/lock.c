@@ -1177,29 +1177,29 @@ int scoutfs_lock_xattr_index(struct super_block *sb, int mode, int flags,
 }
 
 /*
- * The node_id lock protects a mount's private persistent items in the
- * node_id zone.  It's held for the duration of the mount.  It lets the
- * mount modify the node_id items at will and signals to other mounts
- * that we're still alive and our node_id items shouldn't be reclaimed.
+ * The rid lock protects a mount's private persistent items in the rid
+ * zone.  It's held for the duration of the mount.  It lets the mount
+ * modify the rid items at will and signals to other mounts that we're
+ * still alive and our rid items shouldn't be reclaimed.
  *
  * Being held for the entire mount prevents other nodes from reclaiming
  * our items, like free blocks, when it would make sense for them to be
  * able to.  Maybe we have a bunch free and they're trying to allocate
  * and are getting ENOSPC.
  */
-int scoutfs_lock_node_id(struct super_block *sb, int mode, int flags,
-			 u64 node_id, struct scoutfs_lock **lock)
+int scoutfs_lock_rid(struct super_block *sb, int mode, int flags,
+		     u64 rid, struct scoutfs_lock **lock)
 {
 	struct scoutfs_key start;
 	struct scoutfs_key end;
 
 	scoutfs_key_set_zeros(&start);
-	start.sk_zone = SCOUTFS_NODE_ZONE;
-	start.sko_node_id = cpu_to_le64(node_id);
+	start.sk_zone = SCOUTFS_RID_ZONE;
+	start.sko_rid = cpu_to_le64(rid);
 
 	scoutfs_key_set_ones(&end);
-	end.sk_zone = SCOUTFS_NODE_ZONE;
-	end.sko_node_id = cpu_to_le64(node_id);
+	end.sk_zone = SCOUTFS_RID_ZONE;
+	end.sko_rid = cpu_to_le64(rid);
 
 	return lock_key_range(sb, mode, flags, &start, &end, lock);
 }

@@ -1410,11 +1410,11 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	return inode;
 }
 
-static void init_orphan_key(struct scoutfs_key *key, u64 node_id, u64 ino)
+static void init_orphan_key(struct scoutfs_key *key, u64 rid, u64 ino)
 {
 	*key = (struct scoutfs_key) {
-		.sk_zone = SCOUTFS_NODE_ZONE,
-		.sko_node_id = cpu_to_le64(node_id),
+		.sk_zone = SCOUTFS_RID_ZONE,
+		.sko_rid = cpu_to_le64(rid),
 		.sk_type = SCOUTFS_ORPHAN_TYPE,
 		.sko_ino = cpu_to_le64(ino),
 	};
@@ -1423,11 +1423,11 @@ static void init_orphan_key(struct scoutfs_key *key, u64 node_id, u64 ino)
 static int remove_orphan_item(struct super_block *sb, u64 ino)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_lock *lock = sbi->node_id_lock;
+	struct scoutfs_lock *lock = sbi->rid_lock;
 	struct scoutfs_key key;
 	int ret;
 
-	init_orphan_key(&key, sbi->node_id, ino);
+	init_orphan_key(&key, sbi->rid, ino);
 
 	ret = scoutfs_item_delete(sb, &key, lock);
 	if (ret == -ENOENT)
@@ -1574,7 +1574,7 @@ int scoutfs_drop_inode(struct inode *inode)
 int scoutfs_scan_orphans(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_lock *lock = sbi->node_id_lock;
+	struct scoutfs_lock *lock = sbi->rid_lock;
 	struct scoutfs_key key;
 	struct scoutfs_key last;
 	int err = 0;
@@ -1582,8 +1582,8 @@ int scoutfs_scan_orphans(struct super_block *sb)
 
 	trace_scoutfs_scan_orphans(sb);
 
-	init_orphan_key(&key, sbi->node_id, 0);
-	init_orphan_key(&last, sbi->node_id, ~0ULL);
+	init_orphan_key(&key, sbi->rid, 0);
+	init_orphan_key(&last, sbi->rid, ~0ULL);
 
 	while (1) {
 		ret = scoutfs_item_next(sb, &key, &last, NULL, lock);
@@ -1612,13 +1612,13 @@ int scoutfs_orphan_inode(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_lock *lock = sbi->node_id_lock;
+	struct scoutfs_lock *lock = sbi->rid_lock;
 	struct scoutfs_key key;
 	int ret;
 
 	trace_scoutfs_orphan_inode(sb, inode);
 
-	init_orphan_key(&key, sbi->node_id, scoutfs_ino(inode));
+	init_orphan_key(&key, sbi->rid, scoutfs_ino(inode));
 
 	ret = scoutfs_item_create(sb, &key, NULL, lock);
 

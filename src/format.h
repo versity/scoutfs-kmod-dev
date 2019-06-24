@@ -114,12 +114,12 @@ struct scoutfs_key {
 #define skxi_id		_sk_third
 
 /* node free extent */
-#define sknf_node_id	_sk_first
+#define sknf_rid	_sk_first
 #define sknf_major	_sk_second
 #define sknf_minor	_sk_third
 
 /* node orphan inode */
-#define sko_node_id	_sk_first
+#define sko_rid		_sk_first
 #define sko_ino		_sk_second
 
 /* inode */
@@ -357,7 +357,7 @@ struct scoutfs_segment_block {
  */
 #define SCOUTFS_INODE_INDEX_ZONE		1
 #define SCOUTFS_XATTR_INDEX_ZONE		2
-#define SCOUTFS_NODE_ZONE			3
+#define SCOUTFS_RID_ZONE			3
 #define SCOUTFS_FS_ZONE				4
 #define SCOUTFS_LOCK_ZONE			5
 #define SCOUTFS_MAX_ZONE			8 /* power of 2 is efficient */
@@ -370,9 +370,10 @@ struct scoutfs_segment_block {
 /* xattr index zone */
 #define SCOUTFS_XATTR_INDEX_NAME_TYPE		1
 
-/* node zone (also used in server alloc btree) */
+/* rid zone (also used in server alloc btree) */
 #define SCOUTFS_FREE_EXTENT_BLKNO_TYPE		1
 #define SCOUTFS_FREE_EXTENT_BLOCKS_TYPE		2
+#define SCOUTFS_ORPHAN_TYPE			3
 
 /* fs zone */
 #define SCOUTFS_INODE_TYPE			1
@@ -382,12 +383,11 @@ struct scoutfs_segment_block {
 #define SCOUTFS_LINK_BACKREF_TYPE		5
 #define SCOUTFS_SYMLINK_TYPE			6
 #define SCOUTFS_FILE_EXTENT_TYPE		7
-#define SCOUTFS_ORPHAN_TYPE			8
 
 /* lock zone, only ever found in lock ranges, never in persistent items */
 #define SCOUTFS_RENAME_TYPE			1
 
-#define SCOUTFS_MAX_TYPE			16 /* power of 2 is efficient */
+#define SCOUTFS_MAX_TYPE			8 /* power of 2 is efficient */
 
 /*
  * File extents have more data than easily fits in the key so we move

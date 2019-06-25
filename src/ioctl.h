@@ -1,14 +1,41 @@
 #ifndef _SCOUTFS_IOCTL_H_
 #define _SCOUTFS_IOCTL_H_
 
+/*
+ * We naturally align explicit width fields in the ioctl structs so that
+ * userspace doesn't need to deal with padding or unaligned packing and
+ * we don't have to deal with 32/64 compat.  It makes it a little
+ * awkward to communicate persistent packed structs through the ioctls
+ * but that happens very rarely.  An interesting special case are
+ * 0length arrays that follow the structs.  We make those start at the
+ * next aligned offset of the struct to be safe.
+ *
+ * This is enforced by pahole scripting in external build environments.
+ */
+
 /* XXX I have no idea how these are chosen. */
 #define SCOUTFS_IOCTL_MAGIC 's'
 
+/*
+ * Packed scoutfs keys rarely cross the ioctl boundary so we have a
+ * translation struct.
+ */
+struct scoutfs_ioctl_key {
+	__le64	_sk_first;
+	__le64	_sk_second;
+	__le64	_sk_third;
+	__u8	_sk_fourth;
+	__u8	sk_type;
+	__u8	sk_zone;
+	__u8	_pad[5];
+};
+
 struct scoutfs_ioctl_walk_inodes_entry {
 	__u64 major;
-	__u32 minor;
 	__u64 ino;
-} __packed;
+	__u32 minor;
+	__u8  _pad[4];
+};
 
 /*
  * Walk inodes in an index that is sorted by one of their fields.
@@ -48,7 +75,8 @@ struct scoutfs_ioctl_walk_inodes {
 	__u64 entries_ptr;
 	__u32 nr_entries;
 	__u8 index;
-} __packed;
+	__u8 _pad[11]; /* padded to align walk_inodes_entry total size */
+};
 
 enum {
 	SCOUTFS_IOC_WALK_INODES_META_SEQ = 0,
@@ -127,14 +155,16 @@ struct scoutfs_ioctl_ino_path {
 	__u64 dir_pos;
 	__u64 result_ptr;
 	__u16 result_bytes;
-} __packed;
+	__u8 _pad[6];
+};
 
 struct scoutfs_ioctl_ino_path_result {
 	__u64 dir_ino;
 	__u64 dir_pos;
 	__u16 path_bytes;
+	__u8  _pad[6];
 	__u8  path[0];
-} __packed;
+};
 
 /* Get a single path from the root to the given inode number */
 #define SCOUTFS_IOC_INO_PATH _IOW(SCOUTFS_IOCTL_MAGIC, 2, \
@@ -168,7 +198,7 @@ struct scoutfs_ioctl_release {
 	__u64 block;
 	__u64 count;
 	__u64 data_version;
-} __packed;
+};
 
 #define SCOUTFS_IOC_RELEASE _IOW(SCOUTFS_IOCTL_MAGIC, 5, \
 				  struct scoutfs_ioctl_release)
@@ -178,7 +208,8 @@ struct scoutfs_ioctl_stage {
 	__u64 buf_ptr;
 	__u64 offset;
 	__s32 count;
-} __packed;
+	__u32 _pad;
+};
 
 #define SCOUTFS_IOC_STAGE _IOW(SCOUTFS_IOCTL_MAGIC, 6, \
 			       struct scoutfs_ioctl_stage)
@@ -203,10 +234,11 @@ struct scoutfs_ioctl_stat_more {
 	__u64 data_version;
 	__u64 online_blocks;
 	__u64 offline_blocks;
-} __packed;
+};
 
 #define SCOUTFS_IOC_STAT_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \
 				   struct scoutfs_ioctl_stat_more)
+
 
 /*
  * Fills the buffer with either the keys for the cached items or the
@@ -215,11 +247,12 @@ struct scoutfs_ioctl_stat_more {
  * keys the returned number will always be a multiple of two.
  */
 struct scoutfs_ioctl_item_cache_keys {
-	struct scoutfs_key key;
+	struct scoutfs_ioctl_key ikey;
 	__u64 buf_ptr;
 	__u16 buf_nr;
 	__u8 which;
-} __packed;
+	__u8 _pad[21];	/* padded to align _ioctl_key total size */
+};
 
 enum {
 	SCOUTFS_IOC_ITEM_CACHE_KEYS_ITEMS = 0,
@@ -233,7 +266,8 @@ struct scoutfs_ioctl_data_waiting_entry {
 	__u64 ino;
 	__u64 iblock;
 	__u8 op;
-} __packed;
+	__u8 _pad[7];
+};
 
 #define SCOUTFS_IOC_DWO_READ		(1 << 0)
 #define SCOUTFS_IOC_DWO_WRITE		(1 << 1)
@@ -246,7 +280,8 @@ struct scoutfs_ioctl_data_waiting {
 	__u64 after_iblock;
 	__u64 ents_ptr;
 	__u16 ents_nr;
-} __packed;
+	__u8 _pad[6];
+};
 
 #define SCOUTFS_IOC_DATA_WAITING_FLAGS_UNKNOWN		(U8_MAX << 0)
 
@@ -262,8 +297,10 @@ struct scoutfs_ioctl_setattr_more {
 	__u64 data_version;
 	__u64 i_size;
 	__u64 flags;
-	struct scoutfs_timespec ctime;
-} __packed;
+	__u64 ctime_sec;
+	__u32 ctime_nsec;
+	__u8 _pad[4];
+};
 
 #define SCOUTFS_IOC_SETATTR_MORE_OFFLINE		(1 << 0)
 #define SCOUTFS_IOC_SETATTR_MORE_UNKNOWN		(U8_MAX << 1)
@@ -276,7 +313,7 @@ struct scoutfs_ioctl_listxattr_raw {
 	__u64 buf_ptr;
 	__u32 buf_bytes;
 	__u32 hash_pos;
-} __packed;
+};
 
 #define SCOUTFS_IOC_LISTXATTR_RAW _IOW(SCOUTFS_IOCTL_MAGIC, 11, \
 				       struct scoutfs_ioctl_listxattr_raw)
@@ -306,7 +343,8 @@ struct scoutfs_ioctl_find_xattrs {
 	__u64 inodes_ptr;
 	__u16 name_bytes;
 	__u16 nr_inodes;
-} __packed;
+	__u8 _pad[4];
+};
 
 #define SCOUTFS_IOC_FIND_XATTRS _IOW(SCOUTFS_IOCTL_MAGIC, 12, \
 				       struct scoutfs_ioctl_find_xattrs)

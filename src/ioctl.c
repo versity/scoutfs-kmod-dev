@@ -500,17 +500,22 @@ static long scoutfs_ioc_item_cache_keys(struct file *file, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct scoutfs_ioctl_item_cache_keys ick;
-	struct scoutfs_key __user *ukeys;
+	struct scoutfs_ioctl_key __user *ukeys;
+	struct scoutfs_ioctl_key ikeys[16];
 	struct scoutfs_key keys[16];
+	struct scoutfs_key key;
 	unsigned int nr;
 	int total;
 	int ret;
+	int i;
 
 	if (copy_from_user(&ick, (void __user *)arg, sizeof(ick)))
 		return -EFAULT;
 
 	if (ick.which > SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES)
 		return -EINVAL;
+
+	scoutfs_key_copy_types(&key, &ick.ikey);
 
 	ukeys = (void __user *)(long)ick.buf_ptr;
 	total = 0;
@@ -519,21 +524,23 @@ static long scoutfs_ioc_item_cache_keys(struct file *file, unsigned long arg)
 		nr = min_t(size_t, ick.buf_nr, ARRAY_SIZE(keys));
 
 		if (ick.which == SCOUTFS_IOC_ITEM_CACHE_KEYS_ITEMS)
-			ret = scoutfs_item_copy_keys(sb, &ick.key, keys, nr);
+			ret = scoutfs_item_copy_keys(sb, &key, keys, nr);
 		else
-			ret = scoutfs_item_copy_range_keys(sb, &ick.key, keys,
-							   nr);
+			ret = scoutfs_item_copy_range_keys(sb, &key, keys, nr);
 		BUG_ON(ret > nr); /* stack overflow \o/ */
 		if (ret <= 0)
 			break;
 
-		if (copy_to_user(ukeys, keys, ret * sizeof(keys[0]))) {
+		for (i = 0; i < ret; i++)
+			scoutfs_key_copy_types(&ikeys[i], &keys[i]);
+
+		if (copy_to_user(ukeys, ikeys, ret * sizeof(ikeys[0]))) {
 			ret = -EFAULT;
 			break;
 		}
 
-		ick.key = keys[ret - 1];
-		scoutfs_key_inc(&ick.key);
+		key = keys[ret - 1];
+		scoutfs_key_inc(&key);
 
 		ukeys += ret;
 		ick.buf_nr -= ret;
@@ -668,8 +675,8 @@ static long scoutfs_ioc_setattr_more(struct file *file, unsigned long arg)
 		scoutfs_inode_set_data_version(inode, sm.data_version);
 	if (sm.i_size)
 		i_size_write(inode, sm.i_size);
-	inode->i_ctime.tv_sec = le64_to_cpu(sm.ctime.sec);
-	inode->i_ctime.tv_nsec = le32_to_cpu(sm.ctime.nsec);
+	inode->i_ctime.tv_sec = sm.ctime_sec;
+	inode->i_ctime.tv_nsec = sm.ctime_nsec;
 
 	scoutfs_update_inode_item(inode, lock, &ind_locks);
 	ret = 0;

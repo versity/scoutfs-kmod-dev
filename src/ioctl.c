@@ -693,27 +693,26 @@ out:
 	return ret;
 }
 
-static long scoutfs_ioc_listxattr_raw(struct file *file, unsigned long arg)
+/*
+ * This lists .hide. attributes on the inode.  It doesn't include normal
+ * xattrs that are visible to listxattr because we don't perform as
+ * rigorous security access checks as normal vfs listxattr does.
+ */
+static long scoutfs_ioc_listxattr_hidden(struct file *file, unsigned long arg)
 {
 	struct inode *inode = file->f_inode;
-	struct scoutfs_ioctl_listxattr_raw __user *ulxr = (void __user *)arg;
-	struct scoutfs_ioctl_listxattr_raw lxr;
+	struct scoutfs_ioctl_listxattr_hidden __user *ulxr = (void __user *)arg;
+	struct scoutfs_ioctl_listxattr_hidden lxh;
 	struct page *page = NULL;
 	unsigned int bytes;
 	int total = 0;
 	int ret;
 
-	if (!(file->f_mode & FMODE_READ)) {
-		ret = -EBADF;
+	ret = inode_permission(inode, MAY_READ);
+	if (ret < 0)
 		goto out;
-	}
 
-	if (!capable(CAP_SYS_ADMIN)) {
-		ret = -EBADF;
-		goto out;
-	}
-
-	if (copy_from_user(&lxr, ulxr, sizeof(lxr))) {
+	if (copy_from_user(&lxh, ulxr, sizeof(lxh))) {
 		ret = -EFAULT;
 		goto out;
 	}
@@ -724,22 +723,22 @@ static long scoutfs_ioc_listxattr_raw(struct file *file, unsigned long arg)
 		goto out;
 	}
 
-	while (lxr.buf_bytes) {
-		bytes = min_t(int, lxr.buf_bytes, PAGE_SIZE);
+	while (lxh.buf_bytes) {
+		bytes = min_t(int, lxh.buf_bytes, PAGE_SIZE);
 		ret = scoutfs_list_xattrs(inode, page_address(page), bytes,
-					  &lxr.hash_pos, &lxr.id_pos,
+					  &lxh.hash_pos, &lxh.id_pos,
 					  false, true);
 		if (ret <= 0)
 			break;
 
-		if (copy_to_user((void __user *)lxr.buf_ptr,
+		if (copy_to_user((void __user *)lxh.buf_ptr,
 				 page_address(page), ret)) {
 			ret = -EFAULT;
 			break;
 		}
 
-		lxr.buf_ptr += ret;
-		lxr.buf_bytes -= ret;
+		lxh.buf_ptr += ret;
+		lxh.buf_bytes -= ret;
 		total += ret;
 		ret = 0;
 	}
@@ -748,8 +747,8 @@ out:
 	if (page)
 		__free_page(page);
 
-	if (ret == 0 && (__put_user(lxr.hash_pos, &ulxr->hash_pos) ||
-			 __put_user(lxr.id_pos, &ulxr->id_pos)))
+	if (ret == 0 && (__put_user(lxh.hash_pos, &ulxr->hash_pos) ||
+			 __put_user(lxh.id_pos, &ulxr->id_pos)))
 		ret = -EFAULT;
 
 	return ret ?: total;
@@ -868,8 +867,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_data_waiting(file, arg);
 	case SCOUTFS_IOC_SETATTR_MORE:
 		return scoutfs_ioc_setattr_more(file, arg);
-	case SCOUTFS_IOC_LISTXATTR_RAW:
-		return scoutfs_ioc_listxattr_raw(file, arg);
+	case SCOUTFS_IOC_LISTXATTR_HIDDEN:
+		return scoutfs_ioc_listxattr_hidden(file, arg);
 	case SCOUTFS_IOC_FIND_XATTRS:
 		return scoutfs_ioc_find_xattrs(file, arg);
 	}

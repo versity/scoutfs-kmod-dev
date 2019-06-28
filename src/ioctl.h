@@ -306,15 +306,15 @@ struct scoutfs_ioctl_setattr_more {
 #define SCOUTFS_IOC_SETATTR_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 8, \
 				      struct scoutfs_ioctl_setattr_more)
 
-struct scoutfs_ioctl_listxattr_raw {
+struct scoutfs_ioctl_listxattr_hidden {
 	__u64 id_pos;
 	__u64 buf_ptr;
 	__u32 buf_bytes;
 	__u32 hash_pos;
 };
 
-#define SCOUTFS_IOC_LISTXATTR_RAW _IOR(SCOUTFS_IOCTL_MAGIC, 9, \
-				       struct scoutfs_ioctl_listxattr_raw)
+#define SCOUTFS_IOC_LISTXATTR_HIDDEN _IOR(SCOUTFS_IOCTL_MAGIC, 9, \
+					  struct scoutfs_ioctl_listxattr_hidden)
 
 /*
  * Return the inode numbers of inodes which might contain the given

@@ -596,7 +596,7 @@ int scoutfs_removexattr(struct dentry *dentry, const char *name)
 
 ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 			    size_t size, __u32 *hash_pos, __u64 *id_pos,
-			    bool e_range, bool hidden)
+			    bool e_range, bool show_hidden)
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
@@ -607,6 +607,7 @@ ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 	unsigned int bytes;
 	ssize_t total = 0;
 	u32 name_hash = 0;
+	bool is_hidden;
 	u64 id = 0;
 	int ret;
 
@@ -638,10 +639,10 @@ ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 			break;
 		}
 
-		if (hidden ||
-		    parse_tags(xat->name, xat->name_len, &tgs) != 0 ||
-		    !tgs.hide) {
+		is_hidden = parse_tags(xat->name, xat->name_len, &tgs) == 0 &&
+			    tgs.hide;
 
+		if (show_hidden == is_hidden) {
 			if (size) {
 				if ((total + xat->name_len + 1) > size) {
 					if (e_range)

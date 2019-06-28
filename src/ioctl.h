@@ -88,7 +88,7 @@ enum {
  * Adds entries to the user's buffer for each inode that is found in the
  * given index between the first and last positions.
  */
-#define SCOUTFS_IOC_WALK_INODES _IOW(SCOUTFS_IOCTL_MAGIC, 1, \
+#define SCOUTFS_IOC_WALK_INODES _IOR(SCOUTFS_IOCTL_MAGIC, 1, \
 				     struct scoutfs_ioctl_walk_inodes)
 
 /*
@@ -167,10 +167,8 @@ struct scoutfs_ioctl_ino_path_result {
 };
 
 /* Get a single path from the root to the given inode number */
-#define SCOUTFS_IOC_INO_PATH _IOW(SCOUTFS_IOCTL_MAGIC, 2, \
-				      struct scoutfs_ioctl_ino_path)
-
-#define SCOUTFS_IOC_DATA_VERSION _IOW(SCOUTFS_IOCTL_MAGIC, 4, __u64)
+#define SCOUTFS_IOC_INO_PATH _IOR(SCOUTFS_IOCTL_MAGIC, 2, \
+				  struct scoutfs_ioctl_ino_path)
 
 /*
  * "Release" a contiguous range of logical blocks of file data.
@@ -200,8 +198,8 @@ struct scoutfs_ioctl_release {
 	__u64 data_version;
 };
 
-#define SCOUTFS_IOC_RELEASE _IOW(SCOUTFS_IOCTL_MAGIC, 5, \
-				  struct scoutfs_ioctl_release)
+#define SCOUTFS_IOC_RELEASE _IOW(SCOUTFS_IOCTL_MAGIC, 3, \
+				 struct scoutfs_ioctl_release)
 
 struct scoutfs_ioctl_stage {
 	__u64 data_version;
@@ -211,7 +209,7 @@ struct scoutfs_ioctl_stage {
 	__u32 _pad;
 };
 
-#define SCOUTFS_IOC_STAGE _IOW(SCOUTFS_IOCTL_MAGIC, 6, \
+#define SCOUTFS_IOC_STAGE _IOW(SCOUTFS_IOCTL_MAGIC, 4, \
 			       struct scoutfs_ioctl_stage)
 
 /*
@@ -236,7 +234,7 @@ struct scoutfs_ioctl_stat_more {
 	__u64 offline_blocks;
 };
 
-#define SCOUTFS_IOC_STAT_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \
+#define SCOUTFS_IOC_STAT_MORE _IOR(SCOUTFS_IOCTL_MAGIC, 5, \
 				   struct scoutfs_ioctl_stat_more)
 
 
@@ -259,7 +257,7 @@ enum {
 	SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES,
 };
 
-#define SCOUTFS_IOC_ITEM_CACHE_KEYS _IOW(SCOUTFS_IOCTL_MAGIC, 8, \
+#define SCOUTFS_IOC_ITEM_CACHE_KEYS _IOR(SCOUTFS_IOCTL_MAGIC, 6, \
 					 struct scoutfs_ioctl_item_cache_keys)
 
 struct scoutfs_ioctl_data_waiting_entry {
@@ -285,7 +283,7 @@ struct scoutfs_ioctl_data_waiting {
 
 #define SCOUTFS_IOC_DATA_WAITING_FLAGS_UNKNOWN		(U8_MAX << 0)
 
-#define SCOUTFS_IOC_DATA_WAITING _IOW(SCOUTFS_IOCTL_MAGIC, 9, \
+#define SCOUTFS_IOC_DATA_WAITING _IOR(SCOUTFS_IOCTL_MAGIC, 7, \
 				      struct scoutfs_ioctl_data_waiting)
 
 /*
@@ -305,7 +303,7 @@ struct scoutfs_ioctl_setattr_more {
 #define SCOUTFS_IOC_SETATTR_MORE_OFFLINE		(1 << 0)
 #define SCOUTFS_IOC_SETATTR_MORE_UNKNOWN		(U8_MAX << 1)
 
-#define SCOUTFS_IOC_SETATTR_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 10, \
+#define SCOUTFS_IOC_SETATTR_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 8, \
 				      struct scoutfs_ioctl_setattr_more)
 
 struct scoutfs_ioctl_listxattr_raw {
@@ -315,7 +313,7 @@ struct scoutfs_ioctl_listxattr_raw {
 	__u32 hash_pos;
 };
 
-#define SCOUTFS_IOC_LISTXATTR_RAW _IOW(SCOUTFS_IOCTL_MAGIC, 11, \
+#define SCOUTFS_IOC_LISTXATTR_RAW _IOR(SCOUTFS_IOCTL_MAGIC, 9, \
 				       struct scoutfs_ioctl_listxattr_raw)
 
 /*
@@ -346,7 +344,7 @@ struct scoutfs_ioctl_find_xattrs {
 	__u8 _pad[4];
 };
 
-#define SCOUTFS_IOC_FIND_XATTRS _IOW(SCOUTFS_IOCTL_MAGIC, 12, \
-				       struct scoutfs_ioctl_find_xattrs)
+#define SCOUTFS_IOC_FIND_XATTRS _IOR(SCOUTFS_IOCTL_MAGIC, 10, \
+				     struct scoutfs_ioctl_find_xattrs)
 
 #endif

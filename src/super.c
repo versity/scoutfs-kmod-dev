@@ -221,28 +221,15 @@ static const struct super_operations scoutfs_super_ops = {
 };
 
 /*
- * The caller advances the sequence number in the super block header
- * every time it wants to dirty it and eventually write it to reference
- * dirty data that's been written.
- */
-void scoutfs_advance_dirty_super(struct super_block *sb)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-
-	le64_add_cpu(&super->hdr.seq, 1);
-	trace_scoutfs_advance_dirty_super(sb, le64_to_cpu(super->hdr.seq));
-}
-
-/*
- * The caller is responsible for setting the super header's blkno
- * and seq to something reasonable.
+ * Write the caller's super.  The caller has always read a valid super
+ * before modifying and writing it.  The caller's super is modified
+ * to reflect the write.
  *
  * XXX it'd be pretty easy to preallocate to avoid failure here.
  */
-int scoutfs_write_dirty_super(struct super_block *sb)
+int scoutfs_write_super(struct super_block *sb,
+			struct scoutfs_super_block *caller)
 {
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super;
 	struct page *page;
 	int ret;
@@ -251,9 +238,10 @@ int scoutfs_write_dirty_super(struct super_block *sb)
 	if (!page)
 		return -ENOMEM;
 
+	le64_add_cpu(&caller->hdr.seq, 1);
+
 	super = page_address(page);
-	memcpy(super, &sbi->super, sizeof(*super));
-	super->hdr.magic = cpu_to_le32(SCOUTFS_BLOCK_MAGIC_SUPER);
+	memcpy(super, caller, sizeof(*super));
 	super->hdr.crc = scoutfs_block_calc_crc(&super->hdr);
 
 	ret = scoutfs_bio_write(sb, &page, le64_to_cpu(super->hdr.blkno), 1);

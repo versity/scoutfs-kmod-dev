@@ -127,8 +127,8 @@ static inline bool SCOUTFS_HAS_SBI(struct super_block *sb)
 
 int scoutfs_read_super(struct super_block *sb,
 		       struct scoutfs_super_block *super_res);
-void scoutfs_advance_dirty_super(struct super_block *sb);
-int scoutfs_write_dirty_super(struct super_block *sb);
+int scoutfs_write_super(struct super_block *sb,
+		        struct scoutfs_super_block *super);
 
 /* to keep this out of the ioctl.h public interface definition */
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg);

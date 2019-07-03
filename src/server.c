@@ -584,6 +584,7 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 	struct server_info *server = container_of(work, struct server_info,
 						  commit_work);
 	struct super_block *sb = server->sb;
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct commit_waiter *cw;
 	struct commit_waiter *pos;
 	struct llist_node *node;
@@ -611,7 +612,7 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 		goto out;
 	}
 
-	ret = scoutfs_write_dirty_super(sb);
+	ret = scoutfs_write_super(sb, super);
 	if (ret) {
 		scoutfs_err(sb, "server error writing super block: %d", ret);
 		goto out;
@@ -623,7 +624,6 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 	server->stable_manifest_root = SCOUTFS_SB(sb)->super.manifest.root;
 	write_seqcount_end(&server->stable_seqcount);
 
-	scoutfs_advance_dirty_super(sb);
 	ret = 0;
 
 out:
@@ -2325,7 +2325,6 @@ static void scoutfs_server_worker(struct work_struct *work)
 
 	complete(&server->start_comp);
 
-	scoutfs_advance_dirty_super(sb);
 	server->stable_manifest_root = super->manifest.root;
 
 	scoutfs_info(sb, "server started on "SIN_FMT, SIN_ARG(&sin));

@@ -2,9 +2,25 @@
 #define _SCOUTFS_NET_H_
 
 #include <linux/in.h>
+#include "endian_swap.h"
 
 #define SIN_FMT		"%pIS:%u"
 #define SIN_ARG(sin)	sin, be16_to_cpu((sin)->sin_port)
+
+static inline void scoutfs_addr_to_sin(struct sockaddr_in *sin,
+				       struct scoutfs_inet_addr *addr)
+{
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = cpu_to_be32(le32_to_cpu(addr->addr));
+	sin->sin_port = cpu_to_be16(le16_to_cpu(addr->port));
+}
+
+static inline void scoutfs_addr_from_sin(struct scoutfs_inet_addr *addr,
+					 struct sockaddr_in *sin)
+{
+	addr->addr = be32_to_le32(sin->sin_addr.s_addr);
+	addr->port = be16_to_le16(sin->sin_port);
+}
 
 struct scoutfs_net_connection;
 

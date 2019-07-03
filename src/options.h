@@ -2,6 +2,7 @@
 #define	_SCOUTFS_OPTIONS_H_
 
 #include <linux/fs.h>
+#include <linux/in.h>
 #include "format.h"
 
 enum {
@@ -10,11 +11,13 @@ enum {
 	 * the number of items in each block as though the blocks were tiny.
 	 */
 	Opt_btree_force_tiny_blocks,
+	Opt_server_addr,
 	Opt_uniq_name,
 	Opt_err,
 };
 
 struct mount_options {
+	struct sockaddr_in server_addr;
 	char uniq_name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
 };
 

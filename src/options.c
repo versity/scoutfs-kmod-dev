@@ -27,6 +27,7 @@
 #include "super.h"
 
 static const match_table_t tokens = {
+	{Opt_server_addr, "server_addr=%s"},
 	{Opt_uniq_name, "uniq_name=%s"},
 	{Opt_err, NULL}
 };
@@ -50,12 +51,54 @@ u32 scoutfs_option_u32(struct super_block *sb, int token)
 	return 0;
 }
 
+/* The caller's string is null terminted and can be clobbered */
+static int parse_ipv4(struct super_block *sb, char *str,
+		      struct sockaddr_in *sin)
+{
+	unsigned long port = 0;
+	__be32 addr;
+	char *c;
+	int ret;
+
+	/* null term port, if specified */
+	c = strchr(str, ':');
+	if (c)
+		*c = '\0';
+
+	/* parse addr */
+	addr = in_aton(str);
+	if (ipv4_is_multicast(addr) || ipv4_is_lbcast(addr) ||
+	    ipv4_is_zeronet(addr) ||
+	    ipv4_is_local_multicast(addr)) {
+		scoutfs_err(sb, "invalid unicast ipv4 address: %s", str);
+		return -EINVAL;
+	}
+
+	/* parse port, if specified */
+	if (c) {
+		c++;
+		ret = kstrtoul(c, 0, &port);
+		if (ret != 0 || port == 0 || port >= U16_MAX) {
+			scoutfs_err(sb, "invalid port in ipv4 address: %s", c);
+			return -EINVAL;
+		}
+	}
+
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = addr;
+	sin->sin_port = cpu_to_be16(port);
+
+	return 0;
+}
+
 int scoutfs_parse_options(struct super_block *sb, char *options,
 			  struct mount_options *parsed)
 {
+	char ipstr[INET_ADDRSTRLEN + 1];
 	substring_t args[MAX_OPT_ARGS];
 	int token, len;
 	char *p;
+	int ret;
 
 	/* Set defaults */
 	memset(parsed, 0, sizeof(*parsed));
@@ -66,6 +109,13 @@ int scoutfs_parse_options(struct super_block *sb, char *options,
 
 		token = match_token(p, tokens, args);
 		switch (token) {
+		case Opt_server_addr:
+
+			match_strlcpy(ipstr, args, ARRAY_SIZE(ipstr));
+			ret = parse_ipv4(sb, ipstr, &parsed->server_addr);
+			if (ret < 0)
+				return ret;
+			break;
 		case Opt_uniq_name:
 			len = match_strlcpy(parsed->uniq_name, args,
 					    SCOUTFS_UNIQUE_NAME_MAX_BYTES);

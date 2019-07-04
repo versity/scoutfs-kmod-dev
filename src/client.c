@@ -53,10 +53,7 @@ struct client_info {
 	atomic_t shutting_down;
 
 	struct workqueue_struct *workq;
-	struct work_struct connect_work;
-
-	struct scoutfs_quorum_elected_info qei;
-	u64 old_elected_nr;
+	struct delayed_work connect_dwork;
 
 	u64 server_term;
 	u64 greeting_umb;
@@ -373,117 +370,108 @@ out:
 }
 
 /*
- * If the previous election told us to start the server then stop it and
- * clear the indication that we were elected.   We get the current
- * version of the election info from the server because they might have
- * modified it while they were running. the old election info.
+ * This work is responsible for maintaining a connection from the client
+ * to the server.  It's queued on mount and disconnect and we requeue
+ * the work if the work fails and we're not shutting down.
  *
- * If we're not fast enough to clear the election from the quorum block
- * then the next server might fence us.  Should be very unlikely as
- * election requires multiple RMW cycles.
- */
-static void stop_our_server(struct super_block *sb,
-			    struct scoutfs_quorum_elected_info *qei)
-{
-	if (qei->run_server) {
-		scoutfs_server_stop(sb, qei);
-		scoutfs_quorum_clear_elected(sb, qei);
-		memset(qei, 0, sizeof(*qei));
-	}
-}
-
-/*
- * This work is responsible for managing leader elections, running the
- * server, and connecting clients to the server.
- *
- * In the typical case a mount reads the quorum blocks and finds the
+ * In the typical case a mount reads the super blocks and finds the
  * address of the currently running server and connects to it.
+ * Non-voting clients who can't connect will keep trying alternating
+ * reading the address and getting connect timeouts.
  *
- * More rarely clients who aren't connected and are configured to
- * participate in quorum need to elect the new leader.  The elected info
- * filled by quorum tells us if we were elected to run the server.
+ * Voting mounts will try to elect a leader if they can't connect to the
+ * server.  When a quorum can't connect and are able to elect a leader
+ * then a new server is started.  The new server will write its address
+ * in the super and everyone will be able to connect.
  *
- * This leads to the possibility that the mount who is running the
- * server had its mount disconnect.  This is only weirdly different from
- * other clients disconnecting and trying to reconnect because of the
- * way quorum slots are reconfigured and reclaimed.  If we connect to a
- * server with the new quorum config then we can't have any old servers
- * running in the stale old quorum slot.  The simplest way to do this is
- * to *always* stop the server if we're running it and we got
- * disconnected.  It's a big hammer, but it's reliable, and arguably if
- * *we* couldn't' use *our* server then something bad is happening and
- * someone else should be the server.
- *
- * This only executes on mount, error, or as a connection disconnects
- * and there's only ever one executing.
+ * There's a tricky bit of coordination required to safely unmount.
+ * Clients need to tell the server that they won't be coming back with a
+ * farewell request.  Once a client receives its farewell response it
+ * can exit.  But a majority of clients need to stick around to elect a
+ * server to process all their farewell requests.  This is coordinated
+ * by having the greeting tell the server that a client is a voter.  The
+ * server then holds on to farewell requests from voters until only
+ * requests from the final quorum remain.  These farewell responses are
+ * only sent after updating an unmount barrier in the super to indicate
+ * to the final quorum that they can safely exit without having received
+ * a farewell response over the network.
  */
 static void scoutfs_client_connect_worker(struct work_struct *work)
 {
 	struct client_info *client = container_of(work, struct client_info,
-						  connect_work);
+						  connect_dwork.work);
 	struct super_block *sb = client->sb;
-	struct scoutfs_quorum_elected_info *qei = &client->qei;
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_super_block *super = NULL;
 	struct mount_options *opts = &sbi->opts;
+	const bool am_voter = opts->server_addr.sin_addr.s_addr != 0;
 	struct scoutfs_net_greeting greet;
+	struct sockaddr_in sin;
 	ktime_t timeout_abs;
+	u64 elected_term;
 	int ret;
 
-	/* don't try quorum and connecting while our mount runs a server */
-	stop_our_server(sb, qei);
+	super = kmalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
+	if (!super) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
-	timeout_abs = ktime_add_ms(ktime_get(), CLIENT_QUORUM_TIMEOUT_MS);
-
-	ret = scoutfs_quorum_election(sb, opts->uniq_name,
-				      client->old_elected_nr,
-			              timeout_abs, client->sending_farewell,
-				      client->greeting_umb, qei);
+	ret = scoutfs_read_super(sb, super);
 	if (ret)
 		goto out;
 
-	/* we saw that the server wrote a new unmount barrier */
-	if (client->sending_farewell && qei->elected_nr == 0 &&
-	    qei->unmount_barrier > client->greeting_umb) {
+	/* can safely unmount if we see that server processed our farewell */
+	if (am_voter && client->sending_farewell &&
+	    (le64_to_cpu(super->unmount_barrier) > client->greeting_umb)) {
 		client->farewell_error = 0;
 		complete(&client->farewell_comp);
 		ret = 0;
 		goto out;
 	}
 
-	if (qei->run_server) {
-		ret = scoutfs_server_start(sb, &qei->sin, qei->elected_nr, qei);
-		if (ret) {
-			/* forget that we tried to start the server */
-			memset(qei, 0, sizeof(*qei));
+	/* try to connect to the super's server address */
+	scoutfs_addr_to_sin(&sin, &super->server_addr);
+	if (sin.sin_addr.s_addr != 0 && sin.sin_port != 0)
+		ret = scoutfs_net_connect(sb, client->conn, &sin,
+					  CLIENT_CONNECT_TIMEOUT_MS);
+	else
+		ret = -ENOTCONN;
+
+	/* voters try to elect a leader if they couldn't connect */
+	if (ret < 0) {
+		/* non-voters will keep retrying */
+		if (!am_voter)
 			goto out;
-		}
-	}
 
-	/* always give the server some time before connecting */
-	msleep(CLIENT_CONNECT_DELAY_MS);
+		/* make sure local server isn't writing super during votes */
+		scoutfs_server_stop(sb);
 
-	ret = scoutfs_net_connect(sb, client->conn, &qei->sin,
-				  CLIENT_CONNECT_TIMEOUT_MS);
-	if (ret) {
-		/* we couldn't connect, try electing a new server */
-		client->old_elected_nr = qei->elected_nr;
+		timeout_abs = ktime_add_ms(ktime_get(),
+					   CLIENT_QUORUM_TIMEOUT_MS);
+
+		ret = scoutfs_quorum_election(sb, timeout_abs,
+					le64_to_cpu(super->quorum_server_term),
+					&elected_term);
+		/* start the server if we were asked to */
+		if (elected_term > 0)
+			ret = scoutfs_server_start(sb, &opts->server_addr,
+						   elected_term);
+		ret = -ENOTCONN;
 		goto out;
 	}
 
-	/* trust this server again if it's still around after we disconnect */
-	client->old_elected_nr = 0;
-
 	/* send a greeting to verify endpoints of each connection */
-	memcpy(greet.name, opts->uniq_name, sizeof(greet.name));
 	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
 	greet.server_term = cpu_to_le64(client->server_term);
-	greet.unmount_barrier = 0;
+	greet.unmount_barrier = cpu_to_le64(client->greeting_umb);
 	greet.node_id = cpu_to_le64(sbi->node_id);
 	greet.flags = 0;
 	if (client->sending_farewell)
 		greet.flags |= cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_FAREWELL);
+	if (am_voter)
+		greet.flags |= cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_VOTER);
 
 	ret = scoutfs_net_submit_request(sb, client->conn,
 					 SCOUTFS_NET_CMD_GREETING,
@@ -492,8 +480,12 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	if (ret)
 		scoutfs_net_shutdown(sb, client->conn);
 out:
+	kfree(super);
+
+	/* always have a small delay before retrying to avoid storms */
 	if (ret && !atomic_read(&client->shutting_down))
-		queue_work(client->workq, &client->connect_work);
+		queue_delayed_work(client->workq, &client->connect_dwork,
+				   msecs_to_jiffies(CLIENT_CONNECT_DELAY_MS));
 }
 
 /*
@@ -566,7 +558,7 @@ static void client_notify_down(struct super_block *sb,
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
 
 	if (!atomic_read(&client->shutting_down))
-		queue_work(client->workq, &client->connect_work);
+		queue_delayed_work(client->workq, &client->connect_dwork, 0);
 }
 
 /*
@@ -597,7 +589,8 @@ int scoutfs_client_setup(struct super_block *sb)
 	client->sb = sb;
 	init_completion(&client->node_id_comp);
 	atomic_set(&client->shutting_down, 0);
-	INIT_WORK(&client->connect_work, scoutfs_client_connect_worker);
+	INIT_DELAYED_WORK(&client->connect_dwork,
+			  scoutfs_client_connect_worker);
 	init_completion(&client->farewell_comp);
 
 	client->conn = scoutfs_net_alloc_conn(sb, NULL, client_notify_down, 0,
@@ -613,7 +606,7 @@ int scoutfs_client_setup(struct super_block *sb)
 		goto out;
 	}
 
-	queue_work(client->workq, &client->connect_work);
+	queue_delayed_work(client->workq, &client->connect_dwork, 0);
 	ret = 0;
 
 out:
@@ -693,15 +686,12 @@ void scoutfs_client_destroy(struct super_block *sb)
 	atomic_set(&client->shutting_down, 1);
 
 	/* make sure worker isn't using the conn */
-	cancel_work_sync(&client->connect_work);
+	cancel_delayed_work_sync(&client->connect_dwork);
 
 	/* make racing conn use explode */
 	conn = client->conn;
 	client->conn = NULL;
 	scoutfs_net_free_conn(sb, conn);
-
-	/* stop running the server if we were, harmless otherwise */
-	stop_our_server(sb, &client->qei);
 
 	if (client->workq)
 		destroy_workqueue(client->workq);

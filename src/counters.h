@@ -117,18 +117,19 @@
 	EXPAND_COUNTER(net_recv_invalid_message)		\
 	EXPAND_COUNTER(net_recv_messages)			\
 	EXPAND_COUNTER(net_unknown_request)			\
-	EXPAND_COUNTER(quorum_elected)				\
-	EXPAND_COUNTER(quorum_election_error)			\
-	EXPAND_COUNTER(quorum_fenced)				\
-	EXPAND_COUNTER(quorum_found_leader)			\
-	EXPAND_COUNTER(quorum_no_leader)			\
+	EXPAND_COUNTER(quorum_cycle)				\
+	EXPAND_COUNTER(quorum_elected_leader)			\
+	EXPAND_COUNTER(quorum_election_timeout)			\
+	EXPAND_COUNTER(quorum_failure)				\
+	EXPAND_COUNTER(quorum_new_leader)			\
 	EXPAND_COUNTER(quorum_read_block)			\
 	EXPAND_COUNTER(quorum_read_block_error)			\
 	EXPAND_COUNTER(quorum_read_invalid_block)		\
-	EXPAND_COUNTER(quorum_read_invalid_config)		\
-	EXPAND_COUNTER(quorum_waited)				\
+	EXPAND_COUNTER(quorum_saw_super_leader)			\
+	EXPAND_COUNTER(quorum_timedout)				\
 	EXPAND_COUNTER(quorum_write_block)			\
 	EXPAND_COUNTER(quorum_write_block_error)		\
+	EXPAND_COUNTER(quorum_fenced)				\
 	EXPAND_COUNTER(seg_alloc)				\
 	EXPAND_COUNTER(seg_csum_error)				\
 	EXPAND_COUNTER(seg_free)				\

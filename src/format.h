@@ -42,11 +42,14 @@
 
 /*
  * A reasonably large region of aligned quorum blocks follow the super
- * block.
+ * block.  Each voting cycle reads the entire region so we don't want it
+ * to be too enormous.  256K seems like a reasonably chunky single IO.
+ * The number of blocks in the region also determines the number of
+ * mounts that have a reasonable probability of not overwriting each
+ * other's random block locations.
  */
-#define SCOUTFS_QUORUM_BLKNO		((128ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
-#define SCOUTFS_QUORUM_BLOCKS		((128ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
-#define SCOUTFS_QUORUM_MAX_SLOTS	SCOUTFS_QUORUM_BLOCKS
+#define SCOUTFS_QUORUM_BLKNO		((256ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_QUORUM_BLOCKS		((256ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
 
 #define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
 
@@ -304,9 +307,10 @@ struct scoutfs_mounted_client_btree_key {
 } __packed;
 
 struct scoutfs_mounted_client_btree_val {
-	__u8 name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
+	__u8 flags;
 } __packed;
 
+#define SCOUTFS_MOUNTED_CLIENT_VOTER	(1 << 0)
 
 /*
  * The max number of links defines the max number of entries that we can
@@ -421,70 +425,47 @@ struct scoutfs_xattr {
 #define SCOUTFS_UUID_BYTES 16
 
 /*
- * During each quorum voting interval the fabric has to process 2 reads
- * and a write for each voting mount.  The only reason we limit the
- * number of active quorum mounts is to limit the number of IOs per
- * interval.  We use a pretty conservative interval given that IOs will
- * generally be faster than our constant and we'll have fewer active
- * than the max.
+ * Mounts read all the quorum blocks and write to one random quorum
+ * block during a cycle.  The min cycle time limits the per-mount iop
+ * load during elections.  The random cycle delay makes it less likely
+ * that mounts will read and write at the same time and miss each
+ * other's writes.  An election only completes if a quorum of mounts
+ * vote for a leader before any of their elections timeout.  This is
+ * made less likely by the probability that mounts will overwrite each
+ * others random block locations.  The max quorum count limits that
+ * probability.  9 mounts only have a 55% chance of writing to unique 4k
+ * blocks in a 256k region.  The election timeout is set to include
+ * enough cycles to usually complete the election.  Once a leader is
+ * elected it spends a number of cycles writing out blocks with itself
+ * logged as a leader.  This reduces the possibility that servers
+ * will have their log entries overwritten and not be fenced.
  */
-#define SCOUTFS_QUORUM_MAX_ACTIVE	7
-#define SCOUTFS_QUORUM_IO_LATENCY_MS	10
-#define SCOUTFS_QUORUM_INTERVAL_MS \
-	(SCOUTFS_QUORUM_MAX_ACTIVE * 3 * SCOUTFS_QUORUM_IO_LATENCY_MS)
+#define SCOUTFS_QUORUM_MAX_COUNT		9
+#define SCOUTFS_QUORUM_CYCLE_LO_MS		10
+#define SCOUTFS_QUORUM_CYCLE_HI_MS		20
+#define SCOUTFS_QUORUM_TERM_LO_MS		250
+#define SCOUTFS_QUORUM_TERM_HI_MS		500
+#define SCOUTFS_QUORUM_ELECTED_LOG_CYCLES	10
 
-/*
- * Each mount that is found in the quorum config in the super block can
- * write to quorum blocks indicating which mount they vote for as
- * the leader.
- *
- * @config_gen: references the config gen in the super block
- * @write_nr: incremented for every write, only 0 when never written
- * @elected_nr: incremented when elected, 0 otherwise
- * @unmount_barrier: incremented by servers when all members have unmounted
- * @vote_slot: the active config slot that the writer is voting for
- */
 struct scoutfs_quorum_block {
 	__le64 fsid;
 	__le64 blkno;
-	__le64 config_gen;
+	__le64 term;
 	__le64 write_nr;
-	__le64 elected_nr;
-	__le64 unmount_barrier;
+	__le64 voter_rid;
+	__le64 vote_for_rid;
 	__le32 crc;
-	__u8 vote_slot;
-	__u8 flags;
-} __packed;
-
-#define SCOUTFS_QUORUM_BLOCK_FLAG_ELECTED	(1 << 0)
-#define SCOUTFS_QUORUM_BLOCK_FLAG_LISTENING	(1 << 1)
-#define SCOUTFS_QUORUM_BLOCK_FLAGS_UNKNOWN	(U8_MAX << 2)
-
-#define SCOUTFS_QUORUM_MAX_SLOTS	SCOUTFS_QUORUM_BLOCKS
-
-/*
- * Each quorum voter is described by a slot which corresponds to the
- * block that the voter will write to.
- *
- * The stale flag is used to support config migration.  A new
- * configuration is written in free slots and the old configuration is
- * marked stale.  Stale slots can only be reclaimed once we have
- * evidence that the named mount won't try and write to it by seeing it
- * write to other slots or connect with the new gen.
- */
-struct scoutfs_quorum_config {
-	__le64 gen;
-	struct scoutfs_quorum_slot {
-		__u8 name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
+	__u8 log_nr;
+	struct scoutfs_quorum_log {
+		__le64 term;
+		__le64 rid;
 		struct scoutfs_inet_addr addr;
-		__u8 vote_priority;
-		__u8 flags;
-	} __packed slots[SCOUTFS_QUORUM_MAX_SLOTS];
+	} __packed log[0];
 } __packed;
 
-#define SCOUTFS_QUORUM_SLOT_ACTIVE		(1 << 0)
-#define SCOUTFS_QUORUM_SLOT_STALE		(1 << 1)
-#define SCOUTFS_QUORUM_SLOT_FLAGS_UNKNOWN	(U8_MAX << 2)
+#define SCOUTFS_QUORUM_LOG_MAX						\
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_quorum_block)) /	\
+		sizeof(struct scoutfs_quorum_log))
 
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
@@ -500,9 +481,13 @@ struct scoutfs_super_block {
 	__le64 next_seg_seq;
 	__le64 next_node_id;
 	__le64 next_compact_id;
+	__le64 quorum_fenced_term;
+	__le64 quorum_server_term;
+	__le64 unmount_barrier;
+	__u8 quorum_count;
+	struct scoutfs_inet_addr server_addr;
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
-	struct scoutfs_quorum_config quorum_config;
 	struct scoutfs_btree_root lock_clients;
 	struct scoutfs_btree_root trans_seqs;
 	struct scoutfs_btree_root mounted_clients;
@@ -624,8 +609,6 @@ enum {
  * Greetings verify identity of communicating nodes.  The sender sends
  * their credentials and the receiver verifies them.
  *
- * @name: The client sends its unique name to the server.
- *
  * @server_term: The raft term that elected the server.  Initially 0
  * from the client, sent by the server, then sent by the client as it
  * tries to reconnect.  Used to identify a client reconnecting to a
@@ -634,7 +617,7 @@ enum {
  * @unmount_barrier: Incremented every time the remaining majority of
  * quorum members all agree to leave.  The server tells a quorum member
  * the value that it's connecting under so that if the client sees the
- * value increase in a quorum block it knows that the server has
+ * value increase in the super block then it knows that the server has
  * processed its farewell and can safely unmount.
  *
  * @node_id: The id of the client.  Initially 0 from the client,
@@ -643,7 +626,6 @@ enum {
  * state must be dealt with.
  */
 struct scoutfs_net_greeting {
-	__u8 name[SCOUTFS_UNIQUE_NAME_MAX_BYTES];
 	__le64 fsid;
 	__le64 format_hash;
 	__le64 server_term;
@@ -653,7 +635,8 @@ struct scoutfs_net_greeting {
 } __packed;
 
 #define SCOUTFS_NET_GREETING_FLAG_FAREWELL	(1 << 0)
-#define SCOUTFS_NET_GREETING_FLAG_INVALID	(~(__u64)0 << 1)
+#define SCOUTFS_NET_GREETING_FLAG_VOTER		(1 << 1)
+#define SCOUTFS_NET_GREETING_FLAG_INVALID	(~(__u64)0 << 2)
 
 /*
  * This header precedes and describes all network messages sent over

@@ -200,7 +200,6 @@ static void scoutfs_put_super(struct super_block *sb)
 
 	scoutfs_shutdown_trans(sb);
 	scoutfs_client_destroy(sb);
-	scoutfs_quorum_destroy(sb);
 	scoutfs_inode_destroy(sb);
 
 	/* the server locks the listen address and compacts */
@@ -209,6 +208,9 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_net_destroy(sb);
 	scoutfs_seg_destroy(sb);
 	scoutfs_lock_destroy(sb);
+
+	/* server clears quorum leader flag during shutdown */
+	scoutfs_quorum_destroy(sb);
 
 	scoutfs_item_destroy(sb);
 	scoutfs_destroy_triggers(sb);
@@ -315,6 +317,16 @@ int scoutfs_read_super(struct super_block *sb,
 		scoutfs_err(sb, "super block has invalid format hash 0x%llx, expected 0x%llx",
 			    le64_to_cpu(super->format_hash),
 			    SCOUTFS_FORMAT_HASH);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* XXX do we want more rigorous invalid super checking? */
+
+	if (super->quorum_count == 0 ||
+	    super->quorum_count > SCOUTFS_QUORUM_MAX_COUNT) {
+		scoutfs_err(sb, "super block has invalid quorum count %u, must be > 0 and <= %u",
+			    super->quorum_count, SCOUTFS_QUORUM_MAX_COUNT);
 		ret = -EINVAL;
 		goto out;
 	}

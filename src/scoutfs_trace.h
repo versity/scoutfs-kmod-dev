@@ -2544,53 +2544,118 @@ TRACE_EVENT(scoutfs_lock_message,
 		  __entry->old_mode, __entry->new_mode)
 );
 
-DECLARE_EVENT_CLASS(scoutfs_quorum_block_class,
-	TP_PROTO(struct super_block *sb, u64 io_blkno,
-		 struct scoutfs_quorum_block *blk),
 
-	TP_ARGS(sb, io_blkno, blk),
+TRACE_EVENT(scoutfs_quorum_election,
+	TP_PROTO(struct super_block *sb, u64 prev_term),
+
+	TP_ARGS(sb, prev_term),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(__u64, io_blkno)
-		__field(__u64, hdr_blkno)
-		__field(__u64, config_gen)
-		__field(__u64, write_nr)
-		__field(__u64, elected_nr)
-		__field(__u64, unmount_barrier)
-		__field(__u32, crc)
-		__field(__u8, vote_slot)
-		__field(__u8, flags)
+		__field(__u64, prev_term)
 	),
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->io_blkno = io_blkno;
-		__entry->hdr_blkno = le64_to_cpu(blk->blkno);
-		__entry->config_gen = le64_to_cpu(blk->config_gen);
-		__entry->write_nr = le64_to_cpu(blk->write_nr);
-		__entry->elected_nr = le64_to_cpu(blk->elected_nr);
-		__entry->unmount_barrier = le64_to_cpu(blk->unmount_barrier);
-		__entry->crc = le32_to_cpu(blk->crc);
-		__entry->vote_slot = blk->vote_slot;
-		__entry->flags = blk->flags;
+		__entry->prev_term = prev_term;
 	),
 
-	TP_printk(SCSBF" io_blkno %llu hdr_blkno %llu config_gen %llu write_nr %llu elected_nr %llu umb %llu crc 0x%08x vote_slot %u flags %02x",
-		  SCSB_TRACE_ARGS, __entry->io_blkno, __entry->hdr_blkno,
-		  __entry->config_gen, __entry->write_nr, __entry->elected_nr,
-		  __entry->unmount_barrier, __entry->crc, __entry->vote_slot,
-		  __entry->flags)
+	TP_printk(SCSBF" prev_term %llu",
+		  SCSB_TRACE_ARGS, __entry->prev_term)
+);
+
+TRACE_EVENT(scoutfs_quorum_election_ret,
+	TP_PROTO(struct super_block *sb, int ret, u64 elected_term),
+
+	TP_ARGS(sb, ret, elected_term),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(int, ret)
+		__field(__u64, elected_term)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->ret = ret;
+		__entry->elected_term = elected_term;
+	),
+
+	TP_printk(SCSBF" ret %d elected_term %llu",
+		  SCSB_TRACE_ARGS, __entry->ret, __entry->elected_term)
+);
+
+TRACE_EVENT(scoutfs_quorum_election_vote,
+	TP_PROTO(struct super_block *sb, int role, u64 term, u64 vote_for_rid,
+		 int votes, int log_cycles, int quorum_count),
+
+	TP_ARGS(sb, role, term, vote_for_rid, votes, log_cycles, quorum_count),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(int, role)
+		__field(__u64, term)
+		__field(__u64, vote_for_rid)
+		__field(int, votes)
+		__field(int, log_cycles)
+		__field(int, quorum_count)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->role = role;
+		__entry->term = term;
+		__entry->vote_for_rid = vote_for_rid;
+		__entry->votes = votes;
+		__entry->log_cycles = log_cycles;
+		__entry->quorum_count = quorum_count;
+	),
+
+	TP_printk(SCSBF" role %d term %llu vote_for_rid %016llx votes %d log_cycles %d quorum_count %d",
+		  SCSB_TRACE_ARGS, __entry->role, __entry->term,
+		  __entry->vote_for_rid, __entry->votes, __entry->log_cycles,
+		  __entry->quorum_count)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_quorum_block_class,
+	TP_PROTO(struct super_block *sb, struct scoutfs_quorum_block *blk),
+
+	TP_ARGS(sb, blk),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, blkno)
+		__field(__u64, term)
+		__field(__u64, write_nr)
+		__field(__u64, voter_rid)
+		__field(__u64, vote_for_rid)
+		__field(__u32, crc)
+		__field(__u8, log_nr)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->blkno = le64_to_cpu(blk->blkno);
+		__entry->term = le64_to_cpu(blk->term);
+		__entry->write_nr = le64_to_cpu(blk->write_nr);
+		__entry->voter_rid = le64_to_cpu(blk->voter_rid);
+		__entry->vote_for_rid = le64_to_cpu(blk->vote_for_rid);
+		__entry->crc = le32_to_cpu(blk->crc);
+		__entry->log_nr = blk->log_nr;
+	),
+
+	TP_printk(SCSBF" blkno %llu term %llu write_nr %llu voter_rid %016llx vote_for_rid %016llx crc 0x%08x log_nr %u",
+		  SCSB_TRACE_ARGS, __entry->blkno, __entry->term,
+		  __entry->write_nr, __entry->voter_rid, __entry->vote_for_rid,
+		  __entry->crc, __entry->log_nr)
 );
 DEFINE_EVENT(scoutfs_quorum_block_class, scoutfs_quorum_read_block,
-	TP_PROTO(struct super_block *sb, u64 io_blkno,
-		 struct scoutfs_quorum_block *blk),
-	TP_ARGS(sb, io_blkno, blk)
+	TP_PROTO(struct super_block *sb, struct scoutfs_quorum_block *blk),
+	TP_ARGS(sb, blk)
 );
 DEFINE_EVENT(scoutfs_quorum_block_class, scoutfs_quorum_write_block,
-	TP_PROTO(struct super_block *sb, u64 io_blkno,
-		 struct scoutfs_quorum_block *blk),
-	TP_ARGS(sb, io_blkno, blk)
+	TP_PROTO(struct super_block *sb, struct scoutfs_quorum_block *blk),
+	TP_ARGS(sb, blk)
 );
 
 /*

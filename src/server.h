@@ -74,10 +74,9 @@ int scoutfs_server_lock_recover_request(struct super_block *sb, u64 node_id,
 struct sockaddr_in;
 struct scoutfs_quorum_elected_info;
 int scoutfs_server_start(struct super_block *sb, struct sockaddr_in *sin,
-			 u64 term, struct scoutfs_quorum_elected_info *qei);
+			 u64 term);
 void scoutfs_server_abort(struct super_block *sb);
-void scoutfs_server_stop(struct super_block *sb,
-			 struct scoutfs_quorum_elected_info *qei);
+void scoutfs_server_stop(struct super_block *sb);
 
 int scoutfs_server_setup(struct super_block *sb);
 void scoutfs_server_destroy(struct super_block *sb);

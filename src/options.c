@@ -28,7 +28,6 @@
 
 static const match_table_t tokens = {
 	{Opt_server_addr, "server_addr=%s"},
-	{Opt_uniq_name, "uniq_name=%s"},
 	{Opt_err, NULL}
 };
 
@@ -96,7 +95,7 @@ int scoutfs_parse_options(struct super_block *sb, char *options,
 {
 	char ipstr[INET_ADDRSTRLEN + 1];
 	substring_t args[MAX_OPT_ARGS];
-	int token, len;
+	int token;
 	char *p;
 	int ret;
 
@@ -116,22 +115,11 @@ int scoutfs_parse_options(struct super_block *sb, char *options,
 			if (ret < 0)
 				return ret;
 			break;
-		case Opt_uniq_name:
-			len = match_strlcpy(parsed->uniq_name, args,
-					    SCOUTFS_UNIQUE_NAME_MAX_BYTES);
-			if (len == 0 || len > SCOUTFS_UNIQUE_NAME_MAX_BYTES)
-				return -EINVAL;
-			break;
 		default:
 			scoutfs_err(sb, "Unknown or malformed option, \"%s\"",
 				    p);
 			break;
 		}
-	}
-
-	if (parsed->uniq_name[0] == '\0') {
-		scoutfs_err(sb, "must provide a uniq_name option");
-		return -EINVAL;
 	}
 
 	return 0;

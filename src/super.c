@@ -139,7 +139,6 @@ static int scoutfs_show_options(struct seq_file *seq, struct dentry *root)
 	struct mount_options *opts = &SCOUTFS_SB(sb)->opts;
 
 	seq_printf(seq, ",server_addr="SIN_FMT, SIN_ARG(&opts->server_addr));
-	seq_printf(seq, ",uniq_name=%s", opts->uniq_name);
 
 	return 0;
 }
@@ -155,19 +154,8 @@ static ssize_t server_addr_show(struct kobject *kobj,
 }
 SCOUTFS_ATTR_RO(server_addr);
 
-static ssize_t uniq_name_show(struct kobject *kobj,
-			      struct kobj_attribute *attr, char *buf)
-{
-	struct super_block *sb = SCOUTFS_SYSFS_ATTRS_SB(kobj);
-	struct mount_options *opts = &SCOUTFS_SB(sb)->opts;
-
-	return snprintf(buf, PAGE_SIZE, "%s\n", opts->uniq_name);
-}
-SCOUTFS_ATTR_RO(uniq_name);
-
 static struct attribute *mount_options_attrs[] = {
 	SCOUTFS_ATTR_PTR(server_addr),
-	SCOUTFS_ATTR_PTR(uniq_name),
 	NULL,
 };
 

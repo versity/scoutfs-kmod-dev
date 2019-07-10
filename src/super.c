@@ -429,7 +429,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_quorum_setup(sb) ?:
 	      scoutfs_server_setup(sb) ?:
 	      scoutfs_client_setup(sb) ?:
-	      scoutfs_client_wait_node_id(sb) ?:
 	      scoutfs_lock_rid(sb, SCOUTFS_LOCK_WRITE, 0, sbi->rid,
 				   &sbi->rid_lock);
 	if (ret)

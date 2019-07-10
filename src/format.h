@@ -287,7 +287,7 @@ struct scoutfs_extent_btree_key {
  * server failover knows who to wait for before resuming operations.
  */
 struct scoutfs_lock_client_btree_key {
-	__be64 node_id;
+	__be64 rid;
 } __packed;
 
 /*
@@ -296,14 +296,14 @@ struct scoutfs_lock_client_btree_key {
  */
 struct scoutfs_trans_seq_btree_key {
 	__be64 trans_seq;
-	__be64 node_id;
+	__be64 rid;
 } __packed;
 
 /*
  * The server keeps a persistent record of mounted clients.
  */
 struct scoutfs_mounted_client_btree_key {
-	__be64 node_id;
+	__be64 rid;
 } __packed;
 
 struct scoutfs_mounted_client_btree_val {
@@ -479,7 +479,6 @@ struct scoutfs_super_block {
 	__le64 alloc_cursor;
 	struct scoutfs_btree_ring bring;
 	__le64 next_seg_seq;
-	__le64 next_node_id;
 	__le64 next_compact_id;
 	__le64 quorum_fenced_term;
 	__le64 quorum_server_term;
@@ -611,8 +610,9 @@ enum {
  *
  * @server_term: The raft term that elected the server.  Initially 0
  * from the client, sent by the server, then sent by the client as it
- * tries to reconnect.  Used to identify a client reconnecting to a
- * server that has timed out its connection.
+ * tries to reconnect.  Used to identify a client reconnecting to both
+ * the same serer after receiving a greeting response and to a new
+ * server after failover.
  *
  * @unmount_barrier: Incremented every time the remaining majority of
  * quorum members all agree to leave.  The server tells a quorum member
@@ -620,17 +620,17 @@ enum {
  * value increase in the super block then it knows that the server has
  * processed its farewell and can safely unmount.
  *
- * @node_id: The id of the client.  Initially 0 from the client,
- * assigned by the server, and sent by the client as it reconnects.
- * Used by the server to identify reconnecting clients whose existing
- * state must be dealt with.
+ * @rid: The client's random id that was generated once as the mount
+ * started up.  This identifies a specific remote mount across
+ * connections and servers.  It's set to the client's rid in both the
+ * request and response for consistency.
  */
 struct scoutfs_net_greeting {
 	__le64 fsid;
 	__le64 format_hash;
 	__le64 server_term;
 	__le64 unmount_barrier;
-	__le64 node_id;
+	__le64 rid;
 	__le64 flags;
 } __packed;
 

@@ -99,7 +99,7 @@ struct server_info {
  * The server tracks each connected client.
  */
 struct server_client_info {
-	u64 node_id;
+	u64 rid;
 	struct list_head head;
 	unsigned long nr_compacts;
 };
@@ -894,7 +894,7 @@ static int server_advance_seq(struct super_block *sb,
 	__le64 their_seq;
 	__le64 next_seq;
 	struct scoutfs_trans_seq_btree_key tsk;
-	u64 node_id = scoutfs_net_client_node_id(conn);
+	u64 rid = scoutfs_net_client_rid(conn);
 	int ret;
 
 	if (arg_len != sizeof(__le64)) {
@@ -908,7 +908,7 @@ static int server_advance_seq(struct super_block *sb,
 
 	if (their_seq != 0) {
 		tsk.trans_seq = le64_to_be64(their_seq);
-		tsk.node_id = cpu_to_be64(node_id);
+		tsk.rid = cpu_to_be64(rid);
 
 		ret = scoutfs_btree_delete(sb, &super->trans_seqs,
 					   &tsk, sizeof(tsk));
@@ -919,11 +919,11 @@ static int server_advance_seq(struct super_block *sb,
 	next_seq = super->next_trans_seq;
 	le64_add_cpu(&super->next_trans_seq, 1);
 
-	trace_scoutfs_trans_seq_advance(sb, node_id, le64_to_cpu(their_seq),
+	trace_scoutfs_trans_seq_advance(sb, rid, le64_to_cpu(their_seq),
 					le64_to_cpu(next_seq));
 
 	tsk.trans_seq = le64_to_be64(next_seq);
-	tsk.node_id = cpu_to_be64(node_id);
+	tsk.rid = cpu_to_be64(rid);
 
 	ret = scoutfs_btree_insert(sb, &super->trans_seqs,
 				   &tsk, sizeof(tsk), NULL, 0);
@@ -946,7 +946,7 @@ out:
  * client's farewell is retransmitted so it's OK to not find any
  * entries.  This is called with the server commit rwsem held.
  */
-static int remove_trans_seq(struct super_block *sb, u64 node_id)
+static int remove_trans_seq(struct super_block *sb, u64 rid)
 {
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
@@ -958,7 +958,7 @@ static int remove_trans_seq(struct super_block *sb, u64 node_id)
 	down_write(&server->seq_rwsem);
 
 	tsk.trans_seq = 0;
-	tsk.node_id = 0;
+	tsk.rid = 0;
 
 	for (;;) {
 		ret = scoutfs_btree_next(sb, &super->trans_seqs,
@@ -972,8 +972,8 @@ static int remove_trans_seq(struct super_block *sb, u64 node_id)
 		memcpy(&tsk, iref.key, iref.key_len);
 		scoutfs_btree_put_iref(&iref);
 
-		if (be64_to_cpu(tsk.node_id) == node_id) {
-			trace_scoutfs_trans_seq_farewell(sb, node_id,
+		if (be64_to_cpu(tsk.rid) == rid) {
+			trace_scoutfs_trans_seq_farewell(sb, rid,
 						be64_to_cpu(tsk.trans_seq));
 			ret = scoutfs_btree_delete(sb, &super->trans_seqs,
 						   &tsk, sizeof(tsk));
@@ -981,7 +981,7 @@ static int remove_trans_seq(struct super_block *sb, u64 node_id)
 		}
 
 		be64_add_cpu(&tsk.trans_seq, 1);
-		tsk.node_id = 0;
+		tsk.rid = 0;
 	}
 
 	up_write(&server->seq_rwsem);
@@ -1006,7 +1006,7 @@ static int server_get_last_seq(struct super_block *sb,
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_trans_seq_btree_key tsk;
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	u64 node_id = scoutfs_net_client_node_id(conn);
+	u64 rid = scoutfs_net_client_rid(conn);
 	__le64 last_seq = 0;
 	int ret;
 
@@ -1018,7 +1018,7 @@ static int server_get_last_seq(struct super_block *sb,
 	down_read(&server->seq_rwsem);
 
 	tsk.trans_seq = 0;
-	tsk.node_id = 0;
+	tsk.rid = 0;
 
 	ret = scoutfs_btree_next(sb, &super->trans_seqs,
 				 &tsk, sizeof(tsk), &iref);
@@ -1037,7 +1037,7 @@ static int server_get_last_seq(struct super_block *sb,
 		ret = 0;
 	}
 
-	trace_scoutfs_trans_seq_last(sb, node_id, le64_to_cpu(last_seq));
+	trace_scoutfs_trans_seq_last(sb, rid, le64_to_cpu(last_seq));
 
 	up_read(&server->seq_rwsem);
 out:
@@ -1107,12 +1107,12 @@ static int server_lock(struct super_block *sb,
 		       struct scoutfs_net_connection *conn,
 		       u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	u64 node_id = scoutfs_net_client_node_id(conn);
+	u64 rid = scoutfs_net_client_rid(conn);
 
 	if (arg_len != sizeof(struct scoutfs_net_lock))
 		return -EINVAL;
 
-	return scoutfs_lock_server_request(sb, node_id, id, arg);
+	return scoutfs_lock_server_request(sb, rid, id, arg);
 }
 
 static int lock_response(struct super_block *sb,
@@ -1120,31 +1120,31 @@ static int lock_response(struct super_block *sb,
 			 void *resp, unsigned int resp_len,
 			 int error, void *data)
 {
-	u64 node_id = scoutfs_net_client_node_id(conn);
+	u64 rid = scoutfs_net_client_rid(conn);
 
 	if (resp_len != sizeof(struct scoutfs_net_lock))
 		return -EINVAL;
 
-	return scoutfs_lock_server_response(sb, node_id, resp);
+	return scoutfs_lock_server_response(sb, rid, resp);
 }
 
-int scoutfs_server_lock_request(struct super_block *sb, u64 node_id,
+int scoutfs_server_lock_request(struct super_block *sb, u64 rid,
 				struct scoutfs_net_lock *nl)
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 
-	return scoutfs_net_submit_request_node(sb, server->conn, node_id,
+	return scoutfs_net_submit_request_node(sb, server->conn, rid,
 					      SCOUTFS_NET_CMD_LOCK,
 					      nl, sizeof(*nl),
 					      lock_response, NULL, NULL);
 }
 
-int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
+int scoutfs_server_lock_response(struct super_block *sb, u64 rid,
 				 u64 id, struct scoutfs_net_lock *nl)
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 
-	return scoutfs_net_response_node(sb, server->conn, node_id,
+	return scoutfs_net_response_node(sb, server->conn, rid,
 					 SCOUTFS_NET_CMD_LOCK, id, 0,
 					 nl, sizeof(*nl));
 }
@@ -1162,34 +1162,34 @@ static int lock_recover_response(struct super_block *sb,
 				 void *resp, unsigned int resp_len,
 				 int error, void *data)
 {
-	u64 node_id = scoutfs_net_client_node_id(conn);
+	u64 rid = scoutfs_net_client_rid(conn);
 
 	if (invalid_recover(resp, resp_len))
 		return -EINVAL;
 
-	return scoutfs_lock_server_recover_response(sb, node_id, resp);
+	return scoutfs_lock_server_recover_response(sb, rid, resp);
 }
 
-int scoutfs_server_lock_recover_request(struct super_block *sb, u64 node_id,
+int scoutfs_server_lock_recover_request(struct super_block *sb, u64 rid,
 					struct scoutfs_key *key)
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 
-	return scoutfs_net_submit_request_node(sb, server->conn, node_id,
+	return scoutfs_net_submit_request_node(sb, server->conn, rid,
 					      SCOUTFS_NET_CMD_LOCK_RECOVER,
 					      key, sizeof(*key),
 					      lock_recover_response,
 					      NULL, NULL);
 }
 
-static int insert_mounted_client(struct super_block *sb, u64 node_id,
+static int insert_mounted_client(struct super_block *sb, u64 rid,
 				 u64 gr_flags)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_mounted_client_btree_key mck;
 	struct scoutfs_mounted_client_btree_val mcv;
 
-	mck.node_id = cpu_to_be64(node_id);
+	mck.rid = cpu_to_be64(rid);
 	mcv.flags = 0;
 	if (gr_flags & SCOUTFS_NET_GREETING_FLAG_VOTER)
 		mcv.flags |= SCOUTFS_MOUNTED_CLIENT_VOTER;
@@ -1208,13 +1208,13 @@ static int insert_mounted_client(struct super_block *sb, u64 node_id,
  *
  * The caller has to serialize with farewell processing.
  */
-static int delete_mounted_client(struct super_block *sb, u64 node_id)
+static int delete_mounted_client(struct super_block *sb, u64 rid)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_mounted_client_btree_key mck;
 	int ret;
 
-	mck.node_id = cpu_to_be64(node_id);
+	mck.rid = cpu_to_be64(rid);
 
 	ret = scoutfs_btree_delete(sb, &super->mounted_clients,
 				   &mck, sizeof(mck));
@@ -1230,17 +1230,8 @@ static int delete_mounted_client(struct super_block *sb, u64 node_id)
  * log some detail before shutting down.  A failure to send a greeting
  * response shuts down the connection.
  *
- * We allocate a new node_id for the first connect attempt from a
- * client.
- *
- * If a client reconnects they'll send their initially assigned node_id
- * in their greeting request.
- *
- * XXX We can lose allocated node_ids here as we record the node_id as
- * live as we send a valid greeting response.  The client might
- * disconnect before they receive the response and resent and initial
- * blank greeting.  We could use a client uuid to associate with
- * allocated node_ids.
+ * If a client reconnects they'll send their previously received
+ * serer_term in their greeting request.
  *
  * XXX The logic of this has gotten convoluted.  The lock server can
  * send a recovery request so it needs to be called after the core net
@@ -1259,9 +1250,8 @@ static int server_greeting(struct super_block *sb,
 	struct scoutfs_net_greeting greet;
 	DECLARE_SERVER_INFO(sb, server);
 	struct commit_waiter cw;
-	__le64 node_id = 0;
 	__le64 umb = 0;
-	bool sent_node_id;
+	bool reconnecting;
 	bool first_contact;
 	bool farewell;
 	int ret = 0;
@@ -1288,17 +1278,15 @@ static int server_greeting(struct super_block *sb,
 		goto send_err;
 	}
 
-	if (gr->node_id == 0) {
+	if (gr->server_term == 0) {
 		down_read(&server->commit_rwsem);
 
 		spin_lock(&server->lock);
-		node_id = super->next_node_id;
-		le64_add_cpu(&super->next_node_id, 1);
 		umb = super->unmount_barrier;
 		spin_unlock(&server->lock);
 
 		mutex_lock(&server->farewell_mutex);
-		ret = insert_mounted_client(sb, le64_to_cpu(node_id),
+		ret = insert_mounted_client(sb, le64_to_cpu(gr->rid),
 					    le64_to_cpu(gr->flags));
 		mutex_unlock(&server->farewell_mutex);
 
@@ -1310,20 +1298,17 @@ static int server_greeting(struct super_block *sb,
 			queue_work(server->wq, &server->farewell_work);
 		}
 	} else {
-		node_id = gr->node_id;
 		umb = gr->unmount_barrier;
 	}
 
 send_err:
 	err = ret;
-	if (err)
-		node_id = 0;
 
 	greet.fsid = super->hdr.fsid;
 	greet.format_hash = super->format_hash;
 	greet.server_term = cpu_to_le64(server->term);
 	greet.unmount_barrier = umb;
-	greet.node_id = node_id;
+	greet.rid = gr->rid;
 	greet.flags = 0;
 
 	/* queue greeting response to be sent first once messaging enabled */
@@ -1335,15 +1320,15 @@ send_err:
 		goto out;
 
 	/* have the net core enable messaging and resend */
-	sent_node_id = gr->node_id != 0;
+	reconnecting = gr->server_term != 0;
 	first_contact = le64_to_cpu(gr->server_term) != server->term;
 	if (gr->flags & cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_FAREWELL))
 		farewell = true;
 	else
 		farewell = false;
 
-	scoutfs_net_server_greeting(sb, conn, le64_to_cpu(node_id), id,
-				    sent_node_id, first_contact, farewell);
+	scoutfs_net_server_greeting(sb, conn, le64_to_cpu(gr->rid), id,
+				    reconnecting, first_contact, farewell);
 
 	/* lock server might send recovery request */
 	if (le64_to_cpu(gr->server_term) != server->term) {
@@ -1351,7 +1336,7 @@ send_err:
 		/* we're now doing two commits per greeting, not great */
 		down_read(&server->commit_rwsem);
 
-		ret = scoutfs_lock_server_greeting(sb, le64_to_cpu(node_id),
+		ret = scoutfs_lock_server_greeting(sb, le64_to_cpu(gr->rid),
 						   gr->server_term != 0);
 		if (ret == 0)
 			queue_commit_work(server, &cw);
@@ -1369,7 +1354,7 @@ out:
 struct farewell_request {
 	struct list_head entry;
 	u64 net_id;
-	u64 node_id;
+	u64 rid;
 };
 
 static bool invalid_mounted_client_item(struct scoutfs_btree_item_ref *iref)
@@ -1435,7 +1420,7 @@ static void farewell_worker(struct work_struct *work)
 	/* count how many reqs requests are from voting clients */
 	nr_unmounting = 0;
 	list_for_each_entry_safe(fw, tmp, &reqs, entry) {
-		mck.node_id = cpu_to_be64(fw->node_id);
+		mck.rid = cpu_to_be64(fw->rid);
 		ret = scoutfs_btree_lookup(sb, &super->mounted_clients,
 					   &mck, sizeof(mck), &iref);
 		if (ret == 0 && invalid_mounted_client_item(&iref)) {
@@ -1484,7 +1469,7 @@ static void farewell_worker(struct work_struct *work)
 			nr_mounted++;
 
 		scoutfs_btree_put_iref(&iref);
-		be64_add_cpu(&mck.node_id, 1);
+		be64_add_cpu(&mck.rid, 1);
 
 	}
 
@@ -1505,9 +1490,9 @@ static void farewell_worker(struct work_struct *work)
 
 		down_read(&server->commit_rwsem);
 
-		ret = scoutfs_lock_server_farewell(sb, fw->node_id) ?:
-		      remove_trans_seq(sb, fw->node_id) ?:
-		      delete_mounted_client(sb, fw->node_id);
+		ret = scoutfs_lock_server_farewell(sb, fw->rid) ?:
+		      remove_trans_seq(sb, fw->rid) ?:
+		      delete_mounted_client(sb, fw->rid);
 		if (ret == 0)
 			queue_commit_work(server, &cw);
 
@@ -1532,7 +1517,7 @@ static void farewell_worker(struct work_struct *work)
 	/* and finally send all the responses */
 	list_for_each_entry_safe(fw, tmp, &send, entry) {
 
-		ret = scoutfs_net_response_node(sb, server->conn, fw->node_id,
+		ret = scoutfs_net_response_node(sb, server->conn, fw->rid,
 						SCOUTFS_NET_CMD_FAREWELL,
 						fw->net_id, 0, NULL, 0);
 		if (ret)
@@ -1556,7 +1541,7 @@ out:
 		queue_work(server->wq, &server->farewell_work);
 }
 
-static void free_farewell_requests(struct super_block *sb, u64 node_id)
+static void free_farewell_requests(struct super_block *sb, u64 rid)
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 	struct farewell_request *tmp;
@@ -1564,7 +1549,7 @@ static void free_farewell_requests(struct super_block *sb, u64 node_id)
 
 	mutex_lock(&server->farewell_mutex);
 	list_for_each_entry_safe(fw, tmp, &server->farewell_requests, entry) {
-		if (node_id == 0 || fw->node_id == node_id) {
+		if (rid == 0 || fw->rid == rid) {
 			list_del_init(&fw->entry);
 			kfree(fw);
 		}
@@ -1588,7 +1573,7 @@ static int server_farewell(struct super_block *sb,
 			   u8 cmd, u64 id, void *arg, u16 arg_len)
 {
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	u64 node_id = scoutfs_net_client_node_id(conn);
+	u64 rid = scoutfs_net_client_rid(conn);
 	struct farewell_request *fw;
 
 	if (arg_len != 0)
@@ -1600,7 +1585,7 @@ static int server_farewell(struct super_block *sb,
 	if (fw == NULL)
 		return -ENOMEM;
 
-	fw->node_id = node_id;
+	fw->rid = rid;
 	fw->net_id = id;
 
 	mutex_lock(&server->farewell_mutex);
@@ -1616,13 +1601,13 @@ static int server_farewell(struct super_block *sb,
 /* requests sent to clients are tracked so we can free resources */
 struct compact_request {
 	struct list_head head;
-	u64 node_id;
+	u64 rid;
 	struct scoutfs_net_compact_request req;
 };
 
 /*
  * Find a node that can process our compaction request.  Return a
- * node_id if we found a client and added the compaction to the client
+ * rid if we found a client and added the compaction to the client
  * and server counts.  Returns 0 if no suitable clients were found.
  */
 static u64 compact_request_start(struct super_block *sb,
@@ -1631,7 +1616,7 @@ static u64 compact_request_start(struct super_block *sb,
 	struct server_info *server = SCOUTFS_SB(sb)->server_info;
 	struct server_client_info *last;
 	struct server_client_info *sci;
-	u64 node_id = 0;
+	u64 rid = 0;
 
 	spin_lock(&server->lock);
 
@@ -1650,8 +1635,8 @@ static u64 compact_request_start(struct super_block *sb,
 			list_add(&cr->head, &server->compacts);
 			server->nr_compacts++;
 			sci->nr_compacts++;
-			node_id = sci->node_id;
-			cr->node_id = node_id;
+			rid = sci->rid;
+			cr->rid = rid;
 			break;
 		}
 		if (sci == last)
@@ -1659,14 +1644,14 @@ static u64 compact_request_start(struct super_block *sb,
 	}
 
 	trace_scoutfs_server_compact_start(sb, le64_to_cpu(cr->req.id),
-					   cr->req.ents[0].level, node_id,
-					   node_id ? sci->nr_compacts : 0,
+					   cr->req.ents[0].level, rid,
+					   rid ? sci->nr_compacts : 0,
 					   server->nr_compacts,
 					   server->compacts_per_client);
 
 	spin_unlock(&server->lock);
 
-	return node_id;
+	return rid;
 }
 
 /*
@@ -1688,7 +1673,7 @@ static struct compact_request *compact_request_done(struct super_block *sb,
 			continue;
 
 		list_for_each_entry(sci, &server->clients, head) {
-			if (sci->node_id == cr->node_id) {
+			if (sci->rid == cr->rid) {
 				sci->nr_compacts--;
 				break;
 			}
@@ -1700,7 +1685,7 @@ static struct compact_request *compact_request_done(struct super_block *sb,
 		break;
 	}
 
-	trace_scoutfs_server_compact_done(sb, id, ret ? ret->node_id : 0,
+	trace_scoutfs_server_compact_done(sb, id, ret ? ret->rid : 0,
 					  server->nr_compacts);
 
 	spin_unlock(&server->lock);
@@ -1728,7 +1713,7 @@ static void forget_client_compacts(struct super_block *sb,
 
 	spin_lock(&server->lock);
 	list_for_each_entry_safe(cr, pos, &server->compacts, head) {
-		if (cr->node_id == sci->node_id) {
+		if (cr->rid == sci->rid) {
 			sci->nr_compacts--;
 			server->nr_compacts--;
 			list_move(&cr->head, &forget);
@@ -2129,7 +2114,7 @@ static void scoutfs_server_compact_worker(struct work_struct *work)
 	struct compact_request *cr;
 	struct commit_waiter cw;
 	int nr_segnos = 0;
-	u64 node_id;
+	u64 rid;
 	__le64 id;
 	int ret;
 
@@ -2169,14 +2154,14 @@ static void scoutfs_server_compact_worker(struct work_struct *work)
 	/* try to send to a node with capacity, they can disconnect */
 retry:
 	req->id = id;
-	node_id = compact_request_start(sb, cr);
-	if (node_id == 0) {
+	rid = compact_request_start(sb, cr);
+	if (rid == 0) {
 		ret = 0;
 		goto out;
 	}
 
 	/* response processing can complete compaction before this returns */
-	ret = scoutfs_net_submit_request_node(sb, server->conn, node_id,
+	ret = scoutfs_net_submit_request_node(sb, server->conn, rid,
 					      SCOUTFS_NET_CMD_COMPACT,
 					      req, sizeof(*req),
 					      compact_response, NULL, NULL);
@@ -2228,18 +2213,18 @@ static scoutfs_net_request_t server_req_funcs[] = {
 
 static void server_notify_up(struct super_block *sb,
 			     struct scoutfs_net_connection *conn,
-			     void *info, u64 node_id)
+			     void *info, u64 rid)
 {
 	struct server_client_info *sci = info;
 	DECLARE_SERVER_INFO(sb, server);
 
-	if (node_id != 0) {
-		sci->node_id = node_id;
+	if (rid != 0) {
+		sci->rid = rid;
 		sci->nr_compacts = 0;
 		spin_lock(&server->lock);
 		list_add_tail(&sci->head, &server->clients);
 		server->nr_clients++;
-		trace_scoutfs_server_client_up(sb, node_id, server->nr_clients);
+		trace_scoutfs_server_client_up(sb, rid, server->nr_clients);
 		spin_unlock(&server->lock);
 
 		try_queue_compact(server);
@@ -2248,20 +2233,20 @@ static void server_notify_up(struct super_block *sb,
 
 static void server_notify_down(struct super_block *sb,
 			       struct scoutfs_net_connection *conn,
-			       void *info, u64 node_id)
+			       void *info, u64 rid)
 {
 	struct server_client_info *sci = info;
 	DECLARE_SERVER_INFO(sb, server);
 
-	if (node_id != 0) {
+	if (rid != 0) {
 		spin_lock(&server->lock);
 		list_del_init(&sci->head);
 		server->nr_clients--;
-		trace_scoutfs_server_client_down(sb, node_id,
+		trace_scoutfs_server_client_down(sb, rid,
 						 server->nr_clients);
 		spin_unlock(&server->lock);
 
-		free_farewell_requests(sb, node_id);
+		free_farewell_requests(sb, rid);
 
 		forget_client_compacts(sb, sci);
 		try_queue_compact(server);

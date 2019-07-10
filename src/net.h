@@ -37,14 +37,14 @@ typedef int (*scoutfs_net_response_t)(struct super_block *sb,
 
 typedef void (*scoutfs_net_notify_t)(struct super_block *sb,
 				     struct scoutfs_net_connection *conn,
-				     void *info, u64 node_id);
+				     void *info, u64 rid);
 
 struct scoutfs_net_connection *
 scoutfs_net_alloc_conn(struct super_block *sb,
 		       scoutfs_net_notify_t notify_up,
 		       scoutfs_net_notify_t notify_down, size_t info_size,
 		       scoutfs_net_request_t *req_funcs, char *name_suffix);
-u64 scoutfs_net_client_node_id(struct scoutfs_net_connection *conn);
+u64 scoutfs_net_client_rid(struct scoutfs_net_connection *conn);
 int scoutfs_net_connect(struct super_block *sb,
 			struct scoutfs_net_connection *conn,
 			struct sockaddr_in *sin, unsigned long timeout_ms);
@@ -60,8 +60,7 @@ int scoutfs_net_submit_request(struct super_block *sb,
 			       void *resp_data, u64 *id_ret);
 int scoutfs_net_submit_request_node(struct super_block *sb,
 				    struct scoutfs_net_connection *conn,
-				    u64 node_id, u8 cmd,
-				    void *arg, u16 arg_len,
+				    u64 rid, u8 cmd, void *arg, u16 arg_len,
 				    scoutfs_net_response_t resp_func,
 				    void *resp_data, u64 *id_ret);
 void scoutfs_net_cancel_request(struct super_block *sb,
@@ -76,7 +75,7 @@ int scoutfs_net_response(struct super_block *sb,
 			 u8 cmd, u64 id, int error, void *resp, u16 resp_len);
 int scoutfs_net_response_node(struct super_block *sb,
 			      struct scoutfs_net_connection *conn,
-			      u64 node_id, u8 cmd, u64 id, int error,
+			      u64 rid, u8 cmd, u64 id, int error,
 			      void *resp, u16 resp_len);
 void scoutfs_net_shutdown(struct super_block *sb,
 			  struct scoutfs_net_connection *conn);
@@ -88,8 +87,8 @@ void scoutfs_net_client_greeting(struct super_block *sb,
 				 bool new_server);
 void scoutfs_net_server_greeting(struct super_block *sb,
 				 struct scoutfs_net_connection *conn,
-				 u64 node_id, u64 greeting_id,
-				 bool sent_node_id, bool first_contact,
+				 u64 rid, u64 greeting_id,
+				 bool reconnecting, bool first_contact,
 				 bool farewell);
 void scoutfs_net_farewell(struct super_block *sb,
 			  struct scoutfs_net_connection *conn);

@@ -109,7 +109,7 @@ struct scoutfs_net_connection {
 	unsigned long connect_timeout_ms;
 
 	struct socket *sock;
-	u64 node_id;			/* assigned during greeting */
+	u64 rid;
 	u64 greeting_id;
 	struct sockaddr_in sockname;
 	struct sockaddr_in peername;
@@ -344,12 +344,12 @@ static void shutdown_conn(struct scoutfs_net_connection *conn)
  * connection has passed the greeting and isn't being shut down.  At all
  * other times we add new sends to the resend queue.
  *
- * If a non-zero node_id is specified then the conn argument is a listening
+ * If a non-zero rid is specified then the conn argument is a listening
  * connection and the connection to send the message down is found by
- * searching for the node_id in its accepted connections.
+ * searching for the rid in its accepted connections.
  */
 static int submit_send(struct super_block *sb,
-		       struct scoutfs_net_connection *conn, u64 node_id,
+		       struct scoutfs_net_connection *conn, u64 rid,
 		       u8 cmd, u8 flags, u64 id, u8 net_err,
 		       void *data, u16 data_len,
 		       scoutfs_net_response_t resp_func, void *resp_data,
@@ -376,19 +376,19 @@ static int submit_send(struct super_block *sb,
 
 	spin_lock_nested(&conn->lock, CONN_LOCK_LISTENER);
 
-	if (node_id != 0) {
+	if (rid != 0) {
 		list_for_each_entry(acc_conn, &conn->accepted_list,
 				    accepted_head) {
-			if (acc_conn->node_id == node_id) {
+			if (acc_conn->rid == rid) {
 				spin_lock_nested(&acc_conn->lock,
 						 CONN_LOCK_ACCEPTED);
 				spin_unlock(&conn->lock);
 				conn = acc_conn;
-				node_id = 0;
+				rid = 0;
 				break;
 			}
 		}
-		if (node_id != 0) {
+		if (rid != 0) {
 			spin_unlock(&conn->lock);
 			return -ENOTCONN;
 		}
@@ -845,7 +845,7 @@ static void destroy_conn(struct scoutfs_net_connection *conn)
 
 	/* tell callers that accepted connection finally done */
 	if (conn->listening_conn && conn->notify_down)
-		conn->notify_down(sb, conn, conn->info, conn->node_id);
+		conn->notify_down(sb, conn, conn->info, conn->rid);
 
 	/* free all messages, refactor and complete for forced unmount? */
 	list_splice_init(&conn->resend_queue, &conn->send_queue);
@@ -1182,7 +1182,7 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 			conn->shutting_down = 0;
 			if (conn->notify_down)
 				conn->notify_down(sb, conn, conn->info,
-						  conn->node_id);
+						  conn->rid);
 		}
 
 		spin_unlock(&conn->lock);
@@ -1251,12 +1251,12 @@ restart:
  * Accepted connections inherit the callbacks from their listening
  * connection.
  *
- * notify_up is called once a valid greeting is received.  node_id is
+ * notify_up is called once a valid greeting is received.  rid is
  * non-zero on accepted sockets once they've seen a valid greeting.
- * Connected and listening connections have a node_id of 0.
+ * Connected and listening connections have a rid of 0.
  *
  * notify_down is always called as connections are shut down.  It can be
- * called without notify_up ever being called.  The node_id is only
+ * called without notify_up ever being called.  The rid is only
  * non-zero for accepted connections.
  */
 struct scoutfs_net_connection *
@@ -1317,14 +1317,15 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 }
 
 /*
- * Give the caller the client node_id of the connection.  This used by
- * rare server processing callers who want to send async responses after
- * request processing has returned.  We didn't want to plumb the
- * requesting node_id into all the request handlers but that'd work too.
+ * Give the caller the client rid of the connection.  This used by rare
+ * server processing callers who want to send async responses after
+ * request processing has returned.  We didn't want the churn of
+ * providing the requesting rid to all the request handlers, but we
+ * probably should.
  */
-u64 scoutfs_net_client_node_id(struct scoutfs_net_connection *conn)
+u64 scoutfs_net_client_rid(struct scoutfs_net_connection *conn)
 {
-	return conn->node_id;
+	return conn->rid;
 }
 
 /*
@@ -1520,7 +1521,7 @@ void scoutfs_net_client_greeting(struct super_block *sb,
 
 /*
  * The calling server has received a valid greeting from a client.  If
- * the server is reconnecting to us then we need to find its old
+ * the client is reconnecting to us then we need to find its old
  * connection that held its state and transfer it to this connection
  * (connection and socket life cycles make this easier than migrating
  * the socket between the connections).
@@ -1532,9 +1533,8 @@ void scoutfs_net_client_greeting(struct super_block *sb,
  * referring to the same original connection.  We use the increasing
  * greeting id to have the most recent connection attempt win.
  *
- * A node can be reconnecting to us for the first time.  In that case we
- * just trust its node_id.  It will notice the new server term and take
- * steps to recover.
+ * A node can be reconnecting to us for the first time.  It will notice
+ * the new server term and take steps to recover.
  *
  * A client can be reconnecting to us after we've destroyed their state.
  * This is fatal for the client if they just took too long to reconnect.
@@ -1550,8 +1550,8 @@ void scoutfs_net_client_greeting(struct super_block *sb,
  */
 void scoutfs_net_server_greeting(struct super_block *sb,
 				 struct scoutfs_net_connection *conn,
-				 u64 node_id, u64 greeting_id,
-				 bool sent_node_id, bool first_contact,
+				 u64 rid, u64 greeting_id,
+				 bool reconnecting, bool first_contact,
 				 bool farewell)
 {
 	struct scoutfs_net_connection *listener;
@@ -1561,15 +1561,15 @@ void scoutfs_net_server_greeting(struct super_block *sb,
 	/* only called on accepted server connections :/ */
 	BUG_ON(!conn->listening_conn);
 
-	/* see if we have a previous conn for the client's sent node_id */
+	/* see if we have a previous conn for the client's sent rid */
 	reconn = NULL;
-	if (sent_node_id) {
+	if (reconnecting) {
 		listener = conn->listening_conn;
 restart:
 		spin_lock_nested(&listener->lock, CONN_LOCK_LISTENER);
 		list_for_each_entry(acc, &listener->accepted_list,
 				    accepted_head) {
-			if (acc->node_id != node_id ||
+			if (acc->rid != rid ||
 			    acc->greeting_id >= greeting_id ||
 			    acc->reconn_freeing)
 				continue;
@@ -1592,12 +1592,12 @@ restart:
 	}
 
 	/* drop a connection if we can't find its necessary old conn */
-	if (sent_node_id && !reconn && !first_contact && !farewell) {
+	if (reconnecting && !reconn && !first_contact && !farewell) {
 		shutdown_conn(conn);
 		return;
 	}
 
-	/* migrate state from previous conn for this reconnecting node_id */
+	/* migrate state from previous conn for this reconnecting rid */
 	if (reconn) {
 		spin_lock(&conn->lock);
 
@@ -1623,15 +1623,15 @@ restart:
 
 	spin_lock(&conn->lock);
 
-	conn->node_id = node_id;
+	conn->rid = rid;
 	conn->greeting_id = greeting_id;
 	set_valid_greeting(conn);
 
 	spin_unlock(&conn->lock);
 
-	/* only call notify_up the first time we see the node_id */
+	/* only call notify_up the first time we see the rid */
 	if (conn->notify_up && first_contact)
-		conn->notify_up(sb, conn, conn->info, node_id);
+		conn->notify_up(sb, conn, conn->info, rid);
 }
 
 /*
@@ -1651,17 +1651,17 @@ int scoutfs_net_submit_request(struct super_block *sb,
 }
 
 /*
- * Send a request to a specific node_id that was accepted by this listening
+ * Send a request to a specific rid that was accepted by this listening
  * connection.
  */
 int scoutfs_net_submit_request_node(struct super_block *sb,
 				    struct scoutfs_net_connection *conn,
-				    u64 node_id, u8 cmd,
+				    u64 rid, u8 cmd,
 				    void *arg, u16 arg_len,
 				    scoutfs_net_response_t resp_func,
 				    void *resp_data, u64 *id_ret)
 {
-	return submit_send(sb, conn, node_id, cmd, 0, 0, 0, arg, arg_len,
+	return submit_send(sb, conn, rid, cmd, 0, 0, 0, arg, arg_len,
 			   resp_func, resp_data, id_ret);
 }
 
@@ -1687,7 +1687,7 @@ int scoutfs_net_response(struct super_block *sb,
 
 int scoutfs_net_response_node(struct super_block *sb,
 			      struct scoutfs_net_connection *conn,
-			      u64 node_id, u8 cmd, u64 id, int error,
+			      u64 rid, u8 cmd, u64 id, int error,
 			      void *resp, u16 resp_len)
 {
 	if (error) {
@@ -1695,7 +1695,7 @@ int scoutfs_net_response_node(struct super_block *sb,
 		resp_len = 0;
 	}
 
-	return submit_send(sb, conn, node_id, cmd, SCOUTFS_NET_FLAG_RESPONSE,
+	return submit_send(sb, conn, rid, cmd, SCOUTFS_NET_FLAG_RESPONSE,
 			   id, net_err_from_host(sb, error), resp, resp_len,
 			   NULL, NULL, NULL);
 }
@@ -1787,9 +1787,9 @@ static void net_tseq_show_conn(struct seq_file *m,
 	struct scoutfs_net_connection *conn =
 		container_of(ent, struct scoutfs_net_connection, tseq_entry);
 
-	seq_printf(m, "name "SIN_FMT" peer "SIN_FMT" node_id %llu greeting_id %llu vg %u est %u sd %u sg %u sf %u rw %u rf %u cto_ms rdl_j %lu %lu nss %llu rs %llu nsi %llu\n",
+	seq_printf(m, "name "SIN_FMT" peer "SIN_FMT" rid %016llx greeting_id %llu vg %u est %u sd %u sg %u sf %u rw %u rf %u cto_ms rdl_j %lu %lu nss %llu rs %llu nsi %llu\n",
 		   SIN_ARG(&conn->sockname), SIN_ARG(&conn->peername),
-		   conn->node_id, conn->greeting_id, conn->valid_greeting,
+		   conn->rid, conn->greeting_id, conn->valid_greeting,
 		   conn->established, conn->shutting_down, conn->saw_greeting,
 		   conn->saw_farewell, conn->reconn_wait, conn->reconn_freeing,
 		   conn->connect_timeout_ms, conn->reconn_deadline,

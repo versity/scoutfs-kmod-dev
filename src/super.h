@@ -32,7 +32,6 @@ struct scoutfs_sb_info {
 
 	/* assigned once at the start of each mount, read-only */
 	u64 rid;
-	u64 node_id;
 	struct scoutfs_lock *rid_lock;
 
 	struct scoutfs_super_block super;

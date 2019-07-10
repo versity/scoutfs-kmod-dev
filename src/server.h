@@ -64,11 +64,11 @@ void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
 void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
 				struct scoutfs_net_manifest_entry *net_ment);
 
-int scoutfs_server_lock_request(struct super_block *sb, u64 node_id,
+int scoutfs_server_lock_request(struct super_block *sb, u64 rid,
 				struct scoutfs_net_lock *nl);
-int scoutfs_server_lock_response(struct super_block *sb, u64 node_id,
+int scoutfs_server_lock_response(struct super_block *sb, u64 rid,
 				 u64 id, struct scoutfs_net_lock *nl);
-int scoutfs_server_lock_recover_request(struct super_block *sb, u64 node_id,
+int scoutfs_server_lock_recover_request(struct super_block *sb, u64 rid,
 					struct scoutfs_key *key);
 
 struct sockaddr_in;

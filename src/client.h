@@ -24,7 +24,6 @@ int scoutfs_client_lock_response(struct super_block *sb, u64 net_id,
 int scoutfs_client_lock_recover_response(struct super_block *sb, u64 net_id,
 					 struct scoutfs_net_lock_recover *nlr);
 
-int scoutfs_client_wait_node_id(struct super_block *sb);
 int scoutfs_client_setup(struct super_block *sb);
 void scoutfs_client_destroy(struct super_block *sb);
 

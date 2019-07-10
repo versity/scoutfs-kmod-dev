@@ -50,10 +50,10 @@
  * server doesn't use the modes specified by the clients but they're
  * provided to add context.
  *
- * The server relies on the node_id allocation and reliable messaging
- * layers of the system.  Each client has a node_id that is unique for
- * its life time.   Message requests and responses are reliably
- * delivered in order across reconnection.
+ * The server relies on the client's static rid and on reliable
+ * messaging.  Each client has a rid that is unique for its life time.
+ * Message requests and responses are reliably delivered in order across
+ * reconnection.
  *
  * The server maintains a persistent record of connected clients.  A new
  * server instance discovers these and waits for previously connected
@@ -126,7 +126,7 @@ enum {
  * that the mode is actively granted, a pending request from the client,
  * or a pending invalidation sent to the client.
  *
- * @node_id: The client's node_id used to send messages and tear down
+ * @rid: The client's rid used to send messages and tear down
  * state as client's exit.
  *
  * @net_id: The id of a client's request used to send grant responses.  The
@@ -139,7 +139,7 @@ enum {
  */
 struct client_lock_entry {
 	struct list_head head;
-	u64 node_id;
+	u64 rid;
 	u64 net_id;
 	u8 mode;
 
@@ -221,7 +221,7 @@ static bool client_entries_compatible(struct client_lock_entry *granted,
 	return (granted->mode == requested->mode &&
 		(granted->mode == SCOUTFS_LOCK_READ ||
 		 granted->mode == SCOUTFS_LOCK_WRITE_ONLY)) ||
-	       (granted->node_id == requested->node_id &&
+	       (granted->rid == requested->rid &&
 		granted->mode == SCOUTFS_LOCK_READ &&
 		requested->mode == SCOUTFS_LOCK_WRITE);
 }
@@ -340,14 +340,14 @@ static void put_server_lock(struct lock_server_info *inf,
 
 static struct client_lock_entry *find_entry(struct server_lock_node *snode,
 					    struct list_head *list,
-					    u64 node_id)
+					    u64 rid)
 {
 	struct client_lock_entry *clent;
 
 	WARN_ON_ONCE(!mutex_is_locked(&snode->mutex));
 
 	list_for_each_entry(clent, list, head) {
-		if (clent->node_id == node_id)
+		if (clent->rid == rid)
 			return clent;
 	}
 
@@ -363,7 +363,7 @@ static int process_waiting_requests(struct super_block *sb,
  *
  * XXX shut down if we get enomem?
  */
-int scoutfs_lock_server_request(struct super_block *sb, u64 node_id,
+int scoutfs_lock_server_request(struct super_block *sb, u64 rid,
 				u64 net_id, struct scoutfs_net_lock *nl)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
@@ -372,7 +372,7 @@ int scoutfs_lock_server_request(struct super_block *sb, u64 node_id,
 	int ret;
 
 	trace_scoutfs_lock_message(sb, SLT_SERVER, SLT_GRANT, SLT_REQUEST,
-				   node_id, net_id, nl);
+				   rid, net_id, nl);
 
 	if (invalid_mode(nl->old_mode) || invalid_mode(nl->new_mode)) {
 		ret = -EINVAL;
@@ -386,7 +386,7 @@ int scoutfs_lock_server_request(struct super_block *sb, u64 node_id,
 	}
 
 	INIT_LIST_HEAD(&clent->head);
-	clent->node_id = node_id;
+	clent->rid = rid;
 	clent->net_id = net_id;
 	clent->mode = nl->new_mode;
 
@@ -414,7 +414,7 @@ out:
  *
  * XXX what to do with errors?  kick the client?
  */
-int scoutfs_lock_server_response(struct super_block *sb, u64 node_id,
+int scoutfs_lock_server_response(struct super_block *sb, u64 rid,
 				 struct scoutfs_net_lock *nl)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
@@ -423,7 +423,7 @@ int scoutfs_lock_server_response(struct super_block *sb, u64 node_id,
 	int ret;
 
 	trace_scoutfs_lock_message(sb, SLT_SERVER, SLT_INVALIDATE, SLT_RESPONSE,
-				   node_id, 0, nl);
+				   rid, 0, nl);
 
 	if (invalid_mode(nl->old_mode) || invalid_mode(nl->new_mode)) {
 		ret = -EINVAL;
@@ -437,7 +437,7 @@ int scoutfs_lock_server_response(struct super_block *sb, u64 node_id,
 		goto out;
 	}
 
-	clent = find_entry(snode, &snode->invalidated, node_id);
+	clent = find_entry(snode, &snode->invalidated, rid);
 	if (!clent) {
 		put_server_lock(inf, snode);
 		ret = -EINVAL;
@@ -512,13 +512,13 @@ static int process_waiting_requests(struct super_block *sb,
 			nl.old_mode = gr->mode;
 			nl.new_mode = invalidation_mode(gr->mode, req->mode);
 
-			ret = scoutfs_server_lock_request(sb, gr->node_id, &nl);
+			ret = scoutfs_server_lock_request(sb, gr->rid, &nl);
 			if (ret)
 				goto out;
 
 			trace_scoutfs_lock_message(sb, SLT_SERVER,
 						   SLT_INVALIDATE, SLT_REQUEST,
-						   gr->node_id, 0, &nl);
+						   gr->rid, 0, &nl);
 
 			add_client_entry(snode, &snode->invalidated, gr);
 		}
@@ -531,7 +531,7 @@ static int process_waiting_requests(struct super_block *sb,
 		nl.new_mode = req->mode;
 
 		/* see if there's an existing compatible grant to replace */
-		gr = find_entry(snode, &snode->granted, req->node_id);
+		gr = find_entry(snode, &snode->granted, req->rid);
 		if (gr) {
 			nl.old_mode = gr->mode;
 			free_client_entry(inf, snode, gr);
@@ -539,13 +539,13 @@ static int process_waiting_requests(struct super_block *sb,
 			nl.old_mode = SCOUTFS_LOCK_NULL;
 		}
 
-		ret = scoutfs_server_lock_response(sb, req->node_id,
+		ret = scoutfs_server_lock_response(sb, req->rid,
 						   req->net_id, &nl);
 		if (ret)
 			goto out;
 
 		trace_scoutfs_lock_message(sb, SLT_SERVER, SLT_GRANT,
-					   SLT_RESPONSE, req->node_id,
+					   SLT_RESPONSE, req->rid,
 					   req->net_id, &nl);
 
 		/* don't track null client locks, track all else */ 
@@ -571,7 +571,7 @@ out:
  *
  * This is running in concurrent client greeting processing contexts.
  */
-int scoutfs_lock_server_greeting(struct super_block *sb, u64 node_id,
+int scoutfs_lock_server_greeting(struct super_block *sb, u64 rid,
 				 bool should_exist)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
@@ -581,7 +581,7 @@ int scoutfs_lock_server_greeting(struct super_block *sb, u64 node_id,
 	struct scoutfs_key key;
 	int ret;
 
-	cbk.node_id = cpu_to_be64(node_id);
+	cbk.rid = cpu_to_be64(rid);
 
 	mutex_lock(&inf->mutex);
 	if (should_exist) {
@@ -597,7 +597,7 @@ int scoutfs_lock_server_greeting(struct super_block *sb, u64 node_id,
 
 	if (should_exist && ret == 0) {
 		scoutfs_key_set_zeros(&key);
-		ret = scoutfs_server_lock_recover_request(sb, node_id, &key);
+		ret = scoutfs_server_lock_recover_request(sb, rid, &key);
 		if (ret)
 			goto out;
 	}
@@ -611,7 +611,7 @@ out:
  * they were the last client in recovery then we can process all the
  * server locks that had requests.
  */
-static int finished_recovery(struct super_block *sb, u64 node_id, bool cancel)
+static int finished_recovery(struct super_block *sb, u64 rid, bool cancel)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
 	struct server_lock_node *snode;
@@ -620,7 +620,7 @@ static int finished_recovery(struct super_block *sb, u64 node_id, bool cancel)
 	int ret = 0;
 
 	spin_lock(&inf->lock);
-	scoutfs_spbm_clear(&inf->recovery_pending, node_id);
+	scoutfs_spbm_clear(&inf->recovery_pending, rid);
 	still_pending = !scoutfs_spbm_empty(&inf->recovery_pending);
 	spin_unlock(&inf->lock);
 	if (still_pending)
@@ -654,7 +654,7 @@ static int finished_recovery(struct super_block *sb, u64 node_id, bool cancel)
  * gave us in response and send another request from the next key.
  * We're done once we receive an empty response.
  */
-int scoutfs_lock_server_recover_response(struct super_block *sb, u64 node_id,
+int scoutfs_lock_server_recover_response(struct super_block *sb, u64 rid,
 					 struct scoutfs_net_lock_recover *nlr)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
@@ -667,7 +667,7 @@ int scoutfs_lock_server_recover_response(struct super_block *sb, u64 node_id,
 
 	/* client must be in recovery */
 	spin_lock(&inf->lock);
-	if (!scoutfs_spbm_test(&inf->recovery_pending, node_id))
+	if (!scoutfs_spbm_test(&inf->recovery_pending, rid))
 		ret = -EINVAL;
 	spin_unlock(&inf->lock);
 	if (ret)
@@ -675,7 +675,7 @@ int scoutfs_lock_server_recover_response(struct super_block *sb, u64 node_id,
 
 	/* client has sent us all their locks */
 	if (nlr->nr == 0) {
-		ret = finished_recovery(sb, node_id, true);
+		ret = finished_recovery(sb, rid, true);
 		goto out;
 	}
 
@@ -687,7 +687,7 @@ int scoutfs_lock_server_recover_response(struct super_block *sb, u64 node_id,
 		}
 
 		INIT_LIST_HEAD(&clent->head);
-		clent->node_id = node_id;
+		clent->rid = rid;
 		clent->net_id = 0;
 		clent->mode = nlr->locks[i].new_mode;
 
@@ -698,7 +698,7 @@ int scoutfs_lock_server_recover_response(struct super_block *sb, u64 node_id,
 			goto out;
 		}
 
-		existing = find_entry(snode, &snode->granted, node_id);
+		existing = find_entry(snode, &snode->granted, rid);
 		if (existing) {
 			kfree(clent);
 			put_server_lock(inf, snode);
@@ -717,20 +717,20 @@ int scoutfs_lock_server_recover_response(struct super_block *sb, u64 node_id,
 	key = nlr->locks[le16_to_cpu(nlr->nr) - 1].key;
 	scoutfs_key_inc(&key);
 
-	ret = scoutfs_server_lock_recover_request(sb, node_id, &key);
+	ret = scoutfs_server_lock_recover_request(sb, rid, &key);
 out:
 	return ret;
 }
 
-static int node_id_and_put_iref(struct scoutfs_btree_item_ref *iref,
-				u64 *node_id)
+static int get_rid_and_put_ref(struct scoutfs_btree_item_ref *iref,
+			       u64 *rid)
 {
 	struct scoutfs_lock_client_btree_key *cbk;
 	int ret;
 
 	if (iref->key_len == sizeof(*cbk) && iref->val_len == 0) {
 		cbk = iref->key;
-		*node_id = be64_to_cpu(cbk->node_id);
+		*rid = be64_to_cpu(cbk->rid);
 		ret = 0;
 	} else {
 		ret = -EIO;
@@ -754,12 +754,12 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 	struct scoutfs_lock_client_btree_key cbk;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	bool timed_out;
-	u64 node_id;
+	u64 rid;
 	int ret;
 
 	/* we enter recovery if there are any client records */
-	for (node_id = 0; ; node_id++) {
-		cbk.node_id = cpu_to_be64(node_id);
+	for (rid = 0; ; rid++) {
+		cbk.rid = cpu_to_be64(rid);
 		ret = scoutfs_btree_next(sb, &super->lock_clients,
 					 &cbk, sizeof(cbk), &iref);
 		if (ret == -ENOENT) {
@@ -767,13 +767,13 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 			break;
 		}
 		if (ret == 0)
-			ret = node_id_and_put_iref(&iref, &node_id);
+			ret = get_rid_and_put_ref(&iref, &rid);
 		if (ret < 0)
 			break;
 
 		spin_lock(&inf->lock);
-		if (scoutfs_spbm_test(&inf->recovery_pending, node_id)) {
-			scoutfs_spbm_clear(&inf->recovery_pending, node_id);
+		if (scoutfs_spbm_test(&inf->recovery_pending, rid)) {
+			scoutfs_spbm_clear(&inf->recovery_pending, rid);
 			timed_out = true;
 		} else {
 			timed_out = false;
@@ -783,11 +783,11 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 		if (!timed_out)
 			continue;
 
-		scoutfs_err(sb, "client node_id %llu lock recovery timed out",
-			    node_id);
+		scoutfs_err(sb, "client rid %016llx lock recovery timed out",
+			    rid);
 
 		/* XXX these aren't immediately committed */
-		cbk.node_id = cpu_to_be64(node_id);
+		cbk.rid = cpu_to_be64(rid);
 		ret = scoutfs_btree_delete(sb, &super->lock_clients,
 					   &cbk, sizeof(cbk));
 		if (ret)
@@ -812,7 +812,7 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
  * If we fail to delete a persistent entry then we have to shut down and
  * hope that the next server has more luck.
  */
-int scoutfs_lock_server_farewell(struct super_block *sb, u64 node_id)
+int scoutfs_lock_server_farewell(struct super_block *sb, u64 rid)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
@@ -825,7 +825,7 @@ int scoutfs_lock_server_farewell(struct super_block *sb, u64 node_id)
 	bool freed;
 	int ret = 0;
 
-	cli.node_id = cpu_to_be64(node_id);
+	cli.rid = cpu_to_be64(rid);
 	mutex_lock(&inf->mutex);
 	ret = scoutfs_btree_delete(sb, &super->lock_clients, &cli, sizeof(cli));
 	mutex_unlock(&inf->mutex);
@@ -847,7 +847,7 @@ int scoutfs_lock_server_farewell(struct super_block *sb, u64 node_id)
 			    NULL) {
 
 			list_for_each_entry_safe(clent, tmp, list, head) {
-				if (clent->node_id == node_id) {
+				if (clent->rid == rid) {
 					free_client_entry(inf, snode, clent);
 					freed = true;
 				}
@@ -869,7 +869,8 @@ int scoutfs_lock_server_farewell(struct super_block *sb, u64 node_id)
 
 out:
 	if (ret < 0) {
-		scoutfs_err(sb, "lock server err %d during node %llu farewell, shutting down", ret, node_id);
+		scoutfs_err(sb, "lock server err %d during client rid %016llx farewell, shutting down",
+			    ret, rid);
 		scoutfs_server_abort(sb);
 	}
 
@@ -913,9 +914,9 @@ static void lock_server_tseq_show(struct seq_file *m,
 						       tseq_entry);
 	struct server_lock_node *snode = clent->snode;
 
-	seq_printf(m, SK_FMT" %s %s node_id %llu net_id %llu\n",
+	seq_printf(m, SK_FMT" %s %s rid %016llx net_id %llu\n",
 		   SK_ARG(&snode->key), lock_mode_string(clent->mode),
-		   lock_on_list_string(clent->on_list), clent->node_id,
+		   lock_on_list_string(clent->on_list), clent->rid,
 		   clent->net_id);
 }
 
@@ -934,7 +935,7 @@ int scoutfs_lock_server_setup(struct super_block *sb)
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_lock_client_btree_key cbk;
 	unsigned int nr;
-	u64 node_id;
+	u64 rid;
 	int ret;
 
 	inf = kzalloc(sizeof(struct lock_server_info), GFP_KERNEL);
@@ -961,23 +962,23 @@ int scoutfs_lock_server_setup(struct super_block *sb)
 
 	/* we enter recovery if there are any client records */
 	nr = 0;
-	for (node_id = 0; ; node_id++) {
-		cbk.node_id = cpu_to_be64(node_id);
+	for (rid = 0; ; rid++) {
+		cbk.rid = cpu_to_be64(rid);
 		ret = scoutfs_btree_next(sb, &super->lock_clients,
 					 &cbk, sizeof(cbk), &iref);
 		if (ret == -ENOENT)
 			break;
 		if (ret == 0)
-			ret = node_id_and_put_iref(&iref, &node_id);
+			ret = get_rid_and_put_ref(&iref, &rid);
 		if (ret < 0)
 			goto out;
 
-		ret = scoutfs_spbm_set(&inf->recovery_pending, node_id);
+		ret = scoutfs_spbm_set(&inf->recovery_pending, rid);
 		if (ret)
 			goto out;
 		nr++;
 
-		if (node_id == U64_MAX)
+		if (rid == U64_MAX)
 			break;
 	}
 	ret = 0;

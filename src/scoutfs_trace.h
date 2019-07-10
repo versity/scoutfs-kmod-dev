@@ -1154,17 +1154,17 @@ TRACE_EVENT(scoutfs_client_compact_stop,
 );
 
 TRACE_EVENT(scoutfs_server_compact_start,
-	TP_PROTO(struct super_block *sb, u64 id, u8 level, u64 node_id,
+	TP_PROTO(struct super_block *sb, u64 id, u8 level, u64 rid,
 		 unsigned long client_nr, unsigned long server_nr,
 		 unsigned long per_client),
 
-	TP_ARGS(sb, id, level, node_id, client_nr, server_nr, per_client),
+	TP_ARGS(sb, id, level, rid, client_nr, server_nr, per_client),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, id)
 		__field(__u8, level)
-		__field(__u64, node_id)
+		__field(__u64, c_rid)
 		__field(unsigned long, client_nr)
 		__field(unsigned long, server_nr)
 		__field(unsigned long, per_client)
@@ -1174,40 +1174,40 @@ TRACE_EVENT(scoutfs_server_compact_start,
 		SCSB_TRACE_ASSIGN(sb);
 		__entry->id = id;
 		__entry->level = level;
-		__entry->node_id = node_id;
+		__entry->c_rid = rid;
 		__entry->client_nr = client_nr;
 		__entry->server_nr = server_nr;
 		__entry->per_client = per_client;
 	),
 
-	TP_printk(SCSBF" id %llu level %u node_id %llu client_nr %lu server_nr %lu per_client %lu",
+	TP_printk(SCSBF" id %llu level %u rid %016llx client_nr %lu server_nr %lu per_client %lu",
 		  SCSB_TRACE_ARGS, __entry->id, __entry->level,
-		  __entry->node_id, __entry->client_nr, __entry->server_nr,
+		  __entry->c_rid, __entry->client_nr, __entry->server_nr,
 		  __entry->per_client)
 );
 
 TRACE_EVENT(scoutfs_server_compact_done,
-	TP_PROTO(struct super_block *sb, u64 id, u64 node_id,
+	TP_PROTO(struct super_block *sb, u64 id, u64 rid,
 		 unsigned long server_nr),
 
-	TP_ARGS(sb, id, node_id, server_nr),
+	TP_ARGS(sb, id, rid, server_nr),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, id)
-		__field(__u64, node_id)
+		__field(__u64, c_rid)
 		__field(unsigned long, server_nr)
 	),
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
 		__entry->id = id;
-		__entry->node_id = node_id;
+		__entry->rid = rid;
 		__entry->server_nr = server_nr;
 	),
 
-	TP_printk(SCSBF" id %llu node_id %llu server_nr %lu",
-		  SCSB_TRACE_ARGS, __entry->id, __entry->node_id,
+	TP_printk(SCSBF" id %llu rid %016llx server_nr %lu",
+		  SCSB_TRACE_ARGS, __entry->id, __entry->c_rid,
 		  __entry->server_nr)
 );
 
@@ -2470,32 +2470,32 @@ DEFINE_EVENT(scoutfs_segno_class, scoutfs_remove_segno,
 );
 
 DECLARE_EVENT_CLASS(scoutfs_server_client_count_class,
-	TP_PROTO(struct super_block *sb, u64 node_id, unsigned long nr_clients),
+	TP_PROTO(struct super_block *sb, u64 rid, unsigned long nr_clients),
 
-	TP_ARGS(sb, node_id, nr_clients),
+	TP_ARGS(sb, rid, nr_clients),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(__s64, node_id)
+		__field(__s64, c_rid)
 		__field(unsigned long, nr_clients)
 	),
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->node_id = node_id;
+		__entry->c_rid = rid;
 		__entry->nr_clients = nr_clients;
 	),
 
-	TP_printk(SCSBF" node_id %llu nr_clients %lu",
-		  SCSB_TRACE_ARGS, __entry->node_id, __entry->nr_clients)
+	TP_printk(SCSBF" rid %016llx nr_clients %lu",
+		  SCSB_TRACE_ARGS, __entry->c_rid, __entry->nr_clients)
 );
 DEFINE_EVENT(scoutfs_server_client_count_class, scoutfs_server_client_up,
-	TP_PROTO(struct super_block *sb, u64 node_id, unsigned long nr_clients),
-	TP_ARGS(sb, node_id, nr_clients)
+	TP_PROTO(struct super_block *sb, u64 rid, unsigned long nr_clients),
+	TP_ARGS(sb, rid, nr_clients)
 );
 DEFINE_EVENT(scoutfs_server_client_count_class, scoutfs_server_client_down,
-	TP_PROTO(struct super_block *sb, u64 node_id, unsigned long nr_clients),
-	TP_ARGS(sb, node_id, nr_clients)
+	TP_PROTO(struct super_block *sb, u64 rid, unsigned long nr_clients),
+	TP_ARGS(sb, rid, nr_clients)
 );
 
 #define slt_symbolic(mode)						\
@@ -2509,16 +2509,16 @@ DEFINE_EVENT(scoutfs_server_client_count_class, scoutfs_server_client_down,
 
 TRACE_EVENT(scoutfs_lock_message,
 	TP_PROTO(struct super_block *sb, int who, int what, int dir,
-		 u64 node_id, u64 net_id, struct scoutfs_net_lock *nl),
+		 u64 rid, u64 net_id, struct scoutfs_net_lock *nl),
 
-	TP_ARGS(sb, who, what, dir, node_id, net_id, nl),
+	TP_ARGS(sb, who, what, dir, rid, net_id, nl),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(int, who)
 		__field(int, what)
 		__field(int, dir)
-		__field(__u64, node_id)
+		__field(__u64, m_rid)
 		__field(__u64, net_id)
 		sk_trace_define(key)
 		__field(__u8, old_mode)
@@ -2530,17 +2530,17 @@ TRACE_EVENT(scoutfs_lock_message,
 		__entry->who = who;
 		__entry->what = what;
 		__entry->dir = dir;
-		__entry->node_id = node_id;
+		__entry->m_rid = rid;
 		__entry->net_id = net_id;
 		sk_trace_assign(key, &nl->key);
 		__entry->old_mode = nl->old_mode;
 		__entry->new_mode = nl->new_mode;
 	),
 
-	TP_printk(SCSBF" %s %s %s node_id %llu net_id %llu key "SK_FMT" old_mode %u new_mode %u",
+	TP_printk(SCSBF" %s %s %s rid %016llx net_id %llu key "SK_FMT" old_mode %u new_mode %u",
 		  SCSB_TRACE_ARGS, slt_symbolic(__entry->who),
 		  slt_symbolic(__entry->what), slt_symbolic(__entry->dir),
-		  __entry->node_id, __entry->net_id, sk_trace_args(key),
+		  __entry->m_rid, __entry->net_id, sk_trace_args(key),
 		  __entry->old_mode, __entry->new_mode)
 );
 
@@ -2685,70 +2685,70 @@ DEFINE_EVENT(scoutfs_clock_sync_class, scoutfs_recv_clock_sync,
 );
 
 TRACE_EVENT(scoutfs_trans_seq_advance,
-	TP_PROTO(struct super_block *sb, u64 node_id, u64 prev_seq,
+	TP_PROTO(struct super_block *sb, u64 rid, u64 prev_seq,
 		 u64 next_seq),
 
-	TP_ARGS(sb, node_id, prev_seq, next_seq),
+	TP_ARGS(sb, rid, prev_seq, next_seq),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(__u64, node_id)
+		__field(__u64, s_rid)
 		__field(__u64, prev_seq)
 		__field(__u64, next_seq)
 	),
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->node_id = node_id;
+		__entry->s_rid = rid;
 		__entry->prev_seq = prev_seq;
 		__entry->next_seq = next_seq;
 	),
 
-	TP_printk(SCSBF" node_id %llu prev_seq %llu next_seq %llu",
-		  SCSB_TRACE_ARGS, __entry->node_id, __entry->prev_seq,
+	TP_printk(SCSBF" rid %016llx prev_seq %llu next_seq %llu",
+		  SCSB_TRACE_ARGS, __entry->s_rid, __entry->prev_seq,
 		  __entry->next_seq)
 );
 
 TRACE_EVENT(scoutfs_trans_seq_farewell,
-	TP_PROTO(struct super_block *sb, u64 node_id, u64 trans_seq),
+	TP_PROTO(struct super_block *sb, u64 rid, u64 trans_seq),
 
-	TP_ARGS(sb, node_id, trans_seq),
+	TP_ARGS(sb, rid, trans_seq),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(__u64, node_id)
+		__field(__u64, s_rid)
 		__field(__u64, trans_seq)
 	),
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->node_id = node_id;
+		__entry->s_rid = rid;
 		__entry->trans_seq = trans_seq;
 	),
 
-	TP_printk(SCSBF" node_id %llu trans_seq %llu",
-		  SCSB_TRACE_ARGS, __entry->node_id, __entry->trans_seq)
+	TP_printk(SCSBF" rid %016llx trans_seq %llu",
+		  SCSB_TRACE_ARGS, __entry->s_rid, __entry->trans_seq)
 );
 
 TRACE_EVENT(scoutfs_trans_seq_last,
-	TP_PROTO(struct super_block *sb, u64 node_id, u64 trans_seq),
+	TP_PROTO(struct super_block *sb, u64 rid, u64 trans_seq),
 
-	TP_ARGS(sb, node_id, trans_seq),
+	TP_ARGS(sb, rid, trans_seq),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(__u64, node_id)
+		__field(__u64, s_rid)
 		__field(__u64, trans_seq)
 	),
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->node_id = node_id;
+		__entry->s_rid = rid;
 		__entry->trans_seq = trans_seq;
 	),
 
-	TP_printk(SCSBF" node_id %llu trans_seq %llu",
-		  SCSB_TRACE_ARGS, __entry->node_id, __entry->trans_seq)
+	TP_printk(SCSBF" rid %016llx trans_seq %llu",
+		  SCSB_TRACE_ARGS, __entry->s_rid, __entry->trans_seq)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

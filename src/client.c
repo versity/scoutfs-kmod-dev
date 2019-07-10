@@ -49,7 +49,6 @@ struct client_info {
 	struct super_block *sb;
 
 	struct scoutfs_net_connection *conn;
-	struct completion node_id_comp;
 	atomic_t shutting_down;
 
 	struct workqueue_struct *workq;
@@ -299,8 +298,9 @@ static int client_lock_recover(struct super_block *sb,
 
 /*
  * Process a greeting response in the client from the server.  This is
- * called for every connected socket on the connection.  The first
- * response will have the node_id that the server assigned the client.
+ * called for every connected socket on the connection.  Each response
+ * contains the remote server's elected term which can be used to
+ * identify server failover.
  */
 static int client_greeting(struct super_block *sb,
 			   struct scoutfs_net_connection *conn,
@@ -309,7 +309,6 @@ static int client_greeting(struct super_block *sb,
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_net_greeting *gr = resp;
 	bool new_server;
 	int ret;
@@ -338,25 +337,6 @@ static int client_greeting(struct super_block *sb,
 			     le64_to_cpu(super->format_hash));
 		ret = -EINVAL;
 		goto out;
-	}
-
-	if (sbi->node_id != 0 && le64_to_cpu(gr->node_id) != sbi->node_id) {
-		scoutfs_warn(sb, "server sent node_id %llu, client has %llu",
-			     le64_to_cpu(gr->node_id),
-			     sbi->node_id);
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (sbi->node_id == 0 && gr->node_id == 0) {
-		scoutfs_warn(sb, "server sent node_id 0, client also has 0");
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (sbi->node_id == 0) {
-		sbi->node_id = le64_to_cpu(gr->node_id);
-		complete(&client->node_id_comp);
 	}
 
 	new_server = le64_to_cpu(gr->server_term) != client->server_term;
@@ -466,7 +446,7 @@ static void scoutfs_client_connect_worker(struct work_struct *work)
 	greet.format_hash = super->format_hash;
 	greet.server_term = cpu_to_le64(client->server_term);
 	greet.unmount_barrier = cpu_to_le64(client->greeting_umb);
-	greet.node_id = cpu_to_le64(sbi->node_id);
+	greet.rid = cpu_to_le64(sbi->rid);
 	greet.flags = 0;
 	if (client->sending_farewell)
 		greet.flags |= cpu_to_le64(SCOUTFS_NET_GREETING_FLAG_FAREWELL);
@@ -553,24 +533,12 @@ static scoutfs_net_request_t client_req_funcs[] = {
  */
 static void client_notify_down(struct super_block *sb,
 			       struct scoutfs_net_connection *conn, void *info,
-			       u64 node_id)
+			       u64 rid)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
 
 	if (!atomic_read(&client->shutting_down))
 		queue_delayed_work(client->workq, &client->connect_dwork, 0);
-}
-
-/*
- * Wait for the first connected socket on the connection that assigns
- * the node_id that will be used for the rest of the life time of the
- * mount.
- */
-int scoutfs_client_wait_node_id(struct super_block *sb)
-{
-	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-
-	return wait_for_completion_interruptible(&client->node_id_comp);
 }
 
 int scoutfs_client_setup(struct super_block *sb)
@@ -587,7 +555,6 @@ int scoutfs_client_setup(struct super_block *sb)
 	sbi->client_info = client;
 
 	client->sb = sb;
-	init_completion(&client->node_id_comp);
 	atomic_set(&client->shutting_down, 0);
 	INIT_DELAYED_WORK(&client->connect_dwork,
 			  scoutfs_client_connect_worker);
@@ -640,12 +607,12 @@ static int client_farewell_response(struct super_block *sb,
  * so that they don't wait for us to reconnect and trigger a timeout.
  *
  * This decision is a little racy.  The server considers us connected
- * when it assigns us a node_id as it processes the greeting.  We can
- * disconnect before receiving the response and leave without sending a
- * farewell.  So given that awkward initial race, we also have a bit of
- * a race where we just test the server_term to see if we've ever gotten
- * a greeting reply from any server.  We don't try to synchronize with
- * pending connection attempts.
+ * when it records a persistent record of our rid as it processes our
+ * greeting.  We can disconnect before receiving the greeting response
+ * and leave without sending a farewell.  So given that awkward initial
+ * race, we also have a bit of a race where we just test the server_term
+ * to see if we've ever gotten a greeting reply from any server.  We
+ * don't try to synchronize with pending connection attempts.
  *
  * The consequences of aborting a mount at just the wrong time and
  * disconnecting without the farewell handshake depend on what the

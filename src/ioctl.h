@@ -347,4 +347,26 @@ struct scoutfs_ioctl_find_xattrs {
 #define SCOUTFS_IOC_FIND_XATTRS _IOR(SCOUTFS_IOCTL_MAGIC, 10, \
 				     struct scoutfs_ioctl_find_xattrs)
 
+/*
+ * Give the user information about the filesystem.
+ *
+ * @valid_bytes stores the number of bytes that are valid in the
+ * structure.  The caller sets this to the size of the struct that they
+ * understand.  The kernel then fills and copies back the min of the
+ * size they and the user caller understand.  The user can tell if a
+ * field is set if all of its bytes are within the valid_bytes that the
+ * kernel set on return.
+ *
+ * New fields are only added to the end of the struct.
+ */
+struct scoutfs_ioctl_statfs_more {
+	__u64 valid_bytes;
+	__u64 fsid;
+	__u64 rid;
+} __packed;
+
+#define SCOUTFS_IOC_STATFS_MORE _IOR(SCOUTFS_IOCTL_MAGIC, 11, \
+				     struct scoutfs_ioctl_statfs_more)
+
+
 #endif

@@ -848,6 +848,27 @@ out:
 	return ret ?: total;
 }
 
+static long scoutfs_ioc_statfs_more(struct file *file, unsigned long arg)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_ioctl_statfs_more sfm;
+
+	if (get_user(sfm.valid_bytes, (__u64 __user *)arg))
+		return -EFAULT;
+
+	sfm.valid_bytes = min_t(u64, sfm.valid_bytes,
+				sizeof(struct scoutfs_ioctl_statfs_more));
+	sfm.fsid = le64_to_cpu(super->hdr.fsid);
+	sfm.rid = sbi->rid;
+
+	if (copy_to_user((void __user *)arg, &sfm, sfm.valid_bytes))
+		return -EFAULT;
+
+	return 0;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -871,6 +892,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_listxattr_hidden(file, arg);
 	case SCOUTFS_IOC_FIND_XATTRS:
 		return scoutfs_ioc_find_xattrs(file, arg);
+	case SCOUTFS_IOC_STATFS_MORE:
+		return scoutfs_ioc_statfs_more(file, arg);
 	}
 
 	return -ENOTTY;

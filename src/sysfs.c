@@ -43,9 +43,19 @@ static ssize_t fsid_show(struct kobject *kobj, struct attribute *attr,
 	struct super_block *sb = KOBJ_TO_SB(kobj, sb_id_kobj);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 
-	return snprintf(buf, PAGE_SIZE, "%llx\n", le64_to_cpu(super->hdr.fsid));
+	return snprintf(buf, PAGE_SIZE, "%016llx\n",
+			le64_to_cpu(super->hdr.fsid));
 }
 ATTR_FUNCS_RO(fsid);
+
+static ssize_t rid_show(struct kobject *kobj, struct attribute *attr, char *buf)
+{
+	struct super_block *sb = KOBJ_TO_SB(kobj, sb_id_kobj);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	return snprintf(buf, PAGE_SIZE, "%016llx\n", sbi->rid);
+}
+ATTR_FUNCS_RO(rid);
 
 /*
  * ops are defined per type, not per attribute.  To have attributes with
@@ -82,6 +92,7 @@ static ssize_t attr_funcs_show(struct kobject *kobj, struct attribute *attr,
 
 static struct attribute *sb_id_attrs[] = {
 	&fsid_attr_funcs.attr,
+	&rid_attr_funcs.attr,
 	NULL,
 };
 KTYPE(sb_id);

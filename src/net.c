@@ -86,58 +86,20 @@ struct net_info {
 	struct scoutfs_tseq_tree msg_tseq_tree;
 };
 
-struct scoutfs_net_connection {
-	struct super_block *sb;
-	scoutfs_net_notify_t notify_up;
-	scoutfs_net_notify_t notify_down;
-	size_t info_size;
-	scoutfs_net_request_t *req_funcs;
-
-	spinlock_t lock;
-	wait_queue_head_t waitq;
-
-	unsigned long valid_greeting:1,	/* other commands can proceed */
-		      established:1,	/* added sends queue send work */
-		      shutting_down:1,	/* shutdown work has been queued */
-		      saw_greeting:1,	/* saw greeting on this sock */
-		      saw_farewell:1,	/* saw farewell response to client */
-		      reconn_wait:1,	/* shutdown, waiting for reconnect */
-		      reconn_freeing:1;	/* waiting done, setter frees */
-	unsigned long reconn_deadline;
-
-	struct sockaddr_in connect_sin;
-	unsigned long connect_timeout_ms;
-
-	struct socket *sock;
-	u64 rid;
-	u64 greeting_id;
-	struct sockaddr_in sockname;
-	struct sockaddr_in peername;
-
-	struct list_head accepted_head;
-	struct scoutfs_net_connection *listening_conn;
-	struct list_head accepted_list;
-
-	u64 next_send_seq;
-	u64 next_send_id;
-	struct list_head send_queue;
-	struct list_head resend_queue;
-
-	atomic64_t recv_seq;
-
-	struct workqueue_struct *workq;
-	struct work_struct listen_work;
-	struct work_struct connect_work;
-	struct work_struct send_work;
-	struct work_struct recv_work;
-	struct work_struct shutdown_work;
-	struct delayed_work reconn_free_dwork;
-	/* message_recv proc_work also executes in the conn workq */
-
-	struct scoutfs_tseq_entry tseq_entry;
-
-	void *info;
-};
+/* flags enum is in net.h */
+#define test_conn_fl(conn, which) (!!((conn)->flags & CONN_FL_##which))
+#define set_conn_fl(conn, which)				\
+do {								\
+	(conn)->flags |= CONN_FL_##which;			\
+} while (0)
+#define clear_conn_fl(conn, which)				\
+do {								\
+	(conn)->flags &= ~CONN_FL_##which;			\
+} while (0)
+#define assign_conn_fl(dst, src, which)				\
+do {								\
+	(dst)->flags |= ((conn)->flags & CONN_FL_##which);	\
+} while (0)
 
 /* listening and their accepting sockets have a fixed locking order */
 enum {
@@ -319,9 +281,10 @@ static void shutdown_conn_locked(struct scoutfs_net_connection *conn)
 
 	assert_spin_locked(&conn->lock);
 
-	if (!conn->shutting_down) {
-		conn->established = 0;
-		conn->shutting_down = 1;
+	if (!test_conn_fl(conn, shutting_down)) {
+		clear_conn_fl(conn, established);
+		set_conn_fl(conn, shutting_down);
+		trace_scoutfs_conn_shutdown_queued(conn);
 		queue_work(ninf->shutdown_workq, &conn->shutdown_work);
 	}
 }
@@ -412,8 +375,9 @@ static int submit_send(struct super_block *sb,
 	if (data_len)
 		memcpy(msend->nh.data, data, data_len);
 
-	if (conn->established &&
-	    (conn->valid_greeting || cmd == SCOUTFS_NET_CMD_GREETING)) {
+	if (test_conn_fl(conn, established) &&
+	    (test_conn_fl(conn, valid_greeting) ||
+	     cmd == SCOUTFS_NET_CMD_GREETING)) {
 		list_add_tail(&msend->head, &conn->send_queue);
 		queue_work(conn->workq, &conn->send_work);
 	} else {
@@ -615,7 +579,7 @@ static bool invalid_message(struct scoutfs_net_connection *conn,
 
 	if (nh->cmd == SCOUTFS_NET_CMD_GREETING) {
 		/* each endpoint can only receive one greeting per socket */
-		if (conn->saw_greeting)
+		if (test_conn_fl(conn, saw_greeting))
 			return true;
 
 		/* servers get greeting requests, clients get responses */
@@ -686,7 +650,7 @@ static void scoutfs_net_recv_worker(struct work_struct *work)
 
 		if (nh.cmd == SCOUTFS_NET_CMD_GREETING) {
 			/* greetings are out of band, no seq mechanics */
-			conn->saw_greeting = 1;
+			set_conn_fl(conn, saw_greeting);
 
 		} else if (le64_to_cpu(nh.seq) <=
 			   atomic64_read(&conn->recv_seq)) {
@@ -790,7 +754,7 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 
 		if ((msend->nh.cmd == SCOUTFS_NET_CMD_FAREWELL) &&
 		    nh_is_response(&msend->nh)) {
-			conn->saw_farewell = 1;
+			set_conn_fl(conn, saw_farewell);
 		}
 
 		msend->nh.recv_seq =
@@ -840,6 +804,8 @@ static void destroy_conn(struct scoutfs_net_connection *conn)
 	struct message_send *msend;
 	struct message_send *tmp;
 
+	trace_scoutfs_conn_destroy_start(conn);
+
 	WARN_ON_ONCE(conn->sock != NULL);
 	WARN_ON_ONCE(!list_empty(&conn->accepted_list));
 
@@ -867,6 +833,7 @@ static void destroy_conn(struct scoutfs_net_connection *conn)
 	destroy_workqueue(conn->workq);
 	scoutfs_tseq_del(&ninf->conn_tseq_tree, &conn->tseq_entry);
 	kfree(conn->info);
+	trace_scoutfs_conn_destroy_free(conn);
 	kfree(conn);
 }
 
@@ -995,8 +962,10 @@ static void scoutfs_net_listen_worker(struct work_struct *work)
 
 		acc_conn->sock = acc_sock;
 		acc_conn->listening_conn = conn;
-		acc_conn->established = 1;
+		set_conn_fl(acc_conn, established);
 		list_add_tail(&acc_conn->accepted_head, &conn->accepted_list);
+
+		trace_scoutfs_conn_accept(acc_conn);
 
 		spin_unlock(&conn->lock);
 
@@ -1043,6 +1012,8 @@ static void scoutfs_net_connect_worker(struct work_struct *work)
 	conn->sock = sock;
 	spin_unlock(&conn->lock);
 
+	trace_scoutfs_conn_connect_start(conn);
+
 	ret = kernel_connect(sock, (struct sockaddr *)&conn->connect_sin,
 			     sizeof(struct sockaddr_in), 0);
 	if (ret)
@@ -1059,9 +1030,11 @@ static void scoutfs_net_connect_worker(struct work_struct *work)
 	spin_lock(&conn->lock);
 
 	/* clear greeting state for next negotiation */
-	conn->valid_greeting = 0;
-	conn->established = 1;
+	clear_conn_fl(conn, valid_greeting);
+	set_conn_fl(conn, established);
 	wake_up(&conn->waitq);
+
+	trace_scoutfs_conn_connect_complete(conn);
 
 	spin_unlock(&conn->lock);
 
@@ -1102,6 +1075,7 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 	unsigned long delay;
 
 	trace_scoutfs_net_shutdown_work_enter(sb, 0, 0);
+	trace_scoutfs_conn_shutdown_start(conn);
 
 	/* connected and accepted conns print a message */
 	if (conn->peername.sin_port != 0)
@@ -1153,7 +1127,7 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 			free_msend(ninf, msend);
 	}
 
-	conn->saw_greeting = 0;
+	clear_conn_fl(conn, saw_greeting);
 
 	/* signal connect failure */
 	memset(&conn->connect_sin, 0, sizeof(conn->connect_sin));
@@ -1161,7 +1135,8 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 
 	/* resolve racing with listener shutdown with locked shutting_down */
 	if (conn->listening_conn &&
-	    (conn->listening_conn->shutting_down || conn->saw_farewell)) {
+	    (test_conn_fl(conn->listening_conn, shutting_down) ||
+	     test_conn_fl(conn, saw_farewell))) {
 
 		/* free accepted sockets after farewell or listener shutdown */
 		spin_unlock(&conn->lock);
@@ -1173,18 +1148,19 @@ static void scoutfs_net_shutdown_worker(struct work_struct *work)
 			/* server accepted sockets wait for reconnect */
 			listener = conn->listening_conn;
 			delay = msecs_to_jiffies(CLIENT_RECONNECT_TIMEOUT_MS);
-			conn->reconn_wait = 1;
+			set_conn_fl(conn, reconn_wait);
 			conn->reconn_deadline = jiffies + delay;
 			queue_delayed_work(listener->workq,
 					   &listener->reconn_free_dwork, delay);
 		} else {
 			/* clients and listeners can retry */
-			conn->shutting_down = 0;
+			clear_conn_fl(conn, shutting_down);
 			if (conn->notify_down)
 				conn->notify_down(sb, conn, conn->info,
 						  conn->rid);
 		}
 
+		trace_scoutfs_conn_shutdown_complete(conn);
 		spin_unlock(&conn->lock);
 	}
 
@@ -1218,12 +1194,13 @@ restart:
 	spin_lock(&conn->lock);
 	list_for_each_entry(acc, &conn->accepted_list, accepted_head) {
 
-		if (acc->reconn_wait && !acc->reconn_freeing &&
-		    (conn->shutting_down ||
+		if (test_conn_fl(acc, reconn_wait) &&
+		    !test_conn_fl(acc, reconn_freeing) &&
+		    (test_conn_fl(conn, shutting_down) ||
 		     time_after_eq(now, acc->reconn_deadline))) {
-			acc->reconn_freeing = 1;
+			set_conn_fl(acc, reconn_freeing);
 			spin_unlock(&conn->lock);
-			if (!conn->shutting_down)
+			if (!test_conn_fl(conn, shutting_down))
 				scoutfs_info(sb, "client timed out "SIN_FMT" -> "SIN_FMT", can not reconnect",
 					     SIN_ARG(&acc->sockname),
 					     SIN_ARG(&acc->peername));
@@ -1232,7 +1209,8 @@ restart:
 		}
 
 		/* calc delay of next work, can drift a bit */
-		if (acc->reconn_wait && !acc->reconn_freeing &&
+		if (test_conn_fl(acc, reconn_wait) &&
+		    !test_conn_fl(acc, reconn_freeing) &&
 		    (!requeue || time_before(now, deadline))) {
 			requeue = true;
 			deadline = acc->reconn_deadline;
@@ -1312,6 +1290,7 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 			  scoutfs_net_reconn_free_worker);
 
 	scoutfs_tseq_add(&ninf->conn_tseq_tree, &conn->tseq_entry);
+	trace_scoutfs_conn_alloc(conn);
 
 	return conn;
 }
@@ -1432,13 +1411,15 @@ static bool connect_result(struct scoutfs_net_connection *conn, int *error)
 	bool done = false;
 
 	spin_lock(&conn->lock);
-	if (conn->established) {
+	if (test_conn_fl(conn, established)) {
 		done = true;
 		*error = 0;
-	} else if (conn->shutting_down || conn->connect_sin.sin_family == 0) {
+	} else if (test_conn_fl(conn, shutting_down) ||
+		   conn->connect_sin.sin_family == 0) {
 		done = true;
 		*error = -ESHUTDOWN;
 	}
+	trace_scoutfs_conn_connect_result(conn);
 	spin_unlock(&conn->lock);
 
 	return done;
@@ -1477,9 +1458,9 @@ static void set_valid_greeting(struct scoutfs_net_connection *conn)
 	assert_spin_locked(&conn->lock);
 
 	/* recv should have dropped invalid duplicate greeting messages */
-	BUG_ON(conn->valid_greeting);
+	BUG_ON(test_conn_fl(conn, valid_greeting));
 
-	conn->valid_greeting = 1;
+	set_conn_fl(conn, valid_greeting);
 	list_splice_tail_init(&conn->resend_queue, &conn->send_queue);
 	queue_work(conn->workq, &conn->send_work);
 }
@@ -1571,10 +1552,10 @@ restart:
 				    accepted_head) {
 			if (acc->rid != rid ||
 			    acc->greeting_id >= greeting_id ||
-			    acc->reconn_freeing)
+			    test_conn_fl(acc, reconn_freeing))
 				continue;
 
-			if (!acc->reconn_wait) {
+			if (!test_conn_fl(acc, reconn_wait)) {
 				spin_lock_nested(&acc->lock,
 						 CONN_LOCK_ACCEPTED);
 				shutdown_conn_locked(acc);
@@ -1585,7 +1566,7 @@ restart:
 			}
 
 			reconn = acc;
-			reconn->reconn_freeing = 1;
+			set_conn_fl(reconn, reconn_freeing);
 			break;
 		}
 		spin_unlock(&listener->lock);
@@ -1601,7 +1582,7 @@ restart:
 	if (reconn) {
 		spin_lock(&conn->lock);
 
-		conn->saw_farewell = reconn->saw_farewell;
+		assign_conn_fl(conn, reconn, saw_farewell);
 		conn->next_send_seq = reconn->next_send_seq;
 		conn->next_send_id = reconn->next_send_id;
 		atomic64_set(&conn->recv_seq, atomic64_read(&reconn->recv_seq));
@@ -1615,6 +1596,7 @@ restart:
 		swap(conn->info, reconn->info);
 		reconn->notify_down = NULL;
 
+		trace_scoutfs_conn_reconn_migrate(conn);
 		spin_unlock(&conn->lock);
 
 		/* we set _freeing */
@@ -1789,9 +1771,14 @@ static void net_tseq_show_conn(struct seq_file *m,
 
 	seq_printf(m, "name "SIN_FMT" peer "SIN_FMT" rid %016llx greeting_id %llu vg %u est %u sd %u sg %u sf %u rw %u rf %u cto_ms rdl_j %lu %lu nss %llu rs %llu nsi %llu\n",
 		   SIN_ARG(&conn->sockname), SIN_ARG(&conn->peername),
-		   conn->rid, conn->greeting_id, conn->valid_greeting,
-		   conn->established, conn->shutting_down, conn->saw_greeting,
-		   conn->saw_farewell, conn->reconn_wait, conn->reconn_freeing,
+		   conn->rid, conn->greeting_id,
+		   test_conn_fl(conn, valid_greeting),
+		   test_conn_fl(conn, established),
+		   test_conn_fl(conn, shutting_down),
+		   test_conn_fl(conn, saw_greeting),
+		   test_conn_fl(conn, saw_farewell),
+		   test_conn_fl(conn, reconn_wait),
+		   test_conn_fl(conn, reconn_freeing),
 		   conn->connect_timeout_ms, conn->reconn_deadline,
 		   conn->next_send_seq, (u64)atomic64_read(&conn->recv_seq),
 		   conn->next_send_id);

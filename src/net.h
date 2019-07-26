@@ -3,6 +3,87 @@
 
 #include <linux/in.h>
 #include "endian_swap.h"
+#include "tseq.h"
+
+struct scoutfs_net_connection;
+
+/* These are called in their own blocking context */
+typedef int (*scoutfs_net_request_t)(struct super_block *sb,
+				     struct scoutfs_net_connection *conn,
+				     u8 cmd, u64 id, void *arg, u16 arg_len);
+
+/* These are called in their own blocking context */
+typedef int (*scoutfs_net_response_t)(struct super_block *sb,
+				      struct scoutfs_net_connection *conn,
+				      void *resp, unsigned int resp_len,
+				      int error, void *data);
+
+typedef void (*scoutfs_net_notify_t)(struct super_block *sb,
+				     struct scoutfs_net_connection *conn,
+				     void *info, u64 rid);
+
+/*
+ * The conn is only here so that tracing can get at its fields without
+ * having trace functions with a trillion arguments.  Tracing requires
+ * duplicating the arguments for every event, no thanks.
+ */
+
+struct scoutfs_net_connection {
+	struct super_block *sb;
+	scoutfs_net_notify_t notify_up;
+	scoutfs_net_notify_t notify_down;
+	size_t info_size;
+	scoutfs_net_request_t *req_funcs;
+
+	spinlock_t lock;
+	wait_queue_head_t waitq;
+
+	unsigned long flags; /* CONN_FL_* bitmask */
+	unsigned long reconn_deadline;
+
+	struct sockaddr_in connect_sin;
+	unsigned long connect_timeout_ms;
+
+	struct socket *sock;
+	u64 rid;
+	u64 greeting_id;
+	struct sockaddr_in sockname;
+	struct sockaddr_in peername;
+
+	struct list_head accepted_head;
+	struct scoutfs_net_connection *listening_conn;
+	struct list_head accepted_list;
+
+	u64 next_send_seq;
+	u64 next_send_id;
+	struct list_head send_queue;
+	struct list_head resend_queue;
+
+	atomic64_t recv_seq;
+
+	struct workqueue_struct *workq;
+	struct work_struct listen_work;
+	struct work_struct connect_work;
+	struct work_struct send_work;
+	struct work_struct recv_work;
+	struct work_struct shutdown_work;
+	struct delayed_work reconn_free_dwork;
+	/* message_recv proc_work also executes in the conn workq */
+
+	struct scoutfs_tseq_entry tseq_entry;
+
+	void *info;
+};
+
+enum {
+	CONN_FL_valid_greeting = (1UL << 0), /* other commands can proceed */
+	CONN_FL_established =	 (1UL << 1), /* added sends queue send work */
+	CONN_FL_shutting_down =	 (1UL << 2), /* shutdown work was queued */
+	CONN_FL_saw_greeting =	 (1UL << 3), /* saw greeting on this sock */
+	CONN_FL_saw_farewell =	 (1UL << 4), /* saw farewell response */
+	CONN_FL_reconn_wait =	 (1UL << 5), /* shutdown, waiting for reconn */
+	CONN_FL_reconn_freeing = (1UL << 6), /* waiting done, setter frees */
+};
 
 #define SIN_FMT		"%pIS:%u"
 #define SIN_ARG(sin)	sin, be16_to_cpu((sin)->sin_port)
@@ -21,23 +102,6 @@ static inline void scoutfs_addr_from_sin(struct scoutfs_inet_addr *addr,
 	addr->addr = be32_to_le32(sin->sin_addr.s_addr);
 	addr->port = be16_to_le16(sin->sin_port);
 }
-
-struct scoutfs_net_connection;
-
-/* These are called in their own blocking context */
-typedef int (*scoutfs_net_request_t)(struct super_block *sb,
-				     struct scoutfs_net_connection *conn,
-				     u8 cmd, u64 id, void *arg, u16 arg_len);
-
-/* These are called in their own blocking context */
-typedef int (*scoutfs_net_response_t)(struct super_block *sb,
-				      struct scoutfs_net_connection *conn,
-				      void *resp, unsigned int resp_len,
-				      int error, void *data);
-
-typedef void (*scoutfs_net_notify_t)(struct super_block *sb,
-				     struct scoutfs_net_connection *conn,
-				     void *info, u64 rid);
 
 struct scoutfs_net_connection *
 scoutfs_net_alloc_conn(struct super_block *sb,

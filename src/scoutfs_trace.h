@@ -38,6 +38,7 @@
 #include "dir.h"
 #include "extents.h"
 #include "server.h"
+#include "net.h"
 
 struct lock_info;
 
@@ -1811,6 +1812,129 @@ DEFINE_EVENT(scoutfs_net_class, scoutfs_net_recv_message,
         TP_PROTO(struct super_block *sb, struct sockaddr_in *name,
 		 struct sockaddr_in *peer, struct scoutfs_net_header *nh),
         TP_ARGS(sb, name, peer, nh)
+);
+
+#define conn_flag_entry(which) \
+	CONN_FL_##which, __stringify(which)
+
+#define print_conn_flags(flags) __print_flags(flags, "|",	\
+	{ conn_flag_entry(valid_greeting) },			\
+	{ conn_flag_entry(established) },			\
+	{ conn_flag_entry(shutting_down) },			\
+	{ conn_flag_entry(saw_greeting) },			\
+	{ conn_flag_entry(saw_farewell) },			\
+	{ conn_flag_entry(reconn_wait) },			\
+	{ conn_flag_entry(reconn_freeing) })
+
+/*
+ * This is called from alloc and free when the caller only has safe
+ * access to the struct itself, be very careful not to follow any
+ * indirection out of the storage for the conn struct.
+ */
+DECLARE_EVENT_CLASS(scoutfs_net_conn_class,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn),
+
+        TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(unsigned long, flags)
+		__field(unsigned long, reconn_deadline)
+		__field(unsigned long, connect_timeout_ms)
+		__field(void *, sock)
+		__field(__u64, c_rid)
+		__field(__u64, greeting_id)
+		si4_trace_define(sockname)
+		si4_trace_define(peername)
+		__field(unsigned char, e_accepted_head)
+		__field(void *, listening_conn)
+		__field(unsigned char, e_accepted_list)
+		__field(__u64, next_send_seq)
+		__field(__u64, next_send_id)
+		__field(unsigned char, e_send_queue)
+		__field(unsigned char, e_resend_queue)
+		__field(__u64, recv_seq)
+        ),
+        TP_fast_assign(
+		SCSB_TRACE_ASSIGN(conn->sb);
+		__entry->flags = conn->flags;
+		__entry->reconn_deadline = conn->reconn_deadline;
+		__entry->connect_timeout_ms = conn->connect_timeout_ms;
+		__entry->sock = conn->sock;
+		__entry->c_rid = conn->rid;
+		__entry->greeting_id = conn->greeting_id;
+		si4_trace_assign(sockname, &conn->sockname);
+		si4_trace_assign(peername, &conn->peername);
+		__entry->e_accepted_head = !!list_empty(&conn->accepted_head);
+		__entry->listening_conn = conn->listening_conn;
+		__entry->e_accepted_list = !!list_empty(&conn->accepted_list);
+		__entry->next_send_seq = conn->next_send_seq;
+		__entry->next_send_id = conn->next_send_id;
+		__entry->e_send_queue = !!list_empty(&conn->send_queue);
+		__entry->e_resend_queue = !!list_empty(&conn->resend_queue);
+		__entry->recv_seq = atomic64_read(&conn->recv_seq);
+        ),
+        TP_printk(SCSBF" flags %s rc_dl %lu cto %lu sk %p rid %llu grid %llu sn "SI4_FMT" pn "SI4_FMT" eah %u lc %p eal %u nss %llu nsi %llu esq %u erq %u rs %llu",
+		  SCSB_TRACE_ARGS,
+		  print_conn_flags(__entry->flags),
+		  __entry->reconn_deadline,
+		  __entry->connect_timeout_ms,
+		  __entry->sock,
+		  __entry->c_rid,
+		  __entry->greeting_id,
+		  si4_trace_args(sockname),
+		  si4_trace_args(peername),
+		  __entry->e_accepted_head,
+		  __entry->listening_conn,
+		  __entry->e_accepted_list,
+		  __entry->next_send_seq,
+		  __entry->next_send_id,
+		  __entry->e_send_queue,
+		  __entry->e_resend_queue,
+		  __entry->recv_seq)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_alloc,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_connect_start,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_connect_result,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_connect_complete,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_accept,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_reconn_migrate,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_shutdown_queued,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_shutdown_start,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_shutdown_complete,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_destroy_start,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
+);
+DEFINE_EVENT(scoutfs_net_conn_class, scoutfs_conn_destroy_free,
+        TP_PROTO(struct scoutfs_net_connection *conn),
+        TP_ARGS(conn)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_work_class,

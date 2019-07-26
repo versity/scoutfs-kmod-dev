@@ -631,6 +631,8 @@ static int finished_recovery(struct super_block *sb, u64 rid, bool cancel)
 
 	scoutfs_key_set_zeros(&key);
 
+	scoutfs_info(sb, "all lock clients recovered");
+
 	while ((snode = get_server_lock(inf, &key, NULL, true))) {
 
 		key = snode->key;
@@ -986,7 +988,7 @@ int scoutfs_lock_server_setup(struct super_block *sb)
 	if (nr) {
 		schedule_delayed_work(&inf->recovery_dwork,
 				msecs_to_jiffies(LOCK_SERVER_RECOVERY_MS));
-		scoutfs_warn(sb, "waiting for %u lock clients to connect", nr);
+		scoutfs_info(sb, "waiting for %u lock clients to recover", nr);
 	}
 
 out:

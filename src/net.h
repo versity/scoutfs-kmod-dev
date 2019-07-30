@@ -67,6 +67,7 @@ struct scoutfs_net_connection {
 	struct work_struct send_work;
 	struct work_struct recv_work;
 	struct work_struct shutdown_work;
+	struct work_struct destroy_work;
 	struct delayed_work reconn_free_dwork;
 	/* message_recv proc_work also executes in the conn workq */
 

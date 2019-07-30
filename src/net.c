@@ -80,6 +80,7 @@
  */
 struct net_info {
 	struct workqueue_struct *shutdown_workq;
+	struct workqueue_struct *destroy_workq;
 	struct dentry *conn_tseq_dentry;
 	struct scoutfs_tseq_tree conn_tseq_tree;
 	struct dentry *msg_tseq_dentry;
@@ -796,14 +797,25 @@ static void scoutfs_net_send_worker(struct work_struct *work)
 	trace_scoutfs_net_send_work_exit(sb, 0, ret);
 }
 
-static void destroy_conn(struct scoutfs_net_connection *conn)
+/*
+ * Listening conns try to destroy accepted conns.  Workqueues model
+ * flushing work as acquiring a workqueue class lock so it thinks that
+ * this is a deadlock because it doesn't know about our hierarchy of
+ * workqueues.  The workqueue lockdep_map is private so we can't set a
+ * subclass to differentiate between listening and accepted conn
+ * workqueues.  Instead we queue final conn destruction off to a longer
+ * lived specific workqueue that has a different class.
+ */
+static void scoutfs_net_destroy_worker(struct work_struct *work)
 {
+	DEFINE_CONN_FROM_WORK(conn, work, destroy_work);
 	struct super_block *sb = conn->sb;
 	struct net_info *ninf = SCOUTFS_SB(sb)->net_info;
 	struct scoutfs_net_connection *listener;
 	struct message_send *msend;
 	struct message_send *tmp;
 
+	trace_scoutfs_net_destroy_work_enter(sb, 0, 0);
 	trace_scoutfs_conn_destroy_start(conn);
 
 	WARN_ON_ONCE(conn->sock != NULL);
@@ -835,6 +847,15 @@ static void destroy_conn(struct scoutfs_net_connection *conn)
 	kfree(conn->info);
 	trace_scoutfs_conn_destroy_free(conn);
 	kfree(conn);
+
+	trace_scoutfs_net_destroy_work_exit(sb, 0, 0);
+}
+
+static void destroy_conn(struct scoutfs_net_connection *conn)
+{
+	struct net_info *ninf = SCOUTFS_SB(conn->sb)->net_info;
+
+	queue_work(ninf->destroy_workq, &conn->destroy_work);
 }
 
 /*
@@ -1286,6 +1307,7 @@ scoutfs_net_alloc_conn(struct super_block *sb,
 	INIT_WORK(&conn->send_work, scoutfs_net_send_worker);
 	INIT_WORK(&conn->recv_work, scoutfs_net_recv_worker);
 	INIT_WORK(&conn->shutdown_work, scoutfs_net_shutdown_worker);
+	INIT_WORK(&conn->destroy_work, scoutfs_net_destroy_worker);
 	INIT_DELAYED_WORK(&conn->reconn_free_dwork,
 			  scoutfs_net_reconn_free_worker);
 
@@ -1317,6 +1339,7 @@ void scoutfs_net_shutdown(struct super_block *sb,
 {
 	shutdown_conn(conn);
 	flush_work(&conn->shutdown_work);
+	flush_work(&conn->destroy_work);
 }
 
 /*
@@ -1843,7 +1866,10 @@ int scoutfs_net_setup(struct super_block *sb)
 	ninf->shutdown_workq = alloc_workqueue("scoutfs_net_shutdown",
 					       WQ_UNBOUND | WQ_NON_REENTRANT,
 					       0);
-	if (!ninf->shutdown_workq) {
+	ninf->destroy_workq = alloc_workqueue("scoutfs_net_destroy",
+					       WQ_UNBOUND | WQ_NON_REENTRANT,
+					       0);
+	if (!ninf->shutdown_workq || !ninf->destroy_workq) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -1879,6 +1905,8 @@ void scoutfs_net_destroy(struct super_block *sb)
 	if (ninf) {
 		if (ninf->shutdown_workq)
 			destroy_workqueue(ninf->shutdown_workq);
+		if (ninf->destroy_workq)
+			destroy_workqueue(ninf->destroy_workq);
 		debugfs_remove(ninf->conn_tseq_dentry);
 		debugfs_remove(ninf->msg_tseq_dentry);
 		kfree(ninf);

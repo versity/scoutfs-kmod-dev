@@ -608,8 +608,10 @@ static int prepare_curs(struct super_block *sb, struct compact_cursor *curs,
  * segments, then generating the response that describes the output
  * segments.
  *
- * The server will either commit our response or cleanup the request
- * if we return an error that the caller sends in response.
+ * The server will either commit our response or cleanup the request if
+ * we return an error that the caller sends in response.  The server
+ * protects the input segments so they shouldn't be overwritten by other
+ * compactions or allocations.  We shouldn't get stale segment reads.
  */
 int scoutfs_compact(struct super_block *sb,
 		    struct scoutfs_net_compact_request *req,
@@ -668,8 +670,11 @@ int scoutfs_compact(struct super_block *sb,
 
 	ret = 0;
 out:
-	if (ret == -ESTALE)
+	/* server protects input segments, shouldn't be possible */
+	if (WARN_ON_ONCE(ret == -ESTALE)) {
 		scoutfs_inc_counter(sb, compact_stale_error);
+		ret = -EIO;
+	}
 
 	free_cseg_list(sb, &curs.csegs);
 	free_cseg_list(sb, &results);

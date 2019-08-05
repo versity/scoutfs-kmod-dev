@@ -701,16 +701,20 @@ retry:
 		}
 
 		/*
-		 * We don't need to cow the exiting block if we're not
-		 * dirtying the block, or we're not migrating and it's
-		 * already dirty in this transaction, or we're
-		 * migrating and it's already in the current half.
+		 * We need to create a new dirty copy of the block if
+		 * the caller asked for it.  If the block is already
+		 * dirty then we can return it if either we're not
+		 * migrating so it doesn't matter which half it's in, or
+		 * we're migrating and the dirty block is already in the
+		 * second half.  We can be migrating into a new half
+		 * while blocks are still dirty in the old half.  And we
+		 * always have to dirty parent blocks in the current
+		 * half in case we need to dirty their children.
 		 */
 		if (!(flags & BTW_DIRTY) ||
-		    (!(flags & BTW_MIGRATE) &&
-		     (le64_to_cpu(bt->hdr.seq) >= bti->first_dirty_seq)) ||
-		    ((flags & BTW_MIGRATE) &&
-		     blkno_is_current(bring, le64_to_cpu(ref->blkno)))) {
+		    ((le64_to_cpu(bt->hdr.seq) >= bti->first_dirty_seq) &&
+		     (!(flags & BTW_MIGRATE) ||
+		      blkno_is_current(bring, le64_to_cpu(ref->blkno))))) {
 			ret = 0;
 			goto out;
 		}

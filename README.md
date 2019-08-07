@@ -72,7 +72,7 @@ The steps for getting scoutfs mounted and operational are:
  2. Make a new filesystem on the device with the userspace utilities
  3. Mount the device on all the nodes
 
-In this example we run all of these commands on two nodes.  The block
+In this example we run all of these commands on three nodes.  The block
 device name is the same on all the nodes.
 
 1. Get the Kernel Module and Userspace Binaries
@@ -96,29 +96,26 @@ device name is the same on all the nodes.
    git clone git@github.com:versity/scoutfs-utils-dev.git
    make -C scoutfs-utils-dev
    alias scoutfs=$PWD/scoutfs-utils-dev/src/scoutfs
-
    ```
 
 2. Make a New Filesystem (**destroys contents, no questions asked**)
 
-   We specify that every node will participate in quorum voting by
-   configuring each in the super block with options to mkfs.
+   We specify that two of our three nodes must be present to form a
+   quorum for the system to function.
 
    ```shell
-   scoutfs mkfs --quorum_slot node1:0:172.16.1.1 \
-		--quorum_slot node2:0:172.16.1.2 /dev/shared_block_device
+   scoutfs mkfs -Q 2 /dev/shared_block_device
    ```
-
 
 3. Mount the Filesystem
 
-   Each mounting node provides the name that was given to the
-   quorum\_slot option to mkfs.
+   Each mounting node provides its local IP address on which it will run
+   an internal server for the other mounts if it is elected the leader by
+   the quorum.
 
    ```shell
    mkdir /mnt/scoutfs
-   mount -t scoutfs -o uniq_name=$NODENAME /dev/shared_block_device /mnt/scoutfs
-
+   mount -t scoutfs -o server_address=$NODE_ADDR /dev/shared_block_device /mnt/scoutfs
    ```
 
 4. For Kicks, Observe the Metadata Change Index

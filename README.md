@@ -115,7 +115,7 @@ device name is the same on all the nodes.
 
    ```shell
    mkdir /mnt/scoutfs
-   mount -t scoutfs -o server_address=$NODE_ADDR /dev/shared_block_device /mnt/scoutfs
+   mount -t scoutfs -o server_addr=$NODE_ADDR /dev/shared_block_device /mnt/scoutfs
    ```
 
 4. For Kicks, Observe the Metadata Change Index

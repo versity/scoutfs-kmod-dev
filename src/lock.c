@@ -943,8 +943,10 @@ static int lock_key_range(struct super_block *sb, int mode, int flags,
 		ret = wait_event_interruptible(lock->waitq,
 					       lock_wait_cond(sb, lock, mode));
 		spin_lock(&linfo->lock);
-		if (ret)
+		if (ret) {
+			lock->request_pending = 0;
 			break;
+		}
 	}
 
 	lock_dec_count(lock->waiters, mode);

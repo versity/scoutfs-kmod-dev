@@ -1492,14 +1492,19 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	debugfs_remove(linfo->tseq_dentry);
 
 	/*
-	 * This is very clumsy and brute force.  This will be cleaned up
-	 * as we add proper lock recovery.
+	 * Usually lock_free is only called once locks are idle but all
+	 * locks are idle by definition during shutdown.  We need to
+	 * manually update the lock's state to reflect that we've given
+	 * up on pending work that would otherwise prevent free from
+	 * being called (and would trip assertions in our manual calling
+	 * of free).
 	 */
 	spin_lock(&linfo->lock);
 	node = rb_first(&linfo->lock_tree);
 	while (node) {
 		lock = rb_entry(node, struct scoutfs_lock, node);
 		node = rb_next(node);
+		lock->request_pending = 0;
 		if (!list_empty(&lock->lru_head))
 			__lock_del_lru(linfo, lock);
 		lock_remove(linfo, lock);

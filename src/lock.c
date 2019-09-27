@@ -1289,6 +1289,25 @@ void scoutfs_lock_del_coverage(struct super_block *sb,
 }
 
 /*
+ * Returns true if the given lock protects the given access of the given
+ * key.  The lock must have a current granted mode that is compatible
+ * with the access mode and the access key must be in the lock's key
+ * range.
+ *
+ * This is called by lock holders who's use of the lock must be preventing
+ * the mode and keys from changing.
+ */
+bool scoutfs_lock_protected(struct scoutfs_lock *lock, struct scoutfs_key *key,
+			    int mode)
+{
+	signed char lock_mode = ACCESS_ONCE(lock->mode);
+
+	return lock_modes_match(lock_mode, mode) &&
+	       scoutfs_key_compare_ranges(key, key,
+					  &lock->start, &lock->end) == 0;
+}
+
+/*
  * The shrink callback got the lock, marked it request_pending, and
  * handed it off to us.  We kick off a null request and the lock will
  * be freed by the response once all users drain.  If this races with

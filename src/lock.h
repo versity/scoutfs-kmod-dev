@@ -83,6 +83,8 @@ bool scoutfs_lock_is_covered(struct super_block *sb,
 			     struct scoutfs_lock_coverage *cov);
 void scoutfs_lock_del_coverage(struct super_block *sb,
 			       struct scoutfs_lock_coverage *cov);
+bool scoutfs_lock_protected(struct scoutfs_lock *lock, struct scoutfs_key *key,
+			    int mode);
 
 void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr);
 

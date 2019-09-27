@@ -36,6 +36,9 @@ struct scoutfs_lock {
 	unsigned int users[SCOUTFS_LOCK_NR_MODES];
 
 	struct scoutfs_tseq_entry tseq_entry;
+
+	/* the forest btree code stores data per lock */
+	struct forest_lock_private *forest_private;
 };
 
 struct scoutfs_lock_coverage {

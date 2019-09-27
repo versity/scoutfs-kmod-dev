@@ -7,6 +7,7 @@
 /* block header magic values, chosen at random */
 #define SCOUTFS_BLOCK_MAGIC_SUPER	0x103c428b
 #define SCOUTFS_BLOCK_MAGIC_BTREE	0xe597f96d
+#define SCOUTFS_BLOCK_MAGIC_BLOOM	0x31995604
 
 /*
  * The super block and btree blocks are fixed 4k.
@@ -329,6 +330,61 @@ struct scoutfs_mounted_client_btree_val {
 
 #define SCOUTFS_MOUNTED_CLIENT_VOTER	(1 << 0)
 
+struct scoutfs_log_trees {
+	struct scoutfs_balloc_root alloc_root;
+	struct scoutfs_balloc_root free_root;
+	struct scoutfs_btree_root item_root;
+	struct scoutfs_btree_ref bloom_ref;
+	__le64 rid;
+	__le64 nr;
+} __packed;
+
+struct scoutfs_log_trees_key {
+	__be64 rid;
+	__be64 nr;
+} __packed;
+
+struct scoutfs_log_trees_val {
+	struct scoutfs_balloc_root alloc_root;
+	struct scoutfs_balloc_root free_root;
+	struct scoutfs_btree_root item_root;
+	struct scoutfs_btree_ref bloom_ref;
+} __packed;
+
+struct scoutfs_log_item_value {
+	__le64 vers;
+	__u8 flags;
+	__u8 data[0];
+} __packed;
+
+/*
+ * FS items are limited by the max btree value length with the log item
+ * value header.
+ */
+#define SCOUTFS_MAX_VAL_SIZE \
+	(SCOUTFS_BTREE_MAX_VAL_LEN - sizeof(struct scoutfs_log_item_value))
+
+#define SCOUTFS_LOG_ITEM_FLAG_DELETION		(1 << 0)
+
+struct scoutfs_bloom_block {
+	struct scoutfs_block_header hdr;
+	__le64 total_set;
+	__le64 bits[0];
+} __packed;
+
+/*
+ * Log trees include a tree of items that make up a fixed size bloom
+ * filter.  Just a few megs worth of items lets us test for the presence
+ * of locks that cover billions of files with a .1% chance of false
+ * positives.  The log trees should be finalized and merged long before
+ * the bloom filters fill up and start returning excessive false positives.
+ */
+#define SCOUTFS_FOREST_BLOOM_NRS		7
+#define SCOUTFS_FOREST_BLOOM_BITS \
+	(((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_bloom_block)) /	\
+	 member_sizeof(struct scoutfs_bloom_block, bits[0])) *		\
+	 member_sizeof(struct scoutfs_bloom_block, bits[0]) * 8)	\
+
 /*
  * The max number of links defines the max number of entries that we can
  * index in o(log n) and the static list head storage size in the
@@ -496,6 +552,8 @@ struct scoutfs_super_block {
 	__le64 core_balloc_cursor;
 	__le64 free_blocks;
 	__le64 alloc_cursor;
+	__le64 first_fs_blkno;
+	__le64 last_fs_blkno;
 	struct scoutfs_btree_ring bring;
 	__le64 next_seg_seq;
 	__le64 next_compact_id;
@@ -507,8 +565,8 @@ struct scoutfs_super_block {
 	struct scoutfs_balloc_root core_balloc_alloc;
 	struct scoutfs_balloc_root core_balloc_free;
 	struct scoutfs_btree_root alloc_root;
-	struct scoutfs_manifest manifest;
 	struct scoutfs_btree_root fs_root;
+	struct scoutfs_manifest manifest;
 	struct scoutfs_btree_root logs_root;
 	struct scoutfs_btree_root lock_clients;
 	struct scoutfs_btree_root trans_seqs;
@@ -616,8 +674,6 @@ enum {
 #define SCOUTFS_XATTR_NR_PARTS(name_len, val_len)			\
 	DIV_ROUND_UP(sizeof(struct scoutfs_xattr) + name_len + val_len, \
 		     SCOUTFS_XATTR_MAX_PART_SIZE);
-
-#define SCOUTFS_MAX_VAL_SIZE	SCOUTFS_XATTR_MAX_PART_SIZE
 
 #define SCOUTFS_LOCK_INODE_GROUP_NR	1024
 #define SCOUTFS_LOCK_INODE_GROUP_MASK	(SCOUTFS_LOCK_INODE_GROUP_NR - 1)

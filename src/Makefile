@@ -21,6 +21,7 @@ scoutfs-y +=			\
 	export.o		\
 	extents.o		\
 	file.o			\
+	forest.o		\
 	inode.o			\
 	ioctl.o			\
 	item.o			\

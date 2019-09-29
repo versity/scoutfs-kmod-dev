@@ -2389,21 +2389,15 @@ TRACE_EVENT(scoutfs_btree_read_error,
 );
 
 TRACE_EVENT(scoutfs_btree_dirty_block,
-	TP_PROTO(struct super_block *sb, u64 blkno, u64 seq, u64 next_block,
-		u64 next_seq, unsigned long cur_dirtied,
-		unsigned long old_dirtied, u64 bt_blkno, u64 bt_seq),
+	TP_PROTO(struct super_block *sb, u64 blkno, u64 seq,
+		 u64 bt_blkno, u64 bt_seq),
 
-	TP_ARGS(sb, blkno, seq, next_block, next_seq, cur_dirtied, old_dirtied,
-		bt_blkno, bt_seq),
+	TP_ARGS(sb, blkno, seq, bt_blkno, bt_seq),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, blkno)
 		__field(__u64, seq)
-		__field(__u64, next_block)
-		__field(__u64, next_seq)
-		__field(unsigned long, cur_dirtied)
-		__field(unsigned long, old_dirtied)
 		__field(__u64, bt_blkno)
 		__field(__u64, bt_seq)
 	),
@@ -2412,18 +2406,13 @@ TRACE_EVENT(scoutfs_btree_dirty_block,
 		SCSB_TRACE_ASSIGN(sb);
 		__entry->blkno = blkno;
 		__entry->seq = seq;
-		__entry->next_block = next_block;
-		__entry->next_seq = next_seq;
-		__entry->cur_dirtied = cur_dirtied;
-		__entry->old_dirtied = old_dirtied;
 		__entry->bt_blkno = bt_blkno;
 		__entry->bt_seq = bt_seq;
 	),
 
-	TP_printk(SCSBF" blkno %llu seq %llu next_block %llu next_seq %llu cur_dirtied %lu old_dirtied %lu bt_blkno %llu bt_seq %llu",
+	TP_printk(SCSBF" blkno %llu seq %llu bt_blkno %llu bt_seq %llu",
 		  SCSB_TRACE_ARGS, __entry->blkno, __entry->seq,
-		  __entry->next_block, __entry->next_seq, __entry->cur_dirtied,
-		  __entry->old_dirtied, __entry->bt_blkno, __entry->bt_seq)
+		  __entry->bt_blkno, __entry->bt_seq)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_extent_class,

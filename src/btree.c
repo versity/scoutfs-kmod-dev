@@ -14,10 +14,9 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <linux/buffer_head.h>
 #include <linux/crc32c.h>
 #include <linux/sort.h>
-#include <linux/blkdev.h>
+#include <linux/random.h>
 
 #include "super.h"
 #include "format.h"
@@ -28,12 +27,12 @@
 #include "options.h"
 #include "msg.h"
 #include "block.h"
+#include "balloc.h"
 
 #include "scoutfs_trace.h"
 
 /*
- * scoutfs uses a cow btree in a ring of preallocated blocks to index
- * the manifest (and allocator, but mostly the manifest).
+ * scoutfs uses a cow btree to index fs metadata.
  *
  * Using a cow btree lets nodes determine the validity of cached blocks
  * based on a single root ref (blkno, seq) that is communicated through
@@ -41,48 +40,12 @@
  * overwritten in the ring they can continue to use those cached blocks
  * as the newer cowed blocks continue to reference them.
  *
- * New blocks written to the btree are allocated from the tail of the
- * preallocated ring.  This avoids a fine grained persistent record of
- * free btree blocks.  It also gathers all dirty btree blocks into one
- * contiguous write.
- *
- * To ensure that newly written blocks don't overwrite previously valid
- * existing blocks in the ring we take two preventative measures.  First
- * we ensure that there are 4x the number of preallocated blocks that
- * would be needed to store the btrees.  Then, second, for every set of
- * blocks written to the current half of the ring we ensure that at
- * least half of the written blocks are cow copies of valid blocks that
- * were stored in the old half of the ring.  This ensures that the
- * current half of the ring will contain all the valid referenced btree
- * blocks by the time it fills up and wraps around to start overwriting
- * the old half of the ring.
- *
- * To find the blocks in the old half of the ring we store a migration
- * key in the super.  Whenever we need to dirty old blocks we sweep leaf
- * blocks from that key dirtying old blocks we find.
- *
- * Blocks are of a fixed size and are set to 4k to avoid multi-page
- * blocks.  This means they can be smaller than the page size and we can
- * need to pin dirty blocks and invalidate and re-read stable blocks
- * that could fall in the same page.  We use buffer heads to track
- * sub-page block state for us.  We abuse knowledge of the page cache
- * and buffer heads to cast between pointers to the blocks and the
- * buffer heads that contain reference counts of the block contents.
- *
- * We store modified blocks in a list on b_private instead of marking
- * the blocks dirty.  We don't want them written out (and possibly
- * reclaimed and re-read) before we have a chance to update their
- * checksums.  We hold an elevated bh count to avoid the buffers from
- * being removed from the pages while we have them in the list.
- *
  * Today callers provide all the locking.  They serialize readers and
  * writers and writers and committing all the dirty blocks.
  *
  * Btree items are stored in each block as a small header with the key
  * followed by the value.  New items are allocated from the back of the
- * block towards the front.  Deleted items can be reclaimed by packing
- * items towards the back of the block by walking them in reverse offset
- * order.
+ * block towards the front. 
  *
  * A dense array of item headers after the btree block header stores the
  * offsets of the items and is kept sorted by the item's keys.  The
@@ -109,25 +72,6 @@
  *  - validate structures on read?
  */
 
-/*
- * There's one physical ring that stores the blocks for all btrees.  We
- * track the state of the ring and all its dirty blocks in this one
- * btree_info per mount/super.
- */
-struct btree_info {
-	struct mutex mutex;
-
-	unsigned long cur_dirtied;
-	unsigned long old_dirtied;
-	struct buffer_head *first_dirty_bh;
-	struct buffer_head *last_dirty_bh;
-	u64 first_dirty_blkno;
-	u64 first_dirty_seq;
-};
-
-#define DECLARE_BTREE_INFO(sb, name) \
-	struct btree_info *name = SCOUTFS_SB(sb)->btree_info
-
 /* btree walking has a bunch of behavioural bit flags */
 enum {
 	 BTW_NEXT	= (1 <<  0), /* return >= key */
@@ -138,7 +82,6 @@ enum {
 	 BTW_ALLOC	= (1 <<  5), /* allocate a new block for 0 ref */
 	 BTW_INSERT	= (1 <<  6), /* walking to insert, try splitting */
 	 BTW_DELETE	= (1 <<  7), /* walking to delete, try merging */
-	 BTW_MIGRATE	= (1 <<  8), /* don't dirty old leaf blocks */
 };
 
 /*
@@ -298,72 +241,6 @@ static int find_pos(struct scoutfs_btree_block *bt, void *key, unsigned key_len,
 	return pos;
 }
 
-/*
- * A block is current if it's in the same half of the ring as the next
- * dirty block in the transaction.
- */
-static bool blkno_is_current(struct scoutfs_btree_ring *bring, u64 blkno)
-{
-	u64 half_blkno = le64_to_cpu(bring->first_blkno) +
-			 (le64_to_cpu(bring->nr_blocks) / 2);
-	u64 next_blkno = le64_to_cpu(bring->first_blkno) +
-			 le64_to_cpu(bring->next_block);
-
-	return (blkno < half_blkno) == (next_blkno < half_blkno);
-}
-
-static bool first_block_in_half(struct scoutfs_btree_ring *bring)
-{
-	u64 block = le64_to_cpu(bring->next_block);
-
-	return block == 0 || block == (le64_to_cpu(bring->nr_blocks) / 2);
-}
-
-/* Set next_block to the start of the other half */
-static void advance_to_next_half(struct scoutfs_btree_ring *bring)
-{
-	u64 block = le64_to_cpu(bring->next_block);
-	u64 half = le64_to_cpu(bring->nr_blocks) / 2;
-	u64 offset;
-
-	if (block >= half) {
-		offset = le64_to_cpu(bring->nr_blocks) - block;
-		block = 0;
-	} else {
-		offset = half - block;
-		block = half;
-	}
-
-	bring->next_block = cpu_to_le64(block);
-	le64_add_cpu(&bring->next_seq, offset);
-}
-
-static size_t super_root_offsets[] = {
-	offsetof(struct scoutfs_super_block, alloc_root),
-	offsetof(struct scoutfs_super_block, manifest.root),
-	offsetof(struct scoutfs_super_block, lock_clients),
-	offsetof(struct scoutfs_super_block, trans_seqs),
-	offsetof(struct scoutfs_super_block, mounted_clients),
-};
-
-#define for_each_super_root(super, i, root)				\
-	for (i = 0; i < ARRAY_SIZE(super_root_offsets) &&		\
-		    (root = ((void *)super + super_root_offsets[i]), 1);\
-	     i++)
-
-static bool all_roots_migrated(struct scoutfs_super_block *super)
-{
-	struct scoutfs_btree_root *root;
-	int i;
-
-	for_each_super_root(super, i, root) {
-		if (root->migration_key_len)
-			return false;
-	}
-
-	return true;
-}
-
 /* move a number of contigous elements from the src index to the dst index */
 #define memmove_arr(arr, dst, src, nr) \
 	memmove(&(arr)[dst], &(arr)[src], (nr) * sizeof(*(arr)))
@@ -498,76 +375,6 @@ static void move_items(struct scoutfs_btree_block *dst,
 }
 
 /*
- * This is only used after we've elevated bh reference counts.  Until we
- * drop the counts the bhs won't be removed from the page.  This lets us
- * use pointers to the block contents in the api and not have to litter
- * it with redundant containers.
- */
-static struct buffer_head *virt_to_bh(void *kaddr)
-{
-	struct buffer_head *bh;
-	struct page *page;
-	long off;
-
-	page = virt_to_page((unsigned long)kaddr);
-	BUG_ON(!page_has_buffers(page));
-        bh = page_buffers(page);
-	BUG_ON((unsigned long)bh->b_data !=
-	       ((unsigned long)kaddr & PAGE_CACHE_MASK));
-
-	off = (unsigned long)kaddr & ~PAGE_CACHE_MASK;
-        while (off >= SCOUTFS_BLOCK_SIZE) {
-                bh = bh->b_this_page;
-		off -= SCOUTFS_BLOCK_SIZE;
-	}
-
-	return bh;
-}
-
-static void put_btree_block(void *ptr)
-{
-	if (!IS_ERR_OR_NULL(ptr))
-		put_bh(virt_to_bh(ptr));
-}
-
-enum {
-        BH_ScoutfsChecked = BH_PrivateStart,
-        BH_ScoutfsValidCrc,
-};
-
-BUFFER_FNS(ScoutfsChecked, scoutfs_checked)	/* has had crc checked */
-BUFFER_FNS(ScoutfsValidCrc, scoutfs_valid_crc)	/* crc matched */
-
-
-/*
- * Make sure that we've found a valid block and that it's the block that
- * we're looking for.
- */
-static bool valid_referenced_block(struct super_block *sb,
-				   struct scoutfs_btree_ref *ref,
-				   struct scoutfs_btree_block *bt,
-				   struct buffer_head *bh)
-{
-	smp_rmb(); /* load checked before crc */
-	if (!buffer_scoutfs_checked(bh)) {
-		lock_buffer(bh);
-		if (!buffer_scoutfs_checked(bh)) {
-			if (scoutfs_block_valid_crc(&bt->hdr))
-				set_buffer_scoutfs_valid_crc(bh);
-			else
-				clear_buffer_scoutfs_valid_crc(bh);
-
-			smp_wmb(); /* store crc before checked */
-			set_buffer_scoutfs_checked(bh);
-		}
-		unlock_buffer(bh);
-	}
-
-	return buffer_scoutfs_valid_crc(bh) &&
-	       scoutfs_block_valid_ref(sb, &bt->hdr, ref->seq, ref->blkno);
-}
-
-/*
  * This is used to lookup cached blocks, read blocks, cow blocks for
  * dirtying, and allocate new blocks.
  *
@@ -578,54 +385,45 @@ static bool valid_referenced_block(struct super_block *sb,
  * returning -ESTALE if it still looks wrong.  The caller can retry the
  * read from a more current root or decide that this is a persistent
  * error.
- *
- * btree callers serialize concurrent writers in a btree but not between
- * btrees.  We have to lock around the shared btree_info.  Callers do
- * lock between all btree writers and writing dirty blocks.  We don't
- * have to lock around the bti fields that are only changed by commits.
  */
-static int get_ref_block(struct super_block *sb, int flags,
+static int get_ref_block(struct super_block *sb,
+			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_block_writer *wri, int flags,
 			 struct scoutfs_btree_ref *ref,
-			 struct scoutfs_btree_block **bt_ret)
+			 struct scoutfs_block **bl_ret)
 {
-	DECLARE_BTREE_INFO(sb, bti);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_btree_ring *bring = &super->bring;
-	struct scoutfs_btree_root *root;
 	struct scoutfs_btree_block *bt = NULL;
 	struct scoutfs_btree_block *new;
-	struct buffer_head *bh;
+	struct scoutfs_block *new_bl = NULL;
+	struct scoutfs_block *bl = NULL;
 	bool retried = false;
 	u64 blkno;
 	u64 seq;
 	int ret;
-	int i;
 
 	/* always get the current block, either to return or cow from */
 	if (ref && ref->blkno) {
 retry:
-		bh = sb_bread(sb, le64_to_cpu(ref->blkno));
-		if (!bh) {
+
+		bl = scoutfs_block_read(sb, le64_to_cpu(ref->blkno));
+		if (IS_ERR(bl)) {
 			trace_scoutfs_btree_read_error(sb, ref);
 			scoutfs_inc_counter(sb, btree_read_error);
-			ret = -EIO;
+			ret = PTR_ERR(bl);
 			goto out;
 		}
-		bt = (void *)bh->b_data;
+		bt = (void *)bl->data;
 
-		if (!valid_referenced_block(sb, ref, bt, bh) ||
+		if (!scoutfs_block_consistent_ref(sb, bl, ref->seq, ref->blkno,
+						  SCOUTFS_BLOCK_MAGIC_BTREE) ||
 		    scoutfs_trigger(sb, BTREE_STALE_READ)) {
 
 			scoutfs_inc_counter(sb, btree_stale_read);
 
-			lock_buffer(bh);
-			clear_buffer_uptodate(bh);
-			clear_buffer_scoutfs_valid_crc(bh);
-			smp_wmb(); /* store crc before checked */
-			clear_buffer_scoutfs_checked(bh);
-			unlock_buffer(bh);
-			put_bh(bh);
-			bt = NULL;
+			scoutfs_block_invalidate(sb, bl);
+			scoutfs_block_put(sb, bl);
+			bl = NULL;
 
 			if (!retried) {
 				retried = true;
@@ -639,18 +437,10 @@ retry:
 		/*
 		 * We need to create a new dirty copy of the block if
 		 * the caller asked for it.  If the block is already
-		 * dirty then we can return it if either we're not
-		 * migrating so it doesn't matter which half it's in, or
-		 * we're migrating and the dirty block is already in the
-		 * second half.  We can be migrating into a new half
-		 * while blocks are still dirty in the old half.  And we
-		 * always have to dirty parent blocks in the current
-		 * half in case we need to dirty their children.
+		 * dirty then we can return it.
 		 */
 		if (!(flags & BTW_DIRTY) ||
-		    ((le64_to_cpu(bt->hdr.seq) >= bti->first_dirty_seq) &&
-		     (!(flags & BTW_MIGRATE) ||
-		      blkno_is_current(bring, le64_to_cpu(ref->blkno))))) {
+		    scoutfs_block_writer_is_dirty(sb, bl)) {
 			ret = 0;
 			goto out;
 		}
@@ -660,83 +450,39 @@ retry:
 		goto out;
 	}
 
-	mutex_lock(&bti->mutex);
+	ret = scoutfs_balloc_alloc(sb, alloc, wri, &blkno);
+	if (ret < 0)
+		goto out;
 
-	blkno = le64_to_cpu(bring->first_blkno) + le64_to_cpu(bring->next_block);
-	seq = le64_to_cpu(bring->next_seq);
+	prandom_bytes(&seq, sizeof(seq));
 
-	bh = sb_getblk(sb, blkno);
-	if (!bh) {
-		ret = -ENOMEM;
-		mutex_unlock(&bti->mutex);
+	new_bl = scoutfs_block_create(sb, blkno);
+	if (IS_ERR(new_bl)) {
+		ret = scoutfs_balloc_free(sb, alloc, wri, blkno);
+		BUG_ON(ret); /* radix should have been dirty */
+		ret = PTR_ERR(new_bl);
 		goto out;
 	}
-	new = (void *)bh->b_data;
+	new = (void *)new_bl->data;
 
-	set_buffer_uptodate(bh);
-	set_buffer_scoutfs_checked(bh);
-	set_buffer_scoutfs_valid_crc(bh);
-
-	/*
-	 * Track our contiguous dirty blocks by holding a ref and putting
-	 * them in a list.  We don't want them marked dirty or else they
-	 * can be written out before we're ready.
-	 */
-	get_bh(bh);
-	bh->b_private = NULL;
-	if (bti->last_dirty_bh)
-		bti->last_dirty_bh->b_private = bh;
-	bti->last_dirty_bh = bh;
-	if (!bti->first_dirty_bh)
-		bti->first_dirty_bh = bh;
-
-	if (ref && !blkno_is_current(bring, le64_to_cpu(ref->blkno)))
-		bti->old_dirtied++;
-	else
-		bti->cur_dirtied++;
-
-	/* wrap next block and increase next seq */
-	le64_add_cpu(&bring->next_block, 1);
-	le64_add_cpu(&bring->next_seq, 1);
-
-	if (le64_to_cpu(bring->next_block) == le64_to_cpu(bring->nr_blocks))
-		bring->next_block = 0;
+	scoutfs_block_writer_mark_dirty(sb, wri, new_bl);
 
 	trace_scoutfs_btree_dirty_block(sb, blkno, seq,
-		le64_to_cpu(bring->next_block), le64_to_cpu(bring->next_seq),
-		bti->cur_dirtied, bti->old_dirtied,
-		bt ? le64_to_cpu(bt->hdr.blkno) : 0,
-		bt ? le64_to_cpu(bt->hdr.seq) : 0);
-
-	/* force advancing if migration's done and we didn't just wrap */
-	if (all_roots_migrated(super) && !first_block_in_half(bring) &&
-	    scoutfs_trigger(sb, BTREE_ADVANCE_RING_HALF))
-		advance_to_next_half(bring);
-
-	/* reset the migration keys if we've just entered a new half */
-	if (first_block_in_half(bring)) {
-		for_each_super_root(super, i, root) {
-			memset(root->migration_key, 0,
-			       sizeof(root->migration_key));
-			root->migration_key_len = cpu_to_le16(1);
-		}
-	}
-
-	mutex_unlock(&bti->mutex);
+					bt ? le64_to_cpu(bt->hdr.blkno) : 0,
+					bt ? le64_to_cpu(bt->hdr.seq) : 0);
 
 	if (bt) {
 		/* returning a cow of an existing block */
 		memcpy(new, bt, SCOUTFS_BLOCK_SIZE);
-		put_btree_block(bt);
-		bt = new;
+		scoutfs_block_put(sb, bl);
 	} else {
 		/* returning a newly allocated block */
-		bt = new;
-		new = NULL;
-		memset(bt, 0, SCOUTFS_BLOCK_SIZE);
-		bt->hdr.fsid = super->hdr.fsid;
-		bt->free_end = cpu_to_le32(SCOUTFS_BLOCK_SIZE);
+		memset(new, 0, SCOUTFS_BLOCK_SIZE);
+		new->hdr.fsid = super->hdr.fsid;
+		new->free_end = cpu_to_le32(SCOUTFS_BLOCK_SIZE);
 	}
+	bl = new_bl;
+	bt = new;
 
 	bt->hdr.magic = cpu_to_le32(SCOUTFS_BLOCK_MAGIC_BTREE);
 	bt->hdr.blkno = cpu_to_le64(blkno);
@@ -749,11 +495,11 @@ retry:
 
 out:
 	if (ret) {
-		put_btree_block(bt);
-		bt = NULL;
+		scoutfs_block_put(sb, bl);
+		bl = NULL;
 	}
 
-	*bt_ret = bt;
+	*bl_ret = bl;
 	return ret;
 }
 
@@ -761,8 +507,7 @@ out:
  * Create a new item in the parent which references the child.  The caller
  * specifies the key in the item that describes the items in the child.
  */
-static void create_parent_item(struct scoutfs_btree_ring *bring,
-			       struct scoutfs_btree_block *parent,
+static void create_parent_item(struct scoutfs_btree_block *parent,
 			       unsigned pos, struct scoutfs_btree_block *child,
 			       void *key, unsigned key_len)
 {
@@ -779,14 +524,13 @@ static void create_parent_item(struct scoutfs_btree_ring *bring,
  * recreating it.  Descent should have ensured that there was always
  * room for a maximal key in parents.
  */
-static void update_parent_item(struct scoutfs_btree_ring *bring,
-			       struct scoutfs_btree_block *parent,
+static void update_parent_item(struct scoutfs_btree_block *parent,
 			       unsigned pos, struct scoutfs_btree_block *child)
 {
 	struct scoutfs_btree_item *item = last_item(child);
 
 	delete_item(parent, pos);
-	create_parent_item(bring, parent, pos, child,
+	create_parent_item(parent, pos, child,
 			   item_key(item), item_key_len(item));
 }
 
@@ -801,17 +545,21 @@ static void update_parent_item(struct scoutfs_btree_ring *bring,
  *
  * Returns -errno, 0 if nothing done, or 1 if we split.
  */
-static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
+static int try_split(struct super_block *sb,
+		     struct scoutfs_balloc_allocator *alloc,
+		     struct scoutfs_block_writer *wri,
+		     struct scoutfs_btree_root *root,
 		     void *key, unsigned key_len, unsigned val_len,
 		     struct scoutfs_btree_block *parent, unsigned pos,
 		     struct scoutfs_btree_block *right)
 {
-	struct scoutfs_btree_ring *bring = &SCOUTFS_SB(sb)->super.bring;
-	struct scoutfs_btree_block *left = NULL;
+	struct scoutfs_block *left_bl = NULL;
+	struct scoutfs_block *par_bl = NULL;
+	struct scoutfs_btree_block *left;
 	struct scoutfs_btree_item *item;
 	unsigned int all_bytes;
-	bool put_parent = false;
 	int ret;
+	int err;
 
 	if (scoutfs_option_bool(sb, Opt_btree_force_tiny_blocks))
 		all_bytes = SCOUTFS_BLOCK_SIZE - SCOUTFS_BTREE_TINY_BLOCK_SIZE;
@@ -824,18 +572,23 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
 		return 0;
 
 	/* alloc split neighbour first to avoid unwinding tree growth */
-	ret = get_ref_block(sb, BTW_ALLOC, NULL, &left);
+	ret = get_ref_block(sb, alloc, wri, BTW_ALLOC, NULL, &left_bl);
 	if (ret)
 		return ret;
+	left = left_bl->data;
+
 	left->level = right->level;
 
 	if (!parent) {
-		ret = get_ref_block(sb, BTW_ALLOC, NULL, &parent);
+		ret = get_ref_block(sb, alloc, wri, BTW_ALLOC, NULL, &par_bl);
 		if (ret) {
-			put_btree_block(left);
+			err = scoutfs_balloc_free(sb, alloc, wri,
+						  le64_to_cpu(left->hdr.blkno));
+			BUG_ON(err); /* radix should have been dirty */
+			scoutfs_block_put(sb, left_bl);
 			return ret;
 		}
-		put_parent = true;
+		parent = par_bl->data;
 
 		parent->level = root->height;
 		root->height++;
@@ -843,19 +596,18 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
 		root->ref.seq = parent->hdr.seq;
 
 		pos = 0;
-		create_parent_item(bring, parent, pos, right,
+		create_parent_item(parent, pos, right,
 				   &max_key, sizeof(max_key));
 	}
 
 	move_items(left, right, false, used_total(right) / 2);
 
 	item = last_item(left);
-	create_parent_item(bring, parent, pos, left,
+	create_parent_item(parent, pos, left,
 			   item_key(item), item_key_len(item));
 
-	put_btree_block(left);
-	if (put_parent)
-		put_btree_block(parent);
+	scoutfs_block_put(sb, left_bl);
+	scoutfs_block_put(sb, par_bl);
 
 	return 1;
 }
@@ -869,12 +621,15 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
  *
  * XXX this could more cleverly chose a merge candidate sibling
  */
-static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
+static int try_merge(struct super_block *sb,
+		     struct scoutfs_balloc_allocator *alloc,
+		     struct scoutfs_block_writer *wri,
+		     struct scoutfs_btree_root *root,
 		     struct scoutfs_btree_block *parent, unsigned pos,
 		     struct scoutfs_btree_block *bt)
 {
-	struct scoutfs_btree_ring *bring = &SCOUTFS_SB(sb)->super.bring;
 	struct scoutfs_btree_block *sib;
+	struct scoutfs_block *sib_bl;
 	struct scoutfs_btree_ref *ref;
 	unsigned int min_used;
 	unsigned int sib_pos;
@@ -902,9 +657,10 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 	}
 
 	ref = item_val(pos_item(parent, sib_pos));
-	ret = get_ref_block(sb, BTW_DIRTY, ref, &sib);
+	ret = get_ref_block(sb, alloc, wri, BTW_DIRTY, ref, &sib_bl);
 	if (ret)
 		return ret;
+	sib = sib_bl->data;
 
 	if (used_total(sib) < min_used)
 		to_move = used_total(sib);
@@ -915,22 +671,30 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 
 	/* update our parent's item */
 	if (!move_right)
-		update_parent_item(bring, parent, pos, bt);
+		update_parent_item(parent, pos, bt);
 
 	/* update or delete sibling's parent item */
-	if (le32_to_cpu(sib->nr_items) == 0)
+	if (le32_to_cpu(sib->nr_items) == 0) {
 		delete_item(parent, sib_pos);
-	else if (move_right)
-		update_parent_item(bring, parent, sib_pos, sib);
+		ret = scoutfs_balloc_free(sb, alloc, wri,
+					  le64_to_cpu(sib->hdr.blkno));
+		BUG_ON(ret); /* could have dirtied alloc to avoid error */
+
+	} else if (move_right) {
+		update_parent_item(parent, sib_pos, sib);
+	}
 
 	/* and finally shrink the tree if our parent is the root with 1 */
 	if (le32_to_cpu(parent->nr_items) == 1) {
 		root->height--;
 		root->ref.blkno = bt->hdr.blkno;
 		root->ref.seq = bt->hdr.seq;
+		ret = scoutfs_balloc_free(sb, alloc, wri,
+					  le64_to_cpu(parent->hdr.blkno));
+		BUG_ON(ret); /* could have dirtied alloc to avoid error */
 	}
 
-	put_btree_block(sib);
+	scoutfs_block_put(sb, sib_bl);
 
 	return 1;
 }
@@ -1038,15 +802,19 @@ static void inc_key(u8 *bytes, unsigned *len)
  * dirtying old leaf blocks and isn't actually doing anything with the
  * blocks themselves.
  */
-static int btree_walk(struct super_block *sb, struct scoutfs_btree_root *root,
+static int btree_walk(struct super_block *sb,
+		      struct scoutfs_balloc_allocator *alloc,
+		      struct scoutfs_block_writer *wri,
+		      struct scoutfs_btree_root *root,
 		      int flags, void *key, unsigned key_len,
 		      unsigned int val_len,
-		      struct scoutfs_btree_block **bt_ret, void *iter_key,
+		      struct scoutfs_block **bl_ret, void *iter_key,
 		      unsigned *iter_len)
 {
-	struct scoutfs_btree_ring *bring = &SCOUTFS_SB(sb)->super.bring;
+	struct scoutfs_block *par_bl = NULL;
+	struct scoutfs_block *bl = NULL;
 	struct scoutfs_btree_block *parent = NULL;
-	struct scoutfs_btree_block *bt = NULL;
+	struct scoutfs_btree_block *bt;
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_ref *ref;
 	unsigned int level;
@@ -1055,13 +823,16 @@ static int btree_walk(struct super_block *sb, struct scoutfs_btree_root *root,
 	int cmp;
 	int ret;
 
-	if (WARN_ON_ONCE((flags & (BTW_NEXT|BTW_PREV)) && iter_key == NULL))
+	if (WARN_ON_ONCE((flags & (BTW_NEXT|BTW_PREV)) && iter_key == NULL) ||
+	    WARN_ON_ONCE((flags & BTW_DIRTY) && (!alloc || !wri)))
 		return -EINVAL;
 
 restart:
-	put_btree_block(parent);
+	scoutfs_block_put(sb, par_bl);
+	par_bl = NULL;
 	parent = NULL;
-	put_btree_block(bt);
+	scoutfs_block_put(sb, bl);
+	bl = NULL;
 	bt = NULL;
 	level = root->height;
 	if (iter_len)
@@ -1073,8 +844,10 @@ restart:
 		if (!(flags & BTW_INSERT)) {
 			ret = -ENOENT;
 		} else {
-			ret = get_ref_block(sb, BTW_ALLOC, &root->ref, &bt);
+			ret = get_ref_block(sb, alloc, wri, BTW_ALLOC,
+					    &root->ref, &bl);
 			if (ret == 0) {
+				bt = bl->data;
 				bt->level = 0;
 				root->height = 1;
 			}
@@ -1085,16 +858,10 @@ restart:
 	ref = &root->ref;
 
 	while(level-- > 0) {
-		/* no point in dirtying current leaf blocks for migration */
-		if ((flags & BTW_MIGRATE) && level == 0 &&
-		    blkno_is_current(bring, le64_to_cpu(ref->blkno))) {
-			ret = 0;
-			break;
-		}
-
-		ret = get_ref_block(sb, flags, ref, &bt);
+		ret = get_ref_block(sb, alloc, wri, flags, ref, &bl);
 		if (ret)
 			break;
+		bt = bl->data;
 
 		/* XXX it'd be nice to make this tunable */
 		ret = 0 && verify_btree_block(bt, level);
@@ -1126,10 +893,10 @@ restart:
 		 */
 		ret = 0;
 		if (flags & (BTW_INSERT | BTW_DELETE))
-			ret = try_split(sb, root, key, key_len, val_len,
-					parent, pos, bt);
+			ret = try_split(sb, alloc, wri, root, key, key_len,
+					val_len, parent, pos, bt);
 		if (ret == 0 && (flags & BTW_DELETE) && parent)
-			ret = try_merge(sb, root, parent, pos, bt);
+			ret = try_merge(sb, alloc, wri, root, parent, pos, bt);
 		if (ret > 0)
 			goto restart;
 		else if (ret < 0)
@@ -1170,31 +937,37 @@ restart:
 			memcpy(iter_key, item_key(item), *iter_len);
 		}
 
-		put_btree_block(parent);
+		scoutfs_block_put(sb, par_bl);
+		par_bl = bl;
 		parent = bt;
+		bl = NULL;
 		bt = NULL;
 
 		ref = item_val(pos_item(parent, pos));
 	}
 
 out:
-	put_btree_block(parent);
+	scoutfs_block_put(sb, par_bl);
 	if (ret) {
-		put_btree_block(bt);
-		bt = NULL;
+		scoutfs_block_put(sb, bl);
+		bl = NULL;
 	}
 
-	if (bt_ret)
-		*bt_ret = bt;
+	if (bl_ret)
+		*bl_ret = bl;
 	else
-		put_btree_block(bt);
+		scoutfs_block_put(sb, bl);
 
 	return ret;
 }
 
 static void init_item_ref(struct scoutfs_btree_item_ref *iref,
+			  struct super_block *sb,
+			  struct scoutfs_block *bl,
 			  struct scoutfs_btree_item *item)
 {
+	iref->sb = sb;
+	iref->bl = bl;
 	iref->key = item_key(item);
 	iref->key_len = le16_to_cpu(item->key_len);
 	iref->val = item_val(item);
@@ -1203,8 +976,8 @@ static void init_item_ref(struct scoutfs_btree_item_ref *iref,
 
 void scoutfs_btree_put_iref(struct scoutfs_btree_item_ref *iref)
 {
-	if (!IS_ERR_OR_NULL(iref) && !IS_ERR_OR_NULL(iref->key)) {
-		put_btree_block(iref->key);
+	if (!IS_ERR_OR_NULL(iref) && !IS_ERR_OR_NULL(iref->bl)) {
+		scoutfs_block_put(iref->sb, iref->bl);
 		memset(iref, 0, sizeof(struct scoutfs_btree_item_ref));
 	}
 }
@@ -1220,6 +993,7 @@ int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_btree_root *root
 {
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
+	struct scoutfs_block *bl;
 	unsigned int pos;
 	int cmp;
 	int ret;
@@ -1227,15 +1001,17 @@ int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_btree_root *root
 	if (WARN_ON_ONCE(iref->key))
 		return -EINVAL;
 
-	ret = btree_walk(sb, root, 0, key, key_len, 0, &bt, NULL, NULL);
+	ret = btree_walk(sb, NULL, NULL, root, 0, key, key_len, 0, &bl,
+			 NULL, NULL);
 	if (ret == 0) {
+		bt = bl->data;
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (cmp == 0) {
 			item = pos_item(bt, pos);
-			init_item_ref(iref, item);
+			init_item_ref(iref, sb, bl, item);
 			ret = 0;
 		} else {
-			put_btree_block(bt);
+			scoutfs_block_put(sb, bl);
 			ret = -ENOENT;
 		}
 
@@ -1260,11 +1036,15 @@ static bool invalid_item(void *key, unsigned key_len, unsigned val_len)
  * If no value pointer is given then the item is created with a zero
  * length value.
  */
-int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_btree_root *root,
+int scoutfs_btree_insert(struct super_block *sb,
+			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_block_writer *wri,
+			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
 			 void *val, unsigned val_len)
 {
 	struct scoutfs_btree_block *bt;
+	struct scoutfs_block *bl;
 	int pos;
 	int cmp;
 	int ret;
@@ -1272,9 +1052,10 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_btree_root *root
 	if (invalid_item(key, key_len, val_len))
 		return -EINVAL;
 
-	ret = btree_walk(sb, root, BTW_DIRTY | BTW_INSERT, key, key_len,
-			 val_len, &bt, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT,
+			 key, key_len, val_len, &bl, NULL, NULL);
 	if (ret == 0) {
+		bt = bl->data;
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (cmp) {
 			create_item(bt, pos, key, key_len, val, val_len);
@@ -1283,7 +1064,7 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_btree_root *root
 			ret = -EEXIST;
 		}
 
-		put_btree_block(bt);
+		scoutfs_block_put(sb, bl);
 	}
 
 	return ret;
@@ -1300,11 +1081,14 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_btree_root *root
  * which doesn't fit.
  */
 int scoutfs_btree_update(struct super_block *sb,
+			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
 			 void *val, unsigned val_len)
 {
 	struct scoutfs_btree_block *bt;
+	struct scoutfs_block *bl;
 	int pos;
 	int cmp;
 	int ret;
@@ -1312,9 +1096,10 @@ int scoutfs_btree_update(struct super_block *sb,
 	if (invalid_item(key, key_len, val_len))
 		return -EINVAL;
 
-	ret = btree_walk(sb, root, BTW_DIRTY | BTW_INSERT, key, key_len,
-			 val_len, &bt, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT,
+			 key, key_len, val_len, &bl, NULL, NULL);
 	if (ret == 0) {
+		bt = bl->data;
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (cmp == 0) {
 			delete_item(bt, pos);
@@ -1324,7 +1109,7 @@ int scoutfs_btree_update(struct super_block *sb,
 			ret = -ENOENT;
 		}
 
-		put_btree_block(bt);
+		scoutfs_block_put(sb, bl);
 	}
 
 	return ret;
@@ -1334,17 +1119,22 @@ int scoutfs_btree_update(struct super_block *sb,
  * Delete an item from the tree.  -ENOENT is returned if the key isn't
  * found.
  */
-int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_btree_root *root,
+int scoutfs_btree_delete(struct super_block *sb,
+			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_block_writer *wri,
+			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len)
 {
 	struct scoutfs_btree_block *bt;
+	struct scoutfs_block *bl;
 	int pos;
 	int cmp;
 	int ret;
 
-	ret = btree_walk(sb, root, BTW_DELETE | BTW_DIRTY, key, key_len, 0,
-			 &bt, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DELETE | BTW_DIRTY,
+			 key, key_len, 0, &bl, NULL, NULL);
 	if (ret == 0) {
+		bt = bl->data;
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (cmp == 0) {
 			delete_item(bt, pos);
@@ -1360,7 +1150,7 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_btree_root *root
 			ret = -ENOENT;
 		}
 
-		put_btree_block(bt);
+		scoutfs_block_put(sb, bl);
 	}
 
 	return ret;
@@ -1378,12 +1168,13 @@ int scoutfs_btree_delete(struct super_block *sb, struct scoutfs_btree_root *root
  * it lets the tree shape change between each walk and allows empty
  * blocks.
  */
-static int btree_iter(struct super_block *sb, struct scoutfs_btree_root *root,
+static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
 		      int flags, void *key, unsigned key_len,
 		      struct scoutfs_btree_item_ref *iref)
 {
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
+	struct scoutfs_block *bl;
 	unsigned iter_len;
 	unsigned walk_len;
 	void *iter_key;
@@ -1407,10 +1198,11 @@ static int btree_iter(struct super_block *sb, struct scoutfs_btree_root *root,
 	walk_len = key_len;
 
 	for (;;) {
-		ret = btree_walk(sb, root, flags, walk_key, walk_len, 0, &bt,
-				 iter_key, &iter_len);
+		ret = btree_walk(sb, NULL, NULL, root, flags, walk_key,
+				 walk_len, 0, &bl, iter_key, &iter_len);
 		if (ret < 0)
 			break;
+		bt = bl->data;
 
 		pos = find_pos(bt, key, key_len, &cmp);
 
@@ -1425,12 +1217,12 @@ static int btree_iter(struct super_block *sb, struct scoutfs_btree_root *root,
 		/* found the next item in this leaf */
 		if (pos >= 0 && pos < le32_to_cpu(bt->nr_items)) {
 			item = pos_item(bt, pos);
-			init_item_ref(iref, item);
+			init_item_ref(iref, sb, bl, item);
 			ret = 0;
 			break;
 		}
 
-		put_btree_block(bt);
+		scoutfs_block_put(sb, bl);
 
 		/* nothing in this leaf, walk gave us a key */
 		if (iter_len > 0) {
@@ -1485,194 +1277,29 @@ int scoutfs_btree_before(struct super_block *sb, struct scoutfs_btree_root *root
  *
  * <0 is returned on error, including -ENOENT if the key isn't present.
  */
-int scoutfs_btree_dirty(struct super_block *sb, struct scoutfs_btree_root *root,
+int scoutfs_btree_dirty(struct super_block *sb,
+			struct scoutfs_balloc_allocator *alloc,
+			struct scoutfs_block_writer *wri,
+			struct scoutfs_btree_root *root,
 			void *key, unsigned key_len)
 {
 	struct scoutfs_btree_block *bt;
+	struct scoutfs_block *bl;
 	int cmp;
 	int ret;
 
-	ret = btree_walk(sb, root, BTW_DIRTY, key, key_len, 0, &bt, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY, key, key_len, 0, &bl,
+			 NULL, NULL);
 	if (ret == 0) {
+		bt = bl->data;
 		find_pos(bt, key, key_len, &cmp);
 		if (cmp == 0)
 			ret = 0;
 		else
 			ret = -ENOENT;
-		put_btree_block(bt);
+
+		scoutfs_block_put(sb, bl);
 	}
 
 	return ret;
-}
-
-/*
- * This initializes all our tracking info based on the super.  Called
- * before dirtying anything after having read the super or finished
- * writing dirty blocks.
- */
-static int btree_prepare_write(struct super_block *sb)
-{
-	struct scoutfs_btree_ring *bring = &SCOUTFS_SB(sb)->super.bring;
-	DECLARE_BTREE_INFO(sb, bti);
-
-	bti->cur_dirtied = 0;
-	bti->old_dirtied = 0;
-	bti->first_dirty_bh = NULL;
-	bti->last_dirty_bh = NULL;
-	bti->first_dirty_blkno = le64_to_cpu(bring->first_blkno) +
-				 le64_to_cpu(bring->next_block);
-	bti->first_dirty_seq = le64_to_cpu(bring->next_seq);
-
-	return 0;
-}
-
-/*
- * The caller is serializing btree item dirtying and dirty block writing.
- */
-bool scoutfs_btree_has_dirty(struct super_block *sb)
-{
-	DECLARE_BTREE_INFO(sb, bti);
-
-	return bti->first_dirty_bh != NULL;
-}
-
-/* dirty block allocation built this list */
-#define for_each_dirty_bh(bti, bh, tmp) \
-	for (bh = bti->first_dirty_bh; bh && (tmp = bh->b_private, 1); bh = tmp)
-
-/*
- * Write the dirty region of blocks to the ring.  The caller still has
- * to write the super after we're done.  That could fail and we could
- * be asked to write the blocks all over again.
- *
- * We're the only writer.
- */
-int scoutfs_btree_write_dirty(struct super_block *sb)
-{
-	DECLARE_BTREE_INFO(sb, bti);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_btree_root *root;
-	struct scoutfs_btree_block *bt;
-	struct buffer_head *tmp;
-	struct buffer_head *bh;
-	struct blk_plug plug;
-	unsigned int walk_len;
-	unsigned int iter_len;
-	bool progress;
-	void *walk_key;
-	void *iter_key;
-	int ret;
-	int i;
-
-	if (bti->first_dirty_bh == NULL)
-		return 0;
-
-	iter_key = kmalloc(SCOUTFS_BTREE_MAX_KEY_LEN, GFP_NOFS);
-	if (!iter_key)
-		return -ENOMEM;
-
-	progress = true;
-	while (progress && bti->old_dirtied < bti->cur_dirtied) {
-		progress = false;
-
-		for_each_super_root(super, i, root) {
-			walk_key = root->migration_key;
-			walk_len = le16_to_cpu(root->migration_key_len);
-			if (walk_len == 0)
-				continue;
-
-			ret = btree_walk(sb, root,
-					 BTW_DIRTY | BTW_NEXT | BTW_MIGRATE,
-					 walk_key, walk_len, 0, NULL,
-					 iter_key, &iter_len);
-			if (ret < 0)
-				goto out;
-
-			root->migration_key_len = cpu_to_le16(iter_len);
-			if (iter_len) {
-				memcpy(walk_key, iter_key, iter_len);
-				progress = true;
-			} else {
-				memset(walk_key, 0, SCOUTFS_BTREE_MAX_KEY_LEN);
-			}
-		}
-	}
-
-	/* checksum everything to reduce time between io submission merging */
-	for_each_dirty_bh(bti, bh, tmp) {
-		bt = (void *)bh->b_data;
-		bt->hdr.crc = scoutfs_block_calc_crc(&bt->hdr);
-	}
-
-        blk_start_plug(&plug);
-
-	for_each_dirty_bh(bti, bh, tmp) {
-		lock_buffer(bh);
-		set_buffer_mapped(bh);
-		bh->b_end_io = end_buffer_write_sync;
-		get_bh(bh);
-		/* XXX should be more careful with flags */
-		submit_bh(WRITE_SYNC | REQ_META | REQ_PRIO, bh);
-	}
-
-	blk_finish_plug(&plug);
-
-	ret = 0;
-	for_each_dirty_bh(bti, bh, tmp) {
-		wait_on_buffer(bh);
-		if (!buffer_uptodate(bh)) {
-			scoutfs_inc_counter(sb, btree_write_error);
-			ret = -EIO;
-		}
-	}
-
-out:
-	kfree(iter_key);
-	return ret;
-}
-
-/*
- * The dirty blocks and their super reference have been successfully written.
- * Remove them from the dirty list and drop their references and prepare
- * for the next write.
- */
-void scoutfs_btree_write_complete(struct super_block *sb)
-{
-	DECLARE_BTREE_INFO(sb, bti);
-	struct buffer_head *bh;
-	struct buffer_head *tmp;
-
-	for_each_dirty_bh(bti, bh, tmp) {
-		bh->b_private = NULL;
-		put_bh(bh);
-	}
-
-	btree_prepare_write(sb);
-}
-
-int scoutfs_btree_setup(struct super_block *sb)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct btree_info *bti;
-
-	bti = kzalloc(sizeof(struct btree_info), GFP_KERNEL);
-	if (!bti)
-		return -ENOMEM;
-
-	mutex_init(&bti->mutex);
-
-	sbi->btree_info = bti;
-
-	btree_prepare_write(sb);
-
-	return 0;
-}
-
-void scoutfs_btree_destroy(struct super_block *sb)
-{
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-
-	kfree(sbi->btree_info);
-	sbi->btree_info = NULL;
 }

@@ -27,6 +27,7 @@
 #include "ioctl.h"
 #include "super.h"
 #include "inode.h"
+#include "forest.h"
 #include "item.h"
 #include "data.h"
 #include "client.h"
@@ -110,7 +111,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 	for (nr = 0; nr < walk.nr_entries; ) {
 
-		ret = scoutfs_item_next(sb, &key, &last_key, NULL, lock);
+		ret = scoutfs_forest_next(sb, &key, &last_key, NULL, lock);
 		if (ret < 0 && ret != -ENOENT)
 			break;
 
@@ -128,14 +129,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 			scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 
-			/*
-			 * XXX This will miss dirty items.  We'd need to
-			 * force writeouts of dirty items in our
-			 * zone|type and get the manifest root for that.
-			 * It'd mean adding a lock to the inode index
-			 * items which isn't quite there yet.
-			 */
-			ret = scoutfs_manifest_next_key(sb, &key, &next_key);
+			ret = scoutfs_forest_next_hint(sb, &key, &next_key);
 			if (ret < 0 && ret != -ENOENT)
 				goto out;
 
@@ -816,7 +810,7 @@ static long scoutfs_ioc_find_xattrs(struct file *file, unsigned long arg)
 
 	while (fx.nr_inodes) {
 
-		ret = scoutfs_item_next(sb, &key, &last, NULL, lock);
+		ret = scoutfs_forest_next(sb, &key, &last, NULL, lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;

@@ -21,7 +21,7 @@
 
 #include "super.h"
 #include "lock.h"
-#include "item.h"
+#include "forest.h"
 #include "scoutfs_trace.h"
 #include "msg.h"
 #include "cmp.h"
@@ -145,12 +145,10 @@ static void invalidate_inode(struct super_block *sb, u64 ino)
 static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
 			   int prev, int mode)
 {
-	struct scoutfs_key *start = &lock->start;
-	struct scoutfs_key *end = &lock->end;
 	struct scoutfs_lock_coverage *cov;
 	struct scoutfs_lock_coverage *tmp;
 	u64 ino, last;
-	int ret;
+	int ret = 0;
 
 	trace_scoutfs_lock_invalidate(sb, lock);
 
@@ -159,12 +157,12 @@ static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
 	         mode != SCOUTFS_LOCK_NULL);
 
 	/* any transition from a mode allowed to dirty items has to write */
-	if (lock_mode_can_write(prev)) {
-		ret = scoutfs_item_writeback(sb, start, end);
+	if (lock_mode_can_write(prev) && scoutfs_forest_has_dirty(sb)) {
+		ret = scoutfs_trans_sync(sb, 1);
 		if (ret < 0)
 			return ret;
 		if (ret > 0) {
-			scoutfs_add_counter(sb, lock_write_dirty_item, ret);
+			scoutfs_add_counter(sb, lock_invalidate_commit, ret);
 			ret = 0;
 		}
 	}
@@ -194,13 +192,6 @@ retry:
 				invalidate_inode(sb, ino);
 				ino++;
 			}
-		}
-
-		ret = scoutfs_item_invalidate(sb, start, end);
-		if (ret > 0) {
-			scoutfs_add_counter(sb, lock_invalidate_clean_item,
-					    ret);
-			ret = 0;
 		}
 	}
 
@@ -549,49 +540,6 @@ static void extend_grace(struct super_block *sb, struct scoutfs_lock *lock)
 }
 
 /*
- * The given lock is processing a received a grant response.  Trigger a
- * bug if the cache is inconsistent.
- *
- * We only have two modes that can create dirty items.  We can't have
- * dirty items when transitioning from write_only to write because the
- * writer can't trust the cached items in the cache for reading.  And we
- * don't currently transition directly from write to write_only, we
- * first go through null.  So if we have dirty items as we're granted a
- * mode it's always incorrect.
- *
- * And we can't have cached items that we're going to use for reading if
- * the previous mode didn't allow reading.
- *
- * Inconsistencies have come from all sorts of bugs: invalidation missed
- * items, the cache was populated outside of locking coverage, lock
- * holders performed the wrong item operations under their lock,
- * overlapping locks, out of order granting or invalidating, etc.
- */
-static void bug_on_inconsistent_grant_cache(struct super_block *sb,
-					    struct scoutfs_lock *lock,
-					    int old_mode, int new_mode)
-{
-	bool cached = scoutfs_item_range_cached(sb, &lock->start, &lock->end,
-					        false);
-	bool dirty = scoutfs_item_range_cached(sb, &lock->start, &lock->end,
-					       true);
-
-	if (dirty ||
-	    (cached && (!lock_mode_can_read(old_mode) || !lock_mode_can_read(new_mode)))) {
-		scoutfs_err(sb, "granted lock item cache inconsistency, cached %u dirty %u old_mode %d new_mode %d: start "SK_FMT" end "SK_FMT" refresh_gen %llu mode %u waiters: rd %u wr %u wo %u users: rd %u wr %u wo %u",
-			   cached, dirty, old_mode, new_mode, SK_ARG(&lock->start),
-			   SK_ARG(&lock->end), lock->refresh_gen, lock->mode,
-			   lock->waiters[SCOUTFS_LOCK_READ],
-			   lock->waiters[SCOUTFS_LOCK_WRITE],
-			   lock->waiters[SCOUTFS_LOCK_WRITE_ONLY],
-			   lock->users[SCOUTFS_LOCK_READ],
-			   lock->users[SCOUTFS_LOCK_WRITE],
-			   lock->users[SCOUTFS_LOCK_WRITE_ONLY]);
-		BUG();
-	}
-}
-
-/*
  * The client is receiving a lock response message from the server.
  * This can be reordered with incoming invlidation requests from the
  * server so we have to be careful to only set the new mode once the old
@@ -630,8 +578,6 @@ int scoutfs_lock_grant_response(struct super_block *sb,
 		wait_event(lock->waitq, lock->mode == nl->old_mode);
 		spin_lock(&linfo->lock);
 	}
-
-	bug_on_inconsistent_grant_cache(sb, lock, nl->old_mode, nl->new_mode);
 
 	if (!lock_mode_can_read(nl->old_mode) &&
 	    lock_mode_can_read(nl->new_mode)) {

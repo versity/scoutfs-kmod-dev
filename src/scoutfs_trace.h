@@ -570,13 +570,13 @@ TRACE_EVENT(scoutfs_sync_fs,
 );
 
 TRACE_EVENT(scoutfs_trans_write_func,
-	TP_PROTO(struct super_block *sb, int dirty),
+	TP_PROTO(struct super_block *sb, unsigned long dirty),
 
 	TP_ARGS(sb, dirty),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(int, dirty)
+		__field(unsigned long, dirty)
 	),
 
 	TP_fast_assign(
@@ -584,7 +584,7 @@ TRACE_EVENT(scoutfs_trans_write_func,
 		__entry->dirty = dirty;
 	),
 
-	TP_printk(SCSBF" dirty %d", SCSB_TRACE_ARGS, __entry->dirty)
+	TP_printk(SCSBF" dirty %lu", SCSB_TRACE_ARGS, __entry->dirty)
 );
 
 TRACE_EVENT(scoutfs_release_trans,

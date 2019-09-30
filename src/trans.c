@@ -23,6 +23,7 @@
 #include "data.h"
 #include "bio.h"
 #include "item.h"
+#include "forest.h"
 #include "manifest.h"
 #include "seg.h"
 #include "counters.h"
@@ -110,43 +111,26 @@ void scoutfs_trans_write_func(struct work_struct *work)
 						   trans_write_work.work);
 	struct super_block *sb = sbi->sb;
 	DECLARE_TRANS_INFO(sb, tri);
-	struct scoutfs_bio_completion comp;
-	struct scoutfs_segment *seg = NULL;
-	u64 segno;
 	int ret = 0;
 
-	scoutfs_bio_init_comp(&comp);
 	sbi->trans_task = current;
 
 	wait_event(sbi->trans_hold_wq, drained_holders(tri));
 
-	trace_scoutfs_trans_write_func(sb, scoutfs_item_has_dirty(sb));
+	trace_scoutfs_trans_write_func(sb, scoutfs_forest_dirty_bytes(sb));
 
-
-	if (scoutfs_item_has_dirty(sb)) {
+	if (scoutfs_forest_has_dirty(sb)) {
 		if (sbi->trans_deadline_expired)
 			scoutfs_inc_counter(sb, trans_commit_timer);
-		/*
-		 * XXX only straight pass through, we're not worrying
-		 * about leaking segnos nor duplicate manifest entries
-		 * on crashes between us and the server.
-		 */
+
 		ret = scoutfs_inode_walk_writeback(sb, true) ?:
-		      scoutfs_client_alloc_segno(sb, &segno) ?:
-		      scoutfs_seg_alloc(sb, segno, &seg) ?:
-		      scoutfs_item_dirty_seg(sb, seg) ?:
-		      scoutfs_seg_submit_write(sb, seg, &comp) ?:
+		      scoutfs_forest_write(sb) ?:
 		      scoutfs_inode_walk_writeback(sb, false) ?:
-		      scoutfs_bio_wait_comp(sb, &comp) ?:
-		      scoutfs_client_record_segment(sb, seg, 0) ?:
-		      scoutfs_client_advance_seq(sb, &sbi->trans_seq);
-		scoutfs_seg_put(seg);
+		      scoutfs_forest_commit(sb) ?:
+		      scoutfs_client_advance_seq(sb, &sbi->trans_seq) ?:
+		      scoutfs_forest_get_log_trees(sb);
 		if (ret)
 			goto out;
-
-		scoutfs_inc_counter(sb, trans_level0_seg_writes);
-		scoutfs_add_counter(sb, trans_level0_seg_write_bytes,
-				    scoutfs_seg_total_bytes(seg));
 
 	} else if (sbi->trans_deadline_expired) {
 		/*
@@ -295,7 +279,6 @@ static bool acquired_hold(struct super_block *sb,
 	bool acquired = false;
 	unsigned items;
 	unsigned vals;
-	bool fits;
 
 	spin_lock(&tri->lock);
 
@@ -316,8 +299,9 @@ static bool acquired_hold(struct super_block *sb,
 	/* see if we can reserve space for our item count */
 	items = tri->reserved_items + cnt->items;
 	vals = tri->reserved_vals + cnt->vals;
-	fits = scoutfs_item_dirty_fits_single(sb, items, vals);
-	if (!fits) {
+
+	/* XXX just limit to 256K transactions */
+	if (scoutfs_forest_dirty_bytes(sb) >= (256 * 1024)) {
 		scoutfs_inc_counter(sb, trans_commit_full);
 		queue_trans_work(sbi);
 		goto out;
@@ -352,8 +336,7 @@ int scoutfs_hold_trans(struct super_block *sb,
 	 * Caller shouldn't provide garbage counts, nor counts that
 	 * can't fit in segments by themselves.
 	 */
-	if (WARN_ON_ONCE(cnt.items <= 0 || cnt.vals < 0) ||
-	    WARN_ON_ONCE(!scoutfs_seg_fits_single(cnt.items, cnt.vals)))
+	if (WARN_ON_ONCE(cnt.items <= 0 || cnt.vals < 0))
 		return -EINVAL;
 
 	if (current == sbi->trans_task)

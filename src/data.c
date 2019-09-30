@@ -32,7 +32,7 @@
 #include "trans.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
-#include "item.h"
+#include "forest.h"
 #include "ioctl.h"
 #include "client.h"
 #include "lock.h"
@@ -218,19 +218,19 @@ static int data_extent_io(struct super_block *sb, int op,
 		expected = val.iov_len;
 
 		if (op == SEI_NEXT)
-			ret = scoutfs_item_next(sb, &key, &last, &val, lock);
+			ret = scoutfs_forest_next(sb, &key, &last, &val, lock);
 		else
-			ret = scoutfs_item_prev(sb, &key, &first, &val, lock);
+			ret = scoutfs_forest_prev(sb, &key, &first, &val, lock);
 		if (ret >= 0 && ret != expected)
 			ret = -EIO;
 		if (ret == expected)
 			ret = init_extent_from_item(ext, &key, &fex);
 
 	} else if (op == SEI_INSERT) {
-		ret = scoutfs_item_create(sb, &key, &val, lock);
+		ret = scoutfs_forest_create(sb, &key, &val, lock);
 
 	} else if (op == SEI_DELETE) {
-		ret = scoutfs_item_delete(sb, &key, lock);
+		ret = scoutfs_forest_delete(sb, &key, lock);
 
 	} else {
 		ret = WARN_ON_ONCE(-EINVAL);

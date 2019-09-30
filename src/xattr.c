@@ -21,7 +21,7 @@
 #include "key.h"
 #include "super.h"
 #include "kvec.h"
-#include "item.h"
+#include "forest.h"
 #include "trans.h"
 #include "xattr.h"
 #include "lock.h"
@@ -195,7 +195,7 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_key *key,
 	for (;;) {
 		key->skx_part = part;
 		kvec_init(&val, (void *)xat + total, bytes - total);
-		ret = scoutfs_item_next(sb, key, &last, &val, lock);
+		ret = scoutfs_forest_next(sb, key, &last, &val, lock);
 		if (ret < 0) {
 			/* XXX corruption, ran out of parts */
 			if (ret == -ENOENT && part > 0)
@@ -283,10 +283,10 @@ static int create_xattr_items(struct inode *inode, u64 id,
 		part_bytes = min(bytes - total, SCOUTFS_XATTR_MAX_PART_SIZE);
 		kvec_init(&val, (void *)xat + total, part_bytes);
 
-		ret = scoutfs_item_create(sb, &key, &val, lock);
+		ret = scoutfs_forest_create(sb, &key, &val, lock);
 		if (ret) {
 			while (key.skx_part-- > 0)
-				scoutfs_item_delete_dirty(sb, &key);
+				scoutfs_forest_delete_dirty(sb, &key);
 			break;
 		}
 
@@ -313,7 +313,7 @@ static int delete_xattr_items(struct inode *inode, u32 name_hash, u64 id,
 	init_xattr_key(&key, scoutfs_ino(inode), name_hash, id);
 
 	do {
-		ret = scoutfs_item_delete_save(sb, &key, list, lock);
+		ret = scoutfs_forest_delete_save(sb, &key, list, lock);
 	} while (ret == 0 && ++key.skx_part < nr_parts);
 
 	return ret;
@@ -528,11 +528,11 @@ retry:
 		hash = scoutfs_hash64(name, name_len);
 		scoutfs_xattr_index_key(&indx_key, hash, ino, id);
 		if (value)
-			ret = scoutfs_item_create_force(sb, &indx_key, NULL,
-							indx_lock);
+			ret = scoutfs_forest_create_force(sb, &indx_key, NULL,
+							  indx_lock);
 		else
-			ret = scoutfs_item_delete_force(sb, &indx_key,
-							indx_lock);
+			ret = scoutfs_forest_delete_force(sb, &indx_key,
+							  indx_lock);
 		if (ret < 0)
 			goto release;
 		undo_indx = true;
@@ -546,10 +546,10 @@ retry:
 	if (value && ret == 0)
 		ret = create_xattr_items(inode, id, xat, bytes, lck);
 	if (ret < 0) {
-		scoutfs_item_restore(sb, &saved, lck);
+		scoutfs_forest_restore(sb, &saved, lck);
 		goto release;
 	}
-	scoutfs_item_free_batch(sb, &saved);
+	scoutfs_forest_free_batch(sb, &saved);
 
 	/* XXX do these want i_mutex or anything? */
 	inode_inc_iversion(inode);
@@ -560,11 +560,11 @@ retry:
 release:
 	if (ret < 0 && undo_indx) {
 		if (value)
-			err = scoutfs_item_delete_force(sb, &indx_key,
-							indx_lock);
+			err = scoutfs_forest_delete_force(sb, &indx_key,
+							  indx_lock);
 		else
-			err = scoutfs_item_create_force(sb, &indx_key, NULL,
-							indx_lock);
+			err = scoutfs_forest_create_force(sb, &indx_key, NULL,
+							  indx_lock);
 		BUG_ON(err);
 	}
 
@@ -717,7 +717,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 
 	for (;;) {
 		kvec_init(&val, (void *)xat, bytes);
-		ret = scoutfs_item_next(sb, &key, &last, &val, lock);
+		ret = scoutfs_forest_next(sb, &key, &last, &val, lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -744,13 +744,13 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 			break;
 		release = true;
 
-		ret = scoutfs_item_delete(sb, &key, lock);
+		ret = scoutfs_forest_delete(sb, &key, lock);
 		if (ret < 0)
 			break;
 
 		if (tgs.indx) {
-		       ret = scoutfs_item_delete_force(sb, &indx_key,
-						       indx_lock);
+		       ret = scoutfs_forest_delete_force(sb, &indx_key,
+							 indx_lock);
 		       if (ret < 0)
 			       break;
 		}

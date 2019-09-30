@@ -29,7 +29,7 @@
 #include "trans.h"
 #include "xattr.h"
 #include "kvec.h"
-#include "item.h"
+#include "forest.h"
 #include "lock.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
@@ -253,7 +253,7 @@ static int lookup_dirent(struct super_block *sb, u64 dir_ino, const char *name,
 	kvec_init(&val, dent, dirent_bytes(SCOUTFS_NAME_LEN));
 
 	for (;;) {
-		ret = scoutfs_item_next(sb, &key, &last_key, &val, lock);
+		ret = scoutfs_forest_next(sb, &key, &last_key, &val, lock);
 		if (ret < 0)
 			break;
 
@@ -478,7 +478,7 @@ static int KC_DECLARE_READDIR(scoutfs_readdir, struct file *file,
 		init_dirent_key(&key, SCOUTFS_READDIR_TYPE, scoutfs_ino(inode),
 				kc_readdir_pos(file, ctx), 0);
 
-		ret = scoutfs_item_next(sb, &key, &last_key, &val, dir_lock);
+		ret = scoutfs_forest_next(sb, &key, &last_key, &val, dir_lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -556,23 +556,23 @@ static int add_entry_items(struct super_block *sb, u64 dir_ino, u64 hash,
 	init_dirent_key(&lb_key, SCOUTFS_LINK_BACKREF_TYPE, ino, dir_ino, pos);
 	kvec_init(&val, dent, dirent_bytes(name_len));
 
-	ret = scoutfs_item_create(sb, &ent_key, &val, dir_lock);
+	ret = scoutfs_forest_create(sb, &ent_key, &val, dir_lock);
 	if (ret)
 		goto out;
 	del_ent = true;
 
-	ret = scoutfs_item_create(sb, &rdir_key, &val, dir_lock);
+	ret = scoutfs_forest_create(sb, &rdir_key, &val, dir_lock);
 	if (ret)
 		goto out;
 	del_rdir = true;
 
-	ret = scoutfs_item_create(sb, &lb_key, &val, inode_lock);
+	ret = scoutfs_forest_create(sb, &lb_key, &val, inode_lock);
 out:
 	if (ret < 0) {
 		if (del_ent)
-			scoutfs_item_delete_dirty(sb, &ent_key);
+			scoutfs_forest_delete_dirty(sb, &ent_key);
 		if (del_rdir)
-			scoutfs_item_delete_dirty(sb, &rdir_key);
+			scoutfs_forest_delete_dirty(sb, &rdir_key);
 	}
 
 	kfree(dent);
@@ -602,15 +602,15 @@ static int del_entry_items(struct super_block *sb, u64 dir_ino, u64 hash,
 	init_dirent_key(&rdir_key, SCOUTFS_READDIR_TYPE, dir_ino, pos, 0);
 	init_dirent_key(&lb_key, SCOUTFS_LINK_BACKREF_TYPE, ino, dir_ino, pos);
 
-	ret = scoutfs_item_delete_save(sb, &ent_key, &dir_saved, dir_lock) ?:
-	      scoutfs_item_delete_save(sb, &rdir_key, &dir_saved, dir_lock) ?:
-	      scoutfs_item_delete_save(sb, &lb_key, &inode_saved, inode_lock);
+	ret = scoutfs_forest_delete_save(sb, &ent_key, &dir_saved, dir_lock) ?:
+	      scoutfs_forest_delete_save(sb, &rdir_key, &dir_saved, dir_lock) ?:
+	      scoutfs_forest_delete_save(sb, &lb_key, &inode_saved, inode_lock);
 	if (ret < 0) {
-		scoutfs_item_restore(sb, &dir_saved, dir_lock);
-		scoutfs_item_restore(sb, &inode_saved, inode_lock);
+		scoutfs_forest_restore(sb, &dir_saved, dir_lock);
+		scoutfs_forest_restore(sb, &inode_saved, inode_lock);
 	} else {
-		scoutfs_item_free_batch(sb, &dir_saved);
-		scoutfs_item_free_batch(sb, &inode_saved);
+		scoutfs_forest_free_batch(sb, &dir_saved);
+		scoutfs_forest_free_batch(sb, &inode_saved);
 	}
 
 	return ret;
@@ -988,11 +988,11 @@ static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
 		kvec_init(&val, (void *)target, bytes);
 
 		if (op == SYM_CREATE)
-			ret = scoutfs_item_create(sb, &key, &val, lock);
+			ret = scoutfs_forest_create(sb, &key, &val, lock);
 		else if (op == SYM_LOOKUP)
-			ret = scoutfs_item_lookup_exact(sb, &key, &val, lock);
+			ret = scoutfs_forest_lookup_exact(sb, &key, &val, lock);
 		else if (op == SYM_DELETE)
-			ret = scoutfs_item_delete(sb, &key, lock);
+			ret = scoutfs_forest_delete(sb, &key, lock);
 		if (ret)
 			break;
 
@@ -1229,7 +1229,7 @@ int scoutfs_dir_add_next_linkref(struct super_block *sb, u64 ino,
 	if (ret)
 		goto out;
 
-	ret = scoutfs_item_next(sb, &key, &last_key, &val, lock);
+	ret = scoutfs_forest_next(sb, &key, &last_key, &val, lock);
 	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 	lock = NULL;
 	if (ret < 0)

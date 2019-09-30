@@ -160,9 +160,10 @@ struct scoutfs_key_be {
 	__u8	_sk_fourth;
 }__packed;
 
-/* chose reasonable max key and value lens that have room for some u64s */
+/* chose reasonable max key lens that have room for some u64s */
 #define SCOUTFS_BTREE_MAX_KEY_LEN 40
-#define SCOUTFS_BTREE_MAX_VAL_LEN 64
+/* when we split we want to have multiple items on each side */
+#define SCOUTFS_BTREE_MAX_VAL_LEN (SCOUTFS_BLOCK_SIZE / 8)
 
 /*
  * The min number of free bytes we must leave in a parent as we descend

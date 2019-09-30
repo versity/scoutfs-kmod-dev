@@ -238,28 +238,6 @@ struct scoutfs_ioctl_stat_more {
 				   struct scoutfs_ioctl_stat_more)
 
 
-/*
- * Fills the buffer with either the keys for the cached items or the
- * keys for the cached ranges found starting with the given key.  The
- * number of keys filled in the buffer is returned.  When filling range
- * keys the returned number will always be a multiple of two.
- */
-struct scoutfs_ioctl_item_cache_keys {
-	struct scoutfs_ioctl_key ikey;
-	__u64 buf_ptr;
-	__u16 buf_nr;
-	__u8 which;
-	__u8 _pad[21];	/* padded to align _ioctl_key total size */
-};
-
-enum {
-	SCOUTFS_IOC_ITEM_CACHE_KEYS_ITEMS = 0,
-	SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES,
-};
-
-#define SCOUTFS_IOC_ITEM_CACHE_KEYS _IOR(SCOUTFS_IOCTL_MAGIC, 6, \
-					 struct scoutfs_ioctl_item_cache_keys)
-
 struct scoutfs_ioctl_data_waiting_entry {
 	__u64 ino;
 	__u64 iblock;
@@ -283,7 +261,7 @@ struct scoutfs_ioctl_data_waiting {
 
 #define SCOUTFS_IOC_DATA_WAITING_FLAGS_UNKNOWN		(U8_MAX << 0)
 
-#define SCOUTFS_IOC_DATA_WAITING _IOR(SCOUTFS_IOCTL_MAGIC, 7, \
+#define SCOUTFS_IOC_DATA_WAITING _IOR(SCOUTFS_IOCTL_MAGIC, 6, \
 				      struct scoutfs_ioctl_data_waiting)
 
 /*
@@ -303,7 +281,7 @@ struct scoutfs_ioctl_setattr_more {
 #define SCOUTFS_IOC_SETATTR_MORE_OFFLINE		(1 << 0)
 #define SCOUTFS_IOC_SETATTR_MORE_UNKNOWN		(U8_MAX << 1)
 
-#define SCOUTFS_IOC_SETATTR_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 8, \
+#define SCOUTFS_IOC_SETATTR_MORE _IOW(SCOUTFS_IOCTL_MAGIC, 7, \
 				      struct scoutfs_ioctl_setattr_more)
 
 struct scoutfs_ioctl_listxattr_hidden {
@@ -313,7 +291,7 @@ struct scoutfs_ioctl_listxattr_hidden {
 	__u32 hash_pos;
 };
 
-#define SCOUTFS_IOC_LISTXATTR_HIDDEN _IOR(SCOUTFS_IOCTL_MAGIC, 9, \
+#define SCOUTFS_IOC_LISTXATTR_HIDDEN _IOR(SCOUTFS_IOCTL_MAGIC, 8, \
 					  struct scoutfs_ioctl_listxattr_hidden)
 
 /*
@@ -344,7 +322,7 @@ struct scoutfs_ioctl_find_xattrs {
 	__u8 _pad[4];
 };
 
-#define SCOUTFS_IOC_FIND_XATTRS _IOR(SCOUTFS_IOCTL_MAGIC, 10, \
+#define SCOUTFS_IOC_FIND_XATTRS _IOR(SCOUTFS_IOCTL_MAGIC, 9, \
 				     struct scoutfs_ioctl_find_xattrs)
 
 /*
@@ -365,7 +343,7 @@ struct scoutfs_ioctl_statfs_more {
 	__u64 rid;
 } __packed;
 
-#define SCOUTFS_IOC_STATFS_MORE _IOR(SCOUTFS_IOCTL_MAGIC, 11, \
+#define SCOUTFS_IOC_STATFS_MORE _IOR(SCOUTFS_IOCTL_MAGIC, 10, \
 				     struct scoutfs_ioctl_statfs_more)
 
 

@@ -28,9 +28,6 @@
 #include "block.h"
 #include "balloc.h"
 #include "btree.h"
-#include "manifest.h"
-#include "seg.h"
-#include "compact.h"
 #include "scoutfs_trace.h"
 #include "msg.h"
 #include "server.h"
@@ -63,14 +60,10 @@ struct server_info {
 	u64 term;
 	struct scoutfs_net_connection *conn;
 
-	/* request processing coordinates committing manifest and alloc */
+	/* request processing coordinates shared commits */
 	struct rw_semaphore commit_rwsem;
 	struct llist_head commit_waiters;
 	struct work_struct commit_work;
-
-	/* server remembers the stable manifest root for clients */
-	seqcount_t stable_seqcount;
-	struct scoutfs_btree_root stable_manifest_root;
 
 	/* server tracks seq use */
 	struct rw_semaphore seq_rwsem;
@@ -81,12 +74,6 @@ struct server_info {
 
 	struct list_head clients;
 	unsigned long nr_clients;
-
-	/* track compaction in flight */
-	unsigned long compacts_per_client;
-	unsigned long nr_compacts;
-	struct list_head compacts;
-	struct work_struct compact_work;
 
 	/* track clients waiting in unmmount for farewell response */
 	struct mutex farewell_mutex;
@@ -108,7 +95,6 @@ struct server_info {
 struct server_client_info {
 	u64 rid;
 	struct list_head head;
-	unsigned long nr_compacts;
 };
 
 struct commit_waiter {
@@ -245,13 +231,7 @@ static int server_extent_io(struct super_block *sb, int op,
 
 /*
  * Allocate an extent of the given length in the first smallest free
- * extent that contains it.  We allocate in multiples of segment blocks
- * and expose that to callers today.
- *
- * This doesn't have the cursor that segment allocation does.  It's
- * possible that a recently freed segment can merge to form a larger
- * free extent that can be very quickly allocated to a node.  The hope is
- * that doesn't happen very often.
+ * extent that contains it.
  */
 static int alloc_extent(struct super_block *sb, u64 blocks,
 			u64 *start, u64 *len)
@@ -264,11 +244,6 @@ static int alloc_extent(struct super_block *sb, u64 blocks,
 	*len = 0;
 
 	down_write(&server->alloc_rwsem);
-
-	if (blocks & (SCOUTFS_SEGMENT_BLOCKS - 1)) {
-		ret = -EINVAL;
-		goto out;
-	}
 
 	scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLOCKS_TYPE, 0,
 			    0, blocks, 0, 0);
@@ -413,123 +388,11 @@ static int free_extent(struct super_block *sb, u64 start, u64 len)
 	return ret;
 }
 
-/*
- * This is called by the compaction code which is running in the server.
- * The server caller has held all the locks, etc.
- */
-static int free_segno(struct super_block *sb, u64 segno)
-{
-	scoutfs_inc_counter(sb, server_free_segno);
-	trace_scoutfs_free_segno(sb, segno);
-	return free_extent(sb, segno << SCOUTFS_SEGMENT_BLOCK_SHIFT,
-			   SCOUTFS_SEGMENT_BLOCKS);
-}
-
-/*
- * Allocate a segment on behalf of compaction or a node wanting to write
- * a level 0 segment.  It has to be aligned to the segment size because
- * we address segments with aligned segment numbers instead of block
- * offsets.
- *
- * We can use a simple cursor sweep of the index by start because all
- * server extents are multiples of the segment size.  Sweeping through
- * the volume tries to spread out new segment writes and make it more
- * rare to write to a recently freed segment which can cause a client to
- * have to re-read the manifest.
- */
-static int alloc_segno(struct super_block *sb, u64 *segno)
-{
-	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_extent ext;
-	u64 curs;
-	int ret;
-
-	down_write(&server->alloc_rwsem);
-
-	curs = ALIGN(le64_to_cpu(super->alloc_cursor), SCOUTFS_SEGMENT_BLOCKS);
-	*segno = 0;
-
-	do {
-		scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE, 0,
-				    curs, 1, 0, 0);
-		ret = scoutfs_extent_next(sb, server_extent_io, &ext, NULL);
-	} while (ret == -ENOENT && curs && (curs = 0, 1));
-	if (ret) {
-		if (ret == -ENOENT)
-			ret = -ENOSPC;
-		goto out;
-	}
-
-	trace_scoutfs_server_alloc_segno_next(sb, &ext);
-
-	/* use cursor if within extent, otherwise start of next extent */
-	if (ext.start < curs)
-		ext.start = curs;
-	ext.len = SCOUTFS_SEGMENT_BLOCKS;
-
-	ret = scoutfs_extent_remove(sb, server_extent_io, &ext, NULL);
-	if (ret)
-		goto out;
-
-	super->alloc_cursor = cpu_to_le64(ext.start + ext.len);
-
-	*segno = ext.start >> SCOUTFS_SEGMENT_BLOCK_SHIFT;
-
-	trace_scoutfs_server_alloc_segno_allocated(sb, &ext);
-	trace_scoutfs_alloc_segno(sb, *segno);
-	scoutfs_inc_counter(sb, server_alloc_segno);
-
-out:
-	up_write(&server->alloc_rwsem);
-	return ret;
-}
-
-/*
- * "allocating" a segno removes an unknown segment from the allocator
- * and returns it, "removing" a segno removes a specific segno from the
- * allocator.
- */
-static int remove_segno(struct super_block *sb, u64 segno)
-{
-	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	struct scoutfs_extent ext;
-	int ret;
-
-	trace_scoutfs_remove_segno(sb, segno);
-
-	scoutfs_extent_init(&ext, SCOUTFS_FREE_EXTENT_BLKNO_TYPE, 0,
-			    segno << SCOUTFS_SEGMENT_BLOCK_SHIFT,
-			    SCOUTFS_SEGMENT_BLOCKS, 0, 0);
-
-	down_write(&server->alloc_rwsem);
-	ret = scoutfs_extent_remove(sb, server_extent_io, &ext, NULL);
-	up_write(&server->alloc_rwsem);
-	return ret;
-}
-
 static void stop_server(struct server_info *server)
 {
 	/* wait_event/wake_up provide barriers */
 	server->shutting_down = true;
 	wake_up(&server->waitq);
-}
-
-/*
- * Queue compaction work if clients have capacity for processing
- * requests and the manifest knows of levels with too many segments.
- */
-static void try_queue_compact(struct server_info *server)
-{
-	struct super_block *sb = server->sb;
-	bool can_request;
-
-	spin_lock(&server->lock);
-	can_request = server->nr_compacts <
-		      (server->nr_clients * server->compacts_per_client);
-	spin_unlock(&server->lock);
-	if (can_request && scoutfs_manifest_should_compact(sb))
-		queue_work(server->wq, &server->compact_work);
 }
 
 /*
@@ -662,12 +525,7 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 		goto out;
 	}
 
-	write_seqcount_begin(&server->stable_seqcount);
-	server->stable_manifest_root = SCOUTFS_SB(sb)->super.manifest.root;
-	write_seqcount_end(&server->stable_seqcount);
-
 	ret = 0;
-
 out:
 	node = llist_del_all(&server->commit_waiters);
 
@@ -679,26 +537,6 @@ out:
 
 	up_write(&server->commit_rwsem);
 	trace_scoutfs_server_commit_work_exit(sb, 0, ret);
-}
-
-void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
-			      struct scoutfs_manifest_entry *ment)
-{
-	net_ment->segno = cpu_to_le64(ment->segno);
-	net_ment->seq = cpu_to_le64(ment->seq);
-	net_ment->first = ment->first;
-	net_ment->last = ment->last;
-	net_ment->level = ment->level;
-}
-
-void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
-				struct scoutfs_net_manifest_entry *net_ment)
-{
-	ment->segno = le64_to_cpu(net_ment->segno);
-	ment->seq = le64_to_cpu(net_ment->seq);
-	ment->level = net_ment->level;
-	ment->first = net_ment->first;
-	ment->last = net_ment->last;
 }
 
 static int server_alloc_inodes(struct super_block *sb,
@@ -823,89 +661,6 @@ static int server_free_extents(struct super_block *sb,
 		err = wait_for_commit(&cw);
 		if (ret == 0)
 			ret = err;
-	}
-
-out:
-	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
-}
-
-/*
- * We still special case segno allocation because it's aligned and we'd
- * like to keep that detail in the server.
- */
-static int server_alloc_segno(struct super_block *sb,
-			      struct scoutfs_net_connection *conn,
-			      u8 cmd, u64 id, void *arg, u16 arg_len)
-{
-	DECLARE_SERVER_INFO(sb, server);
-	struct commit_waiter cw;
-	__le64 lesegno = 0;
-	u64 segno;
-	int ret;
-
-	if (arg_len != 0) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	down_read(&server->commit_rwsem);
-	ret = alloc_segno(sb, &segno);
-	if (ret == 0)
-		queue_commit_work(server, &cw);
-	up_read(&server->commit_rwsem);
-	if (ret == 0)
-		ret = wait_for_commit(&cw);
-	if (ret)
-		goto out;
-
-	lesegno = cpu_to_le64(segno);
-out:
-	return scoutfs_net_response(sb, conn, cmd, id, ret,
-				    &lesegno, sizeof(lesegno));
-}
-
-static int server_record_segment(struct super_block *sb,
-				 struct scoutfs_net_connection *conn,
-				 u8 cmd, u64 id, void *arg, u16 arg_len)
-{
-	DECLARE_SERVER_INFO(sb, server);
-	struct scoutfs_net_manifest_entry *net_ment;
-	struct scoutfs_manifest_entry ment;
-	struct commit_waiter cw;
-	int ret;
-
-	if (arg_len != sizeof(struct scoutfs_net_manifest_entry)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	net_ment = arg;
-
-retry:
-	down_read(&server->commit_rwsem);
-	scoutfs_manifest_lock(sb);
-
-	if (scoutfs_manifest_level0_full(sb)) {
-		scoutfs_manifest_unlock(sb);
-		up_read(&server->commit_rwsem);
-		/* XXX waits indefinitely?  io errors? */
-		wait_event(server->waitq, !scoutfs_manifest_level0_full(sb));
-		goto retry;
-	}
-
-	scoutfs_init_ment_from_net(&ment, net_ment);
-
-	ret = scoutfs_manifest_add(sb, &ment);
-	scoutfs_manifest_unlock(sb);
-
-	if (ret == 0)
-		queue_commit_work(server, &cw);
-	up_read(&server->commit_rwsem);
-
-	if (ret == 0) {
-		ret = wait_for_commit(&cw);
-		if (ret == 0)
-			try_queue_compact(server);
 	}
 
 out:
@@ -1270,29 +1025,6 @@ static int server_get_last_seq(struct super_block *sb,
 out:
 	return scoutfs_net_response(sb, conn, cmd, id, ret,
 				    &last_seq, sizeof(last_seq));
-}
-
-static int server_get_manifest_root(struct super_block *sb,
-				    struct scoutfs_net_connection *conn,
-				    u8 cmd, u64 id, void *arg, u16 arg_len)
-{
-	DECLARE_SERVER_INFO(sb, server);
-	struct scoutfs_btree_root root;
-	unsigned int start;
-	int ret;
-
-	if (arg_len == 0) {
-		do {
-			start = read_seqcount_begin(&server->stable_seqcount);
-			root = server->stable_manifest_root;
-		} while (read_seqcount_retry(&server->stable_seqcount, start));
-		ret = 0;
-	} else {
-		ret = -EINVAL;
-	}
-
-	return scoutfs_net_response(sb, conn, cmd, id, ret,
-				    &root, sizeof(root));
 }
 
 /*
@@ -1829,616 +1561,15 @@ static int server_farewell(struct super_block *sb,
 	return 0;
 }
 
-/* requests sent to clients are tracked so we can free resources */
-struct compact_request {
-	struct list_head head;
-	u64 rid;
-	struct scoutfs_net_compact_request req;
-};
-
-/*
- * Find a node that can process our compaction request.  Return a
- * rid if we found a client and added the compaction to the client
- * and server counts.  Returns 0 if no suitable clients were found.
- */
-static u64 compact_request_start(struct super_block *sb,
-				 struct compact_request *cr)
-{
-	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	struct server_client_info *last;
-	struct server_client_info *sci;
-	u64 rid = 0;
-
-	spin_lock(&server->lock);
-
-	/* XXX no last_entry_or_null? :( */
-	if (!list_empty(&server->clients))
-		last = list_last_entry(&server->clients,
-				       struct server_client_info, head);
-	else
-		last = NULL;
-
-	while ((sci = list_first_entry_or_null(&server->clients,
-					       struct server_client_info,
-					       head)) != NULL) {
-		list_move_tail(&sci->head, &server->clients);
-		if (sci->nr_compacts < server->compacts_per_client) {
-			list_add(&cr->head, &server->compacts);
-			server->nr_compacts++;
-			sci->nr_compacts++;
-			rid = sci->rid;
-			cr->rid = rid;
-			break;
-		}
-		if (sci == last)
-			break;
-	}
-
-	trace_scoutfs_server_compact_start(sb, le64_to_cpu(cr->req.id),
-					   cr->req.ents[0].level, rid,
-					   rid ? sci->nr_compacts : 0,
-					   server->nr_compacts,
-					   server->compacts_per_client);
-
-	spin_unlock(&server->lock);
-
-	return rid;
-}
-
-/*
- * Find a tracked compact request for the compaction id, remove it from
- * the server and client counts, and return it to the caller.
- */
-static struct compact_request *compact_request_done(struct super_block *sb,
-						    u64 id)
-{
-	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	struct compact_request *ret = NULL;
-	struct server_client_info *sci;
-	struct compact_request *cr;
-
-	spin_lock(&server->lock);
-
-	list_for_each_entry(cr, &server->compacts, head) {
-		if (le64_to_cpu(cr->req.id) != id)
-			continue;
-
-		list_for_each_entry(sci, &server->clients, head) {
-			if (sci->rid == cr->rid) {
-				sci->nr_compacts--;
-				break;
-			}
-		}
-
-		server->nr_compacts--;
-		list_del_init(&cr->head);
-		ret = cr;
-		break;
-	}
-
-	trace_scoutfs_server_compact_done(sb, id, ret ? ret->rid : 0,
-					  server->nr_compacts);
-
-	spin_unlock(&server->lock);
-
-	return ret;
-}
-
-/*
- * When a client disconnects we forget the compactions that they had
- * in flight so that we have capacity to send compaction requests to the
- * remaining clients.
- *
- * XXX we do not free their allocated segnos because they could still be
- * running and writing to those blocks.  To do this safely we'd need
- * full recovery procedures with fencing to ensure that they're not able
- * to write to those blocks anymore.
- */
-static void forget_client_compacts(struct super_block *sb,
-				   struct server_client_info *sci)
-{
-	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	struct compact_request *cr;
-	struct compact_request *pos;
-	LIST_HEAD(forget);
-
-	spin_lock(&server->lock);
-	list_for_each_entry_safe(cr, pos, &server->compacts, head) {
-		if (cr->rid == sci->rid) {
-			sci->nr_compacts--;
-			server->nr_compacts--;
-			list_move(&cr->head, &forget);
-		}
-	}
-	spin_unlock(&server->lock);
-
-	list_for_each_entry_safe(cr, pos, &forget, head) {
-		scoutfs_manifest_compact_done(sb, &cr->req);
-		list_del_init(&cr->head);
-		kfree(cr);
-	}
-}
-
-static int segno_in_ents(u64 segno, struct scoutfs_net_manifest_entry *ents,
-			 unsigned int nr)
-{
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		if (ents[i].segno == 0)
-			break;
-		if (segno == le64_to_cpu(ents[i].segno))
-			return 1;
-	}
-
-	return 0;
-}
-
-static int remove_segnos(struct super_block *sb, __le64 *segnos,
-			 unsigned int nr,
-			 struct scoutfs_net_manifest_entry *unless,
-			 unsigned int nr_unless, bool cleanup);
-
-/*
- * Free (unaligned) segnos if they're not found in the unless entries.
- * If this returns an error then we've cleaned up partial frees on
- * error.  This panics if it sees an error and can't cleanup on error.
- *
- * There are variants of this for lots of add/del, alloc/remove data
- * structurs.
- */
-static int free_segnos(struct super_block *sb, __le64 *segnos,
-		       unsigned int nr,
-		       struct scoutfs_net_manifest_entry *unless,
-		       unsigned int nr_unless, bool cleanup)
-
-{
-	u64 segno;
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		segno = le64_to_cpu(get_unaligned(&segnos[i]));
-		if (segno == 0)
-			break;
-		if (segno_in_ents(segno, unless, nr_unless))
-			continue;
-
-		ret = free_segno(sb, segno);
-		BUG_ON(ret < 0 && !cleanup);
-		if (ret < 0) {
-			remove_segnos(sb, segnos, i, unless, nr_unless, false);
-			break;
-		}
-	}
-
-	return ret;
-}
-
-/* the segno array can be unaligned */
-static int alloc_segnos(struct super_block *sb, __le64 * segnos,
-			unsigned int nr)
-
-{
-	u64 segno;
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		ret = alloc_segno(sb, &segno);
-		if (ret < 0) {
-			free_segnos(sb, segnos, i, NULL, 0, false);
-			break;
-		}
-		put_unaligned(cpu_to_le64(segno), &segnos[i]);
-	}
-
-	return ret;
-}
-
-static int remove_segnos(struct super_block *sb, __le64 *segnos,
-			 unsigned int nr,
-			 struct scoutfs_net_manifest_entry *unless,
-			 unsigned int nr_unless, bool cleanup)
-
-{
-	u64 segno;
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		segno = le64_to_cpu(get_unaligned(&segnos[i]));
-		if (segno == 0)
-			break;
-		if (segno_in_ents(segno, unless, nr_unless))
-			continue;
-
-		ret = remove_segno(sb, segno);
-		BUG_ON(ret < 0 && !cleanup);
-		if (ret < 0) {
-			free_segnos(sb, segnos, i, unless, nr_unless, false);
-			break;
-		}
-	}
-
-	return ret;
-}
-
-
-static int remove_entry_segnos(struct super_block *sb,
-			       struct scoutfs_net_manifest_entry *ents,
-			       unsigned int nr,
-			       struct scoutfs_net_manifest_entry *unless,
-			       unsigned int nr_unless, bool cleanup);
-
-static int free_entry_segnos(struct super_block *sb,
-			     struct scoutfs_net_manifest_entry *ents,
-			     unsigned int nr,
-			     struct scoutfs_net_manifest_entry *unless,
-			     unsigned int nr_unless, bool cleanup)
-{
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		if (ents[i].segno == 0)
-			break;
-		if (segno_in_ents(le64_to_cpu(ents[i].segno),
-				  unless, nr_unless))
-			continue;
-
-		ret = free_segno(sb, le64_to_cpu(ents[i].segno));
-		BUG_ON(ret < 0 && !cleanup);
-		if (ret < 0) {
-			remove_entry_segnos(sb, ents, i, unless, nr_unless,
-					    false);
-			break;
-		}
-	}
-
-	return ret;
-}
-
-static int remove_entry_segnos(struct super_block *sb,
-			       struct scoutfs_net_manifest_entry *ents,
-			       unsigned int nr,
-			       struct scoutfs_net_manifest_entry *unless,
-			       unsigned int nr_unless, bool cleanup)
-{
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		if (ents[i].segno == 0)
-		       break;
-		if (segno_in_ents(le64_to_cpu(ents[i].segno),
-				  unless, nr_unless))
-			continue;
-
-		ret = remove_segno(sb, le64_to_cpu(ents[i].segno));
-		BUG_ON(ret < 0 && !cleanup);
-		if (ret < 0) {
-			free_entry_segnos(sb, ents, i, unless, nr_unless,
-					  false);
-			break;
-		}
-	}
-
-	return ret;
-}
-
-static int del_manifest_entries(struct super_block *sb,
-				struct scoutfs_net_manifest_entry *ents,
-				unsigned int nr, bool cleanup);
-
-static int add_manifest_entries(struct super_block *sb,
-				struct scoutfs_net_manifest_entry *ents,
-				unsigned int nr, bool cleanup)
-{
-	struct scoutfs_manifest_entry ment;
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		if (ents[i].segno == 0)
-			break;
-
-		scoutfs_init_ment_from_net(&ment, &ents[i]);
-
-		ret = scoutfs_manifest_add(sb, &ment);
-		BUG_ON(ret < 0 && !cleanup);
-		if (ret < 0) {
-			del_manifest_entries(sb, ents, i, false);
-			break;
-		}
-	}
-
-	return ret;
-}
-
-static int del_manifest_entries(struct super_block *sb,
-				struct scoutfs_net_manifest_entry *ents,
-				unsigned int nr, bool cleanup)
-{
-	struct scoutfs_manifest_entry ment;
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		if (ents[i].segno == 0)
-			break;
-
-		scoutfs_init_ment_from_net(&ment, &ents[i]);
-
-		ret = scoutfs_manifest_del(sb, &ment);
-		BUG_ON(ret < 0 && !cleanup);
-		if (ret < 0) {
-			add_manifest_entries(sb, ents, i, false);
-			break;
-		}
-	}
-
-	return ret;
-}
-
-/*
- * Process a received compaction response.  This is called in concurrent
- * processing work context so it's racing with other compaction
- * responses and new compaction requests being built and sent.
- *
- * If the compaction failed then we only have to free the allocated
- * output segnos sent in the request.
- *
- * If the compaction succeeded then we need to delete the input manifest
- * entries, add any new output manifest entries, and free allocated
- * segnos and input manifest segnos that aren't found in output segnos.
- *
- * And finally we always remove the compaction from the runtime client
- * accounting
- *
- * As we finish a compaction we wake level0 writers if there's now space
- * in level 0 for a new segment.
- *
- * Errors in processing are taken as an indication that this server is
- * no longer able to do its job.  We return hard errors which shut down
- * the server in the hopes that another healthy server will start up.
- * We may want to revisit this.
- */
-static int compact_response(struct super_block *sb,
-			    struct scoutfs_net_connection *conn,
-			    void *resp, unsigned int resp_len,
-			    int error, void *data)
-{
-	struct server_info *server = SCOUTFS_SB(sb)->server_info;
-	struct scoutfs_net_compact_response *cresp = NULL;
-	struct compact_request *cr = NULL;
-	bool level0_was_full = false;
-	bool add_ents = false;
-	bool del_ents = false;
-	bool rem_segnos = false;
-	struct commit_waiter cw;
-	__le64 id;
-	int ret;
-
-	if (error) {
-		/* an error response without an id is fatal */
-		if (resp_len != sizeof(__le64)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
-		memcpy(&id, resp, resp_len);
-
-	} else {
-		if (resp_len != sizeof(struct scoutfs_net_compact_response)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
-		cresp = resp;
-		id = cresp->id;
-	}
-
-	trace_scoutfs_server_compact_response(sb, le64_to_cpu(id), error);
-
-	/* XXX we only free tracked requests on responses, must still exist */
-	cr = compact_request_done(sb, le64_to_cpu(id));
-	if (WARN_ON_ONCE(cr == NULL)) {
-		ret = -ENOENT;
-		goto out;
-	}
-
-	down_read(&server->commit_rwsem);
-	scoutfs_manifest_lock(sb);
-
-	level0_was_full = scoutfs_manifest_level0_full(sb);
-
-	if (error) {
-		ret = 0;
-		goto cleanup;
-	}
-
-	/* delete old manifest entries */
-	ret = del_manifest_entries(sb, cr->req.ents, ARRAY_SIZE(cr->req.ents),
-				   true);
-	if (ret)
-		goto cleanup;
-	add_ents = true;
-
-	/* add new manifest entries */
-	ret = add_manifest_entries(sb, cresp->ents, ARRAY_SIZE(cresp->ents),
-				   true);
-	if (ret)
-		goto cleanup;
-	del_ents = true;
-
-	/* free allocated segnos not found in new entries */
-	ret = free_segnos(sb, cr->req.segnos, ARRAY_SIZE(cr->req.segnos),
-			  cresp->ents, ARRAY_SIZE(cresp->ents), true);
-	if (ret)
-		goto cleanup;
-	rem_segnos = true;
-
-	/* free input segnos not found in new entries */
-	ret = free_entry_segnos(sb, cr->req.ents, ARRAY_SIZE(cr->req.ents),
-				cresp->ents, ARRAY_SIZE(cresp->ents), true);
-cleanup:
-	/* cleanup partial commits on errors */
-	if (ret < 0 && rem_segnos)
-		remove_segnos(sb, cr->req.segnos, ARRAY_SIZE(cr->req.segnos),
-			      cresp->ents, ARRAY_SIZE(cresp->ents), false);
-	if (ret < 0 && del_ents)
-		del_manifest_entries(sb, cresp->ents, ARRAY_SIZE(cresp->ents),
-				     false);
-	if (ret < 0 && add_ents)
-		add_manifest_entries(sb, cr->req.ents,
-				     ARRAY_SIZE(cr->req.ents), false);
-
-	/* free all the allocated output segnos if compaction failed */
-	if ((error || ret < 0) && cr != NULL)
-		free_segnos(sb, cr->req.segnos, ARRAY_SIZE(cr->req.segnos),
-			    NULL, 0, false);
-
-	if (ret == 0 && level0_was_full && !scoutfs_manifest_level0_full(sb))
-		wake_up(&server->waitq);
-
-	if (ret == 0)
-		queue_commit_work(server, &cw);
-	scoutfs_manifest_unlock(sb);
-	up_read(&server->commit_rwsem);
-
-	if (cr) {
-		scoutfs_manifest_compact_done(sb, &cr->req);
-		kfree(cr);
-	}
-
-	if (ret == 0) {
-		ret = wait_for_commit(&cw);
-		if (ret == 0)
-			try_queue_compact(server);
-	}
-
-out:
-	return ret;
-}
-
-/*
- * The compaction worker executes as the manifest is updated and we see
- * that a level has too many segments and clients aren't processing all
- * their max number of compaction requests.  Only one compaction worker
- * executes.
- *
- * We have the manifest build us a compaction request, find a client to
- * send it too, and record it for later completion processing.
- *
- * The manifest tracks pending compactions and won't use the same
- * segments as inputs to multiple compactions.  We track the number of
- * compactions in flight to each client to keep them balanced.
- */
-static void scoutfs_server_compact_worker(struct work_struct *work)
-{
-	struct server_info *server = container_of(work, struct server_info,
-						  compact_work);
-	struct super_block *sb = server->sb;
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_net_compact_request *req;
-	struct compact_request *cr;
-	struct commit_waiter cw;
-	int nr_segnos = 0;
-	u64 rid;
-	__le64 id;
-	int ret;
-
-	trace_scoutfs_server_compact_work_enter(sb, 0, 0);
-
-	cr = kzalloc(sizeof(struct compact_request), GFP_NOFS);
-	if (!cr) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	req = &cr->req;
-
-	/* get the input manifest entries */
-	ret = scoutfs_manifest_next_compact(sb, req);
-	if (ret <= 0)
-		goto out;
-
-	nr_segnos = ret + SCOUTFS_COMPACTION_SEGNO_OVERHEAD;
-
-	/* get the next id and allocate possible output segnos */
-	down_read(&server->commit_rwsem);
-
-	spin_lock(&server->lock);
-	id = super->next_compact_id;
-	le64_add_cpu(&super->next_compact_id, 1);
-	spin_unlock(&server->lock);
-
-	ret = alloc_segnos(sb, req->segnos, nr_segnos);
-	if (ret == 0)
-		queue_commit_work(server, &cw);
-	up_read(&server->commit_rwsem);
-	if (ret == 0)
-		ret = wait_for_commit(&cw);
-	if (ret)
-		goto out;
-
-	/* try to send to a node with capacity, they can disconnect */
-retry:
-	req->id = id;
-	rid = compact_request_start(sb, cr);
-	if (rid == 0) {
-		ret = 0;
-		goto out;
-	}
-
-	/* response processing can complete compaction before this returns */
-	ret = scoutfs_net_submit_request_node(sb, server->conn, rid,
-					      SCOUTFS_NET_CMD_COMPACT,
-					      req, sizeof(*req),
-					      compact_response, NULL, NULL);
-	if (ret < 0) {
-		cr = compact_request_done(sb, le64_to_cpu(id));
-		BUG_ON(cr == NULL); /* must still be there, no node cleanup */
-	}
-	if (ret == -ENOTCONN)
-		goto retry;
-	if (ret < 0)
-		goto out;
-
-	/* cr is now owned by response processing */
-	cr = NULL;
-	ret = 1;
-
-out:
-	if (ret <= 0 && cr != NULL) {
-		scoutfs_manifest_compact_done(sb, req);
-
-		/* don't need to wait for commit when freeing in cleanup */
-		down_read(&server->commit_rwsem);
-		free_segnos(sb, req->segnos, nr_segnos, NULL, 0, false);
-		up_read(&server->commit_rwsem);
-
-		kfree(cr);
-	}
-
-	if (ret > 0)
-		try_queue_compact(server);
-
-	trace_scoutfs_server_compact_work_exit(sb, 0, ret);
-}
-
 static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_GREETING]		= server_greeting,
 	[SCOUTFS_NET_CMD_ALLOC_INODES]		= server_alloc_inodes,
 	[SCOUTFS_NET_CMD_ALLOC_EXTENT]		= server_alloc_extent,
 	[SCOUTFS_NET_CMD_FREE_EXTENTS]		= server_free_extents,
-	[SCOUTFS_NET_CMD_ALLOC_SEGNO]		= server_alloc_segno,
-	[SCOUTFS_NET_CMD_RECORD_SEGMENT]	= server_record_segment,
 	[SCOUTFS_NET_CMD_GET_LOG_TREES]		= server_get_log_trees,
 	[SCOUTFS_NET_CMD_COMMIT_LOG_TREES]	= server_commit_log_trees,
 	[SCOUTFS_NET_CMD_ADVANCE_SEQ]		= server_advance_seq,
 	[SCOUTFS_NET_CMD_GET_LAST_SEQ]		= server_get_last_seq,
-	[SCOUTFS_NET_CMD_GET_MANIFEST_ROOT]	= server_get_manifest_root,
 	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
 	[SCOUTFS_NET_CMD_LOCK]			= server_lock,
 	[SCOUTFS_NET_CMD_FAREWELL]		= server_farewell,
@@ -2453,14 +1584,11 @@ static void server_notify_up(struct super_block *sb,
 
 	if (rid != 0) {
 		sci->rid = rid;
-		sci->nr_compacts = 0;
 		spin_lock(&server->lock);
 		list_add_tail(&sci->head, &server->clients);
 		server->nr_clients++;
 		trace_scoutfs_server_client_up(sb, rid, server->nr_clients);
 		spin_unlock(&server->lock);
-
-		try_queue_compact(server);
 	}
 }
 
@@ -2480,9 +1608,6 @@ static void server_notify_down(struct super_block *sb,
 		spin_unlock(&server->lock);
 
 		free_farewell_requests(sb, rid);
-
-		forget_client_compacts(sb, sci);
-		try_queue_compact(server);
 	} else {
 		stop_server(server);
 	}
@@ -2537,8 +1662,7 @@ static void scoutfs_server_worker(struct work_struct *work)
 			    &super->core_balloc_free);
 	scoutfs_block_writer_init(sb, &server->wri);
 
-	ret = scoutfs_manifest_setup(sb) ?:
-	      scoutfs_lock_server_setup(sb, &server->alloc, &server->wri);
+	ret = scoutfs_lock_server_setup(sb, &server->alloc, &server->wri);
 	if (ret)
 		goto shutdown;
 
@@ -2555,8 +1679,6 @@ static void scoutfs_server_worker(struct work_struct *work)
 	if (ret < 0)
 		goto shutdown;
 
-	server->stable_manifest_root = super->manifest.root;
-
 	/* start accepting connections and processing work */
 	server->conn = conn;
 	scoutfs_net_listen(sb, conn);
@@ -2571,14 +1693,11 @@ shutdown:
 	scoutfs_info(sb, "server shutting down at "SIN_FMT, SIN_ARG(&sin));
 	/* wait for request processing */
 	scoutfs_net_shutdown(sb, conn);
-	/* drain compact work queued by responses */
-	cancel_work_sync(&server->compact_work);
 	/* wait for commit queued by request processing */
 	flush_work(&server->commit_work);
 	server->conn = NULL;
 
 	destroy_pending_frees(sb);
-	scoutfs_manifest_destroy(sb);
 	scoutfs_lock_server_destroy(sb);
 
 out:
@@ -2672,14 +1791,10 @@ int scoutfs_server_setup(struct super_block *sb)
 	init_rwsem(&server->commit_rwsem);
 	init_llist_head(&server->commit_waiters);
 	INIT_WORK(&server->commit_work, scoutfs_server_commit_func);
-	seqcount_init(&server->stable_seqcount);
 	init_rwsem(&server->seq_rwsem);
 	init_rwsem(&server->alloc_rwsem);
 	INIT_LIST_HEAD(&server->pending_frees);
 	INIT_LIST_HEAD(&server->clients);
-	server->compacts_per_client = 2;
-	INIT_LIST_HEAD(&server->compacts);
-	INIT_WORK(&server->compact_work, scoutfs_server_compact_worker);
 	mutex_init(&server->farewell_mutex);
 	INIT_LIST_HEAD(&server->farewell_requests);
 	INIT_WORK(&server->farewell_work, farewell_worker);

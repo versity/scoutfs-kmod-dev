@@ -56,14 +56,6 @@ do {								\
 	__entry->name##_data_len, __entry->name##_cmd, __entry->name##_flags, \
 	__entry->name##_error
 
-struct scoutfs_net_manifest_entry;
-struct scoutfs_manifest_entry;
-
-void scoutfs_init_ment_to_net(struct scoutfs_net_manifest_entry *net_ment,
-			      struct scoutfs_manifest_entry *ment);
-void scoutfs_init_ment_from_net(struct scoutfs_manifest_entry *ment,
-				struct scoutfs_net_manifest_entry *net_ment);
-
 int scoutfs_server_lock_request(struct super_block *sb, u64 rid,
 				struct scoutfs_net_lock *nl);
 int scoutfs_server_lock_response(struct super_block *sb, u64 rid,

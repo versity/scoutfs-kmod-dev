@@ -23,7 +23,6 @@
 #include "super.h"
 #include "data.h"
 #include "scoutfs_trace.h"
-#include "item.h"
 #include "lock.h"
 #include "file.h"
 #include "inode.h"

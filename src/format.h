@@ -20,18 +20,6 @@
 #define SCOUTFS_BLOCK_SECTORS (1 << SCOUTFS_BLOCK_SECTOR_SHIFT)
 #define SCOUTFS_BLOCK_MAX (U64_MAX >> SCOUTFS_BLOCK_SHIFT)
 
-/*
- * FS data is stored in segments, for now they're fixed size. They'll
- * be dynamic.
- */
-#define SCOUTFS_SEGMENT_SHIFT 20
-#define SCOUTFS_SEGMENT_SIZE (1 << SCOUTFS_SEGMENT_SHIFT)
-#define SCOUTFS_SEGMENT_MASK (SCOUTFS_SEGMENT_SIZE - 1)
-#define SCOUTFS_SEGMENT_PAGES (SCOUTFS_SEGMENT_SIZE / PAGE_SIZE)
-#define SCOUTFS_SEGMENT_BLOCKS (SCOUTFS_SEGMENT_SIZE / SCOUTFS_BLOCK_SIZE)
-#define SCOUTFS_SEGMENT_BLOCK_SHIFT \
-		(SCOUTFS_SEGMENT_SHIFT - SCOUTFS_BLOCK_SHIFT)
-
 #define SCOUTFS_PAGES_PER_BLOCK (SCOUTFS_BLOCK_SIZE / PAGE_SIZE)
 #define SCOUTFS_BLOCK_PAGE_ORDER (SCOUTFS_BLOCK_SHIFT - PAGE_SHIFT)
 
@@ -224,47 +212,6 @@ struct scoutfs_btree_block {
 	struct scoutfs_btree_item_header item_hdrs[0];
 } __packed;
 
-struct scoutfs_btree_ring {
-	__le64 first_blkno;
-	__le64 nr_blocks;
-	__le64 next_block;
-	__le64 next_seq;
-} __packed;
-
-/*
- * This is absurdly huge.  If there was only ever 1 item per segment and
- * 2^64 items the tree could get this deep.
- */
-#define SCOUTFS_MANIFEST_MAX_LEVEL 20
-
-#define SCOUTFS_MANIFEST_FANOUT 10
-
-struct scoutfs_manifest {
-	struct scoutfs_btree_root root;
-	__le64 level_counts[SCOUTFS_MANIFEST_MAX_LEVEL];
-} __packed;
-
-/*
- * Manifest entries are split across btree keys and values.  Putting
- * some entry fields in the value keeps the key smaller and increases
- * the fanout of the btree which keeps the tree smaller and reduces
- * block IO.
- *
- * The key is made up of the level, first key, and seq.  At level 0
- * segments can completely overlap and have identical key ranges but we
- * avoid duplicate btree keys by including the unique seq.
- */
-struct scoutfs_manifest_btree_key {
-	__u8 level;
-	struct scoutfs_key_be first_key;
-	__be64 seq;
-} __packed;
-
-struct scoutfs_manifest_btree_val {
-	__le64 segno;
-	struct scoutfs_key last_key;
-} __packed;
-
 /*
  * Free metadata blocks are tracked by block allocator items.
  */
@@ -384,50 +331,6 @@ struct scoutfs_bloom_block {
 	(((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_bloom_block)) /	\
 	 member_sizeof(struct scoutfs_bloom_block, bits[0])) *		\
 	 member_sizeof(struct scoutfs_bloom_block, bits[0]) * 8)	\
-
-/*
- * The max number of links defines the max number of entries that we can
- * index in o(log n) and the static list head storage size in the
- * segment block.  We always pay the static storage cost, which is tiny,
- * and we can look at the number of items to know the greatest number of
- * links and skip most of the initial 0 links.
- */
-#define SCOUTFS_MAX_SKIP_LINKS 32
-
-/*
- * Items are packed into segments and linked together in a skip list.
- * Each item's header, links, key, and value are stored contiguously.
- * They're not allowed to cross a block boundary.
- */
-struct scoutfs_segment_item {
-	struct scoutfs_key key;
-	__le16 val_len;
-	__u8 flags;
-	__u8 nr_links;
-	__le32 skip_links[0];
-	/* __u8 val_bytes[val_len] */
-} __packed;
-
-#define SCOUTFS_ITEM_FLAG_DELETION (1 << 0)
-
-/*
- * Each large segment starts with a segment block that describes the
- * rest of the blocks that make up the segment.
- *
- * The crc covers the initial total_bytes of the segment but starts
- * after the padding.
- */
-struct scoutfs_segment_block {
-	__le32 crc;
-	__le32 _padding;
-	__le64 segno;
-	__le64 seq;
-	__le32 last_item_off;
-	__le32 total_bytes;
-	__le32 nr_items;
-	__le32 skip_links[SCOUTFS_MAX_SKIP_LINKS];
-	/* packed items */
-} __packed;
 
 /*
  * Keys are first sorted by major key zones.
@@ -551,12 +454,8 @@ struct scoutfs_super_block {
 	__le64 next_uninit_free_block;
 	__le64 core_balloc_cursor;
 	__le64 free_blocks;
-	__le64 alloc_cursor;
 	__le64 first_fs_blkno;
 	__le64 last_fs_blkno;
-	struct scoutfs_btree_ring bring;
-	__le64 next_seg_seq;
-	__le64 next_compact_id;
 	__le64 quorum_fenced_term;
 	__le64 quorum_server_term;
 	__le64 unmount_barrier;
@@ -566,7 +465,6 @@ struct scoutfs_super_block {
 	struct scoutfs_balloc_root core_balloc_free;
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_btree_root fs_root;
-	struct scoutfs_manifest manifest;
 	struct scoutfs_btree_root logs_root;
 	struct scoutfs_btree_root lock_clients;
 	struct scoutfs_btree_root trans_seqs;
@@ -757,15 +655,11 @@ enum {
 	SCOUTFS_NET_CMD_ALLOC_INODES,
 	SCOUTFS_NET_CMD_ALLOC_EXTENT,
 	SCOUTFS_NET_CMD_FREE_EXTENTS,
-	SCOUTFS_NET_CMD_ALLOC_SEGNO,
-	SCOUTFS_NET_CMD_RECORD_SEGMENT,
 	SCOUTFS_NET_CMD_GET_LOG_TREES,
 	SCOUTFS_NET_CMD_COMMIT_LOG_TREES,
 	SCOUTFS_NET_CMD_ADVANCE_SEQ,
 	SCOUTFS_NET_CMD_GET_LAST_SEQ,
-	SCOUTFS_NET_CMD_GET_MANIFEST_ROOT,
 	SCOUTFS_NET_CMD_STATFS,
-	SCOUTFS_NET_CMD_COMPACT,
 	SCOUTFS_NET_CMD_LOCK,
 	SCOUTFS_NET_CMD_LOCK_RECOVER,
 	SCOUTFS_NET_CMD_FAREWELL,
@@ -804,20 +698,6 @@ struct scoutfs_net_inode_alloc {
 	__le64 nr;
 } __packed;
 
-struct scoutfs_net_key_range {
-	__le16 start_len;
-	__le16 end_len;
-	__u8 key_bytes[0];
-} __packed;
-
-struct scoutfs_net_manifest_entry {
-	__le64 segno;
-	__le64 seq;
-	struct scoutfs_key first;
-	struct scoutfs_key last;
-	__u8 level;
-} __packed;
-
 struct scoutfs_net_statfs {
 	__le64 total_blocks;		/* total blocks in device */
 	__le64 next_ino;		/* next unused inode number */
@@ -843,50 +723,6 @@ struct scoutfs_net_extent_list {
 
 /* arbitrarily makes a nice ~1k extent list payload */
 #define SCOUTFS_NET_EXTENT_LIST_MAX_NR	64
-
-/* one upper segment and fanout lower segments */
-#define SCOUTFS_COMPACTION_MAX_INPUT        (1 + SCOUTFS_MANIFEST_FANOUT)
-/* sticky can split the input and item alignment padding can add a lower */
-#define SCOUTFS_COMPACTION_SEGNO_OVERHEAD   2
-#define SCOUTFS_COMPACTION_MAX_OUTPUT       \
-	(SCOUTFS_COMPACTION_MAX_INPUT + SCOUTFS_COMPACTION_SEGNO_OVERHEAD)
-
-/*
- * A compact request is sent by the server to the client.  It provides
- * the input segments and enough allocated segnos to write the results.
- * The id uniquely identifies this compaction request and is included in
- * the response to clean up its allocated resources.
- */
-struct scoutfs_net_compact_request {
-	__le64 id;
-	__u8 last_level;
-	__u8 flags;
-	__le64 segnos[SCOUTFS_COMPACTION_MAX_OUTPUT];
-	struct scoutfs_net_manifest_entry ents[SCOUTFS_COMPACTION_MAX_INPUT];
-} __packed;
-
-/*
- * A sticky compaction has more lower level segments that overlap with
- * the end of the upper after the last lower level segment included in
- * the compaction.  Items left in the upper segment after the last lower
- * need to be written to the upper level instead of the lower.  The
- * upper segment "sticks" in place instead of moving down to the lower
- * level.
- */
-#define SCOUTFS_NET_COMPACT_FLAG_STICKY (1 << 0)
-
-/*
- * A compact response is sent by the client to the server.  It describes
- * the written output segments that need to be added to the manifest.
- * The server compares the response to the request to free unused
- * allocated segnos and input manifest entries.  An empty response is
- * valid and can happen if, say, the upper input segment completely
- * deleted all the items in a single overlapping lower segment.
- */
-struct scoutfs_net_compact_response {
-	__le64 id;
-	struct scoutfs_net_manifest_entry ents[SCOUTFS_COMPACTION_MAX_OUTPUT];
-} __packed;
 
 struct scoutfs_net_lock {
 	struct scoutfs_key key;

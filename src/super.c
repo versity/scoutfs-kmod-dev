@@ -33,11 +33,6 @@
 #include "counters.h"
 #include "triggers.h"
 #include "trans.h"
-#include "item.h"
-#include "manifest.h"
-#include "seg.h"
-#include "bio.h"
-#include "compact.h"
 #include "data.h"
 #include "lock.h"
 #include "net.h"
@@ -197,13 +192,11 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_lock_shutdown(sb);
 	scoutfs_server_destroy(sb);
 	scoutfs_net_destroy(sb);
-	scoutfs_seg_destroy(sb);
 	scoutfs_lock_destroy(sb);
 
 	/* server clears quorum leader flag during shutdown */
 	scoutfs_quorum_destroy(sb);
 
-	scoutfs_item_destroy(sb);
 	scoutfs_block_destroy(sb);
 	scoutfs_destroy_triggers(sb);
 	scoutfs_options_destroy(sb);
@@ -436,8 +429,6 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_sysfs_create_attrs(sb, &sbi->mopts_ssa,
 				mount_options_attrs, "mount_options") ?:
 	      scoutfs_setup_triggers(sb) ?:
-	      scoutfs_seg_setup(sb) ?:
-	      scoutfs_item_setup(sb) ?:
 	      scoutfs_block_setup(sb) ?:
 	      scoutfs_forest_setup(sb) ?:
 	      scoutfs_inode_setup(sb) ?:

@@ -11,10 +11,7 @@
 
 struct scoutfs_counters;
 struct scoutfs_triggers;
-struct item_cache;
 struct manifest;
-struct segment_cache;
-struct compact_info;
 struct data_info;
 struct trans_info;
 struct lock_info;
@@ -40,11 +37,6 @@ struct scoutfs_sb_info {
 
 	spinlock_t next_ino_lock;
 
-	struct manifest *manifest;
-	struct item_cache *item_cache;
-	struct segment_cache *segment_cache;
-	struct seg_alloc *seg_alloc;
-	struct compact_info *compact_info;
 	struct data_info *data_info;
 	struct inode_sb_info *inode_sb_info;
 	struct btree_info *btree_info;

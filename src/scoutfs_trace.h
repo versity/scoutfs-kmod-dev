@@ -29,11 +29,9 @@
 #include "key.h"
 #include "format.h"
 #include "lock.h"
-#include "seg.h"
 #include "super.h"
 #include "ioctl.h"
 #include "count.h"
-#include "bio.h"
 #include "export.h"
 #include "dir.h"
 #include "extents.h"
@@ -97,258 +95,6 @@ TRACE_EVENT(scoutfs_complete_truncate,
 	TP_printk(SCSBF" ino %llu i_size %llu flags 0x%x",
 		  SCSB_TRACE_ARGS, __entry->ino, __entry->i_size,
 		  __entry->flags)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_comp_class,
-	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
-
-	TP_ARGS(sb, comp),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(struct scoutfs_bio_completion *, comp)
-		__field(int, pending)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->comp = comp;
-		__entry->pending = atomic_read(&comp->pending);
-	),
-
-	TP_printk(SCSBF" comp %p pending before %d", SCSB_TRACE_ARGS,
-		  __entry->comp, __entry->pending)
-);
-DEFINE_EVENT(scoutfs_comp_class, comp_end_io,
-	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
-	TP_ARGS(sb, comp)
-);
-DEFINE_EVENT(scoutfs_comp_class, scoutfs_bio_submit_comp,
-	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
-	TP_ARGS(sb, comp)
-);
-DEFINE_EVENT(scoutfs_comp_class, scoutfs_bio_wait_comp,
-	TP_PROTO(struct super_block *sb, struct scoutfs_bio_completion *comp),
-	TP_ARGS(sb, comp)
-);
-
-TRACE_EVENT(scoutfs_bio_init_comp,
-	TP_PROTO(void *comp),
-
-	TP_ARGS(comp),
-
-	TP_STRUCT__entry(
-		__field(void *, comp)
-	),
-
-	TP_fast_assign(
-		__entry->comp = comp;
-	),
-
-	TP_printk("initing comp %p", __entry->comp)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_bio_class,
-	TP_PROTO(struct super_block *sb, void *bio, void *args, int in_flight),
-
-	TP_ARGS(sb, bio, args, in_flight),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(void *, bio)
-		__field(void *, args)
-		__field(int, in_flight)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->bio = bio;
-		__entry->args = args;
-		__entry->in_flight = in_flight;
-	),
-
-	TP_printk(SCSBF" bio %p args %p in_flight %d", SCSB_TRACE_ARGS,
-		  __entry->bio, __entry->args, __entry->in_flight)
-);
-
-DEFINE_EVENT(scoutfs_bio_class, scoutfs_bio_submit,
-	TP_PROTO(struct super_block *sb, void *bio, void *args, int in_flight),
-	TP_ARGS(sb, bio, args, in_flight)
-);
-
-DEFINE_EVENT(scoutfs_bio_class, scoutfs_bio_submit_partial,
-	TP_PROTO(struct super_block *sb, void *bio, void *args, int in_flight),
-	TP_ARGS(sb, bio, args, in_flight)
-);
-
-TRACE_EVENT(scoutfs_bio_end_io,
-	TP_PROTO(struct super_block *sb, void *bio, int size, int err),
-
-	TP_ARGS(sb, bio, size, err),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(void *, bio)
-		__field(int, size)
-		__field(int, err)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->bio = bio;
-		__entry->size = size;
-		__entry->err = err;
-	),
-
-	TP_printk(SCSBF" bio %p size %u err %d", SCSB_TRACE_ARGS,
-		  __entry->bio, __entry->size, __entry->err)
-);
-
-TRACE_EVENT(scoutfs_dec_end_io,
-	TP_PROTO(struct super_block *sb, void *args, int in_flight, int err),
-
-	TP_ARGS(sb, args, in_flight, err),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(void *, args)
-		__field(int, in_flight)
-		__field(int, err)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->args = args;
-		__entry->in_flight = in_flight;
-		__entry->err = err;
-	),
-
-	TP_printk(SCSBF" args %p in_flight %d err %d", SCSB_TRACE_ARGS,
-		  __entry->args, __entry->in_flight, __entry->err)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_key_ret_class,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
-
-	TP_ARGS(sb, key, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		sk_trace_define(key)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		sk_trace_assign(key, key);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" key "SK_FMT" ret %d",
-		  SCSB_TRACE_ARGS, sk_trace_args(key), __entry->ret)
-);
-
-DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_create,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
-	TP_ARGS(sb, key, ret)
-);
-DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_delete,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
-	TP_ARGS(sb, key, ret)
-);
-DEFINE_EVENT(scoutfs_key_ret_class, scoutfs_item_delete_save,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, int ret),
-	TP_ARGS(sb, key, ret)
-);
-
-TRACE_EVENT(scoutfs_item_dirty_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" ret %d", SCSB_TRACE_ARGS, __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_item_update_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" ret %d", SCSB_TRACE_ARGS, __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_item_next_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" ret %d", SCSB_TRACE_ARGS, __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_item_prev_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" ret %d", SCSB_TRACE_ARGS, __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_erase_item,
-	TP_PROTO(struct super_block *sb, void *item),
-
-	TP_ARGS(sb, item),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(void *, item)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->item = item;
-	),
-
-	TP_printk(SCSBF" erasing item %p", SCSB_TRACE_ARGS, __entry->item)
 );
 
 TRACE_EVENT(scoutfs_data_fallocate,
@@ -946,34 +692,6 @@ TRACE_EVENT(scoutfs_inode_walk_writeback,
 		  __entry->ino, __entry->write, __entry->ret)
 );
 
-DECLARE_EVENT_CLASS(scoutfs_segment_class,
-	TP_PROTO(struct super_block *sb, __u64 segno),
-
-	TP_ARGS(sb, segno),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, segno)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->segno = segno;
-	),
-
-	TP_printk(SCSBF" segno %llu", SCSB_TRACE_ARGS, __entry->segno)
-);
-
-DEFINE_EVENT(scoutfs_segment_class, scoutfs_seg_submit_read,
-	TP_PROTO(struct super_block *sb, __u64 segno),
-	TP_ARGS(sb, segno)
-);
-
-DEFINE_EVENT(scoutfs_segment_class, scoutfs_seg_submit_write,
-	TP_PROTO(struct super_block *sb, __u64 segno),
-	TP_ARGS(sb, segno)
-);
-
 DECLARE_EVENT_CLASS(scoutfs_lock_info_class,
 	TP_PROTO(struct super_block *sb, struct lock_info *linfo),
 
@@ -1034,27 +752,6 @@ TRACE_EVENT(scoutfs_xattr_set,
 		  __entry->size, __entry->flags)
 );
 
-TRACE_EVENT(scoutfs_manifest_next_compact,
-	TP_PROTO(struct super_block *sb, int level, int ret),
-
-	TP_ARGS(sb, level, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(int, level)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->level = level;
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" level %d ret %d", SCSB_TRACE_ARGS, __entry->level,
-		  __entry->ret)
-);
-
 TRACE_EVENT(scoutfs_advance_dirty_super,
 	TP_PROTO(struct super_block *sb, __u64 seq),
 
@@ -1107,130 +804,6 @@ TRACE_EVENT(scoutfs_dir_add_next_linkref,
 		  SCSB_TRACE_ARGS, __entry->ino, __entry->dir_pos,
 		  __entry->dir_ino, __entry->ret, __entry->found_dir_pos,
 		  __entry->found_dir_ino, __entry->name_len)
-);
-
-TRACE_EVENT(scoutfs_client_compact_start,
-	TP_PROTO(struct super_block *sb, u64 id, u8 last_level, u8 flags),
-
-	TP_ARGS(sb, id, last_level, flags),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, id)
-		__field(__u8, last_level)
-		__field(__u8, flags)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->id = id;
-		__entry->last_level = last_level;
-		__entry->flags = flags;
-	),
-
-	TP_printk(SCSBF" id %llu last_level %u flags 0x%x",
-		  SCSB_TRACE_ARGS, __entry->id, __entry->last_level,
-		  __entry->flags)
-);
-
-TRACE_EVENT(scoutfs_client_compact_stop,
-	TP_PROTO(struct super_block *sb, u64 id, int ret),
-
-	TP_ARGS(sb, id, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, id)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->id = id;
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" id %llu ret %d",
-		  SCSB_TRACE_ARGS, __entry->id, __entry->ret)
-);
-
-TRACE_EVENT(scoutfs_server_compact_start,
-	TP_PROTO(struct super_block *sb, u64 id, u8 level, u64 rid,
-		 unsigned long client_nr, unsigned long server_nr,
-		 unsigned long per_client),
-
-	TP_ARGS(sb, id, level, rid, client_nr, server_nr, per_client),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, id)
-		__field(__u8, level)
-		__field(__u64, c_rid)
-		__field(unsigned long, client_nr)
-		__field(unsigned long, server_nr)
-		__field(unsigned long, per_client)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->id = id;
-		__entry->level = level;
-		__entry->c_rid = rid;
-		__entry->client_nr = client_nr;
-		__entry->server_nr = server_nr;
-		__entry->per_client = per_client;
-	),
-
-	TP_printk(SCSBF" id %llu level %u rid %016llx client_nr %lu server_nr %lu per_client %lu",
-		  SCSB_TRACE_ARGS, __entry->id, __entry->level,
-		  __entry->c_rid, __entry->client_nr, __entry->server_nr,
-		  __entry->per_client)
-);
-
-TRACE_EVENT(scoutfs_server_compact_done,
-	TP_PROTO(struct super_block *sb, u64 id, u64 rid,
-		 unsigned long server_nr),
-
-	TP_ARGS(sb, id, rid, server_nr),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, id)
-		__field(__u64, c_rid)
-		__field(unsigned long, server_nr)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->id = id;
-		__entry->rid = rid;
-		__entry->server_nr = server_nr;
-	),
-
-	TP_printk(SCSBF" id %llu rid %016llx server_nr %lu",
-		  SCSB_TRACE_ARGS, __entry->id, __entry->c_rid,
-		  __entry->server_nr)
-);
-
-TRACE_EVENT(scoutfs_server_compact_response,
-	TP_PROTO(struct super_block *sb, u64 id, int error),
-
-	TP_ARGS(sb, id, error),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, id)
-		__field(int, error)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->id = id;
-		__entry->error = error;
-	),
-
-	TP_printk(SCSBF" id %llu error %d",
-		  SCSB_TRACE_ARGS, __entry->id, __entry->error)
 );
 
 TRACE_EVENT(scoutfs_write_begin,
@@ -1382,89 +955,6 @@ TRACE_EVENT(scoutfs_scan_orphans,
 	TP_printk("dev %d,%d", MAJOR(__entry->dev), MINOR(__entry->dev))
 );
 
-DECLARE_EVENT_CLASS(scoutfs_manifest_class,
-        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key *first, struct scoutfs_key *last),
-        TP_ARGS(sb, level, segno, seq, first, last),
-        TP_STRUCT__entry(
-		__field(u8, level)
-		__field(u64, segno)
-		__field(u64, seq)
-		sk_trace_define(first)
-		sk_trace_define(last)
-        ),
-        TP_fast_assign(
-		__entry->level = level;
-		__entry->segno = segno;
-		__entry->seq = seq;
-		sk_trace_assign(first, first);
-		sk_trace_assign(last, last);
-        ),
-        TP_printk("level %u segno %llu seq %llu first "SK_FMT" last "SK_FMT,
-		  __entry->level, __entry->segno, __entry->seq,
-		  sk_trace_args(first), sk_trace_args(last))
-);
-
-DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_add,
-        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key *first, struct scoutfs_key *last),
-        TP_ARGS(sb, level, segno, seq, first, last)
-);
-
-DEFINE_EVENT(scoutfs_manifest_class, scoutfs_manifest_delete,
-        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key *first, struct scoutfs_key *last),
-        TP_ARGS(sb, level, segno, seq, first, last)
-);
-
-DEFINE_EVENT(scoutfs_manifest_class, scoutfs_compact_input,
-        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key *first, struct scoutfs_key *last),
-        TP_ARGS(sb, level, segno, seq, first, last)
-);
-
-DEFINE_EVENT(scoutfs_manifest_class, scoutfs_compact_output,
-        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key *first, struct scoutfs_key *last),
-        TP_ARGS(sb, level, segno, seq, first, last)
-);
-
-DEFINE_EVENT(scoutfs_manifest_class, scoutfs_read_item_segment,
-        TP_PROTO(struct super_block *sb, u8 level, u64 segno, u64 seq,
-		 struct scoutfs_key *first, struct scoutfs_key *last),
-        TP_ARGS(sb, level, segno, seq, first, last)
-);
-
-TRACE_EVENT(scoutfs_read_item_keys,
-        TP_PROTO(struct super_block *sb,
-		 struct scoutfs_key *key,
-		 struct scoutfs_key *start,
-		 struct scoutfs_key *end,
-		 struct scoutfs_key *seg_start,
-		 struct scoutfs_key *seg_end),
-        TP_ARGS(sb, key, start, end, seg_start, seg_end),
-        TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		sk_trace_define(key)
-		sk_trace_define(start)
-		sk_trace_define(end)
-		sk_trace_define(seg_start)
-		sk_trace_define(seg_end)
-        ),
-        TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		sk_trace_assign(key, key);
-		sk_trace_assign(start, start);
-		sk_trace_assign(end, end);
-		sk_trace_assign(seg_start, seg_start);
-		sk_trace_assign(seg_end, seg_end);
-        ),
-        TP_printk(SCSBF" key "SK_FMT" start "SK_FMT" end "SK_FMT" seg_start "SK_FMT" seg_end "SK_FMT"",
-		  SCSB_TRACE_ARGS, sk_trace_args(key), sk_trace_args(start),
-		  sk_trace_args(end), sk_trace_args(seg_start),
-		  sk_trace_args(seg_end))
-);
-
 DECLARE_EVENT_CLASS(scoutfs_key_class,
         TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
         TP_ARGS(sb, key),
@@ -1479,141 +969,9 @@ DECLARE_EVENT_CLASS(scoutfs_key_class,
 	TP_printk(SCSBF" key "SK_FMT, SCSB_TRACE_ARGS, sk_trace_args(key))
 );
 
-DEFINE_EVENT(scoutfs_key_class, scoutfs_item_lookup,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
-        TP_ARGS(sb, key)
-);
-
-TRACE_EVENT(scoutfs_item_lookup_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" ret %d", SCSB_TRACE_ARGS, __entry->ret)
-);
-
-DEFINE_EVENT(scoutfs_key_class, scoutfs_item_insertion,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
-        TP_ARGS(sb, key)
-);
-
-DEFINE_EVENT(scoutfs_key_class, scoutfs_item_shrink,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
-        TP_ARGS(sb, key)
-);
-
 DEFINE_EVENT(scoutfs_key_class, scoutfs_xattr_get_next_key,
         TP_PROTO(struct super_block *sb, struct scoutfs_key *key),
         TP_ARGS(sb, key)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_range_class,
-        TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
-		 struct scoutfs_key *end),
-        TP_ARGS(sb, start, end),
-        TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		sk_trace_define(start)
-		sk_trace_define(end)
-        ),
-        TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		sk_trace_assign(start, start);
-		sk_trace_assign(end, end);
-        ),
-        TP_printk(SCSBF" start "SK_FMT" end "SK_FMT,
-		  SCSB_TRACE_ARGS, sk_trace_args(start), sk_trace_args(end))
-);
-
-DEFINE_EVENT(scoutfs_range_class, scoutfs_item_insert_batch,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
-		 struct scoutfs_key *end),
-        TP_ARGS(sb, start, end)
-);
-
-DEFINE_EVENT(scoutfs_range_class, scoutfs_item_invalidate_range,
-	TP_PROTO(struct super_block *sb, struct scoutfs_key *start,
-		 struct scoutfs_key *end),
-        TP_ARGS(sb, start, end)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_cached_range_class,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end),
-        TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(void *, rng)
-		sk_trace_define(start)
-		sk_trace_define(end)
-        ),
-        TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->rng = rng;
-		sk_trace_assign(start, start);
-		sk_trace_assign(end, end);
-        ),
-        TP_printk(SCSBF" rng %p start "SK_FMT" end "SK_FMT,
-		  SCSB_TRACE_ARGS, __entry->rng, sk_trace_args(start),
-		  sk_trace_args(end))
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_free,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_ins_rb_insert,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_mid_left,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_start,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_remove_end,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_rem_rb_insert,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_shrink_start,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
-);
-
-DEFINE_EVENT(scoutfs_cached_range_class, scoutfs_item_range_shrink_end,
-        TP_PROTO(struct super_block *sb, void *rng,
-		 struct scoutfs_key *start, struct scoutfs_key *end),
-        TP_ARGS(sb, rng, start, end)
 );
 
 #define lock_mode(mode)						\
@@ -1706,79 +1064,6 @@ DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_unlock,
 DEFINE_EVENT(scoutfs_lock_class, scoutfs_lock_shrink,
        TP_PROTO(struct super_block *sb, struct scoutfs_lock *lck),
        TP_ARGS(sb, lck)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_seg_class,
-        TP_PROTO(struct scoutfs_segment *seg),
-        TP_ARGS(seg),
-        TP_STRUCT__entry(
-		__field(unsigned int, major)
-		__field(unsigned int, minor)
-		__field(struct scoutfs_segment *, seg)
-		__field(int, refcount)
-		__field(u64, segno)
-		__field(unsigned long, flags)
-		__field(int, err)
-        ),
-        TP_fast_assign(
-		__entry->major = MAJOR(seg->sb->s_bdev->bd_dev);
-		__entry->minor = MINOR(seg->sb->s_bdev->bd_dev);
-		__entry->seg = seg;
-		__entry->refcount = atomic_read(&seg->refcount);
-		__entry->segno = seg->segno;
-		__entry->flags = seg->flags;
-		__entry->err = seg->err;
-        ),
-        TP_printk("dev %u:%u seg %p refcount %d segno %llu flags %lx err %d",
-		  __entry->major, __entry->minor, __entry->seg, __entry->refcount,
-		  __entry->segno, __entry->flags, __entry->err)
-);
-
-DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_alloc,
-	TP_PROTO(struct scoutfs_segment *seg),
-        TP_ARGS(seg)
-);
-
-DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_shrink,
-	TP_PROTO(struct scoutfs_segment *seg),
-        TP_ARGS(seg)
-);
-
-DEFINE_EVENT(scoutfs_seg_class, scoutfs_seg_free,
-	TP_PROTO(struct scoutfs_segment *seg),
-        TP_ARGS(seg)
-);
-
-TRACE_EVENT(scoutfs_seg_append_item,
-	TP_PROTO(struct super_block *sb, u64 segno, u64 seq, u32 nr_items,
-		 u32 total_bytes, struct scoutfs_key *key, u16 val_len),
-
-	TP_ARGS(sb, segno, seq, nr_items, total_bytes, key, val_len),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, segno)
-		__field(__u64, seq)
-		__field(__u32, nr_items)
-		__field(__u32, total_bytes)
-		sk_trace_define(key)
-		__field(__u16, val_len)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->segno = segno;
-		__entry->seq = seq;
-		__entry->nr_items = nr_items;
-		__entry->total_bytes = total_bytes;
-		sk_trace_assign(key, key);
-		__entry->val_len = val_len;
-	),
-
-	TP_printk(SCSBF" segno %llu seq %llu nr_items %u total_bytes %u key "SK_FMT" val_len %u",
-		  SCSB_TRACE_ARGS, __entry->segno, __entry->seq,
-		  __entry->nr_items, __entry->total_bytes,
-		  sk_trace_args(key), __entry->val_len)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_net_class,
@@ -1961,14 +1246,6 @@ DEFINE_EVENT(scoutfs_work_class, scoutfs_server_commit_work_exit,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
 );
-DEFINE_EVENT(scoutfs_work_class, scoutfs_server_compact_work_enter,
-        TP_PROTO(struct super_block *sb, u64 data, int ret),
-        TP_ARGS(sb, data, ret)
-);
-DEFINE_EVENT(scoutfs_work_class, scoutfs_server_compact_work_exit,
-        TP_PROTO(struct super_block *sb, u64 data, int ret),
-        TP_ARGS(sb, data, ret)
-);
 DEFINE_EVENT(scoutfs_work_class, scoutfs_net_proc_work_enter,
         TP_PROTO(struct super_block *sb, u64 data, int ret),
         TP_ARGS(sb, data, ret)
@@ -2054,66 +1331,6 @@ DEFINE_EVENT(scoutfs_work_class, scoutfs_data_return_server_extents_exit,
         TP_ARGS(sb, data, ret)
 );
 
-TRACE_EVENT(scoutfs_item_next_range_check,
-        TP_PROTO(struct super_block *sb, int cached,
-		 struct scoutfs_key *key, struct scoutfs_key *pos,
-		 struct scoutfs_key *last, struct scoutfs_key *end,
-		 struct scoutfs_key *range_end),
-        TP_ARGS(sb, cached, key, pos, last, end, range_end),
-        TP_STRUCT__entry(
-		__field(void *, sb)
-		__field(int, cached)
-		sk_trace_define(key)
-		sk_trace_define(pos)
-		sk_trace_define(last)
-		sk_trace_define(end)
-		sk_trace_define(range_end)
-        ),
-        TP_fast_assign(
-		__entry->sb = sb;
-		__entry->cached = cached;
-		sk_trace_assign(key, key);
-		sk_trace_assign(pos, pos);
-		sk_trace_assign(last, last);
-		sk_trace_assign(end, end);
-		sk_trace_assign(range_end, range_end);
-        ),
-        TP_printk("sb %p cached %d key "SK_FMT" pos "SK_FMT" last "SK_FMT" end "SK_FMT" range_end "SK_FMT,
-		  __entry->sb, __entry->cached, sk_trace_args(key),
-		  sk_trace_args(pos), sk_trace_args(last),
-		  sk_trace_args(end), sk_trace_args(range_end))
-);
-
-TRACE_EVENT(scoutfs_item_prev_range_check,
-        TP_PROTO(struct super_block *sb, int cached,
-		 struct scoutfs_key *key, struct scoutfs_key *pos,
-		 struct scoutfs_key *first, struct scoutfs_key *start,
-		 struct scoutfs_key *range_start),
-        TP_ARGS(sb, cached, key, pos, first, start, range_start),
-        TP_STRUCT__entry(
-		__field(void *, sb)
-		__field(int, cached)
-		sk_trace_define(key)
-		sk_trace_define(pos)
-		sk_trace_define(first)
-		sk_trace_define(start)
-		sk_trace_define(range_start)
-        ),
-        TP_fast_assign(
-		__entry->sb = sb;
-		__entry->cached = cached;
-		sk_trace_assign(key, key);
-		sk_trace_assign(pos, pos);
-		sk_trace_assign(first, first);
-		sk_trace_assign(start, start);
-		sk_trace_assign(range_start, range_start);
-        ),
-        TP_printk("sb %p cached %d key "SK_FMT" pos "SK_FMT" first "SK_FMT" start "SK_FMT" range_start "SK_FMT,
-		  __entry->sb, __entry->cached, sk_trace_args(key),
-		  sk_trace_args(pos), sk_trace_args(first),
-		  sk_trace_args(start), sk_trace_args(range_start))
-);
-
 DECLARE_EVENT_CLASS(scoutfs_shrink_exit_class,
         TP_PROTO(struct super_block *sb, unsigned long nr_to_scan, int ret),
         TP_ARGS(sb, nr_to_scan, ret),
@@ -2134,50 +1351,6 @@ DECLARE_EVENT_CLASS(scoutfs_shrink_exit_class,
 DEFINE_EVENT(scoutfs_shrink_exit_class, scoutfs_lock_shrink_exit,
         TP_PROTO(struct super_block *sb, unsigned long nr_to_scan, int ret),
         TP_ARGS(sb, nr_to_scan, ret)
-);
-
-DEFINE_EVENT(scoutfs_shrink_exit_class, scoutfs_seg_shrink_exit,
-        TP_PROTO(struct super_block *sb, unsigned long nr_to_scan, int ret),
-        TP_ARGS(sb, nr_to_scan, ret)
-);
-
-DEFINE_EVENT(scoutfs_shrink_exit_class, scoutfs_item_shrink_exit,
-        TP_PROTO(struct super_block *sb, unsigned long nr_to_scan, int ret),
-        TP_ARGS(sb, nr_to_scan, ret)
-);
-
-TRACE_EVENT(scoutfs_item_shrink_around,
-        TP_PROTO(struct super_block *sb,
-		 struct scoutfs_key *rng_start,
-		 struct scoutfs_key *rng_end, struct scoutfs_key *item,
-		 struct scoutfs_key *prev, struct scoutfs_key *first,
-		 struct scoutfs_key *last, struct scoutfs_key *next),
-        TP_ARGS(sb, rng_start, rng_end, item, prev, first, last, next),
-        TP_STRUCT__entry(
-		__field(void *, sb)
-		sk_trace_define(rng_start)
-		sk_trace_define(rng_end)
-		sk_trace_define(item)
-		sk_trace_define(prev)
-		sk_trace_define(first)
-		sk_trace_define(last)
-		sk_trace_define(next)
-        ),
-        TP_fast_assign(
-		__entry->sb = sb;
-		sk_trace_assign(rng_start, rng_start);
-		sk_trace_assign(rng_end, rng_end);
-		sk_trace_assign(item, item);
-		sk_trace_assign(prev, prev);
-		sk_trace_assign(first, first);
-		sk_trace_assign(last, last);
-		sk_trace_assign(next, next);
-        ),
-        TP_printk("sb %p rng_start "SK_FMT" rng_end "SK_FMT" item "SK_FMT" prev "SK_FMT" first "SK_FMT" last "SK_FMT" next "SK_FMT,
-		  __entry->sb, sk_trace_args(rng_start),
-		  sk_trace_args(rng_end), sk_trace_args(item),
-		  sk_trace_args(prev), sk_trace_args(first),
-		  sk_trace_args(last), sk_trace_args(next))
 );
 
 TRACE_EVENT(scoutfs_rename,
@@ -2515,14 +1688,6 @@ DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_extent_allocated,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
 );
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_segno_next,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_segno_allocated,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
 DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_free_pending_extent,
 	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
 	TP_ARGS(sb, ext)
@@ -2557,37 +1722,6 @@ TRACE_EVENT(scoutfs_online_offline_blocks,
 	TP_printk(SCSBF" on_delta %lld off_delta %lld on_now %llu off_now %llu ",
 		  SCSB_TRACE_ARGS, __entry->on_delta, __entry->off_delta,
 		  __entry->on_now, __entry->off_now)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_segno_class,
-	TP_PROTO(struct super_block *sb, u64 segno),
-
-	TP_ARGS(sb, segno),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__s64, segno)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->segno = segno;
-	),
-
-	TP_printk(SCSBF" segno %llu",
-		  SCSB_TRACE_ARGS, __entry->segno)
-);
-DEFINE_EVENT(scoutfs_segno_class, scoutfs_alloc_segno,
-	TP_PROTO(struct super_block *sb, u64 segno),
-	TP_ARGS(sb, segno)
-);
-DEFINE_EVENT(scoutfs_segno_class, scoutfs_free_segno,
-	TP_PROTO(struct super_block *sb, u64 segno),
-	TP_ARGS(sb, segno)
-);
-DEFINE_EVENT(scoutfs_segno_class, scoutfs_remove_segno,
-	TP_PROTO(struct super_block *sb, u64 segno),
-	TP_ARGS(sb, segno)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_server_client_count_class,

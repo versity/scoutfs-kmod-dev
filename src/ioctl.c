@@ -28,11 +28,9 @@
 #include "super.h"
 #include "inode.h"
 #include "forest.h"
-#include "item.h"
 #include "data.h"
 #include "client.h"
 #include "lock.h"
-#include "manifest.h"
 #include "trans.h"
 #include "xattr.h"
 #include "hash.h"
@@ -490,61 +488,6 @@ static long scoutfs_ioc_stat_more(struct file *file, unsigned long arg)
 	return 0;
 }
 
-static long scoutfs_ioc_item_cache_keys(struct file *file, unsigned long arg)
-{
-	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_ioctl_item_cache_keys ick;
-	struct scoutfs_ioctl_key __user *ukeys;
-	struct scoutfs_ioctl_key ikeys[16];
-	struct scoutfs_key keys[16];
-	struct scoutfs_key key;
-	unsigned int nr;
-	int total;
-	int ret;
-	int i;
-
-	if (copy_from_user(&ick, (void __user *)arg, sizeof(ick)))
-		return -EFAULT;
-
-	if (ick.which > SCOUTFS_IOC_ITEM_CACHE_KEYS_RANGES)
-		return -EINVAL;
-
-	scoutfs_key_copy_types(&key, &ick.ikey);
-
-	ukeys = (void __user *)(long)ick.buf_ptr;
-	total = 0;
-	ret = 0;
-	while (ick.buf_nr) {
-		nr = min_t(size_t, ick.buf_nr, ARRAY_SIZE(keys));
-
-		if (ick.which == SCOUTFS_IOC_ITEM_CACHE_KEYS_ITEMS)
-			ret = scoutfs_item_copy_keys(sb, &key, keys, nr);
-		else
-			ret = scoutfs_item_copy_range_keys(sb, &key, keys, nr);
-		BUG_ON(ret > nr); /* stack overflow \o/ */
-		if (ret <= 0)
-			break;
-
-		for (i = 0; i < ret; i++)
-			scoutfs_key_copy_types(&ikeys[i], &keys[i]);
-
-		if (copy_to_user(ukeys, ikeys, ret * sizeof(ikeys[0]))) {
-			ret = -EFAULT;
-			break;
-		}
-
-		key = keys[ret - 1];
-		scoutfs_key_inc(&key);
-
-		ukeys += ret;
-		ick.buf_nr -= ret;
-		total += ret;
-		ret = 0;
-	}
-
-	return ret ?: total;
-}
-
 static bool inc_wrapped(u64 *ino, u64 *iblock)
 {
 	return (++(*iblock) == 0) && (++(*ino) == 0);
@@ -876,8 +819,6 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_stage(file, arg);
 	case SCOUTFS_IOC_STAT_MORE:
 		return scoutfs_ioc_stat_more(file, arg);
-	case SCOUTFS_IOC_ITEM_CACHE_KEYS:
-		return scoutfs_ioc_item_cache_keys(file, arg);
 	case SCOUTFS_IOC_DATA_WAITING:
 		return scoutfs_ioc_data_waiting(file, arg);
 	case SCOUTFS_IOC_SETATTR_MORE:

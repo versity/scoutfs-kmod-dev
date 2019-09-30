@@ -25,9 +25,6 @@
 #include "counters.h"
 #include "inode.h"
 #include "btree.h"
-#include "manifest.h"
-#include "seg.h"
-#include "compact.h"
 #include "scoutfs_trace.h"
 #include "msg.h"
 #include "client.h"
@@ -133,40 +130,6 @@ int scoutfs_client_free_extents(struct super_block *sb,
 					nexl, bytes, NULL, 0);
 }
 
-int scoutfs_client_alloc_segno(struct super_block *sb, u64 *segno)
-{
-	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-	__le64 lesegno;
-	int ret;
-
-	ret = scoutfs_net_sync_request(sb, client->conn,
-				       SCOUTFS_NET_CMD_ALLOC_SEGNO,
-				       NULL, 0, &lesegno, sizeof(lesegno));
-	if (ret == 0) {
-		if (lesegno == 0)
-			ret = -ENOSPC;
-		else
-			*segno = le64_to_cpu(lesegno);
-	}
-
-	return ret;
-}
-
-int scoutfs_client_record_segment(struct super_block *sb,
-				  struct scoutfs_segment *seg, u8 level)
-{
-	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-	struct scoutfs_net_manifest_entry net_ment;
-	struct scoutfs_manifest_entry ment;
-
-	scoutfs_seg_init_ment(&ment, level, seg);
-	scoutfs_init_ment_to_net(&net_ment, &ment);
-
-	return scoutfs_net_sync_request(sb, client->conn,
-					SCOUTFS_NET_CMD_RECORD_SEGMENT,
-					&net_ment, sizeof(net_ment), NULL, 0);
-}
-
 int scoutfs_client_get_log_trees(struct super_block *sb,
 				 struct scoutfs_log_trees *lt)
 {
@@ -217,17 +180,6 @@ int scoutfs_client_get_last_seq(struct super_block *sb, u64 *seq)
 		*seq = le64_to_cpu(last_seq);
 
 	return ret;
-}
-
-int scoutfs_client_get_manifest_root(struct super_block *sb,
-				     struct scoutfs_btree_root *root)
-{
-	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-
-	return scoutfs_net_sync_request(sb, client->conn,
-					SCOUTFS_NET_CMD_GET_MANIFEST_ROOT,
-					NULL, 0, root,
-					sizeof(struct scoutfs_btree_root));
 }
 
 int scoutfs_client_statfs(struct super_block *sb,
@@ -488,61 +440,7 @@ out:
 				   msecs_to_jiffies(CLIENT_CONNECT_DELAY_MS));
 }
 
-/*
- * Perform a compaction in the client as requested by the server.  The
- * server has protected the input segments and allocated the output
- * segnos for us.  This executes in work queued by the client's net
- * connection.  It only reads and write segments.  The server will
- * update the manifest and allocators while processing the response.  An
- * error response includes the compaction id so that the server can
- * clean it up.
- *
- * If we get duplicate requests across a reconnected socket we can have
- * two workers performing the same compaction simultaneously.  This
- * isn't particularly efficient but it's rare and won't corrupt the
- * output.  Our response can be lost if the socket is shutdown while
- * it's in flight, the server deals with this.
- */
-static int client_compact(struct super_block *sb,
-			  struct scoutfs_net_connection *conn,
-			  u8 cmd, u64 id, void *arg, u16 arg_len)
-{
-	struct scoutfs_net_compact_response *resp = NULL;
-	struct scoutfs_net_compact_request *req;
-	int ret;
-
-	if (arg_len != sizeof(struct scoutfs_net_compact_request)) {
-		ret = -EINVAL;
-		goto out;
-	}
-	req = arg;
-
-	trace_scoutfs_client_compact_start(sb, le64_to_cpu(req->id),
-					   req->last_level, req->flags);
-
-	resp = kzalloc(sizeof(struct scoutfs_net_compact_response), GFP_NOFS);
-	if (!resp) {
-		ret = -ENOMEM;
-	} else {
-		resp->id = req->id;
-		ret = scoutfs_compact(sb, req, resp);
-	}
-
-	trace_scoutfs_client_compact_stop(sb, le64_to_cpu(req->id), ret);
-
-	if (ret < 0)
-		ret = scoutfs_net_response(sb, conn, cmd, id, ret,
-					   &req->id, sizeof(req->id));
-	else
-		ret = scoutfs_net_response(sb, conn, cmd, id, 0,
-					   resp, sizeof(*resp));
-	kfree(resp);
-out:
-	return ret;
-}
-
 static scoutfs_net_request_t client_req_funcs[] = {
-	[SCOUTFS_NET_CMD_COMPACT]		= client_compact,
 	[SCOUTFS_NET_CMD_LOCK]			= client_lock,
 	[SCOUTFS_NET_CMD_LOCK_RECOVER]		= client_lock_recover,
 };

@@ -9,12 +9,10 @@ CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
 -include $(src)/Makefile.kernelcompat
  
 scoutfs-y +=			\
-	bio.o			\
 	balloc.o		\
 	block.o			\
 	btree.o			\
 	client.o		\
-	compact.o		\
 	counters.o		\
 	data.o			\
 	dir.o			\
@@ -24,17 +22,14 @@ scoutfs-y +=			\
 	forest.o		\
 	inode.o			\
 	ioctl.o			\
-	item.o			\
 	lock.o			\
 	lock_server.o		\
-	manifest.o		\
 	msg.o			\
 	net.o			\
 	options.o		\
 	per_task.o		\
 	quorum.o		\
 	scoutfs_trace.o		\
-	seg.o			\
 	server.o		\
 	spbm.o			\
 	super.o			\

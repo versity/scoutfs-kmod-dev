@@ -1356,10 +1356,17 @@ int scoutfs_btree_insert(struct super_block *sb, struct scoutfs_btree_root *root
 }
 
 /*
- * Update a btree item.  The key and value must be of the same length (though
- * it would be easy enough for us to change that if a caller cared).
+ * Update a btree item.  -ENOENT is returned if the item didn't exist.
+ *
+ * We don't know the existing item's value length as we first descend.
+ * We assume that the new value is longer and try to split so that we
+ * can insert if that's true.  If the new value is shorter than the
+ * existing then the leaf might fall under the minimum watermark, but at
+ * least we can do that while we simply can't insert a new longer value
+ * which doesn't fit.
  */
-int scoutfs_btree_update(struct super_block *sb, struct scoutfs_btree_root *root,
+int scoutfs_btree_update(struct super_block *sb,
+			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
 			 void *val, unsigned val_len)
 {
@@ -1372,19 +1379,14 @@ int scoutfs_btree_update(struct super_block *sb, struct scoutfs_btree_root *root
 	if (invalid_item(key, key_len, val_len))
 		return -EINVAL;
 
-	ret = btree_walk(sb, root, BTW_DIRTY, key, key_len, 0, &bt, NULL, NULL);
+	ret = btree_walk(sb, root, BTW_DIRTY | BTW_INSERT, key, key_len,
+			 val_len, &bt, NULL, NULL);
 	if (ret == 0) {
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (cmp == 0) {
 			item = pos_item(bt, pos);
-			if (item_key_len(item) != key_len ||
-			    item_val_len(item) != val_len) {
-				ret = -EINVAL;
-			} else {
-				memcpy(item_key(item), key, key_len);
-				memcpy(item_val(item), val, val_len);
-				ret = 0;
-			}
+			delete_item(bt, pos);
+			create_item(bt, pos, key, key_len, val, val_len);
 			ret = 0;
 		} else {
 			ret = -ENOENT;

@@ -296,8 +296,8 @@ static bool acquired_hold(struct super_block *sb,
 	items = tri->reserved_items + cnt->items;
 	vals = tri->reserved_vals + cnt->vals;
 
-	/* XXX just limit to 256K transactions */
-	if (scoutfs_forest_dirty_bytes(sb) >= (256 * 1024)) {
+	/* XXX arbitrarily limit to 8 meg transactions */
+	if (scoutfs_forest_dirty_bytes(sb) >= (8 * 1024 * 1024)) {
 		scoutfs_inc_counter(sb, trans_commit_full);
 		queue_trans_work(sbi);
 		goto out;

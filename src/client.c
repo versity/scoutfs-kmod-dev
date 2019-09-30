@@ -167,6 +167,26 @@ int scoutfs_client_record_segment(struct super_block *sb,
 					&net_ment, sizeof(net_ment), NULL, 0);
 }
 
+int scoutfs_client_get_log_trees(struct super_block *sb,
+				 struct scoutfs_log_trees *lt)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return scoutfs_net_sync_request(sb, client->conn,
+					SCOUTFS_NET_CMD_GET_LOG_TREES,
+					NULL, 0, lt, sizeof(*lt));
+}
+
+int scoutfs_client_commit_log_trees(struct super_block *sb,
+				    struct scoutfs_log_trees *lt)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return scoutfs_net_sync_request(sb, client->conn,
+					SCOUTFS_NET_CMD_COMMIT_LOG_TREES,
+					lt, sizeof(*lt), NULL, 0);
+}
+
 int scoutfs_client_advance_seq(struct super_block *sb, u64 *seq)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;

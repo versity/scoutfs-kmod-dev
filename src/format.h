@@ -492,6 +492,8 @@ struct scoutfs_super_block {
 	__le64 next_ino;
 	__le64 next_trans_seq;
 	__le64 total_blocks;
+	__le64 next_uninit_free_block;
+	__le64 core_balloc_cursor;
 	__le64 free_blocks;
 	__le64 alloc_cursor;
 	struct scoutfs_btree_ring bring;
@@ -506,6 +508,8 @@ struct scoutfs_super_block {
 	struct scoutfs_balloc_root core_balloc_free;
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
+	struct scoutfs_btree_root fs_root;
+	struct scoutfs_btree_root logs_root;
 	struct scoutfs_btree_root lock_clients;
 	struct scoutfs_btree_root trans_seqs;
 	struct scoutfs_btree_root mounted_clients;
@@ -699,6 +703,8 @@ enum {
 	SCOUTFS_NET_CMD_FREE_EXTENTS,
 	SCOUTFS_NET_CMD_ALLOC_SEGNO,
 	SCOUTFS_NET_CMD_RECORD_SEGMENT,
+	SCOUTFS_NET_CMD_GET_LOG_TREES,
+	SCOUTFS_NET_CMD_COMMIT_LOG_TREES,
 	SCOUTFS_NET_CMD_ADVANCE_SEQ,
 	SCOUTFS_NET_CMD_GET_LAST_SEQ,
 	SCOUTFS_NET_CMD_GET_MANIFEST_ROOT,

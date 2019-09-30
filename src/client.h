@@ -1,6 +1,8 @@
 #ifndef _SCOUTFS_CLIENT_H_
 #define _SCOUTFS_CLIENT_H_
 
+struct scoutfs_segment;
+
 int scoutfs_client_alloc_inodes(struct super_block *sb, u64 count,
 				u64 *ino, u64 *nr);
 int scoutfs_client_alloc_extent(struct super_block *sb, u64 blocks, u64 *start,
@@ -10,6 +12,10 @@ int scoutfs_client_free_extents(struct super_block *sb,
 int scoutfs_client_alloc_segno(struct super_block *sb, u64 *segno);
 int scoutfs_client_record_segment(struct super_block *sb,
 				  struct scoutfs_segment *seg, u8 level);
+int scoutfs_client_get_log_trees(struct super_block *sb,
+				 struct scoutfs_log_trees *lt);
+int scoutfs_client_commit_log_trees(struct super_block *sb,
+				    struct scoutfs_log_trees *lt);
 u64 *scoutfs_client_bulk_alloc(struct super_block *sb);
 int scoutfs_client_advance_seq(struct super_block *sb, u64 *seq);
 int scoutfs_client_get_last_seq(struct super_block *sb, u64 *seq);

@@ -100,7 +100,7 @@
 	EXPAND_COUNTER(lock_grace_wait)				\
 	EXPAND_COUNTER(lock_grant_request)			\
 	EXPAND_COUNTER(lock_grant_response)			\
-	EXPAND_COUNTER(lock_invalidate_clean_item)		\
+	EXPAND_COUNTER(lock_invalidate_commit)			\
 	EXPAND_COUNTER(lock_invalidate_coverage)		\
 	EXPAND_COUNTER(lock_invalidate_inode)			\
 	EXPAND_COUNTER(lock_invalidate_request)			\
@@ -113,7 +113,6 @@
 	EXPAND_COUNTER(lock_shrink_request_aborted)		\
 	EXPAND_COUNTER(lock_unlock)				\
 	EXPAND_COUNTER(lock_wait)				\
-	EXPAND_COUNTER(lock_write_dirty_item)			\
 	EXPAND_COUNTER(manifest_compact_migrate)		\
 	EXPAND_COUNTER(manifest_hard_stale_error)		\
 	EXPAND_COUNTER(manifest_read_excluded_key)		\
@@ -157,8 +156,6 @@
 	EXPAND_COUNTER(trans_commit_item_flush)			\
 	EXPAND_COUNTER(trans_commit_sync_fs)			\
 	EXPAND_COUNTER(trans_commit_timer)			\
-	EXPAND_COUNTER(trans_level0_seg_write_bytes)		\
-	EXPAND_COUNTER(trans_level0_seg_writes)			\
 	EXPAND_COUNTER(trans_write_item)			\
 	EXPAND_COUNTER(trans_write_deletion_item)
 

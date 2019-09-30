@@ -435,7 +435,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_server_setup(sb) ?:
 	      scoutfs_client_setup(sb) ?:
 	      scoutfs_lock_rid(sb, SCOUTFS_LOCK_WRITE, 0, sbi->rid,
-				   &sbi->rid_lock);
+				   &sbi->rid_lock) ?:
+	      scoutfs_forest_get_log_trees(sb);
 	if (ret)
 		goto out;
 

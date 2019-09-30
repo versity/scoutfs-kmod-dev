@@ -95,6 +95,8 @@ struct server_info {
 
 	struct scoutfs_balloc_allocator alloc;
 	struct scoutfs_block_writer wri;
+
+	struct mutex logs_mutex;
 };
 
 #define DECLARE_SERVER_INFO(sb, name) \
@@ -567,6 +569,40 @@ static inline int wait_for_commit(struct commit_waiter *cw)
 }
 
 /*
+ * Add newly initialized free metadata block allocator items to the core
+ * block allocator.  This is called as we commit transactions in the
+ * server.  It adds many more free blocks than is ever consumed by a
+ * transaction so this will stay ahead of the server's block allocation.
+ * The intent is to have a low constant overhead to initializing block
+ * allocators over time instead of requiring a large amount of IO during
+ * mkfs.
+ */
+static int add_uninit_balloc_items(struct super_block *sb,
+				   struct server_info *server,
+				   struct scoutfs_super_block *super)
+{
+	u64 next = le64_to_cpu(super->next_uninit_free_block);
+	u64 total = le64_to_cpu(super->total_blocks);
+	u64 nr;
+	int ret;
+
+	/* next_uninit should always start a new item */
+	if (WARN_ON_ONCE(next & SCOUTFS_BALLOC_ITEM_BIT_MASK))
+		return -EIO;
+
+	nr = min_t(u64, total - next,
+		   round_up(512 * 1024 * 1024 / SCOUTFS_BLOCK_SIZE,
+			    SCOUTFS_BALLOC_ITEM_BITS));
+
+	ret = scoutfs_balloc_add_alloc_bulk(sb, &server->alloc, &server->wri,
+					    next, nr);
+	if (ret == 0)
+		le64_add_cpu(&super->next_uninit_free_block, nr);
+
+	return ret;
+}
+
+/*
  * A core function of request processing is to modify the manifest and
  * allocator.  Often the processing needs to make the modifications
  * persistent before replying.  We'd like to batch these commits as much
@@ -606,6 +642,10 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 		scoutfs_err(sb, "server error freeing extents: %d", ret);
 		goto out;
 	}
+
+	/* XXX not sure what to do about failure here */
+	ret = add_uninit_balloc_items(sb, server, super);
+	BUG_ON(ret);
 
 	ret = scoutfs_block_writer_write(sb, &server->wri);
 	if (ret) {
@@ -869,6 +909,185 @@ retry:
 	}
 
 out:
+	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
+}
+
+/*
+ * Give the client references to stable persistent trees that they'll
+ * use to write their next transaction.
+ */
+static int server_get_log_trees(struct super_block *sb,
+				struct scoutfs_net_connection *conn,
+				u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	u64 rid = scoutfs_net_client_rid(conn);
+	DECLARE_SERVER_INFO(sb, server);
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct scoutfs_log_trees_key ltk;
+	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_log_trees lt;
+	struct commit_waiter cw;
+	u64 next_past;
+	u64 at_least;
+	u64 target;
+	u64 from;
+	int ret;
+
+	if (arg_len != 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	down_read(&server->commit_rwsem);
+
+	mutex_lock(&server->logs_mutex);
+
+	memset(&ltk, 0, sizeof(ltk));
+	ltk.rid = cpu_to_be64(rid);
+	ltk.nr = cpu_to_be64(U64_MAX);
+
+	ret = scoutfs_btree_prev(sb, &super->logs_root,
+				 &ltk, sizeof(ltk), &iref);
+	if (ret < 0 && ret != -ENOENT)
+		goto unlock;
+	if (ret == 0) {
+		if (iref.key_len == sizeof(struct scoutfs_log_trees_key) &&
+		    iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
+			memcpy(&ltk, iref.key, iref.key_len);
+			memcpy(&ltv, iref.val, iref.val_len);
+			if (be64_to_cpu(ltk.rid) != rid)
+				ret = -ENOENT;
+		} else {
+			ret = -EIO;
+		}
+		scoutfs_btree_put_iref(&iref);
+		if (ret == -EIO)
+			goto unlock;
+	}
+
+	/* initialize new roots if we don't have any */
+	if (ret == -ENOENT) {
+		ltk.rid = cpu_to_be64(rid);
+		ltk.nr = cpu_to_be64(1);
+		memset(&ltv, 0, sizeof(ltv));
+	}
+
+	target = (64*1024*1024) / SCOUTFS_BLOCK_SIZE;
+
+	/* XXX arbitrarily give client enough metadata for a transaction */
+	while (le64_to_cpu(ltv.alloc_root.total_free) < target) {
+		from = le64_to_cpu(super->core_balloc_cursor);
+		at_least = target - le64_to_cpu(ltv.alloc_root.total_free);
+
+		ret = scoutfs_balloc_move(sb, &server->alloc, &server->wri,
+					  &ltv.alloc_root,
+					  &server->alloc.alloc_root,
+					  from, at_least, &next_past);
+		if (ret == -ENOENT && from != 0) {
+			super->core_balloc_cursor = 0;
+			continue;
+		}
+		if (ret < 0)
+			goto unlock;
+
+		super->core_balloc_cursor = cpu_to_le64(next_past);
+
+	}
+
+	/* update client's log tree's item */
+	ret = scoutfs_btree_force(sb, &server->alloc, &server->wri,
+				  &super->logs_root, &ltk, sizeof(ltk),
+				  &ltv, sizeof(ltv));
+unlock:
+	mutex_unlock(&server->logs_mutex);
+
+	if (ret == 0)
+		queue_commit_work(server, &cw);
+	up_read(&server->commit_rwsem);
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+
+	if (ret == 0) {
+		lt.alloc_root = ltv.alloc_root;
+		lt.free_root = ltv.free_root;
+		lt.item_root = ltv.item_root;
+		lt.bloom_ref = ltv.bloom_ref;
+		lt.rid = be64_to_le64(ltk.rid);
+		lt.nr = be64_to_le64(ltk.nr);
+	}
+
+out:
+	WARN_ON_ONCE(ret < 0);
+	return scoutfs_net_response(sb, conn, cmd, id, ret, &lt, sizeof(lt));
+}
+
+/*
+ * The client is sending the roots of all the btree blocks that they
+ * wrote to their free space for their transaction.  Make it persistent
+ * by referencing the roots from their log item in the logs root and
+ * committing.
+ */
+static int server_commit_log_trees(struct super_block *sb,
+				   struct scoutfs_net_connection *conn,
+				   u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	DECLARE_SERVER_INFO(sb, server);
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct scoutfs_log_trees_key ltk;
+	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_log_trees *lt;
+	struct commit_waiter cw;
+	int ret;
+
+	if (arg_len != sizeof(struct scoutfs_log_trees)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	lt = arg;
+
+	down_read(&server->commit_rwsem);
+	mutex_lock(&server->logs_mutex);
+
+	/* find the client's existing item */
+	memset(&ltk, 0, sizeof(ltk));
+	ltk.rid = le64_to_be64(lt->rid);
+	ltk.nr = le64_to_be64(lt->nr);
+	ret = scoutfs_btree_lookup(sb, &super->logs_root,
+				   &ltk, sizeof(ltk), &iref);
+	if (ret < 0 && ret != -ENOENT)
+		goto unlock;
+	if (ret == 0) {
+		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
+			memcpy(&ltv, iref.val, iref.val_len);
+		} else {
+			ret = -EIO;
+		}
+		scoutfs_btree_put_iref(&iref);
+		if (ret < 0)
+			goto unlock;
+	}
+
+	ltv.alloc_root = lt->alloc_root;
+	ltv.free_root = lt->free_root;
+	ltv.item_root = lt->item_root;
+	ltv.bloom_ref = lt->bloom_ref;
+
+	ret = scoutfs_btree_update(sb, &server->alloc, &server->wri,
+				   &super->logs_root, &ltk, sizeof(ltk),
+				   &ltv, sizeof(ltv));
+
+unlock:
+	mutex_unlock(&server->logs_mutex);
+
+	if (ret == 0)
+		queue_commit_work(server, &cw);
+	up_read(&server->commit_rwsem);
+	if (ret == 0)
+		ret = wait_for_commit(&cw);
+out:
+	WARN_ON_ONCE(ret < 0);
 	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
 }
 
@@ -2215,6 +2434,8 @@ static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_FREE_EXTENTS]		= server_free_extents,
 	[SCOUTFS_NET_CMD_ALLOC_SEGNO]		= server_alloc_segno,
 	[SCOUTFS_NET_CMD_RECORD_SEGMENT]	= server_record_segment,
+	[SCOUTFS_NET_CMD_GET_LOG_TREES]		= server_get_log_trees,
+	[SCOUTFS_NET_CMD_COMMIT_LOG_TREES]	= server_commit_log_trees,
 	[SCOUTFS_NET_CMD_ADVANCE_SEQ]		= server_advance_seq,
 	[SCOUTFS_NET_CMD_GET_LAST_SEQ]		= server_get_last_seq,
 	[SCOUTFS_NET_CMD_GET_MANIFEST_ROOT]	= server_get_manifest_root,
@@ -2462,6 +2683,7 @@ int scoutfs_server_setup(struct super_block *sb)
 	mutex_init(&server->farewell_mutex);
 	INIT_LIST_HEAD(&server->farewell_requests);
 	INIT_WORK(&server->farewell_work, farewell_worker);
+	mutex_init(&server->logs_mutex);
 
 	server->wq = alloc_workqueue("scoutfs_server",
 				     WQ_UNBOUND | WQ_NON_REENTRANT, 0);

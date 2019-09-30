@@ -502,6 +502,8 @@ struct scoutfs_super_block {
 	__le64 unmount_barrier;
 	__u8 quorum_count;
 	struct scoutfs_inet_addr server_addr;
+	struct scoutfs_balloc_root core_balloc_alloc;
+	struct scoutfs_balloc_root core_balloc_free;
 	struct scoutfs_btree_root alloc_root;
 	struct scoutfs_manifest manifest;
 	struct scoutfs_btree_root lock_clients;

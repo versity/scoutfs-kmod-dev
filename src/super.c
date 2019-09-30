@@ -21,6 +21,7 @@
 #include <linux/sched.h>
 #include <linux/debugfs.h>
 #include <linux/percpu.h>
+#include <linux/buffer_head.h>
 
 #include "super.h"
 #include "block.h"
@@ -237,23 +238,32 @@ int scoutfs_write_super(struct super_block *sb,
 			struct scoutfs_super_block *caller)
 {
 	struct scoutfs_super_block *super;
-	struct page *page;
+	struct buffer_head *bh;
 	int ret;
 
-	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-	if (!page)
+	bh = sb_getblk(sb, SCOUTFS_SUPER_BLKNO);
+	if (!bh)
 		return -ENOMEM;
 
 	le64_add_cpu(&caller->hdr.seq, 1);
 
-	super = page_address(page);
+	memset(bh->b_data, 0, bh->b_size);
+	super = (void *)bh->b_data;
 	memcpy(super, caller, sizeof(*super));
 	super->hdr.crc = scoutfs_block_calc_crc(&super->hdr);
 
-	ret = scoutfs_bio_write(sb, &page, le64_to_cpu(super->hdr.blkno), 1);
-	WARN_ON_ONCE(ret);
+	lock_buffer(bh);
+	set_buffer_mapped(bh);
+	set_buffer_dirty(bh);
+	unlock_buffer(bh);
 
-	__free_page(page);
+	ll_rw_block(WRITE, 1, &bh);
+	wait_on_buffer(bh);
+	if (!buffer_uptodate(bh))
+		ret = -EIO;
+	else
+		ret = 0;
+	brelse(bh);
 
 	return ret;
 }
@@ -266,21 +276,25 @@ int scoutfs_read_super(struct super_block *sb,
 		       struct scoutfs_super_block *super_res)
 {
 	struct scoutfs_super_block *super;
-	struct page *page;
+	struct buffer_head *bh = NULL;
 	__le32 calc;
 	int ret;
 
-	page = alloc_page(GFP_KERNEL);
-	if (!page)
-		return -ENOMEM;
-
-	ret = scoutfs_bio_read(sb, &page, SCOUTFS_SUPER_BLKNO, 1);
-	if (ret) {
+	bh = sb_getblk(sb, SCOUTFS_SUPER_BLKNO);
+	if (bh) {
+		lock_buffer(bh);
+		clear_buffer_uptodate(bh);
+		unlock_buffer(bh);
+		brelse(bh);
+	}
+	bh = sb_bread(sb, SCOUTFS_SUPER_BLKNO);
+	if (!bh) {
+		ret = -EIO;
 		scoutfs_err(sb, "error reading super block: %d", ret);
 		goto out;
 	}
 
-	super = scoutfs_page_block_address(&page, 0);
+	super = (void *)(bh->b_data);
 
 	if (super->hdr.magic != cpu_to_le32(SCOUTFS_BLOCK_MAGIC_SUPER)) {
 		scoutfs_err(sb, "super block has invalid magic value 0x%08x",
@@ -325,7 +339,7 @@ int scoutfs_read_super(struct super_block *sb,
 	*super_res = *super;
 	ret = 0;
 out:
-	__free_page(page);
+	brelse(bh);
 	return ret;
 }
 

@@ -191,7 +191,7 @@ int scoutfs_manifest_add(struct super_block *sb,
 	trace_scoutfs_manifest_add(sb, ment->level, ment->segno, ment->seq,
 				   &ment->first, &ment->last);
 
-	ret = scoutfs_btree_insert(sb, &super->manifest.root,
+	ret = scoutfs_btree_insert(sb, NULL, &super->manifest.root,
 				   &mkey, sizeof(mkey), &mval, sizeof(mval));
 	if (ret == 0) {
 		mani->nr_levels = max_t(u8, mani->nr_levels, ment->level + 1);
@@ -223,7 +223,7 @@ int scoutfs_manifest_del(struct super_block *sb,
 
 	init_btree_key(&mkey, ment->level, ment->seq, &ment->first);
 
-	ret = scoutfs_btree_delete(sb, &super->manifest.root,
+	ret = scoutfs_btree_delete(sb, NULL, &super->manifest.root,
 				   &mkey, sizeof(mkey));
 	if (ret == 0)
 		add_level_count(sb, ment->level, -1ULL);

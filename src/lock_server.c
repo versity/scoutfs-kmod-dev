@@ -19,6 +19,8 @@
 #include "net.h"
 #include "tseq.h"
 #include "spbm.h"
+#include "block.h"
+#include "balloc.h"
 #include "btree.h"
 #include "msg.h"
 #include "scoutfs_trace.h"
@@ -84,6 +86,9 @@ struct lock_server_info {
 
 	struct scoutfs_tseq_tree tseq_tree;
 	struct dentry *tseq_dentry;
+
+	struct scoutfs_balloc_allocator *alloc;
+	struct scoutfs_block_writer *wri;
 };
 
 #define DECLARE_LOCK_SERVER_INFO(sb, name) \
@@ -590,7 +595,8 @@ int scoutfs_lock_server_greeting(struct super_block *sb, u64 rid,
 		if (ret == 0)
 			scoutfs_btree_put_iref(&iref);
 	} else {
-		ret = scoutfs_btree_insert(sb, &super->lock_clients,
+		ret = scoutfs_btree_insert(sb, inf->alloc, inf->wri,
+					   &super->lock_clients,
 					   &cbk, sizeof(cbk), NULL, 0);
 	}
 	mutex_unlock(&inf->mutex);
@@ -790,7 +796,8 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 
 		/* XXX these aren't immediately committed */
 		cbk.rid = cpu_to_be64(rid);
-		ret = scoutfs_btree_delete(sb, &super->lock_clients,
+		ret = scoutfs_btree_delete(sb, inf->alloc, inf->wri,
+					   &super->lock_clients,
 					   &cbk, sizeof(cbk));
 		if (ret)
 			break;
@@ -829,7 +836,8 @@ int scoutfs_lock_server_farewell(struct super_block *sb, u64 rid)
 
 	cli.rid = cpu_to_be64(rid);
 	mutex_lock(&inf->mutex);
-	ret = scoutfs_btree_delete(sb, &super->lock_clients, &cli, sizeof(cli));
+	ret = scoutfs_btree_delete(sb, inf->alloc, inf->wri,
+				   &super->lock_clients, &cli, sizeof(cli));
 	mutex_unlock(&inf->mutex);
 	if (ret == -ENOENT) {
 		ret = 0;
@@ -929,7 +937,9 @@ static void lock_server_tseq_show(struct seq_file *m,
  * all the existing clients, either they reconnect and replay locks or
  * we time them out.
  */
-int scoutfs_lock_server_setup(struct super_block *sb)
+int scoutfs_lock_server_setup(struct super_block *sb,
+			      struct scoutfs_balloc_allocator *alloc,
+			      struct scoutfs_block_writer *wri)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
@@ -952,6 +962,8 @@ int scoutfs_lock_server_setup(struct super_block *sb)
 	INIT_DELAYED_WORK(&inf->recovery_dwork,
 			  scoutfs_lock_server_recovery_timeout);
 	scoutfs_tseq_tree_init(&inf->tseq_tree, lock_server_tseq_show);
+	inf->alloc = alloc;
+	inf->wri = wri;
 
 	inf->tseq_dentry = scoutfs_tseq_create("server_locks", sbi->debug_root,
 					       &inf->tseq_tree);

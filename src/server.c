@@ -25,6 +25,8 @@
 #include "format.h"
 #include "counters.h"
 #include "inode.h"
+#include "block.h"
+#include "balloc.h"
 #include "btree.h"
 #include "manifest.h"
 #include "seg.h"
@@ -90,6 +92,9 @@ struct server_info {
 	struct mutex farewell_mutex;
 	struct list_head farewell_requests;
 	struct work_struct farewell_work;
+
+	struct scoutfs_balloc_allocator alloc;
+	struct scoutfs_block_writer wri;
 };
 
 #define DECLARE_SERVER_INFO(sb, name) \
@@ -155,6 +160,7 @@ static int init_extent_from_btree_key(struct scoutfs_extent *ext, u8 type,
 static int server_extent_io(struct super_block *sb, int op,
 			    struct scoutfs_extent *ext, void *data)
 {
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_extent_btree_key ebk;
 	SCOUTFS_BTREE_ITEM_REF(iref);
@@ -197,11 +203,13 @@ static int server_extent_io(struct super_block *sb, int op,
 		}
 
 	} else if (op == SEI_INSERT) {
-		ret = scoutfs_btree_insert(sb, &super->alloc_root,
+		ret = scoutfs_btree_insert(sb, &server->alloc, &server->wri,
+					   &super->alloc_root,
 					   &ebk, sizeof(ebk), NULL, 0);
 
 	} else if (op == SEI_DELETE) {
-		ret = scoutfs_btree_delete(sb, &super->alloc_root,
+		ret = scoutfs_btree_delete(sb, &server->alloc, &server->wri,
+					   &super->alloc_root,
 					   &ebk, sizeof(ebk));
 
 	} else {
@@ -599,24 +607,20 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 		goto out;
 	}
 
-	if (!scoutfs_btree_has_dirty(sb)) {
-		ret = 0;
-		goto out;
-	}
-
-	ret = scoutfs_btree_write_dirty(sb);
+	ret = scoutfs_block_writer_write(sb, &server->wri);
 	if (ret) {
 		scoutfs_err(sb, "server error writing btree blocks: %d", ret);
 		goto out;
 	}
+
+	super->core_balloc_alloc = server->alloc.alloc_root;
+	super->core_balloc_free = server->alloc.free_root;
 
 	ret = scoutfs_write_super(sb, super);
 	if (ret) {
 		scoutfs_err(sb, "server error writing super block: %d", ret);
 		goto out;
 	}
-
-	scoutfs_btree_write_complete(sb);
 
 	write_seqcount_begin(&server->stable_seqcount);
 	server->stable_manifest_root = SCOUTFS_SB(sb)->super.manifest.root;
@@ -910,7 +914,8 @@ static int server_advance_seq(struct super_block *sb,
 		tsk.trans_seq = le64_to_be64(their_seq);
 		tsk.rid = cpu_to_be64(rid);
 
-		ret = scoutfs_btree_delete(sb, &super->trans_seqs,
+		ret = scoutfs_btree_delete(sb, &server->alloc, &server->wri,
+					   &super->trans_seqs,
 					   &tsk, sizeof(tsk));
 		if (ret < 0 && ret != -ENOENT)
 			goto out;
@@ -925,7 +930,8 @@ static int server_advance_seq(struct super_block *sb,
 	tsk.trans_seq = le64_to_be64(next_seq);
 	tsk.rid = cpu_to_be64(rid);
 
-	ret = scoutfs_btree_insert(sb, &super->trans_seqs,
+	ret = scoutfs_btree_insert(sb, &server->alloc, &server->wri,
+				   &super->trans_seqs,
 				   &tsk, sizeof(tsk), NULL, 0);
 out:
 	up_write(&server->seq_rwsem);
@@ -975,7 +981,9 @@ static int remove_trans_seq(struct super_block *sb, u64 rid)
 		if (be64_to_cpu(tsk.rid) == rid) {
 			trace_scoutfs_trans_seq_farewell(sb, rid,
 						be64_to_cpu(tsk.trans_seq));
-			ret = scoutfs_btree_delete(sb, &super->trans_seqs,
+			ret = scoutfs_btree_delete(sb, &server->alloc,
+						   &server->wri,
+						   &super->trans_seqs,
 						   &tsk, sizeof(tsk));
 			break;
 		}
@@ -1185,6 +1193,7 @@ int scoutfs_server_lock_recover_request(struct super_block *sb, u64 rid,
 static int insert_mounted_client(struct super_block *sb, u64 rid,
 				 u64 gr_flags)
 {
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_mounted_client_btree_key mck;
 	struct scoutfs_mounted_client_btree_val mcv;
@@ -1194,7 +1203,8 @@ static int insert_mounted_client(struct super_block *sb, u64 rid,
 	if (gr_flags & SCOUTFS_NET_GREETING_FLAG_VOTER)
 		mcv.flags |= SCOUTFS_MOUNTED_CLIENT_VOTER;
 
-	return scoutfs_btree_insert(sb, &super->mounted_clients,
+	return scoutfs_btree_insert(sb, &server->alloc, &server->wri,
+				    &super->mounted_clients,
 				    &mck, sizeof(mck), &mcv, sizeof(mcv));
 }
 
@@ -1210,13 +1220,15 @@ static int insert_mounted_client(struct super_block *sb, u64 rid,
  */
 static int delete_mounted_client(struct super_block *sb, u64 rid)
 {
+	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_mounted_client_btree_key mck;
 	int ret;
 
 	mck.rid = cpu_to_be64(rid);
 
-	ret = scoutfs_btree_delete(sb, &super->mounted_clients,
+	ret = scoutfs_btree_delete(sb, &server->alloc, &server->wri,
+				   &super->mounted_clients,
 				   &mck, sizeof(mck));
 	if (ret == -ENOENT)
 		ret = 0;
@@ -2296,10 +2308,16 @@ static void scoutfs_server_worker(struct work_struct *work)
 		goto out;
 
 	/* start up the server subsystems before accepting */
-	ret = scoutfs_read_super(sb, super) ?:
-	      scoutfs_btree_setup(sb) ?:
-	      scoutfs_manifest_setup(sb) ?:
-	      scoutfs_lock_server_setup(sb);
+	ret = scoutfs_read_super(sb, super);
+	if (ret < 0)
+		goto shutdown;
+
+	scoutfs_balloc_init(&server->alloc, &super->core_balloc_alloc,
+			    &super->core_balloc_free);
+	scoutfs_block_writer_init(sb, &server->wri);
+
+	ret = scoutfs_manifest_setup(sb) ?:
+	      scoutfs_lock_server_setup(sb, &server->alloc, &server->wri);
 	if (ret)
 		goto shutdown;
 
@@ -2340,7 +2358,6 @@ shutdown:
 
 	destroy_pending_frees(sb);
 	scoutfs_manifest_destroy(sb);
-	scoutfs_btree_destroy(sb);
 	scoutfs_lock_server_destroy(sb);
 
 out:

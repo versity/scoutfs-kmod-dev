@@ -223,7 +223,6 @@ struct scoutfs_btree_item {
 struct scoutfs_btree_block {
 	struct scoutfs_block_header hdr;
 	__le16 free_end;
-	__le16 free_reclaim;
 	__le16 nr_items;
 	__u8 level;
 	struct scoutfs_btree_item_header item_hdrs[0];

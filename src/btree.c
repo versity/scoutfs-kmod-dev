@@ -23,7 +23,6 @@
 #include "format.h"
 #include "key.h"
 #include "btree.h"
-#include "sort_priv.h"
 #include "counters.h"
 #include "triggers.h"
 #include "options.h"
@@ -200,8 +199,8 @@ static inline unsigned int all_item_bytes(struct scoutfs_btree_item *item)
 			     le16_to_cpu(item->val_len));
 }
 
-/* number of contig free bytes between last item header and first item */
-static inline unsigned int contig_free(struct scoutfs_btree_block *bt)
+/* number of free bytes between last item header and first item */
+static inline unsigned int free_bytes(struct scoutfs_btree_block *bt)
 {
 	unsigned int nr = le16_to_cpu(bt->nr_items);
 
@@ -209,17 +208,11 @@ static inline unsigned int contig_free(struct scoutfs_btree_block *bt)
 	       offsetof(struct scoutfs_btree_block, item_hdrs[nr]);
 }
 
-/* number of contig bytes free after reclaiming free amongst items */
-static inline unsigned int reclaimable_free(struct scoutfs_btree_block *bt)
-{
-	return contig_free(bt) + le16_to_cpu(bt->free_reclaim);
-}
-
 /* all bytes used by item offsets, headers, and values */
 static inline unsigned int used_total(struct scoutfs_btree_block *bt)
 {
 	return SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block) -
-	       reclaimable_free(bt);
+	       free_bytes(bt);
 }
 
 static inline struct scoutfs_btree_item *
@@ -371,102 +364,13 @@ static bool all_roots_migrated(struct scoutfs_super_block *super)
 	return true;
 }
 
-static int cmp_hdr_item_key(void *priv, const void *a_ptr, const void *b_ptr)
-{
-	struct scoutfs_btree_block *bt = priv;
-	const struct scoutfs_btree_item_header *a_hdr = a_ptr;
-	const struct scoutfs_btree_item_header *b_hdr = b_ptr;
-	struct scoutfs_btree_item *a_item = off_item(bt, a_hdr->off);
-	struct scoutfs_btree_item *b_item = off_item(bt, b_hdr->off);
-
-	return cmp_keys(item_key(a_item), item_key_len(a_item),
-		        item_key(b_item), item_key_len(b_item));
-}
-
-static int cmp_hdr_off(void *priv, const void *a_ptr, const void *b_ptr)
-{
-	const struct scoutfs_btree_item_header *a_hdr = a_ptr;
-	const struct scoutfs_btree_item_header *b_hdr = b_ptr;
-
-	return (int)le16_to_cpu(a_hdr->off) - (int)le16_to_cpu(b_hdr->off);
-}
-
-static void swap_hdr(void *priv, void *a_ptr, void *b_ptr, int size)
-{
-	struct scoutfs_btree_item_header *a_hdr = a_ptr;
-	struct scoutfs_btree_item_header *b_hdr = b_ptr;
-
-	swap(*a_hdr, *b_hdr);
-}
-
-/*
- * As items are deleted they create fragmented free space.  Even if we
- * indexed free space in the block it could still get sufficiently
- * fragmented to force a split on insertion even though the two
- * resulting blocks would have less than the minimum space consumed by
- * items.
- *
- * We don't bother implementing free space indexing and addressing that
- * corner case.  Instead we track the number of bytes that could be
- * reclaimed if we compacted the item space after the free_end offset.
- * If this additional free space would satisfy an insertion then we
- * compact the items instead of splitting the block.
- *
- * We move the free space to the center of the block by walking
- * backwards through the items in offset order and packing them towards
- * the end of the block.
- *
- * We don't have specific metadata to either walk the items in offset
- * order or to update the item offsets as we move items.  We sort the
- * item offset array to achieve both ends.  First we sort it by offset
- * so we can walk in reverse order.  As we move items we update their
- * offset and then sort by keys once we're done.
- */
-static void compact_items(struct scoutfs_btree_block *bt)
-{
-	unsigned int nr = le16_to_cpu(bt->nr_items);
-	struct scoutfs_btree_item *from;
-	struct scoutfs_btree_item *to;
-	unsigned int bytes;
-	__le16 end;
-	int i;
-
-	sort_priv(bt, bt->item_hdrs, nr, sizeof(bt->item_hdrs[0]),
-		  cmp_hdr_off, swap_hdr);
-
-	end = cpu_to_le16(SCOUTFS_BLOCK_SIZE);
-
-	for (i = nr - 1; i >= 0; i--) {
-		from = pos_item(bt, i);
-
-		bytes = item_bytes(from);
-		le16_add_cpu(&end, -bytes);
-		to = off_item(bt, end);
-		bt->item_hdrs[i].off = end;
-
-		if (from != to)
-			memmove(to, from, bytes);
-	}
-
-	bt->free_end = end;
-	bt->free_reclaim = 0;
-
-	sort_priv(bt, bt->item_hdrs, nr, sizeof(bt->item_hdrs[0]),
-		  cmp_hdr_item_key, swap_hdr);
-}
-
 /* move a number of contigous elements from the src index to the dst index */
 #define memmove_arr(arr, dst, src, nr) \
 	memmove(&(arr)[dst], &(arr)[src], (nr) * sizeof(*(arr)))
 
 /*
  * Insert a new item into the block.  The caller has made sure that
- * there's space for the item and its metadata but we might have to
- * compact the block to make that space contiguous.
- *
- * The possibility of compaction means that callers *can not* hold item,
- * key, or value pointers across item creation.  An easy way to verify
- * this is to audit pos_item() callers.
+ * there's space for the item and its metadata.
  */
 static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
 			void *key, unsigned key_len, void *val,
@@ -477,10 +381,7 @@ static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
 	unsigned all_bytes;
 
 	all_bytes = all_len_bytes(key_len, val_len);
-	if (contig_free(bt) < all_bytes) {
-		BUG_ON(reclaimable_free(bt) < all_bytes);
-		compact_items(bt);
-	}
+	BUG_ON(free_bytes(bt) < all_bytes);
 
 	if (pos < nr)
 		memmove_arr(bt->item_hdrs, pos + 1, pos, nr - pos);
@@ -503,24 +404,59 @@ static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
 }
 
 /*
- * Delete an item from a btree block.  We record the amount of space it
- * frees to later decide if we can satisfy an insertion by compaction
- * instead of splitting.
+ * Delete an item from a btree block.
+ *
+ * This moves all the headers after the item (in sort order) towards the
+ * start of the header array.  It moves all the items before the removed
+ * item towards the end of the block.  The items that have to be moved
+ * can be anywhere in the sort order.  We first move the item region
+ * and then walk the headers looking for offsets that need to be updated.
+ *
+ * The item motion means that callers can not hold item references
+ * across item deletion.
  */
 static void delete_item(struct scoutfs_btree_block *bt, unsigned int pos)
 {
-	struct scoutfs_btree_item *item = pos_item(bt, pos);
 	unsigned int nr = le16_to_cpu(bt->nr_items);
+	unsigned int updated;
+	unsigned int total;
+	unsigned int first;
+	unsigned int bytes;
+	unsigned int last;
+	unsigned int off;
+	int i;
+
+	/* calculate region of items to move */
+	first = le16_to_cpu(bt->free_end);
+	last = le16_to_cpu(bt->item_hdrs[pos].off);
+	total = last - first;
+	bytes = item_bytes(pos_item(bt, pos));
+
+	/* move items before deleted to the back of the block */
+	if (total > 0) {
+		/* update headers before memove overwrites deleted item */
+		for (i = 0, updated = 0; i < nr && updated < total; i++) {
+			off = le16_to_cpu(bt->item_hdrs[i].off);
+			if (off >= first && off < last) {
+				updated += item_bytes(pos_item(bt, i));
+				le16_add_cpu(&bt->item_hdrs[i].off, bytes);
+			}
+		}
+		BUG_ON(updated != total);
+
+		memmove(off_item(bt, cpu_to_le16(first + bytes)),
+			off_item(bt, cpu_to_le16(first)), total);
+
+	}
+
+	/* wipe deleted bytes to avoid leaking data */
+	memset(off_item(bt, cpu_to_le16(first)), 0, bytes);
 
 	if (pos < (nr - 1))
 		memmove_arr(bt->item_hdrs, pos, pos + 1, nr - 1 - pos);
 
-	le16_add_cpu(&bt->free_reclaim, item_bytes(item));
-	nr--;
-	bt->nr_items = cpu_to_le16(nr);
-
-	/* wipe deleted items to avoid leaking data */
-	memset(item, 0, item_bytes(item));
+	le16_add_cpu(&bt->free_end, bytes);
+	le16_add_cpu(&bt->nr_items, -1);
 }
 
 /*
@@ -884,7 +820,7 @@ static int try_split(struct super_block *sb, struct scoutfs_btree_root *root,
 	else
 		all_bytes = all_len_bytes(key_len, val_len);
 
-	if (reclaimable_free(right) >= all_bytes)
+	if (free_bytes(right) >= all_bytes)
 		return 0;
 
 	/* alloc split neighbour first to avoid unwinding tree growth */
@@ -1007,7 +943,7 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 static int verify_btree_block(struct scoutfs_btree_block *bt, int level)
 {
 	struct scoutfs_btree_item *item;
-	struct scoutfs_btree_item *prev;
+	struct scoutfs_btree_item *prev = NULL;
 	unsigned int bytes = 0;
 	unsigned int after_off = sizeof(struct scoutfs_btree_block);
 	unsigned int first_off;
@@ -1048,17 +984,15 @@ static int verify_btree_block(struct scoutfs_btree_block *bt, int level)
 	if (first_off < le16_to_cpu(bt->free_end))
 		goto out;
 
-	if ((le16_to_cpu(bt->free_end) + bytes +
-	     le16_to_cpu(bt->free_reclaim)) != SCOUTFS_BLOCK_SIZE)
+	if ((le16_to_cpu(bt->free_end) + bytes) != SCOUTFS_BLOCK_SIZE)
 		goto out;
 
 	bad = 0;
 out:
 	if (bad) {
-		printk("bt %p blkno %llu level %d end %u reclaim %u nr %u (after %u bytes %u)\n",
+		printk("bt %p blkno %llu level %d end %u nr %u (after %u bytes %u)\n",
 			bt, le64_to_cpu(bt->hdr.blkno), level,
-			le16_to_cpu(bt->free_end),
-			le16_to_cpu(bt->free_reclaim), le16_to_cpu(bt->nr_items),
+			le16_to_cpu(bt->free_end), le16_to_cpu(bt->nr_items),
 			after_off, bytes);
 		for (i = 0; i < nr; i++) {
 			item = pos_item(bt, i);
@@ -1370,7 +1304,6 @@ int scoutfs_btree_update(struct super_block *sb,
 			 void *key, unsigned key_len,
 			 void *val, unsigned val_len)
 {
-	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
 	int pos;
 	int cmp;
@@ -1384,7 +1317,6 @@ int scoutfs_btree_update(struct super_block *sb,
 	if (ret == 0) {
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (cmp == 0) {
-			item = pos_item(bt, pos);
 			delete_item(bt, pos);
 			create_item(bt, pos, key, key_len, val, val_len);
 			ret = 0;

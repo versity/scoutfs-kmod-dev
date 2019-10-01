@@ -34,7 +34,6 @@ scoutfs-y +=			\
 	scoutfs_trace.o		\
 	seg.o			\
 	server.o		\
-	sort_priv.o		\
 	spbm.o			\
 	super.o			\
 	sysfs.o			\

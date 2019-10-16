@@ -10,6 +10,7 @@ CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
  
 scoutfs-y +=			\
 	bio.o			\
+	balloc.o		\
 	block.o			\
 	btree.o			\
 	client.o		\

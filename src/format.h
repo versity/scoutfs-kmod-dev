@@ -270,6 +270,28 @@ struct scoutfs_manifest_btree_val {
 } __packed;
 
 /*
+ * Free metadata blocks are tracked by block allocator items.
+ */
+struct scoutfs_balloc_root {
+	struct scoutfs_btree_root root;
+	__le64 total_free;
+} __packed;
+struct scoutfs_balloc_item_key {
+	__be64 base;
+} __packed;
+
+#define SCOUTFS_BALLOC_ITEM_BYTES	    256
+#define SCOUTFS_BALLOC_ITEM_U64S	    (SCOUTFS_BALLOC_ITEM_BYTES / \
+					     sizeof(__u64))
+#define SCOUTFS_BALLOC_ITEM_BITS	    (SCOUTFS_BALLOC_ITEM_BYTES * 8)
+#define SCOUTFS_BALLOC_ITEM_BASE_SHIFT	    ilog2(SCOUTFS_BALLOC_ITEM_BITS)
+#define SCOUTFS_BALLOC_ITEM_BIT_MASK	    (SCOUTFS_BALLOC_ITEM_BITS - 1)
+
+struct scoutfs_balloc_item_val {
+	__le64 bits[SCOUTFS_BALLOC_ITEM_U64S];
+} __packed;
+
+/*
  * Free extents are stored in the server in an allocation btree.  The
  * type differentiates whether start or length is in stored in the major
  * value and is the primary sort key.  'start' is set to the final block

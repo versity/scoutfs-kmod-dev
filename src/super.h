@@ -26,6 +26,7 @@ struct btree_info;
 struct sysfs_info;
 struct options_sb_info;
 struct net_info;
+struct block_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -48,6 +49,7 @@ struct scoutfs_sb_info {
 	struct btree_info *btree_info;
 	struct net_info *net_info;
 	struct quorum_info *quorum_info;
+	struct block_info *block_info;
 
 	wait_queue_head_t trans_hold_wq;
 	struct task_struct *trans_task;

@@ -211,7 +211,7 @@ struct scoutfs_btree_root {
 } __packed;
 
 struct scoutfs_btree_item_header {
-	__le16 off;
+	__le32 off;
 } __packed;
 
 struct scoutfs_btree_item {
@@ -222,8 +222,8 @@ struct scoutfs_btree_item {
 
 struct scoutfs_btree_block {
 	struct scoutfs_block_header hdr;
-	__le16 free_end;
-	__le16 nr_items;
+	__le32 free_end;
+	__le32 nr_items;
 	__u8 level;
 	struct scoutfs_btree_item_header item_hdrs[0];
 } __packed;

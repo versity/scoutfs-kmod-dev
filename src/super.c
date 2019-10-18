@@ -201,6 +201,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_quorum_destroy(sb);
 
 	scoutfs_item_destroy(sb);
+	scoutfs_block_destroy(sb);
 	scoutfs_destroy_triggers(sb);
 	scoutfs_options_destroy(sb);
 	scoutfs_sysfs_destroy_attrs(sb, &sbi->mopts_ssa);
@@ -421,6 +422,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_setup_triggers(sb) ?:
 	      scoutfs_seg_setup(sb) ?:
 	      scoutfs_item_setup(sb) ?:
+	      scoutfs_block_setup(sb) ?:
 	      scoutfs_inode_setup(sb) ?:
 	      scoutfs_data_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:

@@ -151,7 +151,7 @@ static char max_key[SCOUTFS_BTREE_MAX_KEY_LEN] = {
 };
 
 /* number of contiguous bytes used by the item header, key, and value */
-static inline unsigned len_bytes(unsigned key_len, unsigned val_len)
+static inline unsigned int len_bytes(unsigned key_len, unsigned val_len)
 {
 	return sizeof(struct scoutfs_btree_item) + key_len + val_len;
 }
@@ -202,9 +202,9 @@ static inline unsigned int all_item_bytes(struct scoutfs_btree_item *item)
 /* number of free bytes between last item header and first item */
 static inline unsigned int free_bytes(struct scoutfs_btree_block *bt)
 {
-	unsigned int nr = le16_to_cpu(bt->nr_items);
+	unsigned int nr = le32_to_cpu(bt->nr_items);
 
-	return le16_to_cpu(bt->free_end) -
+	return le32_to_cpu(bt->free_end) -
 	       offsetof(struct scoutfs_btree_block, item_hdrs[nr]);
 }
 
@@ -216,9 +216,9 @@ static inline unsigned int used_total(struct scoutfs_btree_block *bt)
 }
 
 static inline struct scoutfs_btree_item *
-off_item(struct scoutfs_btree_block *bt, __le16 off)
+off_item(struct scoutfs_btree_block *bt, __le32 off)
 {
-	return (void *)bt + le16_to_cpu(off);
+	return (void *)bt + le32_to_cpu(off);
 }
 
 static inline struct scoutfs_btree_item *
@@ -230,7 +230,7 @@ pos_item(struct scoutfs_btree_block *bt, unsigned int pos)
 static inline struct scoutfs_btree_item *
 last_item(struct scoutfs_btree_block *bt)
 {
-	return pos_item(bt, le16_to_cpu(bt->nr_items) - 1);
+	return pos_item(bt, le32_to_cpu(bt->nr_items) - 1);
 }
 
 static inline void *item_key(struct scoutfs_btree_item *item)
@@ -275,7 +275,7 @@ static int find_pos(struct scoutfs_btree_block *bt, void *key, unsigned key_len,
 {
 	struct scoutfs_btree_item *item;
 	unsigned int start = 0;
-	unsigned int end = le16_to_cpu(bt->nr_items);
+	unsigned int end = le32_to_cpu(bt->nr_items);
 	unsigned int pos = 0;
 
 	*cmp = -1;
@@ -376,7 +376,7 @@ static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
 			void *key, unsigned key_len, void *val,
 			unsigned val_len)
 {
-	unsigned nr = le16_to_cpu(bt->nr_items);
+	unsigned int nr = le32_to_cpu(bt->nr_items);
 	struct scoutfs_btree_item *item;
 	unsigned all_bytes;
 
@@ -386,12 +386,12 @@ static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
 	if (pos < nr)
 		memmove_arr(bt->item_hdrs, pos + 1, pos, nr - pos);
 
-	le16_add_cpu(&bt->free_end, -len_bytes(key_len, val_len));
+	le32_add_cpu(&bt->free_end, -len_bytes(key_len, val_len));
 	bt->item_hdrs[pos].off = bt->free_end;
 	nr++;
-	bt->nr_items = cpu_to_le16(nr);
+	bt->nr_items = cpu_to_le32(nr);
 
-	BUG_ON(le16_to_cpu(bt->free_end) <
+	BUG_ON(le32_to_cpu(bt->free_end) <
 	       offsetof(struct scoutfs_btree_block, item_hdrs[nr]));
 
 	item = pos_item(bt, pos);
@@ -417,7 +417,7 @@ static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
  */
 static void delete_item(struct scoutfs_btree_block *bt, unsigned int pos)
 {
-	unsigned int nr = le16_to_cpu(bt->nr_items);
+	unsigned int nr = le32_to_cpu(bt->nr_items);
 	unsigned int updated;
 	unsigned int total;
 	unsigned int first;
@@ -427,8 +427,8 @@ static void delete_item(struct scoutfs_btree_block *bt, unsigned int pos)
 	int i;
 
 	/* calculate region of items to move */
-	first = le16_to_cpu(bt->free_end);
-	last = le16_to_cpu(bt->item_hdrs[pos].off);
+	first = le32_to_cpu(bt->free_end);
+	last = le32_to_cpu(bt->item_hdrs[pos].off);
 	total = last - first;
 	bytes = item_bytes(pos_item(bt, pos));
 
@@ -436,27 +436,27 @@ static void delete_item(struct scoutfs_btree_block *bt, unsigned int pos)
 	if (total > 0) {
 		/* update headers before memove overwrites deleted item */
 		for (i = 0, updated = 0; i < nr && updated < total; i++) {
-			off = le16_to_cpu(bt->item_hdrs[i].off);
+			off = le32_to_cpu(bt->item_hdrs[i].off);
 			if (off >= first && off < last) {
 				updated += item_bytes(pos_item(bt, i));
-				le16_add_cpu(&bt->item_hdrs[i].off, bytes);
+				le32_add_cpu(&bt->item_hdrs[i].off, bytes);
 			}
 		}
 		BUG_ON(updated != total);
 
-		memmove(off_item(bt, cpu_to_le16(first + bytes)),
-			off_item(bt, cpu_to_le16(first)), total);
+		memmove(off_item(bt, cpu_to_le32(first + bytes)),
+			off_item(bt, cpu_to_le32(first)), total);
 
 	}
 
 	/* wipe deleted bytes to avoid leaking data */
-	memset(off_item(bt, cpu_to_le16(first)), 0, bytes);
+	memset(off_item(bt, cpu_to_le32(first)), 0, bytes);
 
 	if (pos < (nr - 1))
 		memmove_arr(bt->item_hdrs, pos, pos + 1, nr - 1 - pos);
 
-	le16_add_cpu(&bt->free_end, bytes);
-	le16_add_cpu(&bt->nr_items, -1);
+	le32_add_cpu(&bt->free_end, bytes);
+	le32_add_cpu(&bt->nr_items, -1);
 }
 
 /*
@@ -474,14 +474,14 @@ static void move_items(struct scoutfs_btree_block *dst,
 	unsigned int f;
 
 	if (move_right) {
-		f = le16_to_cpu(src->nr_items) - 1;
+		f = le32_to_cpu(src->nr_items) - 1;
 		t = 0;
 	} else {
 		f = 0;
-		t = le16_to_cpu(dst->nr_items);
+		t = le32_to_cpu(dst->nr_items);
 	}
 
-	while (f < le16_to_cpu(src->nr_items) && to_move > 0) {
+	while (f < le32_to_cpu(src->nr_items) && to_move > 0) {
 		from = pos_item(src, f);
 
 		create_item(dst, t, item_key(from), item_key_len(from),
@@ -735,7 +735,7 @@ retry:
 		new = NULL;
 		memset(bt, 0, SCOUTFS_BLOCK_SIZE);
 		bt->hdr.fsid = super->hdr.fsid;
-		bt->free_end = cpu_to_le16(SCOUTFS_BLOCK_SIZE);
+		bt->free_end = cpu_to_le32(SCOUTFS_BLOCK_SIZE);
 	}
 
 	bt->hdr.magic = cpu_to_le32(SCOUTFS_BLOCK_MAGIC_BTREE);
@@ -918,13 +918,13 @@ static int try_merge(struct super_block *sb, struct scoutfs_btree_root *root,
 		update_parent_item(bring, parent, pos, bt);
 
 	/* update or delete sibling's parent item */
-	if (le16_to_cpu(sib->nr_items) == 0)
+	if (le32_to_cpu(sib->nr_items) == 0)
 		delete_item(parent, sib_pos);
 	else if (move_right)
 		update_parent_item(bring, parent, sib_pos, sib);
 
 	/* and finally shrink the tree if our parent is the root with 1 */
-	if (le16_to_cpu(parent->nr_items) == 1) {
+	if (le32_to_cpu(parent->nr_items) == 1) {
 		root->height--;
 		root->ref.blkno = bt->hdr.blkno;
 		root->ref.seq = bt->hdr.seq;
@@ -952,7 +952,7 @@ static int verify_btree_block(struct scoutfs_btree_block *bt, int level)
 	unsigned int i = 0;
 	int bad = 1;
 
-	nr = le16_to_cpu(bt->nr_items);
+	nr = le32_to_cpu(bt->nr_items);
 	if (nr == 0)
 		goto out;
 
@@ -965,7 +965,7 @@ static int verify_btree_block(struct scoutfs_btree_block *bt, int level)
 	}
 
 	for (i = 0; i < nr; i++) {
-		off = le16_to_cpu(bt->item_hdrs[i].off);
+		off = le32_to_cpu(bt->item_hdrs[i].off);
 		if (off >= SCOUTFS_BLOCK_SIZE || off < after_off)
 			goto out;
 
@@ -981,10 +981,10 @@ static int verify_btree_block(struct scoutfs_btree_block *bt, int level)
 		prev = item;
 	}
 
-	if (first_off < le16_to_cpu(bt->free_end))
+	if (first_off < le32_to_cpu(bt->free_end))
 		goto out;
 
-	if ((le16_to_cpu(bt->free_end) + bytes) != SCOUTFS_BLOCK_SIZE)
+	if ((le32_to_cpu(bt->free_end) + bytes) != SCOUTFS_BLOCK_SIZE)
 		goto out;
 
 	bad = 0;
@@ -992,12 +992,12 @@ out:
 	if (bad) {
 		printk("bt %p blkno %llu level %d end %u nr %u (after %u bytes %u)\n",
 			bt, le64_to_cpu(bt->hdr.blkno), level,
-			le16_to_cpu(bt->free_end), le16_to_cpu(bt->nr_items),
+			le32_to_cpu(bt->free_end), le32_to_cpu(bt->nr_items),
 			after_off, bytes);
 		for (i = 0; i < nr; i++) {
 			item = pos_item(bt, i);
 			printk("  [%u] off %u key_len %u val_len %u\n",
-			       i, le16_to_cpu(bt->item_hdrs[i].off),
+			       i, le32_to_cpu(bt->item_hdrs[i].off),
 			       item_key_len(item), item_val_len(item));
 		}
 		BUG_ON(bad);
@@ -1049,9 +1049,9 @@ static int btree_walk(struct super_block *sb, struct scoutfs_btree_root *root,
 	struct scoutfs_btree_block *bt = NULL;
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_ref *ref;
-	unsigned level;
-	unsigned pos;
-	unsigned nr;
+	unsigned int level;
+	unsigned int pos;
+	unsigned int nr;
 	int cmp;
 	int ret;
 
@@ -1139,7 +1139,7 @@ restart:
 		if (level == 0)
 			break;
 
-		nr = le16_to_cpu(bt->nr_items);
+		nr = le32_to_cpu(bt->nr_items);
 
 		/* Find the next child block for the search key. */
 		pos = find_pos(bt, key, key_len, &cmp);
@@ -1423,7 +1423,7 @@ static int btree_iter(struct super_block *sb, struct scoutfs_btree_root *root,
 			pos--;
 
 		/* found the next item in this leaf */
-		if (pos >= 0 && pos < le16_to_cpu(bt->nr_items)) {
+		if (pos >= 0 && pos < le32_to_cpu(bt->nr_items)) {
 			item = pos_item(bt, pos);
 			init_item_ref(iref, item);
 			ret = 0;

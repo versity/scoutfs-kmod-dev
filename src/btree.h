@@ -35,6 +35,12 @@ int scoutfs_btree_update(struct super_block *sb,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
 			 void *val, unsigned val_len);
+int scoutfs_btree_force(struct super_block *sb,
+			struct scoutfs_balloc_allocator *alloc,
+			struct scoutfs_block_writer *wri,
+			struct scoutfs_btree_root *root,
+			void *key, unsigned key_len,
+			void *val, unsigned val_len);
 int scoutfs_btree_delete(struct super_block *sb,
 			 struct scoutfs_balloc_allocator *alloc,
 			 struct scoutfs_block_writer *wri,

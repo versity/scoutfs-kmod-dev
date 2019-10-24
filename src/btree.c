@@ -1116,6 +1116,40 @@ int scoutfs_btree_update(struct super_block *sb,
 }
 
 /*
+ * Create an item, overwriting any item that might exist.  It's _update
+ * which will insert instead of returning -ENOENT.
+ */
+int scoutfs_btree_force(struct super_block *sb,
+			struct scoutfs_balloc_allocator *alloc,
+			struct scoutfs_block_writer *wri,
+			struct scoutfs_btree_root *root,
+			void *key, unsigned key_len,
+			void *val, unsigned val_len)
+{
+	struct scoutfs_btree_block *bt;
+	struct scoutfs_block *bl;
+	int pos;
+	int cmp;
+	int ret;
+
+	if (invalid_item(key, key_len, val_len))
+		return -EINVAL;
+
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT,
+			 key, key_len, val_len, &bl, NULL, NULL);
+	if (ret == 0) {
+		bt = bl->data;
+		pos = find_pos(bt, key, key_len, &cmp);
+		if (cmp == 0)
+			delete_item(bt, pos);
+		create_item(bt, pos, key, key_len, val, val_len);
+		scoutfs_block_put(sb, bl);
+	}
+
+	return ret;
+}
+
+/*
  * Delete an item from the tree.  -ENOENT is returned if the key isn't
  * found.
  */

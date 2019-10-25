@@ -726,6 +726,7 @@ struct scoutfs_net_extent_list {
 
 struct scoutfs_net_lock {
 	struct scoutfs_key key;
+	__le64 write_version;
 	__u8 old_mode;
 	__u8 new_mode;
 } __packed;

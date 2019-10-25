@@ -587,6 +587,7 @@ int scoutfs_lock_grant_response(struct super_block *sb,
 
 	lock->request_pending = 0;
 	lock->mode = nl->new_mode;
+	lock->write_version = le64_to_cpu(nl->write_version);
 
 	if (lock_count_match_exists(nl->new_mode, lock->waiters))
 		extend_grace(sb, lock);

@@ -494,6 +494,8 @@ static int process_waiting_requests(struct super_block *sb,
 	struct client_lock_entry *req_tmp;
 	struct client_lock_entry *gr;
 	struct client_lock_entry *gr_tmp;
+	static atomic64_t write_version = ATOMIC64_INIT(0);
+	u64 wv;
 	int ret;
 
 	BUG_ON(!mutex_is_locked(&snode->mutex));
@@ -542,6 +544,12 @@ static int process_waiting_requests(struct super_block *sb,
 			free_client_entry(inf, snode, gr);
 		} else {
 			nl.old_mode = SCOUTFS_LOCK_NULL;
+		}
+
+		if (nl.new_mode == SCOUTFS_LOCK_WRITE ||
+		    nl.new_mode == SCOUTFS_LOCK_WRITE_ONLY) {
+			wv = atomic64_inc_return(&write_version);
+			nl.write_version = cpu_to_le64(wv);
 		}
 
 		ret = scoutfs_server_lock_response(sb, req->rid,

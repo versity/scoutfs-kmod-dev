@@ -11,8 +11,8 @@
 #define SCOUTFS_LOCK_NR_MODES		SCOUTFS_LOCK_INVALID
 
 /*
- * A few fields (start, end, refresh_gen, granted_mode) are referenced
- * by code outside lock.c.
+ * A few fields (start, end, refresh_gen, write_version, granted_mode)
+ * are referenced by code outside lock.c.
  */
 struct scoutfs_lock {
 	struct super_block *sb;
@@ -21,6 +21,7 @@ struct scoutfs_lock {
 	struct rb_node node;
 	struct rb_node range_node;
 	u64 refresh_gen;
+	u64 write_version;
 	struct list_head lru_head;
 	wait_queue_head_t waitq;
 	struct work_struct shrink_work;

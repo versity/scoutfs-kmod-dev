@@ -24,6 +24,7 @@
 #include "balloc.h"
 #include "block.h"
 #include "forest.h"
+#include "scoutfs_trace.h"
 
 /*
  * scoutfs items are stored in a forest of btrees.  Each mount writes
@@ -342,6 +343,13 @@ static int refresh_bloom_roots(struct super_block *sb,
 
 		scoutfs_block_put(sb, bl);
 
+		trace_scoutfs_forest_bloom_search(sb, &lock->start,
+					be64_to_cpu(ltk.rid),
+					be64_to_cpu(ltk.nr),
+					le64_to_cpu(ltv.bloom_ref.blkno),
+					le64_to_cpu(ltv.bloom_ref.seq),
+					i);
+
 		/* one of the bloom bits wasn't set */
 		if (i != ARRAY_SIZE(bloom.nrs))
 			continue;
@@ -365,6 +373,10 @@ static int refresh_bloom_roots(struct super_block *sb,
 		fr->nr = be64_to_cpu(ltk.nr);
 
 		list_add_tail(&fr->entry, &lpriv->roots);
+
+		trace_scoutfs_forest_add_root(sb, &lock->start, fr->rid,
+				fr->nr, le64_to_cpu(fr->item_root.ref.blkno),
+				le64_to_cpu(fr->item_root.ref.seq));
 	}
 
 	/* add our current log root if a locked writer added it */
@@ -754,6 +766,9 @@ retry:
 		list_for_each_entry_safe(ip, tmp, &list, entry) {
 			fr = ip->fr;
 
+			trace_scoutfs_forest_iter_search(sb, fr->rid, fr->nr,
+							 &ip->pos);
+
 			/* remove once we can't contain any more items */
 			if (!forest_iter_key_before(&ip->pos, &found, fwd) ||
 			    !forest_iter_key_within(&ip->pos, end, fwd)) {
@@ -783,6 +798,11 @@ retry:
 
 			scoutfs_key_from_be(&ip->pos, iref.key);
 			vers = item_vers(lpriv, fr, iref.val);
+
+			trace_scoutfs_forest_iter_found(sb, fr->rid, fr->nr,
+					vers,
+					item_flags(lpriv, fr, iref.val),
+					&ip->pos);
 
 			/* record next earliest item and copy to caller */
 			if (!item_is_deletion(lpriv, fr, iref.val) &&
@@ -818,6 +838,8 @@ unlock:
 	}
 
 out:
+	trace_scoutfs_forest_iter_ret(sb, key, end, fwd, ret,
+				      found_vers, found_copied, &found);
 	if (ret == 0) {
 		/* _next/_prev interfaces modify caller's key :/ */
 		if (found_vers > 0) {
@@ -969,6 +991,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 	struct scoutfs_bloom_block *bb;
 	struct scoutfs_btree_ref *ref;
 	struct forest_bloom_nrs bloom;
+	int nr_set = 0;
 	u64 blkno;
 	int ret;
 	int err;
@@ -1042,8 +1065,16 @@ static int set_lock_bloom_bits(struct super_block *sb,
 	for (i = 0; i < ARRAY_SIZE(bloom.nrs); i++) {
 		if (!test_and_set_bit_le(bloom.nrs[i], bb->bits)) {
 			le64_add_cpu(&bb->total_set, 1);
+			nr_set++;
 		}
 	}
+
+	trace_scoutfs_forest_bloom_set(sb, &lock->start,
+				le64_to_cpu(finf->our_log.rid),
+				le64_to_cpu(finf->our_log.nr),
+				le64_to_cpu(finf->our_log.bloom_ref.blkno),
+				le64_to_cpu(finf->our_log.bloom_ref.seq),
+				nr_set);
 
 	ret = 0;
 unlock:

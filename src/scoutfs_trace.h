@@ -2006,6 +2006,145 @@ TRACE_EVENT(scoutfs_trans_seq_last,
 		  SCSB_TRACE_ARGS, __entry->s_rid, __entry->trans_seq)
 );
 
+DECLARE_EVENT_CLASS(scoutfs_forest_bloom_class,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key,
+		 u64 rid, u64 nr, u64 blkno, u64 seq, unsigned int count),
+	TP_ARGS(sb, key, rid, nr, blkno, seq, count),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		sk_trace_define(key)
+		__field(__u64, b_rid)
+		__field(__u64, nr)
+		__field(__u64, blkno)
+		__field(__u64, seq)
+		__field(unsigned int, count)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		sk_trace_assign(key, key);
+		__entry->b_rid = rid;
+		__entry->nr = nr;
+		__entry->blkno = blkno;
+		__entry->seq = seq;
+		__entry->count = count;
+	),
+	TP_printk(SCSBF" key "SK_FMT" rid %016llx nr %llu blkno %llu seq %llx count %u",
+		  SCSB_TRACE_ARGS, sk_trace_args(key), __entry->b_rid,
+		  __entry->nr, __entry->blkno, __entry->seq, __entry->count)
+);
+DEFINE_EVENT(scoutfs_forest_bloom_class, scoutfs_forest_bloom_set,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key,
+		 u64 rid, u64 nr, u64 blkno, u64 seq, unsigned int count),
+	TP_ARGS(sb, key, rid, nr, blkno, seq, count)
+);
+DEFINE_EVENT(scoutfs_forest_bloom_class, scoutfs_forest_bloom_search,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key,
+		 u64 rid, u64 nr, u64 blkno, u64 seq, unsigned int count),
+	TP_ARGS(sb, key, rid, nr, blkno, seq, count)
+);
+
+TRACE_EVENT(scoutfs_forest_add_root,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, u64 rid,
+		 u64 nr, u64 blkno, u64 seq),
+	TP_ARGS(sb, key, rid, nr, blkno, seq),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		sk_trace_define(key)
+		__field(__u64, b_rid)
+		__field(__u64, nr)
+		__field(__u64, blkno)
+		__field(__u64, seq)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		sk_trace_assign(key, key);
+		__entry->b_rid = rid;
+		__entry->nr = nr;
+		__entry->blkno = blkno;
+		__entry->seq = seq;
+	),
+	TP_printk(SCSBF" key "SK_FMT" rid %016llx nr %llu blkno %llu seq %llx",
+		  SCSB_TRACE_ARGS, sk_trace_args(key),
+		  __entry->b_rid, __entry->nr, __entry->blkno, __entry->seq)
+);
+
+TRACE_EVENT(scoutfs_forest_iter_search,
+	TP_PROTO(struct super_block *sb, u64 rid, u64 nr,
+		 struct scoutfs_key *pos),
+	TP_ARGS(sb, rid, nr, pos),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, b_rid)
+		__field(__u64, nr)
+		sk_trace_define(pos)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->b_rid = rid;
+		__entry->nr = nr;
+		sk_trace_assign(pos, pos);
+	),
+	TP_printk(SCSBF" rid %016llx nr %llu pos "SK_FMT,
+		  SCSB_TRACE_ARGS, __entry->b_rid, __entry->nr,
+		  sk_trace_args(pos))
+);
+
+TRACE_EVENT(scoutfs_forest_iter_found,
+	TP_PROTO(struct super_block *sb, u64 rid, u64 nr, u64 vers,
+		 u8 flags, struct scoutfs_key *key),
+	TP_ARGS(sb, rid, nr, vers, flags, key),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, b_rid)
+		__field(__u64, nr)
+		__field(__u64, vers)
+		__field(__u8, flags)
+		sk_trace_define(key)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->b_rid = rid;
+		__entry->nr = nr;
+		__entry->vers = vers;
+		__entry->flags = flags;
+		sk_trace_assign(key, key);
+	),
+	TP_printk(SCSBF" rid %016llx nr %llu vers %llu flags %x key "SK_FMT,
+		  SCSB_TRACE_ARGS, __entry->b_rid, __entry->nr,
+		  __entry->vers, __entry->flags, sk_trace_args(key))
+);
+
+TRACE_EVENT(scoutfs_forest_iter_ret,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key,
+		 struct scoutfs_key *end, bool forward, int ret,
+		 u64 found_vers, int found_copied, struct scoutfs_key *found),
+	TP_ARGS(sb, key, end, forward, ret, found_vers, found_copied, found),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		sk_trace_define(key)
+		sk_trace_define(end)
+		__field(char, forward)
+		__field(int, ret)
+		__field(__u64, found_vers)
+		__field(int, found_copied)
+		sk_trace_define(found)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		sk_trace_assign(key, key);
+		sk_trace_assign(end, end);
+		__entry->forward = !!forward;
+		__entry->ret = ret;
+		__entry->found_vers = found_vers;
+		__entry->found_copied = found_copied;
+		sk_trace_assign(found, found);
+	),
+	TP_printk(SCSBF" key "SK_FMT" end "SK_FMT" fwd %u ret %d fv %llu fc %d f "SK_FMT,
+		  SCSB_TRACE_ARGS, sk_trace_args(key), sk_trace_args(end),
+		  __entry->forward, __entry->ret, __entry->found_vers,
+		  __entry->found_copied, sk_trace_args(found))
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

@@ -25,6 +25,7 @@
 #include "block.h"
 #include "counters.h"
 #include "msg.h"
+#include "scoutfs_trace.h"
 
 /*
  * The scoutfs block cache manages metadata blocks that can be larger
@@ -85,6 +86,15 @@ struct block_private {
 		void *virt;
 	};
 };
+
+#define TRACE_BLOCK(which, bp)						\
+do {									\
+	__typeof__(bp) _bp = (bp);					\
+	trace_scoutfs_block_##which(_bp->sb, _bp, _bp->bl.blkno,	\
+				   atomic_read(&_bp->refcount),		\
+				   atomic_read(&_bp->io_count),		\
+				   _bp->bits, _bp->lru_moved);		\
+} while (0)
 
 #define BLOCK_PRIVATE(_bl) \
 	container_of((_bl), struct block_private, bl)
@@ -160,6 +170,8 @@ static struct block_private *block_alloc(struct super_block *sb, u64 blkno)
 	set_bit(BLOCK_BIT_NEW, &bp->bits);
 	atomic_set(&bp->io_count, 0);
 
+	TRACE_BLOCK(allocate, bp);
+
 out:
 	if (!bp)
 		scoutfs_inc_counter(sb, block_cache_alloc_failure);
@@ -169,6 +181,8 @@ out:
 static void block_free(struct super_block *sb, struct block_private *bp)
 {
 	scoutfs_inc_counter(sb, block_cache_free);
+
+	TRACE_BLOCK(free, bp);
 
 	if (test_bit(BLOCK_BIT_PAGE_ALLOC, &bp->bits))
 		__free_pages(bp->page, SCOUTFS_BLOCK_PAGE_ORDER);
@@ -235,6 +249,8 @@ static void block_insert(struct super_block *sb, struct block_private *bp,
 	list_add_tail(&bp->lru_entry, &binf->lru_list);
 	bp->lru_moved = ++binf->lru_move_counter;
 	binf->lru_nr++;
+
+	TRACE_BLOCK(insert, bp);
 }
 
 /*
@@ -349,8 +365,10 @@ static void block_bio_end_io(struct bio *bio, int err)
 	struct block_private *bp = bio->bi_private;
 	struct super_block *sb = bp->sb;
 
+
 	block_end_io(sb, bio->bi_rw, bp, err);
 	bio_put(bio);
+	TRACE_BLOCK(end_io, bp);
 	block_put(sb, bp);
 }
 
@@ -392,6 +410,8 @@ static int block_submit_bio(struct super_block *sb, struct block_private *bp,
 
 			atomic_inc(&bp->refcount);
 			atomic_inc(&bp->io_count);
+
+			TRACE_BLOCK(submit, bp);
 		}
 
 		if (test_bit(BLOCK_BIT_PAGE_ALLOC, &bp->bits))
@@ -558,6 +578,7 @@ void scoutfs_block_invalidate(struct super_block *sb, struct scoutfs_block *bl)
 		spin_lock(&binf->lock);
 		block_remove(sb, bp);
 		spin_unlock(&binf->lock);
+		TRACE_BLOCK(invalidate, bp);
 	}
 }
 
@@ -614,6 +635,8 @@ void scoutfs_block_writer_mark_dirty(struct super_block *sb,
 		list_add_tail(&bp->dirty_entry, &wri->dirty_list);
 		wri->nr_dirty_blocks++;
 		spin_unlock(&wri->lock);
+
+		TRACE_BLOCK(mark_dirty, bp);
 	}
 }
 
@@ -687,6 +710,7 @@ static void block_forget(struct super_block *sb,
 	clear_bit(BLOCK_BIT_DIRTY, &bp->bits);
 	list_del_init(&bp->dirty_entry);
 	wri->nr_dirty_blocks--;
+	TRACE_BLOCK(forget, bp);
 	block_put(sb, bp);
 }
 
@@ -792,8 +816,11 @@ static int block_shrink(struct shrinker *shrink, struct shrink_control *sc)
 		if (nr-- == 0)
 			break;
 
+		TRACE_BLOCK(shrink, bp);
+
 		scoutfs_inc_counter(sb, block_cache_shrink);
 		block_remove(sb, bp);
+
 	}
 
 	spin_unlock(&binf->lock);

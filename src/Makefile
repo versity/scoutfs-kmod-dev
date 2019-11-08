@@ -4,6 +4,9 @@ CFLAGS_super.o = -DSCOUTFS_GIT_DESCRIBE=\"$(SCOUTFS_GIT_DESCRIBE)\" \
 		 -DSCOUTFS_FORMAT_HASH=0x$(SCOUTFS_FORMAT_HASH)LLU
 
 CFLAGS_scoutfs_trace.o = -I$(src) # define_trace.h double include
+
+# add EXTRA_CFLAGS defines for kernel compat
+-include $(src)/Makefile.kernelcompat
  
 scoutfs-y +=			\
 	bio.o			\

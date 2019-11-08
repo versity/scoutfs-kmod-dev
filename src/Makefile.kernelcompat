@@ -1,0 +1,7 @@
+#
+# We try to detect the specific api incompatibilities with simple tests
+# because distros regularly backport features without changing the
+# version.
+#
+
+ccflags-y += -include $(src)/kernelcompat.h

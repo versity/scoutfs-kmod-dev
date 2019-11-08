@@ -1,0 +1,4 @@
+#ifndef _SCOUTFS_KERNELCOMPAT_H_
+#define _SCOUTFS_KERNELCOMPAT_H_
+
+#endif

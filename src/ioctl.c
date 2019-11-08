@@ -587,6 +587,13 @@ static long scoutfs_ioc_setattr_more(struct file *file, unsigned long arg)
 	if (ret)
 		goto unlock;
 
+	/* create offline extents in potentially many transactions */
+	if (sm.flags & SCOUTFS_IOC_SETATTR_MORE_OFFLINE) {
+		ret = scoutfs_data_init_offline_extent(inode, sm.i_size, lock);
+		if (ret)
+			goto unlock;
+	}
+
 	/* can only change size/dv on untouched regular files */
 	if ((sm.i_size != 0 || sm.data_version != 0) &&
 	    ((!S_ISREG(inode->i_mode) ||
@@ -602,12 +609,6 @@ static long scoutfs_ioc_setattr_more(struct file *file, unsigned long arg)
 	if (ret)
 		goto unlock;
 
-	if (sm.flags & SCOUTFS_IOC_SETATTR_MORE_OFFLINE) {
-		ret = scoutfs_data_init_offline_extent(inode, sm.i_size, lock);
-		if (ret)
-			goto release;
-	}
-
 	if (sm.data_version)
 		scoutfs_inode_set_data_version(inode, sm.data_version);
 	if (sm.i_size)
@@ -618,7 +619,6 @@ static long scoutfs_ioc_setattr_more(struct file *file, unsigned long arg)
 	scoutfs_update_inode_item(inode, lock, &ind_locks);
 	ret = 0;
 
-release:
 	scoutfs_release_trans(sb);
 unlock:
 	scoutfs_inode_index_unlock(sb, &ind_locks);

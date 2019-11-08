@@ -3,10 +3,6 @@
 
 int scoutfs_client_alloc_inodes(struct super_block *sb, u64 count,
 				u64 *ino, u64 *nr);
-int scoutfs_client_alloc_extent(struct super_block *sb, u64 blocks, u64 *start,
-				u64 *len);
-int scoutfs_client_free_extents(struct super_block *sb,
-				struct scoutfs_net_extent_list *nexl);
 int scoutfs_client_get_log_trees(struct super_block *sb,
 				 struct scoutfs_log_trees *lt);
 int scoutfs_client_commit_log_trees(struct super_block *sb,

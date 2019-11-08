@@ -252,7 +252,7 @@ static inline const struct scoutfs_item_count SIC_WRITE_BEGIN(void)
 	__count_dirty_inode(&cnt);
 
 	cnt.items += nr_free + nr_file;
-	cnt.vals += nr_file * sizeof(struct scoutfs_file_extent);
+	cnt.vals += nr_file;
 
 	return cnt;
 }
@@ -276,22 +276,7 @@ SIC_TRUNC_EXTENT(struct inode *inode)
 		__count_dirty_inode(&cnt);
 
 	cnt.items += nr_file + nr_free;
-	cnt.vals += nr_file * sizeof(struct scoutfs_file_extent);
-
-	return cnt;
-}
-
-/*
- * Returning extents to the server can, at most:
- *  - delete MAX_NR extents with indexed copies
- *  - create an extent for the leftovers of the last extent
- */
-static inline const struct scoutfs_item_count SIC_RETURN_EXTENTS(void)
-{
-	struct scoutfs_item_count cnt = {0,};
-	unsigned int nr = SCOUTFS_NET_EXTENT_LIST_MAX_NR + 1;
-
-	cnt.items += (nr * 2);
+	cnt.vals += nr_file;
 
 	return cnt;
 }
@@ -312,7 +297,7 @@ static inline const struct scoutfs_item_count SIC_FALLOCATE_ONE(void)
 	__count_dirty_inode(&cnt);
 
 	cnt.items += nr_free + nr_file;
-	cnt.vals += nr_file * sizeof(struct scoutfs_file_extent);
+	cnt.vals += nr_file;
 
 	return cnt;
 }
@@ -327,7 +312,6 @@ static inline const struct scoutfs_item_count SIC_SETATTR_MORE(void)
 	__count_dirty_inode(&cnt);
 
 	cnt.items++;
-	cnt.vals += sizeof(struct scoutfs_file_extent);
 
 	return cnt;
 }

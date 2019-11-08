@@ -1,6 +1,9 @@
 #ifndef _SCOUTFS_FOREST_H_
 #define _SCOUTFS_FOREST_H_
 
+struct scoutfs_balloc_allocator;
+struct scoutfs_block_writer;
+
 int scoutfs_forest_lookup(struct super_block *sb, struct scoutfs_key *key,
 			  struct kvec *val, struct scoutfs_lock *lock);
 int scoutfs_forest_lookup_exact(struct super_block *sb,
@@ -36,11 +39,12 @@ int scoutfs_forest_restore(struct super_block *sb, struct list_head *list,
 			   struct scoutfs_lock *lock);
 void scoutfs_forest_free_batch(struct super_block *sb, struct list_head *list);
 
-int scoutfs_forest_get_log_trees(struct super_block *sb);
-bool scoutfs_forest_has_dirty(struct super_block *sb);
-unsigned long scoutfs_forest_dirty_bytes(struct super_block *sb);
-int scoutfs_forest_write(struct super_block *sb);
-int scoutfs_forest_commit(struct super_block *sb);
+void scoutfs_forest_init_btrees(struct super_block *sb,
+				struct scoutfs_balloc_allocator *alloc,
+				struct scoutfs_block_writer *wri,
+				struct scoutfs_log_trees *lt);
+void scoutfs_forest_get_btrees(struct super_block *sb,
+			       struct scoutfs_log_trees *lt);
 
 void scoutfs_forest_clear_lock(struct super_block *sb,
 			       struct scoutfs_lock *lock);

@@ -157,7 +157,7 @@ static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
 	         mode != SCOUTFS_LOCK_NULL);
 
 	/* any transition from a mode allowed to dirty items has to write */
-	if (lock_mode_can_write(prev) && scoutfs_forest_has_dirty(sb)) {
+	if (lock_mode_can_write(prev) && scoutfs_trans_has_dirty(sb)) {
 		ret = scoutfs_trans_sync(sb, 1);
 		if (ret < 0)
 			return ret;

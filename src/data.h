@@ -36,8 +36,17 @@ struct scoutfs_data_wait {
 		.node.__rb_parent_color = (unsigned long)(&nm.node),	\
 	}
 
+struct scoutfs_traced_extent {
+	u64 iblock;
+	u64 count;
+	u64 blkno;
+	u8 flags;
+};
+
 extern const struct address_space_operations scoutfs_file_aops;
 extern const struct file_operations scoutfs_file_fops;
+struct scoutfs_balloc_allocator;
+struct scoutfs_block_writer;
 
 int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 				u64 ino, u64 iblock, u64 last, bool offline,
@@ -62,6 +71,24 @@ void scoutfs_data_wait_changed(struct inode *inode);
 int scoutfs_data_waiting(struct super_block *sb, u64 ino, u64 iblock,
 			 struct scoutfs_ioctl_data_waiting_entry *dwe,
 			 unsigned int nr);
+
+int scoutfs_data_move_alloc_bits(struct super_block *sb,
+				 struct scoutfs_balloc_allocator *alloc,
+				 struct scoutfs_block_writer *wri,
+				 struct scoutfs_balloc_root *dst,
+				 struct scoutfs_balloc_root *src,
+				 __le64 *cursor, u64 min_dst_total);
+int scoutfs_data_add_free_blocks(struct super_block *sb,
+				 struct scoutfs_balloc_allocator *alloc,
+				 struct scoutfs_block_writer *wri,
+				 struct scoutfs_balloc_root *broot,
+				 u64 blkno, u64 count);
+void scoutfs_data_init_btrees(struct super_block *sb,
+			      struct scoutfs_balloc_allocator *alloc,
+			      struct scoutfs_block_writer *wri,
+			      struct scoutfs_log_trees *lt);
+void scoutfs_data_get_btrees(struct super_block *sb,
+			     struct scoutfs_log_trees *lt);
 
 int scoutfs_data_setup(struct super_block *sb);
 void scoutfs_data_destroy(struct super_block *sb);

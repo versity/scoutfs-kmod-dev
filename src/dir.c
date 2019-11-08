@@ -436,28 +436,6 @@ out:
 	return d_splice_alias(inode, dentry);
 }
 
-/* this exists upstream so we can just delete it in a forward port */
-static int dir_emit_dots(struct file *file, void *dirent, filldir_t filldir)
-{
-	struct dentry *dentry = file->f_path.dentry;
-	struct inode *inode = dentry->d_inode;
-	struct inode *parent = dentry->d_parent->d_inode;
-
-	if (file->f_pos == 0) {
-		if (filldir(dirent, ".", 1, 1, scoutfs_ino(inode), DT_DIR))
-			return 0;
-		file->f_pos = 1;
-	}
-
-	if (file->f_pos == 1) {
-		if (filldir(dirent, "..", 2, 1, scoutfs_ino(parent), DT_DIR))
-			return 0;
-		file->f_pos = 2;
-	}
-
-	return 1;
-}
-
 /*
  * readdir simply iterates over the dirent items for the dir inode and
  * uses their offset as the readdir position.
@@ -465,7 +443,8 @@ static int dir_emit_dots(struct file *file, void *dirent, filldir_t filldir)
  * It will need to be careful not to read past the region of the dirent
  * hash offset keys that it has access to.
  */
-static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
+static int KC_DECLARE_READDIR(scoutfs_readdir, struct file *file,
+			      void *dirent, kc_readdir_ctx_t ctx)
 {
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
@@ -478,7 +457,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 	u64 pos;
 	int ret;
 
-	if (!dir_emit_dots(file, dirent, filldir))
+	if (!kc_dir_emit_dots(file, dirent, ctx))
 		return 0;
 
 	dent = alloc_dirent(SCOUTFS_NAME_LEN);
@@ -497,7 +476,7 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 
 	for (;;) {
 		init_dirent_key(&key, SCOUTFS_READDIR_TYPE, scoutfs_ino(inode),
-				file->f_pos, 0);
+				kc_readdir_pos(file, ctx), 0);
 
 		ret = scoutfs_item_next(sb, &key, &last_key, &val, dir_lock);
 		if (ret < 0) {
@@ -511,21 +490,24 @@ static int scoutfs_readdir(struct file *file, void *dirent, filldir_t filldir)
 			scoutfs_corruption(sb, SC_DIRENT_READDIR_NAME_LEN,
 					   corrupt_dirent_readdir_name_len,
 					   "dir_ino %llu pos %llu key "SK_FMT" len %d",
-					   scoutfs_ino(inode), file->f_pos,
+					   scoutfs_ino(inode),
+					   kc_readdir_pos(file, ctx),
 					   SK_ARG(&key), name_len);
 			ret = -EIO;
 			goto out;
 		}
 
 		pos = le64_to_cpu(key.skd_major);
+		kc_readdir_pos(file, ctx) = pos;
 
-		if (filldir(dirent, dent->name, name_len, pos,
-			    le64_to_cpu(dent->ino), dentry_type(dent->type))) {
+		if (!kc_dir_emit(ctx, dent, dent->name, name_len, pos,
+				le64_to_cpu(dent->ino),
+				dentry_type(dent->type))) {
 			ret = 0;
 			break;
 		}
 
-		file->f_pos = pos + 1;
+		kc_readdir_pos(file, ctx) = pos + 1;
 	}
 
 out:
@@ -1737,8 +1719,20 @@ out_unlock:
 	return ret;
 }
 
+#ifdef KC_FMODE_KABI_ITERATE
+/* we only need this to set the iterate flag for kabi :/ */
+static int scoutfs_dir_open(struct inode *inode, struct file *file)
+{
+        file->f_mode |= FMODE_KABI_ITERATE;
+        return 0;
+}
+#endif
+
 const struct file_operations scoutfs_dir_fops = {
-	.readdir	= scoutfs_readdir,
+	.KC_FOP_READDIR	= scoutfs_readdir,
+#ifdef KC_FMODE_KABI_ITERATE
+	.open		= scoutfs_dir_open,
+#endif
 	.unlocked_ioctl	= scoutfs_ioctl,
 	.fsync		= scoutfs_file_fsync,
 	.llseek		= generic_file_llseek,

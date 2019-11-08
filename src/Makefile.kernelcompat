@@ -5,3 +5,32 @@
 #
 
 ccflags-y += -include $(src)/kernelcompat.h
+
+#
+# v3.10-rc6-21-gbb6f619b3a49
+#
+# _readdir changes from fop->readdir() to fop->iterate() and from
+# filldir(dirent) to dir_emit(ctx).
+#
+ifneq (,$(shell grep 'iterate.*dir_context' include/linux/fs.h))
+ccflags-y += -DKC_ITERATE_DIR_CONTEXT
+endif
+
+#
+# v3.10-rc6-23-g5f99f4e79abc
+#
+# Helpers including dir_emit_dots() are added in the process of
+# switching dcache_readdir() from fop->readdir() to fop->iterate()
+#
+ifneq (,$(shell grep 'dir_emit_dots' include/linux/fs.h))
+ccflags-y += -DKC_DIR_EMIT_DOTS
+endif
+
+#
+# RHEL extended the fop struct so to use it we have to set
+# a flag to indicate that the struct is large enough and
+# contains the pointer.
+#
+ifneq (,$(shell grep 'FMODE_KABI_ITERATE' include/linux/fs.h))
+ccflags-y += -DKC_FMODE_KABI_ITERATE
+endif

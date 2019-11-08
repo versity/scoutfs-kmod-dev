@@ -105,11 +105,6 @@ struct scoutfs_key {
 #define skxi_ino	_sk_second
 #define skxi_id		_sk_third
 
-/* node free extent */
-#define sknf_rid	_sk_first
-#define sknf_major	_sk_second
-#define sknf_minor	_sk_third
-
 /* node orphan inode */
 #define sko_rid		_sk_first
 #define sko_ino		_sk_second
@@ -132,9 +127,10 @@ struct scoutfs_key {
 #define sks_ino		_sk_first
 #define sks_nr		_sk_second
 
-/* file extent */
-#define skfe_ino	_sk_first
-#define skfe_last	_sk_second
+/* packed extents */
+#define skpe_ino	_sk_first
+#define skpe_base	_sk_second
+#define skpe_part	_sk_fourth
 
 /*
  * The btree still uses memcmp() to compare keys.  We should fix that
@@ -235,17 +231,31 @@ struct scoutfs_balloc_item_val {
 } __packed;
 
 /*
- * Free extents are stored in the server in an allocation btree.  The
- * type differentiates whether start or length is in stored in the major
- * value and is the primary sort key.  'start' is set to the final block
- * in the extent so that overlaping queries can be done with next
- * instead prev.
+ * Free data blocks are tracked in bitmaps stored in btree items.
  */
-struct scoutfs_extent_btree_key {
+struct scoutfs_block_bitmap_key {
 	__u8 type;
-	__be64 major;
-	__be64 minor;
+	__be64 base;
 } __packed;
+
+#define SCOUTFS_BLOCK_BITMAP_BIG	0
+#define SCOUTFS_BLOCK_BITMAP_LITTLE	1
+
+#define SCOUTFS_PACKED_BITMAP_WORDS	32
+#define SCOUTFS_PACKED_BITMAP_BITS	(SCOUTFS_PACKED_BITMAP_WORDS * 64)
+#define SCOUTFS_PACKED_BITMAP_MAX_BYTES				\
+	    offsetof(struct scoutfs_packed_bitmap,		\
+		     words[SCOUTFS_PACKED_BITMAP_WORDS])
+
+#define SCOUTFS_BLOCK_BITMAP_BITS	SCOUTFS_PACKED_BITMAP_BITS
+#define SCOUTFS_BLOCK_BITMAP_BIT_MASK	(SCOUTFS_PACKED_BITMAP_BITS - 1)
+#define SCOUTFS_BLOCK_BITMAP_BASE_SHIFT	(ilog2(SCOUTFS_PACKED_BITMAP_BITS))
+
+struct scoutfs_packed_bitmap {
+	__le64 present;
+	__le64 set;
+	__le64 words[0];
+};
 
 /*
  * The lock server keeps a persistent record of connected clients so that
@@ -277,11 +287,18 @@ struct scoutfs_mounted_client_btree_val {
 
 #define SCOUTFS_MOUNTED_CLIENT_VOTER	(1 << 0)
 
+/*
+ * XXX I imagine we should rename these now that they've evolved to track
+ * all the btrees that clients use during a transaction.  It's not just
+ * about item logs, it's about clients making changes to trees.
+ */
 struct scoutfs_log_trees {
 	struct scoutfs_balloc_root alloc_root;
 	struct scoutfs_balloc_root free_root;
 	struct scoutfs_btree_root item_root;
 	struct scoutfs_btree_ref bloom_ref;
+	struct scoutfs_balloc_root data_alloc;
+	struct scoutfs_balloc_root data_free;
 	__le64 rid;
 	__le64 nr;
 } __packed;
@@ -296,6 +313,8 @@ struct scoutfs_log_trees_val {
 	struct scoutfs_balloc_root free_root;
 	struct scoutfs_btree_root item_root;
 	struct scoutfs_btree_ref bloom_ref;
+	struct scoutfs_balloc_root data_alloc;
+	struct scoutfs_balloc_root data_free;
 } __packed;
 
 struct scoutfs_log_item_value {
@@ -351,9 +370,7 @@ struct scoutfs_bloom_block {
 #define SCOUTFS_XATTR_INDEX_NAME_TYPE		1
 
 /* rid zone (also used in server alloc btree) */
-#define SCOUTFS_FREE_EXTENT_BLKNO_TYPE		1
-#define SCOUTFS_FREE_EXTENT_BLOCKS_TYPE		2
-#define SCOUTFS_ORPHAN_TYPE			3
+#define SCOUTFS_ORPHAN_TYPE			1
 
 /* fs zone */
 #define SCOUTFS_INODE_TYPE			1
@@ -362,22 +379,44 @@ struct scoutfs_bloom_block {
 #define SCOUTFS_READDIR_TYPE			4
 #define SCOUTFS_LINK_BACKREF_TYPE		5
 #define SCOUTFS_SYMLINK_TYPE			6
-#define SCOUTFS_FILE_EXTENT_TYPE		7
+#define SCOUTFS_PACKED_EXTENT_TYPE		7
 
 /* lock zone, only ever found in lock ranges, never in persistent items */
 #define SCOUTFS_RENAME_TYPE			1
 
 #define SCOUTFS_MAX_TYPE			8 /* power of 2 is efficient */
 
+
 /*
- * File extents have more data than easily fits in the key so we move
- * the non-indexed fields into the value.
+ * The extents that map blocks in a fixed-size logical region of a file
+ * are packed and stored in item values.  The packed extents are
+ * contiguous so the starting logical block is implicit from the length
+ * of previous extents.  Sparse regions are represented by 0 flags and
+ * blkno.  The blkno of a packed extent is encoded as the zigzag (lsb is
+ * sign bit) difference from the last blkno of the previous extent.
+ * This guarantees that non-sparse extents must have a blkno delta of at
+ * least -1/1.  High zero byte aren't stored.
  */
-struct scoutfs_file_extent {
-	__le64 blkno;
-	__le64 len;
-	__u8 flags;
+struct scoutfs_packed_extent {
+	__le16 count;
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u8 diff_bytes:4,
+	     flags:3,
+	     final:1;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+	__u8 final:1,
+	     flags:3,
+	     diff_bytes:4;
+#else
+#error "no {BIG,LITTLE}_ENDIAN_BITFIELD defined?"
+#endif
+	__u8 le_blkno_diff[0];
 } __packed;
+
+#define SCOUTFS_PACKEXT_BLOCKS		(8 * 1024 * 1024 / SCOUTFS_BLOCK_SIZE)
+#define SCOUTFS_PACKEXT_BASE_SHIFT	(ilog2(SCOUTFS_PACKEXT_BLOCKS))
+#define SCOUTFS_PACKEXT_BASE_MASK	(~((__u64)SCOUTFS_PACKEXT_BLOCKS - 1))
+#define SCOUTFS_PACKEXT_MAX_BYTES	SCOUTFS_MAX_VAL_SIZE
 
 #define SEF_OFFLINE	(1 << 0)
 #define SEF_UNWRITTEN	(1 << 1)
@@ -451,8 +490,12 @@ struct scoutfs_super_block {
 	__le64 next_ino;
 	__le64 next_trans_seq;
 	__le64 total_blocks;
-	__le64 next_uninit_free_block;
+	__le64 next_uninit_meta_blkno;
+	__le64 last_uninit_meta_blkno;
+	__le64 next_uninit_data_blkno;
+	__le64 last_uninit_data_blkno;
 	__le64 core_balloc_cursor;
+	__le64 core_data_alloc_cursor;
 	__le64 free_blocks;
 	__le64 first_fs_blkno;
 	__le64 last_fs_blkno;
@@ -463,7 +506,8 @@ struct scoutfs_super_block {
 	struct scoutfs_inet_addr server_addr;
 	struct scoutfs_balloc_root core_balloc_alloc;
 	struct scoutfs_balloc_root core_balloc_free;
-	struct scoutfs_btree_root alloc_root;
+	struct scoutfs_balloc_root core_data_alloc;
+	struct scoutfs_balloc_root core_data_free;
 	struct scoutfs_btree_root fs_root;
 	struct scoutfs_btree_root logs_root;
 	struct scoutfs_btree_root lock_clients;
@@ -653,8 +697,6 @@ struct scoutfs_net_header {
 enum {
 	SCOUTFS_NET_CMD_GREETING = 0,
 	SCOUTFS_NET_CMD_ALLOC_INODES,
-	SCOUTFS_NET_CMD_ALLOC_EXTENT,
-	SCOUTFS_NET_CMD_FREE_EXTENTS,
 	SCOUTFS_NET_CMD_GET_LOG_TREES,
 	SCOUTFS_NET_CMD_COMMIT_LOG_TREES,
 	SCOUTFS_NET_CMD_ADVANCE_SEQ,
@@ -704,25 +746,6 @@ struct scoutfs_net_statfs {
 	__le64 bfree;			/* free blocks */
 	__u8 uuid[SCOUTFS_UUID_BYTES];	/* logical volume uuid */
 } __packed;
-
-struct scoutfs_net_extent {
-	__le64 start;
-	__le64 len;
-} __packed;
-
-struct scoutfs_net_extent_list {
-	__le64 nr;
-	struct {
-		__le64 start;
-		__le64 len;
-	} __packed extents[0];
-} __packed;
-
-#define SCOUTFS_NET_EXTENT_LIST_BYTES(nr) \
-	offsetof(struct scoutfs_net_extent_list, extents[nr])
-
-/* arbitrarily makes a nice ~1k extent list payload */
-#define SCOUTFS_NET_EXTENT_LIST_MAX_NR	64
 
 struct scoutfs_net_lock {
 	struct scoutfs_key key;

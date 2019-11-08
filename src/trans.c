@@ -25,6 +25,8 @@
 #include "counters.h"
 #include "client.h"
 #include "inode.h"
+#include "balloc.h"
+#include "block.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -60,6 +62,10 @@ struct trans_info {
 	unsigned reserved_vals;
 	unsigned holders;
 	bool writing;
+
+	struct scoutfs_log_trees lt;
+	struct scoutfs_balloc_allocator alloc;
+	struct scoutfs_block_writer wri;
 };
 
 #define DECLARE_TRANS_INFO(sb, name) \
@@ -77,6 +83,48 @@ static bool drained_holders(struct trans_info *tri)
 	return drained;
 }
 
+static int commit_btrees(struct super_block *sb)
+{
+	DECLARE_TRANS_INFO(sb, tri);
+	struct scoutfs_log_trees lt;
+
+	lt = tri->lt;
+	lt.alloc_root = tri->alloc.alloc_root;
+	lt.free_root = tri->alloc.free_root;
+	scoutfs_forest_get_btrees(sb, &lt);
+	scoutfs_data_get_btrees(sb, &lt);
+
+	return scoutfs_client_commit_log_trees(sb, &lt);
+}
+
+/*
+ * This gets all the resources from the server that the client will
+ * need during the transaction.
+ */
+int scoutfs_trans_get_log_trees(struct super_block *sb)
+{
+	DECLARE_TRANS_INFO(sb, tri);
+	struct scoutfs_log_trees lt;
+	int ret = 0;
+
+	ret = scoutfs_client_get_log_trees(sb, &lt);
+	if (ret == 0) {
+		tri->lt = lt;
+		scoutfs_balloc_init(&tri->alloc, &lt.alloc_root, &lt.free_root);
+		scoutfs_block_writer_init(sb, &tri->wri);
+
+		scoutfs_forest_init_btrees(sb, &tri->alloc, &tri->wri, &lt);
+		scoutfs_data_init_btrees(sb, &tri->alloc, &tri->wri, &lt);
+	}
+	return ret;
+}
+
+bool scoutfs_trans_has_dirty(struct super_block *sb)
+{
+	DECLARE_TRANS_INFO(sb, tri);
+
+	return scoutfs_block_writer_has_dirty(sb, &tri->wri);
+}
 /*
  * This work func is responsible for writing out all the dirty blocks
  * that make up the current dirty transaction.  It prevents writers from
@@ -113,18 +161,19 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 	wait_event(sbi->trans_hold_wq, drained_holders(tri));
 
-	trace_scoutfs_trans_write_func(sb, scoutfs_forest_dirty_bytes(sb));
+	trace_scoutfs_trans_write_func(sb,
+			scoutfs_block_writer_dirty_bytes(sb, &tri->wri));
 
-	if (scoutfs_forest_has_dirty(sb)) {
+	if (scoutfs_block_writer_has_dirty(sb, &tri->wri)) {
 		if (sbi->trans_deadline_expired)
 			scoutfs_inc_counter(sb, trans_commit_timer);
 
 		ret = scoutfs_inode_walk_writeback(sb, true) ?:
-		      scoutfs_forest_write(sb) ?:
+		      scoutfs_block_writer_write(sb, &tri->wri) ?:
 		      scoutfs_inode_walk_writeback(sb, false) ?:
-		      scoutfs_forest_commit(sb) ?:
+		      commit_btrees(sb) ?:
 		      scoutfs_client_advance_seq(sb, &sbi->trans_seq) ?:
-		      scoutfs_forest_get_log_trees(sb);
+		      scoutfs_trans_get_log_trees(sb);
 		if (ret)
 			goto out;
 
@@ -297,7 +346,8 @@ static bool acquired_hold(struct super_block *sb,
 	vals = tri->reserved_vals + cnt->vals;
 
 	/* XXX arbitrarily limit to 8 meg transactions */
-	if (scoutfs_forest_dirty_bytes(sb) >= (8 * 1024 * 1024)) {
+	if (scoutfs_block_writer_dirty_bytes(sb, &tri->wri) >=
+			(8 * 1024 * 1024)) {
 		scoutfs_inc_counter(sb, trans_commit_full);
 		queue_trans_work(sbi);
 		goto out;
@@ -481,6 +531,7 @@ void scoutfs_shutdown_trans(struct super_block *sb)
 	DECLARE_TRANS_INFO(sb, tri);
 
 	if (tri) {
+		scoutfs_block_writer_forget_all(sb, &tri->wri);
 		if (sbi->trans_write_workq) {
 			cancel_delayed_work_sync(&sbi->trans_write_work);
 			destroy_workqueue(sbi->trans_write_workq);

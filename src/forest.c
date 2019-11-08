@@ -61,8 +61,8 @@
 
 struct forest_info {
 	struct rw_semaphore rwsem;
-	struct scoutfs_balloc_allocator alloc;
-	struct scoutfs_block_writer wri;
+	struct scoutfs_balloc_allocator *alloc;
+	struct scoutfs_block_writer *wri;
 	struct scoutfs_log_trees our_log;
 };
 
@@ -1025,14 +1025,14 @@ static int set_lock_bloom_bits(struct super_block *sb,
 
 	if (!ref->blkno || !scoutfs_block_writer_is_dirty(sb, bl)) {
 
-		ret = scoutfs_balloc_alloc(sb, &finf->alloc, &finf->wri,
+		ret = scoutfs_balloc_alloc(sb, finf->alloc, finf->wri,
 					   &blkno);
 		if (ret < 0)
 			goto unlock;
 
 		new_bl = scoutfs_block_create(sb, blkno);
 		if (IS_ERR(new_bl)) {
-			err = scoutfs_balloc_free(sb, &finf->alloc, &finf->wri,
+			err = scoutfs_balloc_free(sb, finf->alloc, finf->wri,
 						  blkno);
 			BUG_ON(err); /* could have dirtied */
 			ret = PTR_ERR(new_bl);
@@ -1040,7 +1040,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 		}
 
 		if (bl) {
-			err = scoutfs_balloc_free(sb, &finf->alloc, &finf->wri,
+			err = scoutfs_balloc_free(sb, finf->alloc, finf->wri,
 						  le64_to_cpu(ref->blkno));
 			BUG_ON(err); /* could have dirtied */
 			memcpy(new_bl->data, bl->data, SCOUTFS_BLOCK_SIZE);
@@ -1048,7 +1048,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 			memset(new_bl->data, 0, SCOUTFS_BLOCK_SIZE);
 		}
 
-		scoutfs_block_writer_mark_dirty(sb, &finf->wri, new_bl);
+		scoutfs_block_writer_mark_dirty(sb, finf->wri, new_bl);
 
 		scoutfs_block_put(sb, bl);
 		bl = new_bl;
@@ -1165,7 +1165,7 @@ static int forest_insert(struct super_block *sb, struct scoutfs_key *key,
 	scoutfs_key_to_be(&kbe, key);
 
 	down_write(&finf->rwsem);
-	ret = scoutfs_btree_force(sb, &finf->alloc, &finf->wri,
+	ret = scoutfs_btree_force(sb, finf->alloc, finf->wri,
 				  &finf->our_log.item_root, &kbe, sizeof(kbe),
 				  iv->iov_base, iv->iov_len);
 	up_write(&finf->rwsem);
@@ -1249,7 +1249,7 @@ static int forest_delete(struct super_block *sb, struct scoutfs_key *key,
 	liv.flags = SCOUTFS_LOG_ITEM_FLAG_DELETION;
 
 	down_write(&finf->rwsem);
-	ret = scoutfs_btree_force(sb, &finf->alloc, &finf->wri,
+	ret = scoutfs_btree_force(sb, finf->alloc, finf->wri,
 				  &finf->our_log.item_root,
 				  &kbe, sizeof(kbe), &liv, sizeof(liv));
 	up_write(&finf->rwsem);
@@ -1318,69 +1318,41 @@ void scoutfs_forest_free_batch(struct super_block *sb, struct list_head *list)
 
 /*
  * This is called from transactions as a new transaction opens and is
- * serialized with all writers.  Get the tree roots that we'll need
- * for the transaction.
+ * serialized with all writers.
  */
-int scoutfs_forest_get_log_trees(struct super_block *sb)
+void scoutfs_forest_init_btrees(struct super_block *sb,
+				struct scoutfs_balloc_allocator *alloc,
+				struct scoutfs_block_writer *wri,
+				struct scoutfs_log_trees *lt)
 {
 	DECLARE_FOREST_INFO(sb, finf);
-	struct scoutfs_log_trees lt;
-	int ret;
-
-	ret = scoutfs_client_get_log_trees(sb, &lt);
-	if (ret)
-		goto out;
 
 	down_write(&finf->rwsem);
-	scoutfs_balloc_init(&finf->alloc, &lt.alloc_root, &lt.free_root);
-	scoutfs_block_writer_init(sb, &finf->wri);
-	finf->our_log = lt;
+
+	finf->alloc = alloc;
+	finf->wri = wri;
+
+	/* we use the item and bloom trees */
+	memset(&finf->our_log, 0, sizeof(finf->our_log));
+	finf->our_log.item_root = lt->item_root;
+	finf->our_log.bloom_ref = lt->bloom_ref;
+
 	up_write(&finf->rwsem);
-
-	ret = 0;
-out:
-	return ret;
-}
-
-bool scoutfs_forest_has_dirty(struct super_block *sb)
-{
-	DECLARE_FOREST_INFO(sb, finf);
-
-	return scoutfs_block_writer_has_dirty(sb, &finf->wri);
-}
-
-unsigned long scoutfs_forest_dirty_bytes(struct super_block *sb)
-{
-	DECLARE_FOREST_INFO(sb, finf);
-
-	return scoutfs_block_writer_dirty_bytes(sb, &finf->wri);
-}
-
-int scoutfs_forest_write(struct super_block *sb)
-{
-	DECLARE_FOREST_INFO(sb, finf);
-
-	return scoutfs_block_writer_write(sb, &finf->wri);
 }
 
 /*
  * This is called during transaction commit which excludes forest writer
  * calls.  The caller has already written all the dirty blocks that the
- * forest roots reference.
+ * forest roots reference.  They're getting the roots to send to the server
+ * for the commit.
  */
-int scoutfs_forest_commit(struct super_block *sb)
+void scoutfs_forest_get_btrees(struct super_block *sb,
+			       struct scoutfs_log_trees *lt)
 {
 	DECLARE_FOREST_INFO(sb, finf);
-	struct scoutfs_log_trees lt = {
-		.alloc_root = finf->alloc.alloc_root,
-		.free_root = finf->alloc.free_root,
-		.item_root = finf->our_log.item_root,
-		.bloom_ref = finf->our_log.bloom_ref,
-		.rid = finf->our_log.rid,
-		.nr = finf->our_log.nr,
-	};
 
-	return scoutfs_client_commit_log_trees(sb, &lt);
+	lt->item_root = finf->our_log.item_root;
+	lt->bloom_ref = finf->our_log.bloom_ref;
 }
 
 int scoutfs_forest_setup(struct super_block *sb)
@@ -1395,7 +1367,7 @@ int scoutfs_forest_setup(struct super_block *sb)
 		goto out;
 	}
 
-	/* the finf fields will be setup as we open a transaction */ 
+	/* the finf fields will be setup as we open a transaction */
 	init_rwsem(&finf->rwsem);
 
 	sbi->forest_info = finf;
@@ -1413,7 +1385,6 @@ void scoutfs_forest_destroy(struct super_block *sb)
 	struct forest_info *finf = SCOUTFS_SB(sb)->forest_info;
 
 	if (finf) {
-		scoutfs_block_writer_forget_all(sb, &finf->wri);
 		kfree(finf);
 		sbi->forest_info = NULL;
 	}

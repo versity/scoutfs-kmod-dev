@@ -16,6 +16,9 @@ void scoutfs_release_trans(struct super_block *sb);
 void scoutfs_trans_track_item(struct super_block *sb, signed items,
 			      signed vals);
 
+int scoutfs_trans_get_log_trees(struct super_block *sb);
+bool scoutfs_trans_has_dirty(struct super_block *sb);
+
 int scoutfs_setup_trans(struct super_block *sb);
 void scoutfs_shutdown_trans(struct super_block *sb);
 

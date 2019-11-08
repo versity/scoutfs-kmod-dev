@@ -105,11 +105,6 @@
 	EXPAND_COUNTER(quorum_write_block)			\
 	EXPAND_COUNTER(quorum_write_block_error)		\
 	EXPAND_COUNTER(quorum_fenced)				\
-	EXPAND_COUNTER(server_extent_alloc)			\
-	EXPAND_COUNTER(server_extent_alloc_error)		\
-	EXPAND_COUNTER(server_free_extent)			\
-	EXPAND_COUNTER(server_free_pending_extent)		\
-	EXPAND_COUNTER(server_free_pending_error)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\
 	EXPAND_COUNTER(trans_commit_sync_fs)			\

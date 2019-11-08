@@ -34,11 +34,32 @@
 #include "count.h"
 #include "export.h"
 #include "dir.h"
-#include "extents.h"
 #include "server.h"
 #include "net.h"
+#include "data.h"
 
 struct lock_info;
+
+#define STE_FMT "[%llu %llu %llu 0x%x]"
+#define STE_ARGS(te) (te)->iblock, (te)->count, (te)->blkno, (te)->flags
+#define STE_FIELDS(pref)			\
+	__field(__u64, pref##_iblock)		\
+	__field(__u64, pref##_count)		\
+	__field(__u64, pref##_blkno)		\
+	__field(__u8, pref##_flags)
+#define STE_ASSIGN(pref, te)			\
+	__entry->pref##_iblock = (te)->iblock;	\
+	__entry->pref##_count = (te)->count;	\
+	__entry->pref##_blkno = (te)->blkno;	\
+	__entry->pref##_flags = (te)->flags;
+#define STE_ENTRY_ARGS(pref)			\
+	__entry->pref##_iblock,			\
+	__entry->pref##_count,			\
+	__entry->pref##_blkno,			\
+	__entry->pref##_flags
+
+#define DECLARE_TRACED_EXTENT(name) \
+	struct scoutfs_traced_extent name = {0}
 
 TRACE_EVENT(scoutfs_setattr,
 	TP_PROTO(struct dentry *dentry, struct iattr *attr),
@@ -152,15 +173,17 @@ TRACE_EVENT(scoutfs_data_fiemap,
 
 TRACE_EVENT(scoutfs_get_block,
 	TP_PROTO(struct super_block *sb, __u64 ino, __u64 iblock,
-		 int create, int ret, __u64 blkno, size_t size),
+		 int create, struct scoutfs_traced_extent *te,
+		 int ret, __u64 blkno, size_t size),
 
-	TP_ARGS(sb, ino, iblock, create, ret, blkno, size),
+	TP_ARGS(sb, ino, iblock, create, te, ret, blkno, size),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, ino)
 		__field(__u64, iblock)
 		__field(int, create)
+		STE_FIELDS(ext)
 		__field(int, ret)
 		__field(__u64, blkno)
 		__field(size_t, size)
@@ -171,68 +194,58 @@ TRACE_EVENT(scoutfs_get_block,
 		__entry->ino = ino;
 		__entry->iblock = iblock;
 		__entry->create = create;
+		STE_ASSIGN(ext, te)
 		__entry->ret = ret;
 		__entry->blkno = blkno;
 		__entry->size = size;
 	),
 
-	TP_printk(SCSBF" ino %llu iblock %llu create %d ret %d bnr %llu "
-		  "size %zu", SCSB_TRACE_ARGS, __entry->ino, __entry->iblock,
-		  __entry->create, __entry->ret, __entry->blkno, __entry->size)
+	TP_printk(SCSBF" ino %llu iblock %llu create %d ext "STE_FMT" ret %d bnr %llu size %zu",
+		  SCSB_TRACE_ARGS, __entry->ino, __entry->iblock,
+		  __entry->create, STE_ENTRY_ARGS(ext), __entry->ret,
+		  __entry->blkno, __entry->size)
 );
 
-TRACE_EVENT(scoutfs_data_alloc_block,
-	TP_PROTO(struct super_block *sb, struct inode *inode,
-		 struct scoutfs_extent *ext, u64 iblock, u64 len,
-		 u64 online_blocks, u64 offline_blocks),
+TRACE_EVENT(scoutfs_data_file_extent_class,
+	TP_PROTO(struct super_block *sb, __u64 ino,
+		 struct scoutfs_traced_extent *te),
 
-	TP_ARGS(sb, inode, ext, iblock, len, online_blocks, offline_blocks),
+	TP_ARGS(sb, ino, te),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, ino)
-		se_trace_define(ext)
-		__field(__u64, iblock)
-		__field(__u64, len)
-		__field(__u64, online_blocks)
-		__field(__u64, offline_blocks)
+		STE_FIELDS(ext)
 	),
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->ino = scoutfs_ino(inode);
-		se_trace_assign(ext, ext);
-		__entry->iblock = iblock;
-		__entry->len = len;
-		__entry->online_blocks = online_blocks;
-		__entry->offline_blocks = offline_blocks;
+		__entry->ino = ino;
+		STE_ASSIGN(ext, te)
 	),
 
-	TP_printk(SCSBF" ino %llu ext "SE_FMT" iblock %llu len %llu online_blocks %llu offline_blocks %llu",
-		  SCSB_TRACE_ARGS, __entry->ino, se_trace_args(ext),
-		  __entry->iblock, __entry->len, __entry->online_blocks,
-		  __entry->offline_blocks)
+	TP_printk(SCSBF" ino %llu ext "STE_FMT,
+		  SCSB_TRACE_ARGS, __entry->ino, STE_ENTRY_ARGS(ext))
 );
-
-TRACE_EVENT(scoutfs_data_alloc_block_ret,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext, int ret),
-
-	TP_ARGS(sb, ext, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		se_trace_define(ext)
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		se_trace_assign(ext, ext);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" ext "SE_FMT" ret %d", SCSB_TRACE_ARGS,
-		se_trace_args(ext), __entry->ret)
+DEFINE_EVENT(scoutfs_data_file_extent_class, scoutfs_data_alloc_block,
+	TP_PROTO(struct super_block *sb, __u64 ino,
+		 struct scoutfs_traced_extent *te),
+	TP_ARGS(sb, ino, te)
+);
+DEFINE_EVENT(scoutfs_data_file_extent_class, scoutfs_data_prealloc_unwritten,
+	TP_PROTO(struct super_block *sb, __u64 ino,
+		 struct scoutfs_traced_extent *te),
+	TP_ARGS(sb, ino, te)
+);
+DEFINE_EVENT(scoutfs_data_file_extent_class, scoutfs_data_extent_truncated,
+	TP_PROTO(struct super_block *sb, __u64 ino,
+		 struct scoutfs_traced_extent *te),
+	TP_ARGS(sb, ino, te)
+);
+DEFINE_EVENT(scoutfs_data_file_extent_class, scoutfs_data_fiemap_extent,
+	TP_PROTO(struct super_block *sb, __u64 ino,
+		 struct scoutfs_traced_extent *te),
+	TP_ARGS(sb, ino, te)
 );
 
 TRACE_EVENT(scoutfs_data_truncate_items,
@@ -260,10 +273,9 @@ TRACE_EVENT(scoutfs_data_truncate_items,
 
 TRACE_EVENT(scoutfs_data_wait_check,
 	TP_PROTO(struct super_block *sb, __u64 ino, __u64 pos, __u64 len,
-		 __u8 sef, __u8 op, __u64 ext_start, __u64 ext_len,
-		 __u8 ext_flags, int ret),
+		 __u8 sef, __u8 op, struct scoutfs_traced_extent *te, int ret),
 
-	TP_ARGS(sb, ino, pos, len, sef, op, ext_start, ext_len, ext_flags, ret),
+	TP_ARGS(sb, ino, pos, len, sef, op, te, ret),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
@@ -272,9 +284,7 @@ TRACE_EVENT(scoutfs_data_wait_check,
 		__field(__u64, len)
 		__field(__u8, sef)
 		__field(__u8, op)
-		__field(__u64, ext_start)
-		__field(__u64, ext_len)
-		__field(__u8, ext_flags)
+		STE_FIELDS(ext)
 		__field(int, ret)
 	),
 
@@ -285,16 +295,13 @@ TRACE_EVENT(scoutfs_data_wait_check,
 		__entry->len = len;
 		__entry->sef = sef;
 		__entry->op = op;
-		__entry->ext_start = ext_start;
-		__entry->ext_len = ext_len;
-		__entry->ext_flags = ext_flags;
+		STE_ASSIGN(ext, te)
 		__entry->ret = ret;
 	),
 
-	TP_printk(SCSBF" ino %llu pos %llu len %llu sef 0x%x op 0x%x ext_start %llu ext_len %llu ext_flags 0x%x ret %d",
+	TP_printk(SCSBF" ino %llu pos %llu len %llu sef 0x%x op 0x%x ext "STE_FMT" ret %d",
 		  SCSB_TRACE_ARGS, __entry->ino, __entry->pos, __entry->len,
-		  __entry->sef, __entry->op, __entry->ext_start,
-		  __entry->ext_len, __entry->ext_flags, __entry->ret)
+		  __entry->sef, __entry->op, STE_ENTRY_ARGS(ext), __entry->ret)
 );
 
 TRACE_EVENT(scoutfs_sync_fs,
@@ -1586,115 +1593,6 @@ TRACE_EVENT(scoutfs_btree_dirty_block,
 	TP_printk(SCSBF" blkno %llu seq %llu bt_blkno %llu bt_seq %llu",
 		  SCSB_TRACE_ARGS, __entry->blkno, __entry->seq,
 		  __entry->bt_blkno, __entry->bt_seq)
-);
-
-DECLARE_EVENT_CLASS(scoutfs_extent_class,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-
-	TP_ARGS(sb, ext),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		se_trace_define(ext)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		se_trace_assign(ext, ext);
-	),
-
-	TP_printk(SCSBF" ext "SE_FMT,
-		  SCSB_TRACE_ARGS, se_trace_args(ext))
-);
-
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_insert,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_delete,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_next_input,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_next_output,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_prev_input,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_prev_output,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_add,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_extent_remove,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_truncate_next,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_truncate_remove,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_truncate_offline,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_server_extent,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_find_free_extent,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_alloc_block_next,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_block_next,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_get_block_intersection,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_fiemap_extent,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_data_return_server_extent,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_extent_next,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_alloc_extent_allocated,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_free_pending_extent,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
-);
-DEFINE_EVENT(scoutfs_extent_class, scoutfs_server_extent_io,
-	TP_PROTO(struct super_block *sb, struct scoutfs_extent *ext),
-	TP_ARGS(sb, ext)
 );
 
 TRACE_EVENT(scoutfs_online_offline_blocks,

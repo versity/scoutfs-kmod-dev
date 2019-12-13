@@ -118,6 +118,71 @@ TRACE_EVENT(scoutfs_complete_truncate,
 		  __entry->flags)
 );
 
+TRACE_EVENT(scoutfs_data_alloc_blocks,
+	TP_PROTO(struct super_block *sb, struct scoutfs_balloc_root *broot,
+		 u64 base, u8 type, int bit, u64 blkno, u64 count),
+
+	TP_ARGS(sb, broot, base, type, bit, blkno, count),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, root_blkno)
+		__field(__u64, root_seq)
+		__field(__u64, root_total_free)
+		__field(__u64, base)
+		__field(u8, type)
+		__field(int, bit)
+		__field(__u64, blkno)
+		__field(__u64, count)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->root_blkno = le64_to_cpu(broot->root.ref.blkno);
+		__entry->root_seq = le64_to_cpu(broot->root.ref.seq);
+		__entry->root_total_free = le64_to_cpu(broot->total_free);
+		__entry->base = base;
+		__entry->type = type;
+		__entry->bit = bit;
+		__entry->blkno = blkno;
+		__entry->count = count;
+	),
+
+	TP_printk(SCSBF" root_blkno %llu root_seq %llu root_total_free %llu base %llu type %u bit %d blkno %llu count %llu\n",
+		SCSB_TRACE_ARGS, __entry->root_blkno, __entry->root_seq,
+		__entry->root_total_free, __entry->base, __entry->type,
+		__entry->bit, __entry->blkno, __entry->count)
+);
+
+TRACE_EVENT(scoutfs_data_free_blocks,
+	TP_PROTO(struct super_block *sb, struct scoutfs_balloc_root *broot,
+		 u64 blkno, u64 count),
+
+	TP_ARGS(sb, broot, blkno, count),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, root_blkno)
+		__field(__u64, root_seq)
+		__field(__u64, root_total_free)
+		__field(__u64, blkno)
+		__field(__u64, count)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->root_blkno = le64_to_cpu(broot->root.ref.blkno);
+		__entry->root_seq = le64_to_cpu(broot->root.ref.seq);
+		__entry->root_total_free = le64_to_cpu(broot->total_free);
+		__entry->blkno = blkno;
+		__entry->count = count;
+	),
+
+	TP_printk(SCSBF" root_blkno %llu root_seq %llu root_total_free %llu blkno %llu count %llu\n",
+		SCSB_TRACE_ARGS, __entry->root_blkno, __entry->root_seq,
+		__entry->root_total_free, __entry->blkno, __entry->count)
+);
+
 TRACE_EVENT(scoutfs_data_fallocate,
 	TP_PROTO(struct super_block *sb, u64 ino, int mode, loff_t offset,
 		 loff_t len, int ret),

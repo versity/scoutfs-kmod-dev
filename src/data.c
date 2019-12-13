@@ -1085,6 +1085,10 @@ static int alloc_blocks(struct super_block *sb, u64 count, u64 *blkno_ret,
 
 	*blkno_ret = blkno;
 	*count_ret = count;
+
+	trace_scoutfs_data_alloc_blocks(sb, broot, bb->base, bb->type, bit,
+				        blkno, count);
+
 out:
 	kfree(bb);
 	return ret;
@@ -1113,8 +1117,10 @@ static int free_blocks(struct super_block *sb,
 				     &broot->root, SCOUTFS_BLOCK_BITMAP_LITTLE,
 				     blkno, count);
 
-	if (ret == 0)
+	if (ret == 0) {
 		le64_add_cpu(&broot->total_free, count);
+		trace_scoutfs_data_free_blocks(sb, broot, blkno, count);
+	}
 
 	return ret;
 }

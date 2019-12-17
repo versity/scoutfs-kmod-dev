@@ -508,6 +508,7 @@ int scoutfs_setup_trans(struct super_block *sb)
 		return -ENOMEM;
 
 	spin_lock_init(&tri->lock);
+	scoutfs_block_writer_init(sb, &tri->wri);
 
 	sbi->trans_write_workq = alloc_workqueue("scoutfs_trans",
 						 WQ_UNBOUND, 1);

@@ -225,7 +225,7 @@ static inline const struct scoutfs_item_count SIC_XATTR_SET(unsigned old_parts,
 		cnt.items++;
 
 	if (creating) {
-		new_parts = SCOUTFS_XATTR_NR_PARTS(name_len, size)
+		new_parts = SCOUTFS_XATTR_NR_PARTS(name_len, size);
 
 		cnt.items += new_parts;
 		cnt.vals += sizeof(struct scoutfs_xattr) + name_len + size;

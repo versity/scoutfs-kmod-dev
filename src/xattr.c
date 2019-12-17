@@ -270,8 +270,8 @@ static int create_xattr_items(struct inode *inode, u64 id,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
 	unsigned int part_bytes;
+	unsigned int total;
 	struct kvec val;
-	int total;
 	int ret;
 
 	init_xattr_key(&key, scoutfs_ino(inode),
@@ -280,7 +280,8 @@ static int create_xattr_items(struct inode *inode, u64 id,
 	total = 0;
 	ret = 0;
 	while (total < bytes) {
-		part_bytes = min(bytes - total, SCOUTFS_XATTR_MAX_PART_SIZE);
+		part_bytes = min_t(unsigned int, bytes - total,
+				   SCOUTFS_XATTR_MAX_PART_SIZE);
 		kvec_init(&val, (void *)xat + total, part_bytes);
 
 		ret = scoutfs_forest_create(sb, &key, &val, lock);

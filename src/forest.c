@@ -298,6 +298,8 @@ static int refresh_bloom_roots(struct super_block *sb,
 	if (ret)
 		goto out;
 
+	trace_scoutfs_forest_read_super(sb, &super);
+
 	srefs->fs_ref = super.fs_root.ref;
 	srefs->logs_ref = super.logs_root.ref;
 
@@ -1353,6 +1355,9 @@ void scoutfs_forest_get_btrees(struct super_block *sb,
 
 	lt->item_root = finf->our_log.item_root;
 	lt->bloom_ref = finf->our_log.bloom_ref;
+
+	trace_scoutfs_forest_prepare_commit(sb, &lt->item_root.ref,
+					    &lt->bloom_ref);
 }
 
 int scoutfs_forest_setup(struct super_block *sb)

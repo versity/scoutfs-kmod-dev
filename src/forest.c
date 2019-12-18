@@ -517,10 +517,10 @@ static int lock_safe(struct scoutfs_lock *lock, struct scoutfs_key *key,
  * needs to be skipped.
  */
 static int copy_val(struct forest_lock_private *lpriv, struct forest_root *fr,
-		    struct kvec *val, struct scoutfs_btree_item_ref *iref)
+		    struct kvec *val, void *item_val, int item_val_len)
 {
-	void *val_start = iref->val;
-	unsigned int val_len = iref->val_len;
+	void *val_start = item_val;
+	unsigned int val_len = item_val_len;
 	int ret;
 
 	if (!is_fs_root(lpriv, fr)) {
@@ -594,7 +594,8 @@ retry:
 			if (item_is_deletion(lpriv, fr, iref.val))
 				ret = -ENOENT;
 			else
-				ret = copy_val(lpriv, fr, val, &iref);
+				ret = copy_val(lpriv, fr, val,
+					       iref.val, iref.val_len);
 		}
 		scoutfs_btree_put_iref(&iref);
 		read_unlock_forest_root(finf, lpriv, fr);
@@ -652,6 +653,15 @@ static inline void forest_iter_key_advance(struct scoutfs_key *key, bool forward
 		scoutfs_key_dec(key);
 }
 
+static inline int forest_iter_key_cmp(struct scoutfs_key *a,
+				      struct scoutfs_key *b, bool forward)
+{
+	int cmp = scoutfs_key_compare(a, b);
+	if (cmp == 0 || forward)
+		return cmp;
+	return -cmp;
+}
+
 /* returns true if a is before b in the direction of iteration */
 static inline bool forest_iter_key_before(struct scoutfs_key *a,
 					  struct scoutfs_key *b, bool forward)
@@ -683,19 +693,114 @@ static inline int forest_iter_btree_search(struct super_block *sb,
 }
 
 struct forest_iter_pos {
-	struct list_head entry;
+	struct rb_node node;
 	struct forest_root *fr;
-	struct scoutfs_key pos;
+	struct scoutfs_key key;
+	u64 vers;
+	bool deletion;
+	void *val;
+	int val_len;
 };
+
+static struct forest_iter_pos *first_iter_pos(struct rb_root *root)
+{
+	return rb_entry_safe(rb_first(root), struct forest_iter_pos, node);
+}
+
+static struct forest_iter_pos *next_iter_pos(struct forest_iter_pos *ip)
+{
+	return rb_entry_safe(rb_next(&ip->node), struct forest_iter_pos, node);
+}
+
+/*
+ * Sort root iter positions first by missing items, then by key in the
+ * direction if iteration, and then by reverse version.  Thus the first
+ * iter_pos in the rbtree is either a root that needs to check the next
+ * item, a deletion that removes all older versions of the key, or is
+ * the item that iteration should return.
+ */
+static int cmp_iter_pos(struct forest_iter_pos *a, struct forest_iter_pos *b,
+			bool fwd)
+{
+	int cmp;
+
+	if (a->vers == 0)
+		return -1;
+	if (b->vers == 0)
+		return 1;
+
+	cmp = forest_iter_key_cmp(&a->key, &b->key, fwd);
+	if (cmp)
+		return cmp;
+
+	return scoutfs_cmp_u64s(b->vers, a->vers);
+}
+
+/*
+ * There's a sneaky subtlety here.  The fs items have a fake verison of
+ * 1 which can equal a log tree version of 1.  We always iterate over
+ * the fs root last so we try to insert the fake fs item last.  It will
+ * compare equal to the version and will be inserted to the right of the
+ * existing log item.
+ */
+static void insert_iter_pos(struct forest_iter_pos *ins, struct rb_root *root,
+			    bool fwd)
+{
+	struct rb_node **node = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct forest_iter_pos *ip;
+	int cmp;
+
+	while (*node) {
+		parent = *node;
+		ip = container_of(*node, struct forest_iter_pos, node);
+
+		cmp = cmp_iter_pos(ins, ip, fwd);
+		if (cmp < 0)
+			node = &(*node)->rb_left;
+		else
+			node = &(*node)->rb_right;
+	}
+
+	rb_link_node(&ins->node, parent, node);
+	rb_insert_color(&ins->node, root);
+}
+
+/*
+ * clear the version and re-insert the iter_pos so that the next
+ * iteration will search for the next item in the root.
+ */
+static void advance_iter_pos(struct forest_iter_pos *ip, struct rb_root *root,
+			     bool fwd)
+{
+	ip->vers = 0;
+	forest_iter_key_advance(&ip->key, fwd);
+	kfree(ip->val);
+	ip->val = NULL;
+	rb_erase(&ip->node, root);
+	insert_iter_pos(ip, root, fwd);
+}
+
+static void destroy_iter_pos(struct forest_iter_pos *ip, struct rb_root *root)
+{
+	kfree(ip->val);
+	rb_erase(&ip->node, root);
+	kfree(ip);
+}
 
 /*
  * Iterate over items in all the roots looking for the next least
  * non-deletion item in the direction of iteration.  The roots can have
- * any mix of deletion items and item versions.  As we iterate we record
- * the non-deletion item we've seen with the earliest key and the
- * greatest version of that specific key.  We record iteration positions
- * in all btrees and we know we've finished once we've found a possible
- * item to return and all the btrees have checked up to that position.
+ * any combination of item keys, versions, and deletions so we have to
+ * be very careful.
+ *
+ * We store the next item in each root in a node in an rbtree.  The
+ * nodes are sorted by needing to be read, key, then reverse version.
+ * The first node in the rbtree is always a root to search, a deletion
+ * item to remove, or the item that iteration should return.
+ *
+ * btree locking prevents us from holding references to the items in all
+ * the roots so we store copies of the items in the nodes.
  */
 static int forest_iter(struct super_block *sb, struct scoutfs_key *key,
 		       struct scoutfs_key *end, struct kvec *val,
@@ -705,21 +810,17 @@ static int forest_iter(struct super_block *sb, struct scoutfs_key *key,
 	struct forest_lock_private *lpriv;
 	DECLARE_FOREST_INFO(sb, finf);
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct forest_iter_pos *tmp;
-	struct forest_iter_pos *ip;
+	struct rb_root iter_root = RB_ROOT;
+	struct scoutfs_key found_key;
 	struct scoutfs_key_be kbe;
-	struct scoutfs_key found;
+	struct forest_iter_pos *nip;
+	struct forest_iter_pos *ip;
 	struct forest_root *fr;
-	LIST_HEAD(list);
-	int found_copied;
-	u64 found_vers;
-	u64 vers;
+	u64 found_vers = 0;
+	int found_ret = 0;
 	int ret;
 
-	scoutfs_key_set_zeros(&found);
-	found_copied = 0;
-	found_vers = 0;
-	ret = 0;
+	scoutfs_key_set_zeros(&found_key);
 
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_READ)) < 0)
 		goto out;
@@ -743,7 +844,7 @@ static int forest_iter(struct super_block *sb, struct scoutfs_key *key,
 retry:
 	down_read(&lpriv->rwsem);
 
-	/* track iteration position in each btree */
+	/* initialize iter position for each tree */
 	fr = NULL;
 	while (!(ret = for_each_forest_root(lock, lpriv, &fr)) && fr) {
 		ip = kmalloc(sizeof(struct forest_iter_pos), GFP_NOFS);
@@ -753,37 +854,26 @@ retry:
 		}
 
 		ip->fr = fr;
-		forest_iter_set_min(&ip->pos, fwd);
-		list_add_tail(&ip->entry, &list);
+		ip->key = *key;
+		ip->vers = 0;
+		ip->deletion = false;
+		ip->val = NULL;
+		insert_iter_pos(ip, &iter_root, fwd);
 	}
 	if (ret < 0)
 		goto unlock;
 
-	forest_iter_set_max(&found, fwd);
+	scoutfs_key_set_zeros(&found_key);
 	found_vers = 0;
-	found_copied = 0;
+	found_ret = -ENOENT;
 
-	/* check each tree until they've all searched up to found */
-	while (!list_empty(&list)) {
-		list_for_each_entry_safe(ip, tmp, &list, entry) {
-			fr = ip->fr;
+	/* search until we hit the end key on all roots */
+	while ((ip = first_iter_pos(&iter_root))) {
+		fr = ip->fr;
 
-			trace_scoutfs_forest_iter_search(sb, fr->rid, fr->nr,
-							 &ip->pos);
-
-			/* remove once we can't contain any more items */
-			if (!forest_iter_key_before(&ip->pos, &found, fwd) ||
-			    !forest_iter_key_within(&ip->pos, end, fwd)) {
-				list_del(&ip->entry);
-				kfree(ip);
-				continue;
-			}
-
-			/* iter pos key is only set after searching */
-			if (forest_iter_key_before(&ip->pos, key, fwd))
-				scoutfs_key_to_be(&kbe, key);
-			else
-				scoutfs_key_to_be(&kbe, &ip->pos);
+		/* search for the next item in the root */
+		if (ip->vers == 0) {
+			scoutfs_key_to_be(&kbe, &ip->key);
 
 			read_lock_forest_root(finf, lpriv, fr);
 			ret = forest_iter_btree_search(sb, &fr->item_root,
@@ -792,45 +882,69 @@ retry:
 			if (ret < 0)
 				read_unlock_forest_root(finf, lpriv, fr);
 			if (ret == -ENOENT) {
-				forest_iter_set_max(&ip->pos, fwd);
+				destroy_iter_pos(ip, &iter_root);
 				continue;
 			}
 			if (ret < 0)
 				goto unlock;
 
-			scoutfs_key_from_be(&ip->pos, iref.key);
-			vers = item_vers(lpriv, fr, iref.val);
+			scoutfs_key_from_be(&ip->key, iref.key);
+			ip->vers = item_vers(lpriv, fr, iref.val);
+			ip->deletion = item_is_deletion(lpriv, fr, iref.val);
 
-			trace_scoutfs_forest_iter_found(sb, fr->rid, fr->nr,
-					vers,
+			trace_scoutfs_forest_iter_search(sb, fr->rid, fr->nr,
+					ip->vers,
 					item_flags(lpriv, fr, iref.val),
-					&ip->pos);
+					&ip->key);
 
-			/* record next earliest item and copy to caller */
-			if (!item_is_deletion(lpriv, fr, iref.val) &&
-			    forest_iter_key_within(&ip->pos, end, fwd) &&
-			    (forest_iter_key_before(&ip->pos, &found, fwd) ||
-			     (scoutfs_key_compare(&ip->pos, &found) == 0 &&
-			      vers > found_vers))) {
-
-				found = ip->pos;
-				found_vers = vers;
-				found_copied = copy_val(lpriv, fr, val, &iref);
+			if (!forest_iter_key_within(&ip->key, end, fwd)) {
+				/* root is done if next is past end */
+				destroy_iter_pos(ip, &iter_root);
+			} else {
+				kfree(ip->val);
+				ip->val = kmalloc(iref.val_len, GFP_NOFS);
+				if (!ip->val) {
+					ret = -ENOMEM;
+				} else {
+					/* copy item and re-sort its node */
+					memcpy(ip->val, iref.val, iref.val_len);
+					ip->val_len = iref.val_len;
+					rb_erase(&ip->node, &iter_root);
+					insert_iter_pos(ip, &iter_root, fwd);
+				}
 			}
+
 			scoutfs_btree_put_iref(&iref);
 			read_unlock_forest_root(finf, lpriv, fr);
 
-			forest_iter_key_advance(&ip->pos, fwd);
+			if (ret < 0)
+				goto unlock;
+			continue;
 		}
+
+		/* deletions remove all earlier versions and themselves */
+		if (ip->deletion) {
+			while ((nip = next_iter_pos(ip)) &&
+			       !scoutfs_key_compare(&ip->key, &nip->key)) {
+				advance_iter_pos(nip, &iter_root, fwd);
+			}
+			advance_iter_pos(ip, &iter_root, fwd);
+			continue;
+		}
+
+		/* use the first non-deletion across all roots */
+		found_key = ip->key;
+		found_vers = ip->vers;
+		found_ret = copy_val(lpriv, ip->fr, val, ip->val, ip->val_len);
+		break;
 	}
 
 	ret = 0;
 unlock:
 	up_read(&lpriv->rwsem);
 
-	list_for_each_entry_safe(ip, tmp, &list, entry) {
-		list_del(&ip->entry);
-		kfree(ip);
+	rbtree_postorder_for_each_entry_safe(ip, nip, &iter_root, node) {
+		destroy_iter_pos(ip, &iter_root);
 	}
 
 	if (ret == -ESTALE) {
@@ -841,15 +955,13 @@ unlock:
 
 out:
 	trace_scoutfs_forest_iter_ret(sb, key, end, fwd, ret,
-				      found_vers, found_copied, &found);
+				      found_vers, found_ret, &found_key);
+
 	if (ret == 0) {
+		ret = found_ret;
 		/* _next/_prev interfaces modify caller's key :/ */
-		if (found_vers > 0) {
-			*key = found;
-			ret = found_copied;
-		} else {
-			ret = -ENOENT;
-		}
+		if (ret >= 0)
+			*key = found_key;
 	}
 
 	return ret;

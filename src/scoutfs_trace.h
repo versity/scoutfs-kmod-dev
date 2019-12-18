@@ -2079,27 +2079,6 @@ TRACE_EVENT(scoutfs_forest_add_root,
 );
 
 TRACE_EVENT(scoutfs_forest_iter_search,
-	TP_PROTO(struct super_block *sb, u64 rid, u64 nr,
-		 struct scoutfs_key *pos),
-	TP_ARGS(sb, rid, nr, pos),
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, b_rid)
-		__field(__u64, nr)
-		sk_trace_define(pos)
-	),
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->b_rid = rid;
-		__entry->nr = nr;
-		sk_trace_assign(pos, pos);
-	),
-	TP_printk(SCSBF" rid %016llx nr %llu pos "SK_FMT,
-		  SCSB_TRACE_ARGS, __entry->b_rid, __entry->nr,
-		  sk_trace_args(pos))
-);
-
-TRACE_EVENT(scoutfs_forest_iter_found,
 	TP_PROTO(struct super_block *sb, u64 rid, u64 nr, u64 vers,
 		 u8 flags, struct scoutfs_key *key),
 	TP_ARGS(sb, rid, nr, vers, flags, key),
@@ -2127,8 +2106,8 @@ TRACE_EVENT(scoutfs_forest_iter_found,
 TRACE_EVENT(scoutfs_forest_iter_ret,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key *key,
 		 struct scoutfs_key *end, bool forward, int ret,
-		 u64 found_vers, int found_copied, struct scoutfs_key *found),
-	TP_ARGS(sb, key, end, forward, ret, found_vers, found_copied, found),
+		 u64 found_vers, int found_ret, struct scoutfs_key *found),
+	TP_ARGS(sb, key, end, forward, ret, found_vers, found_ret, found),
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		sk_trace_define(key)
@@ -2136,7 +2115,7 @@ TRACE_EVENT(scoutfs_forest_iter_ret,
 		__field(char, forward)
 		__field(int, ret)
 		__field(__u64, found_vers)
-		__field(int, found_copied)
+		__field(int, found_ret)
 		sk_trace_define(found)
 	),
 	TP_fast_assign(
@@ -2146,13 +2125,13 @@ TRACE_EVENT(scoutfs_forest_iter_ret,
 		__entry->forward = !!forward;
 		__entry->ret = ret;
 		__entry->found_vers = found_vers;
-		__entry->found_copied = found_copied;
+		__entry->found_ret = found_ret;
 		sk_trace_assign(found, found);
 	),
 	TP_printk(SCSBF" key "SK_FMT" end "SK_FMT" fwd %u ret %d fv %llu fc %d f "SK_FMT,
 		  SCSB_TRACE_ARGS, sk_trace_args(key), sk_trace_args(end),
 		  __entry->forward, __entry->ret, __entry->found_vers,
-		  __entry->found_copied, sk_trace_args(found))
+		  __entry->found_ret, sk_trace_args(found))
 );
 
 DECLARE_EVENT_CLASS(scoutfs_block_class,

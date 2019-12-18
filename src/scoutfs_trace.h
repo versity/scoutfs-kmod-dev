@@ -2006,6 +2006,53 @@ DEFINE_EVENT(scoutfs_forest_bloom_class, scoutfs_forest_bloom_search,
 	TP_ARGS(sb, key, rid, nr, blkno, seq, count)
 );
 
+TRACE_EVENT(scoutfs_forest_prepare_commit,
+	TP_PROTO(struct super_block *sb, struct scoutfs_btree_ref *item_ref,
+		 struct scoutfs_btree_ref *bloom_ref),
+	TP_ARGS(sb, item_ref, bloom_ref),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, item_blkno)
+		__field(__u64, item_seq)
+		__field(__u64, bloom_blkno)
+		__field(__u64, bloom_seq)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->item_blkno = le64_to_cpu(item_ref->blkno);
+		__entry->item_seq = le64_to_cpu(item_ref->seq);
+		__entry->bloom_blkno = le64_to_cpu(bloom_ref->blkno);
+		__entry->bloom_seq = le64_to_cpu(bloom_ref->seq);
+	),
+	TP_printk(SCSBF" item blkno %llu seq %llu bloom blkno %llu seq %llu",
+		  SCSB_TRACE_ARGS,  __entry->item_blkno, __entry->item_seq,
+		  __entry->bloom_blkno, __entry->bloom_seq)
+);
+
+TRACE_EVENT(scoutfs_forest_read_super,
+	TP_PROTO(struct super_block *sb, struct scoutfs_super_block *super),
+	TP_ARGS(sb, super),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, hdr_seq)
+		__field(__u64, fs_blkno)
+		__field(__u64, fs_seq)
+		__field(__u64, logs_blkno)
+		__field(__u64, logs_seq)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->hdr_seq = le64_to_cpu(super->hdr.seq);
+		__entry->fs_blkno = le64_to_cpu(super->fs_root.ref.blkno);
+		__entry->fs_seq = le64_to_cpu(super->fs_root.ref.seq);
+		__entry->logs_blkno = le64_to_cpu(super->logs_root.ref.blkno);
+		__entry->logs_seq = le64_to_cpu(super->logs_root.ref.seq);
+	),
+	TP_printk(SCSBF" hdr seq %llu fs blkno %llu seq %llu logs blkno %llu seq %llu",
+		  SCSB_TRACE_ARGS, __entry->hdr_seq, __entry->fs_blkno,
+		  __entry->fs_seq, __entry->logs_blkno, __entry->logs_seq)
+);
+
 TRACE_EVENT(scoutfs_forest_add_root,
 	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, u64 rid,
 		 u64 nr, u64 blkno, u64 seq),

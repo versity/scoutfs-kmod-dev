@@ -1,0 +1,10 @@
+FROM centos:7.3.1611
+MAINTAINER support@versity.com
+
+ADD . / ./
+
+RUN yum -c ./docker-ci/yum-repos/CentOS-Vault-7.3.repo --disablerepo=base --disablerepo=updates -y downgrade glibc glibc-common && yum -c ./docker-ci/yum-repos/CentOS-Vault-7.3.repo --disablerepo=base --disablerepo=updates -y install rpm-build redhat-rpm-config make gcc git vi tar unzip rpmlint kernel-devel
+RUN yum clean all
+
+RUN make dist
+RUN rpmbuild --define "kversion 3.10.0-514.el7.x86_64" -tb *.tar

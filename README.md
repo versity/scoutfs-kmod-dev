@@ -5,9 +5,8 @@ from the ground up to support large archival systems.
 
 Its key differentiating features are:
 
- - Integrated consistent indexing to accelerate archival maintenance operations
- - Shared LSM index structure to scale metadata rates with storage bandwidth
- - Decoupled logical locking from serialized device writes to reduce contention
+ - Integrated consistent indexing accelerates archival maintenance operations
+ - Log-structured commits allow nodes to write concurrently without contention
 
 It meets best of breed expectations:
 

@@ -249,6 +249,24 @@ static void calc_bloom_nrs(struct forest_bloom_nrs *bloom,
 	}
 }
 
+static struct scoutfs_block *read_bloom_ref(struct super_block *sb,
+					    struct scoutfs_btree_ref *ref)
+{
+	struct scoutfs_block *bl;
+
+	bl = scoutfs_block_read(sb, le64_to_cpu(ref->blkno));
+	if (IS_ERR(bl))
+		return bl;
+
+	if (!scoutfs_block_consistent_ref(sb, bl, ref->seq, ref->blkno,
+					  SCOUTFS_BLOCK_MAGIC_BLOOM)) {
+		scoutfs_block_put(sb, bl);
+		return ERR_PTR(-ESTALE);
+	}
+
+	return bl;
+}
+
 /*
  * Empty the list of btrees currently stored in the lock and walk the
  * current fs image looking for btrees whose bloom filters indicate that
@@ -331,7 +349,7 @@ static int refresh_bloom_roots(struct super_block *sb,
 		if (ltv.bloom_ref.blkno == 0)
 			continue;
 
-		bl = scoutfs_block_read(sb, le64_to_cpu(ltv.bloom_ref.blkno));
+		bl = read_bloom_ref(sb, &ltv.bloom_ref);
 		if (IS_ERR(bl)) {
 			ret = PTR_ERR(bl);
 			goto out;
@@ -1098,6 +1116,7 @@ out:
 static int set_lock_bloom_bits(struct super_block *sb,
 			       struct scoutfs_lock *lock)
 {
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_FOREST_INFO(sb, finf);
 	struct forest_lock_private *lpriv;
 	struct scoutfs_block *new_bl = NULL;
@@ -1129,7 +1148,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 	ref = &finf->our_log.bloom_ref;
 
 	if (ref->blkno) {
-		bl = scoutfs_block_read(sb, le64_to_cpu(ref->blkno));
+		bl = read_bloom_ref(sb, ref);
 		if (IS_ERR(bl)) {
 			ret = PTR_ERR(bl);
 			goto unlock;
@@ -1170,6 +1189,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 		new_bl = NULL;
 
 		bb->hdr.magic = cpu_to_le32(SCOUTFS_BLOCK_MAGIC_BLOOM);
+		bb->hdr.fsid = super->hdr.fsid;
 		bb->hdr.blkno = cpu_to_le64(blkno);
 		prandom_bytes(&bb->hdr.seq, sizeof(bb->hdr.seq));
 		ref->blkno = bb->hdr.blkno;

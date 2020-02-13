@@ -246,57 +246,6 @@ struct scoutfs_btree_block {
 	struct scoutfs_btree_item_header item_hdrs[0];
 } __packed;
 
-#if 0
-/*
- * Free metadata blocks are tracked by block allocator items.
- */
-struct scoutfs_balloc_root {
-	struct scoutfs_btree_root root;
-	__le64 total_free;
-} __packed;
-struct scoutfs_balloc_item_key {
-	__be64 base;
-} __packed;
-
-#define SCOUTFS_BALLOC_ITEM_BYTES	    256
-#define SCOUTFS_BALLOC_ITEM_U64S	    (SCOUTFS_BALLOC_ITEM_BYTES / \
-					     sizeof(__u64))
-#define SCOUTFS_BALLOC_ITEM_BITS	    (SCOUTFS_BALLOC_ITEM_BYTES * 8)
-#define SCOUTFS_BALLOC_ITEM_BASE_SHIFT	    ilog2(SCOUTFS_BALLOC_ITEM_BITS)
-#define SCOUTFS_BALLOC_ITEM_BIT_MASK	    (SCOUTFS_BALLOC_ITEM_BITS - 1)
-
-struct scoutfs_balloc_item_val {
-	__le64 bits[SCOUTFS_BALLOC_ITEM_U64S];
-} __packed;
-
-/*
- * Free data blocks are tracked in bitmaps stored in btree items.
- */
-struct scoutfs_block_bitmap_key {
-	__u8 type;
-	__be64 base;
-} __packed;
-
-#define SCOUTFS_BLOCK_BITMAP_BIG	0
-#define SCOUTFS_BLOCK_BITMAP_LITTLE	1
-
-#define SCOUTFS_PACKED_BITMAP_WORDS	32
-#define SCOUTFS_PACKED_BITMAP_BITS	(SCOUTFS_PACKED_BITMAP_WORDS * 64)
-#define SCOUTFS_PACKED_BITMAP_MAX_BYTES				\
-	    offsetof(struct scoutfs_packed_bitmap,		\
-		     words[SCOUTFS_PACKED_BITMAP_WORDS])
-
-#define SCOUTFS_BLOCK_BITMAP_BITS	SCOUTFS_PACKED_BITMAP_BITS
-#define SCOUTFS_BLOCK_BITMAP_BIT_MASK	(SCOUTFS_PACKED_BITMAP_BITS - 1)
-#define SCOUTFS_BLOCK_BITMAP_BASE_SHIFT	(ilog2(SCOUTFS_PACKED_BITMAP_BITS))
-
-struct scoutfs_packed_bitmap {
-	__le64 present;
-	__le64 set;
-	__le64 words[0];
-};
-#endif
-
 /*
  * The lock server keeps a persistent record of connected clients so that
  * server failover knows who to wait for before resuming operations.

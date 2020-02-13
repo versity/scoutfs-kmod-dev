@@ -72,19 +72,6 @@ int scoutfs_data_waiting(struct super_block *sb, u64 ino, u64 iblock,
 			 struct scoutfs_ioctl_data_waiting_entry *dwe,
 			 unsigned int nr);
 
-#if 0
-int scoutfs_data_move_alloc_bits(struct super_block *sb,
-				 struct scoutfs_balloc_allocator *alloc,
-				 struct scoutfs_block_writer *wri,
-				 struct scoutfs_balloc_root *dst,
-				 struct scoutfs_balloc_root *src,
-				 __le64 *cursor, u64 min_dst_total);
-int scoutfs_data_add_free_blocks(struct super_block *sb,
-				 struct scoutfs_balloc_allocator *alloc,
-				 struct scoutfs_block_writer *wri,
-				 struct scoutfs_balloc_root *broot,
-				 u64 blkno, u64 count);
-#endif
 void scoutfs_data_init_btrees(struct super_block *sb,
 			      struct scoutfs_radix_allocator *alloc,
 			      struct scoutfs_block_writer *wri,

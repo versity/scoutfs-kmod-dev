@@ -246,6 +246,7 @@ struct scoutfs_btree_block {
 	struct scoutfs_btree_item_header item_hdrs[0];
 } __packed;
 
+#if 0
 /*
  * Free metadata blocks are tracked by block allocator items.
  */
@@ -294,6 +295,7 @@ struct scoutfs_packed_bitmap {
 	__le64 set;
 	__le64 words[0];
 };
+#endif
 
 /*
  * The lock server keeps a persistent record of connected clients so that
@@ -331,12 +333,12 @@ struct scoutfs_mounted_client_btree_val {
  * about item logs, it's about clients making changes to trees.
  */
 struct scoutfs_log_trees {
-	struct scoutfs_balloc_root alloc_root;
-	struct scoutfs_balloc_root free_root;
+	struct scoutfs_radix_root meta_avail;
+	struct scoutfs_radix_root meta_freed;
 	struct scoutfs_btree_root item_root;
 	struct scoutfs_btree_ref bloom_ref;
-	struct scoutfs_balloc_root data_alloc;
-	struct scoutfs_balloc_root data_free;
+	struct scoutfs_radix_root data_avail;
+	struct scoutfs_radix_root data_freed;
 	__le64 rid;
 	__le64 nr;
 } __packed;
@@ -347,12 +349,12 @@ struct scoutfs_log_trees_key {
 } __packed;
 
 struct scoutfs_log_trees_val {
-	struct scoutfs_balloc_root alloc_root;
-	struct scoutfs_balloc_root free_root;
+	struct scoutfs_radix_root meta_avail;
+	struct scoutfs_radix_root meta_freed;
 	struct scoutfs_btree_root item_root;
 	struct scoutfs_btree_ref bloom_ref;
-	struct scoutfs_balloc_root data_alloc;
-	struct scoutfs_balloc_root data_free;
+	struct scoutfs_radix_root data_avail;
+	struct scoutfs_radix_root data_freed;
 } __packed;
 
 struct scoutfs_log_item_value {
@@ -527,25 +529,22 @@ struct scoutfs_super_block {
 	__u8 uuid[SCOUTFS_UUID_BYTES];
 	__le64 next_ino;
 	__le64 next_trans_seq;
-	__le64 total_blocks;
-	__le64 next_uninit_meta_blkno;
-	__le64 last_uninit_meta_blkno;
-	__le64 next_uninit_data_blkno;
-	__le64 last_uninit_data_blkno;
-	__le64 core_balloc_cursor;
-	__le64 core_data_alloc_cursor;
+	__le64 total_meta_blocks;	/* both static and dynamic */
+	__le64 first_meta_blkno;	/* first dynamically allocated */
+	__le64 last_meta_blkno;
+	__le64 total_data_blocks;
+	__le64 first_data_blkno;
+	__le64 last_data_blkno;
 	__le64 free_blocks;
-	__le64 first_fs_blkno;
-	__le64 last_fs_blkno;
 	__le64 quorum_fenced_term;
 	__le64 quorum_server_term;
 	__le64 unmount_barrier;
 	__u8 quorum_count;
 	struct scoutfs_inet_addr server_addr;
-	struct scoutfs_balloc_root core_balloc_alloc;
-	struct scoutfs_balloc_root core_balloc_free;
-	struct scoutfs_balloc_root core_data_alloc;
-	struct scoutfs_balloc_root core_data_free;
+	struct scoutfs_radix_root core_meta_avail;
+	struct scoutfs_radix_root core_meta_freed;
+	struct scoutfs_radix_root core_data_avail;
+	struct scoutfs_radix_root core_data_freed;
 	struct scoutfs_btree_root fs_root;
 	struct scoutfs_btree_root logs_root;
 	struct scoutfs_btree_root lock_clients;

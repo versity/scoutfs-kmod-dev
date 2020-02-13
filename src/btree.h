@@ -3,7 +3,7 @@
 
 #include <linux/uio.h>
 
-struct scoutfs_balloc_allocator;
+struct scoutfs_radix_allocator;
 struct scoutfs_block_writer;
 struct scoutfs_block;
 
@@ -24,25 +24,25 @@ int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_btree_root *root
 			 void *key, unsigned key_len,
 			 struct scoutfs_btree_item_ref *iref);
 int scoutfs_btree_insert(struct super_block *sb,
-			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
 			 void *val, unsigned val_len);
 int scoutfs_btree_update(struct super_block *sb,
-			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
 			 void *val, unsigned val_len);
 int scoutfs_btree_force(struct super_block *sb,
-			struct scoutfs_balloc_allocator *alloc,
+			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
 			void *key, unsigned key_len,
 			void *val, unsigned val_len);
 int scoutfs_btree_delete(struct super_block *sb,
-			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len);
@@ -59,7 +59,7 @@ int scoutfs_btree_before(struct super_block *sb, struct scoutfs_btree_root *root
 		         void *key, unsigned key_len,
 		         struct scoutfs_btree_item_ref *iref);
 int scoutfs_btree_dirty(struct super_block *sb,
-			struct scoutfs_balloc_allocator *alloc,
+			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
 			void *key, unsigned key_len);

@@ -25,7 +25,7 @@
 #include "counters.h"
 #include "client.h"
 #include "inode.h"
-#include "balloc.h"
+#include "radix.h"
 #include "block.h"
 #include "scoutfs_trace.h"
 
@@ -64,7 +64,7 @@ struct trans_info {
 	bool writing;
 
 	struct scoutfs_log_trees lt;
-	struct scoutfs_balloc_allocator alloc;
+	struct scoutfs_radix_allocator alloc;
 	struct scoutfs_block_writer wri;
 };
 
@@ -89,8 +89,8 @@ static int commit_btrees(struct super_block *sb)
 	struct scoutfs_log_trees lt;
 
 	lt = tri->lt;
-	lt.alloc_root = tri->alloc.alloc_root;
-	lt.free_root = tri->alloc.free_root;
+	lt.meta_avail = tri->alloc.avail;
+	lt.meta_freed = tri->alloc.freed;
 	scoutfs_forest_get_btrees(sb, &lt);
 	scoutfs_data_get_btrees(sb, &lt);
 
@@ -110,7 +110,8 @@ int scoutfs_trans_get_log_trees(struct super_block *sb)
 	ret = scoutfs_client_get_log_trees(sb, &lt);
 	if (ret == 0) {
 		tri->lt = lt;
-		scoutfs_balloc_init(&tri->alloc, &lt.alloc_root, &lt.free_root);
+		scoutfs_radix_init_alloc(&tri->alloc, &lt.meta_avail,
+					 &lt.meta_freed);
 		scoutfs_block_writer_init(sb, &tri->wri);
 
 		scoutfs_forest_init_btrees(sb, &tri->alloc, &tri->wri, &lt);

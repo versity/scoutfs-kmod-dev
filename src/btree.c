@@ -27,7 +27,7 @@
 #include "options.h"
 #include "msg.h"
 #include "block.h"
-#include "balloc.h"
+#include "radix.h"
 
 #include "scoutfs_trace.h"
 
@@ -387,7 +387,7 @@ static void move_items(struct scoutfs_btree_block *dst,
  * error.
  */
 static int get_ref_block(struct super_block *sb,
-			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri, int flags,
 			 struct scoutfs_btree_ref *ref,
 			 struct scoutfs_block **bl_ret)
@@ -450,7 +450,7 @@ retry:
 		goto out;
 	}
 
-	ret = scoutfs_balloc_alloc(sb, alloc, wri, &blkno);
+	ret = scoutfs_radix_alloc(sb, alloc, wri, &blkno);
 	if (ret < 0)
 		goto out;
 
@@ -458,7 +458,7 @@ retry:
 
 	new_bl = scoutfs_block_create(sb, blkno);
 	if (IS_ERR(new_bl)) {
-		ret = scoutfs_balloc_free(sb, alloc, wri, blkno);
+		ret = scoutfs_radix_free(sb, alloc, wri, blkno);
 		BUG_ON(ret); /* radix should have been dirty */
 		ret = PTR_ERR(new_bl);
 		goto out;
@@ -546,7 +546,7 @@ static void update_parent_item(struct scoutfs_btree_block *parent,
  * Returns -errno, 0 if nothing done, or 1 if we split.
  */
 static int try_split(struct super_block *sb,
-		     struct scoutfs_balloc_allocator *alloc,
+		     struct scoutfs_radix_allocator *alloc,
 		     struct scoutfs_block_writer *wri,
 		     struct scoutfs_btree_root *root,
 		     void *key, unsigned key_len, unsigned val_len,
@@ -582,8 +582,8 @@ static int try_split(struct super_block *sb,
 	if (!parent) {
 		ret = get_ref_block(sb, alloc, wri, BTW_ALLOC, NULL, &par_bl);
 		if (ret) {
-			err = scoutfs_balloc_free(sb, alloc, wri,
-						  le64_to_cpu(left->hdr.blkno));
+			err = scoutfs_radix_free(sb, alloc, wri,
+						 le64_to_cpu(left->hdr.blkno));
 			BUG_ON(err); /* radix should have been dirty */
 			scoutfs_block_put(sb, left_bl);
 			return ret;
@@ -622,7 +622,7 @@ static int try_split(struct super_block *sb,
  * XXX this could more cleverly chose a merge candidate sibling
  */
 static int try_merge(struct super_block *sb,
-		     struct scoutfs_balloc_allocator *alloc,
+		     struct scoutfs_radix_allocator *alloc,
 		     struct scoutfs_block_writer *wri,
 		     struct scoutfs_btree_root *root,
 		     struct scoutfs_btree_block *parent, unsigned pos,
@@ -676,8 +676,8 @@ static int try_merge(struct super_block *sb,
 	/* update or delete sibling's parent item */
 	if (le32_to_cpu(sib->nr_items) == 0) {
 		delete_item(parent, sib_pos);
-		ret = scoutfs_balloc_free(sb, alloc, wri,
-					  le64_to_cpu(sib->hdr.blkno));
+		ret = scoutfs_radix_free(sb, alloc, wri,
+					 le64_to_cpu(sib->hdr.blkno));
 		BUG_ON(ret); /* could have dirtied alloc to avoid error */
 
 	} else if (move_right) {
@@ -689,8 +689,8 @@ static int try_merge(struct super_block *sb,
 		root->height--;
 		root->ref.blkno = bt->hdr.blkno;
 		root->ref.seq = bt->hdr.seq;
-		ret = scoutfs_balloc_free(sb, alloc, wri,
-					  le64_to_cpu(parent->hdr.blkno));
+		ret = scoutfs_radix_free(sb, alloc, wri,
+					 le64_to_cpu(parent->hdr.blkno));
 		BUG_ON(ret); /* could have dirtied alloc to avoid error */
 	}
 
@@ -803,7 +803,7 @@ static void inc_key(u8 *bytes, unsigned *len)
  * blocks themselves.
  */
 static int btree_walk(struct super_block *sb,
-		      struct scoutfs_balloc_allocator *alloc,
+		      struct scoutfs_radix_allocator *alloc,
 		      struct scoutfs_block_writer *wri,
 		      struct scoutfs_btree_root *root,
 		      int flags, void *key, unsigned key_len,
@@ -1037,7 +1037,7 @@ static bool invalid_item(void *key, unsigned key_len, unsigned val_len)
  * length value.
  */
 int scoutfs_btree_insert(struct super_block *sb,
-			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
@@ -1081,7 +1081,7 @@ int scoutfs_btree_insert(struct super_block *sb,
  * which doesn't fit.
  */
 int scoutfs_btree_update(struct super_block *sb,
-			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len,
@@ -1120,7 +1120,7 @@ int scoutfs_btree_update(struct super_block *sb,
  * which will insert instead of returning -ENOENT.
  */
 int scoutfs_btree_force(struct super_block *sb,
-			struct scoutfs_balloc_allocator *alloc,
+			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
 			void *key, unsigned key_len,
@@ -1154,7 +1154,7 @@ int scoutfs_btree_force(struct super_block *sb,
  * found.
  */
 int scoutfs_btree_delete(struct super_block *sb,
-			 struct scoutfs_balloc_allocator *alloc,
+			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 void *key, unsigned key_len)
@@ -1312,7 +1312,7 @@ int scoutfs_btree_before(struct super_block *sb, struct scoutfs_btree_root *root
  * <0 is returned on error, including -ENOENT if the key isn't present.
  */
 int scoutfs_btree_dirty(struct super_block *sb,
-			struct scoutfs_balloc_allocator *alloc,
+			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
 			void *key, unsigned key_len)

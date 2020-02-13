@@ -118,6 +118,7 @@ TRACE_EVENT(scoutfs_complete_truncate,
 		  __entry->flags)
 );
 
+#if 0
 TRACE_EVENT(scoutfs_data_alloc_blocks,
 	TP_PROTO(struct super_block *sb, struct scoutfs_balloc_root *broot,
 		 u64 base, u8 type, int bit, u64 blkno, u64 count),
@@ -182,6 +183,7 @@ TRACE_EVENT(scoutfs_data_free_blocks,
 		SCSB_TRACE_ARGS, __entry->root_blkno, __entry->root_seq,
 		__entry->root_total_free, __entry->blkno, __entry->count)
 );
+#endif
 
 TRACE_EVENT(scoutfs_data_fallocate,
 	TP_PROTO(struct super_block *sb, u64 ino, int mode, loff_t offset,

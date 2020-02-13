@@ -20,7 +20,7 @@
 #include "tseq.h"
 #include "spbm.h"
 #include "block.h"
-#include "balloc.h"
+#include "radix.h"
 #include "btree.h"
 #include "msg.h"
 #include "scoutfs_trace.h"
@@ -87,7 +87,7 @@ struct lock_server_info {
 	struct scoutfs_tseq_tree tseq_tree;
 	struct dentry *tseq_dentry;
 
-	struct scoutfs_balloc_allocator *alloc;
+	struct scoutfs_radix_allocator *alloc;
 	struct scoutfs_block_writer *wri;
 };
 
@@ -946,7 +946,7 @@ static void lock_server_tseq_show(struct seq_file *m,
  * we time them out.
  */
 int scoutfs_lock_server_setup(struct super_block *sb,
-			      struct scoutfs_balloc_allocator *alloc,
+			      struct scoutfs_radix_allocator *alloc,
 			      struct scoutfs_block_writer *wri)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);

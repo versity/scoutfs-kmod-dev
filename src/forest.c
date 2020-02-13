@@ -21,7 +21,7 @@
 #include "lock.h"
 #include "btree.h"
 #include "client.h"
-#include "balloc.h"
+#include "radix.h"
 #include "block.h"
 #include "forest.h"
 #include "scoutfs_trace.h"
@@ -61,7 +61,7 @@
 
 struct forest_info {
 	struct rw_semaphore rwsem;
-	struct scoutfs_balloc_allocator *alloc;
+	struct scoutfs_radix_allocator *alloc;
 	struct scoutfs_block_writer *wri;
 	struct scoutfs_log_trees our_log;
 };
@@ -1158,22 +1158,21 @@ static int set_lock_bloom_bits(struct super_block *sb,
 
 	if (!ref->blkno || !scoutfs_block_writer_is_dirty(sb, bl)) {
 
-		ret = scoutfs_balloc_alloc(sb, finf->alloc, finf->wri,
-					   &blkno);
+		ret = scoutfs_radix_alloc(sb, finf->alloc, finf->wri, &blkno);
 		if (ret < 0)
 			goto unlock;
 
 		new_bl = scoutfs_block_create(sb, blkno);
 		if (IS_ERR(new_bl)) {
-			err = scoutfs_balloc_free(sb, finf->alloc, finf->wri,
-						  blkno);
+			err = scoutfs_radix_free(sb, finf->alloc, finf->wri,
+						 blkno);
 			BUG_ON(err); /* could have dirtied */
 			ret = PTR_ERR(new_bl);
 			goto unlock;
 		}
 
 		if (bl) {
-			err = scoutfs_balloc_free(sb, finf->alloc, finf->wri,
+			err = scoutfs_radix_free(sb, finf->alloc, finf->wri,
 						  le64_to_cpu(ref->blkno));
 			BUG_ON(err); /* could have dirtied */
 			memcpy(new_bl->data, bl->data, SCOUTFS_BLOCK_SIZE);
@@ -1455,7 +1454,7 @@ void scoutfs_forest_free_batch(struct super_block *sb, struct list_head *list)
  * serialized with all writers.
  */
 void scoutfs_forest_init_btrees(struct super_block *sb,
-				struct scoutfs_balloc_allocator *alloc,
+				struct scoutfs_radix_allocator *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_log_trees *lt)
 {

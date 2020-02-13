@@ -26,7 +26,7 @@
 #include "counters.h"
 #include "inode.h"
 #include "block.h"
-#include "balloc.h"
+#include "radix.h"
 #include "btree.h"
 #include "scoutfs_trace.h"
 #include "msg.h"
@@ -78,7 +78,7 @@ struct server_info {
 	struct list_head farewell_requests;
 	struct work_struct farewell_work;
 
-	struct scoutfs_balloc_allocator alloc;
+	struct scoutfs_radix_allocator alloc;
 	struct scoutfs_block_writer wri;
 
 	struct mutex logs_mutex;
@@ -145,77 +145,6 @@ static inline int wait_for_commit(struct commit_waiter *cw)
 }
 
 /*
- * Add newly initialized free metadata block allocator items to the core
- * block allocator.  This is called as we commit transactions in the
- * server.  It adds many more free blocks than is ever consumed by a
- * transaction so this will stay ahead of the server's block allocation.
- * The intent is to have a low constant overhead to initializing block
- * allocators over time instead of requiring a large amount of IO during
- * mkfs.
- */
-static int add_uninit_balloc_items(struct super_block *sb,
-				   struct server_info *server,
-				   struct scoutfs_super_block *super)
-{
-	u64 next = le64_to_cpu(super->next_uninit_meta_blkno);
-	u64 last = le64_to_cpu(super->last_uninit_meta_blkno);
-	u64 nr;
-	int ret;
-
-	if (next > last)
-		return 0;
-
-	/* next_uninit should always start a new item */
-	if (WARN_ON_ONCE(next & SCOUTFS_BALLOC_ITEM_BIT_MASK))
-		return -EIO;
-
-	nr = min_t(u64, last - next + 1,
-		   round_up(512 * 1024 * 1024 / SCOUTFS_BLOCK_SIZE,
-			    SCOUTFS_BALLOC_ITEM_BITS));
-
-	ret = scoutfs_balloc_add_alloc_bulk(sb, &server->alloc, &server->wri,
-					    next, nr);
-	if (ret == 0)
-		le64_add_cpu(&super->next_uninit_meta_blkno, nr);
-
-	return ret;
-}
-
-/*
- * Add newly initialized free block bitmap items.
- */
-static int add_uninit_data_alloc_items(struct super_block *sb,
-				       struct server_info *server,
-				       struct scoutfs_super_block *super)
-{
-	int nr = 16;
-	u64 next;
-	u64 last;
-	int ret;
-
-	while (nr-- > 0) {
-		next = le64_to_cpu(super->next_uninit_data_blkno);
-		last = le64_to_cpu(super->last_uninit_data_blkno);
-		if (next > last) {
-			ret = 0;
-			break;
-		}
-
-		ret = scoutfs_data_add_free_blocks(sb, &server->alloc,
-						   &server->wri,
-						   &super->core_data_alloc,
-						   next, last - next + 1);
-		if (ret <= 0)
-			break;
-
-		le64_add_cpu(&super->next_uninit_data_blkno, ret);
-		ret = 0;
-	}
-
-	return ret;
-}
-
-/*
  * A core function of request processing is to modify the manifest and
  * allocator.  Often the processing needs to make the modifications
  * persistent before replying.  We'd like to batch these commits as much
@@ -249,22 +178,14 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 
 	down_write(&server->commit_rwsem);
 
-	/* XXX not sure what to do about failure here */
-	ret = add_uninit_balloc_items(sb, server, super);
-	BUG_ON(ret);
-
-	/* XXX not sure what to do about failure here */
-	ret = add_uninit_data_alloc_items(sb, server, super);
-	BUG_ON(ret);
-
 	ret = scoutfs_block_writer_write(sb, &server->wri);
 	if (ret) {
 		scoutfs_err(sb, "server error writing btree blocks: %d", ret);
 		goto out;
 	}
 
-	super->core_balloc_alloc = server->alloc.alloc_root;
-	super->core_balloc_free = server->alloc.free_root;
+	super->core_meta_avail = server->alloc.avail;
+	super->core_meta_freed = server->alloc.freed;
 
 	ret = scoutfs_write_super(sb, super);
 	if (ret) {
@@ -342,10 +263,8 @@ static int server_get_log_trees(struct super_block *sb,
 	struct scoutfs_log_trees_val ltv;
 	struct scoutfs_log_trees lt;
 	struct commit_waiter cw;
-	u64 next_past;
-	u64 at_least;
+	u64 count;
 	u64 target;
-	u64 from;
 	int ret;
 
 	if (arg_len != 0) {
@@ -385,39 +304,37 @@ static int server_get_log_trees(struct super_block *sb,
 		ltk.rid = cpu_to_be64(rid);
 		ltk.nr = cpu_to_be64(1);
 		memset(&ltv, 0, sizeof(ltv));
+		scoutfs_radix_root_init(sb, &ltv.meta_avail, true);
+		scoutfs_radix_root_init(sb, &ltv.meta_freed, true);
+		scoutfs_radix_root_init(sb, &ltv.data_avail, false);
+		scoutfs_radix_root_init(sb, &ltv.data_freed, false);
 	}
 
 	/* ensure client has enough free metadata blocks for a transaction */
 	target = (64*1024*1024) / SCOUTFS_BLOCK_SIZE;
-	while (le64_to_cpu(ltv.alloc_root.total_free) < target) {
-		from = le64_to_cpu(super->core_balloc_cursor);
-		at_least = target - le64_to_cpu(ltv.alloc_root.total_free);
+	if (le64_to_cpu(ltv.meta_avail.ref.sm_total) < target) {
+		count = target - le64_to_cpu(ltv.meta_avail.ref.sm_total);
 
-		ret = scoutfs_balloc_move(sb, &server->alloc, &server->wri,
-					  &ltv.alloc_root,
-					  &server->alloc.alloc_root,
-					  from, at_least, &next_past);
-		if (ret == -ENOENT && from != 0) {
-			super->core_balloc_cursor = 0;
-			continue;
-		}
+		ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+					  &ltv.meta_avail,
+					  &server->alloc.avail,
+					  &server->alloc.avail, count);
 		if (ret < 0)
 			goto unlock;
-
-		super->core_balloc_cursor = cpu_to_le64(next_past);
 	}
 
-	/* fill client's data block allocator */
+	/* ensure client has enough free data blocks for a transaction */
 	target = (2ULL*1024*1024*1024) / SCOUTFS_BLOCK_SIZE;
-	down_write(&server->alloc_rwsem);
-	ret = scoutfs_data_move_alloc_bits(sb, &server->alloc, &server->wri,
-					   &ltv.data_alloc,
-					   &super->core_data_alloc,
-					   &super->core_data_alloc_cursor,
-					   target);
-	up_write(&server->alloc_rwsem);
-	if (ret < 0)
-		goto unlock;
+	if (le64_to_cpu(ltv.data_avail.ref.sm_total) < target) {
+		count = target - le64_to_cpu(ltv.data_avail.ref.sm_total);
+
+		ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+					  &ltv.data_avail,
+					  &super->core_data_avail,
+					  &super->core_data_avail, count);
+		if (ret < 0)
+			goto unlock;
+	}
 
 	/* update client's log tree's item */
 	ret = scoutfs_btree_force(sb, &server->alloc, &server->wri,
@@ -433,12 +350,12 @@ unlock:
 		ret = wait_for_commit(&cw);
 
 	if (ret == 0) {
-		lt.alloc_root = ltv.alloc_root;
-		lt.free_root = ltv.free_root;
+		lt.meta_avail = ltv.meta_avail;
+		lt.meta_freed = ltv.meta_freed;
 		lt.item_root = ltv.item_root;
 		lt.bloom_ref = ltv.bloom_ref;
-		lt.data_alloc = ltv.data_alloc;
-		lt.data_free = ltv.data_free;
+		lt.data_avail = ltv.data_avail;
+		lt.data_freed = ltv.data_freed;
 		lt.rid = be64_to_le64(ltk.rid);
 		lt.nr = be64_to_le64(ltk.nr);
 	}
@@ -497,12 +414,12 @@ static int server_commit_log_trees(struct super_block *sb,
 
 	/* XXX probably want to merge free blocks */
 
-	ltv.alloc_root = lt->alloc_root;
-	ltv.free_root = lt->free_root;
+	ltv.meta_avail = lt->meta_avail;
+	ltv.meta_freed = lt->meta_freed;
 	ltv.item_root = lt->item_root;
 	ltv.bloom_ref = lt->bloom_ref;
-	ltv.data_alloc = lt->data_alloc;
-	ltv.data_free = lt->data_free;
+	ltv.data_avail = lt->data_avail;
+	ltv.data_freed = lt->data_freed;
 
 	ret = scoutfs_btree_update(sb, &server->alloc, &server->wri,
 				   &super->logs_root, &ltk, sizeof(ltk),
@@ -542,12 +459,7 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_log_trees_key ltk;
 	struct scoutfs_log_trees_val ltv;
-	__le64 curs;
-	u64 tot;
 	int ret;
-
-	memset(&ltk, 0, sizeof(ltk));
-	memset(&ltv, 0, sizeof(ltv));
 
 	mutex_lock(&server->logs_mutex);
 	down_write(&server->alloc_rwsem);
@@ -575,21 +487,17 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 		goto out;
 	}
 
-	tot = le64_to_cpu(super->core_data_alloc.total_free) +
-	      le64_to_cpu(ltv.data_alloc.total_free);
-	curs = 0;
-	ret = scoutfs_data_move_alloc_bits(sb, &server->alloc, &server->wri,
-					   &super->core_data_alloc,
-					   &ltv.data_alloc, &curs, tot);
+	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &super->core_data_avail,
+				  &ltv.data_avail, &ltv.data_avail,
+				  le64_to_cpu(ltv.data_avail.ref.sm_total));
 	if (ret < 0)
 		goto out;
 
-	tot = le64_to_cpu(super->core_data_alloc.total_free) +
-	      le64_to_cpu(ltv.data_free.total_free);
-	curs = 0;
-	ret = scoutfs_data_move_alloc_bits(sb, &server->alloc, &server->wri,
-					   &super->core_data_alloc,
-					   &ltv.data_free, &curs, tot);
+	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &super->core_data_avail,
+				  &ltv.data_freed, &ltv.data_freed,
+				  le64_to_cpu(ltv.data_freed.ref.sm_total));
 out:
 	up_write(&server->alloc_rwsem);
 	mutex_unlock(&server->logs_mutex);
@@ -801,7 +709,9 @@ static int server_statfs(struct super_block *sb,
 		spin_unlock(&sbi->next_ino_lock);
 
 		down_read(&server->alloc_rwsem);
-		nstatfs.total_blocks = super->total_blocks;
+		nstatfs.total_blocks = super->total_meta_blocks;
+		le64_add_cpu(&nstatfs.total_blocks,
+			     le64_to_cpu(super->total_data_blocks));
 		nstatfs.bfree = super->free_blocks;
 		up_read(&server->alloc_rwsem);
 		ret = 0;
@@ -1408,8 +1318,8 @@ static void scoutfs_server_worker(struct work_struct *work)
 	if (ret < 0)
 		goto shutdown;
 
-	scoutfs_balloc_init(&server->alloc, &super->core_balloc_alloc,
-			    &super->core_balloc_free);
+	scoutfs_radix_init_alloc(&server->alloc, &super->core_meta_avail,
+				 &super->core_meta_freed);
 	scoutfs_block_writer_init(sb, &server->wri);
 
 	ret = scoutfs_lock_server_setup(sb, &server->alloc, &server->wri);

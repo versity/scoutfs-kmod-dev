@@ -38,6 +38,7 @@
 #include "file.h"
 #include "msg.h"
 #include "count.h"
+#include "radix.h"
 
 /*
  * Logical file blocks are mapped to device blocks with extents stored
@@ -53,33 +54,17 @@
  * modified they can be packed back into the item.  Typically there are
  * very few extents that cover the region.
  *
- * Free blocks are tracked with bitmaps that are stored in items.  Again
- * the bitmaps are stored in a packed form and operated on in memory in
- * a native form.  Only 64bit words with a mix of set and clear bits are
- * stored.  The bitmaps are translated into long bitmaps in memory so we
- * can use the kernel's long bitmap interfaces.
- *
- * There are two types of bitmap items: little bitmap bits track
- * individual blocks and large bitmap bits track full little bitmap
- * items.  The logical packed extent item and little bitmap item sizes
- * are chosen such that a full little bitmap represents a full packed
- * extent item so we can allocate maximum size extents from the large
- * bitmap bits.
- *
- * The client is given a tree of free block bitmap items from the server
- * at the start of each transaction.  The client allocates from items in
- * an allocation tree and frees into items in a free tree.  The server
- * is responsible for filling the alloc tree and reclaiming the free
- * tree as transactions are opened and committed.
+ * The client is given a radix allocator with trees for allocating
+ * blocks and recording frees at the start of each transaction.
  */
 
 struct data_info {
 	struct super_block *sb;
 	struct rw_semaphore alloc_rwsem;
-	struct scoutfs_balloc_allocator *alloc;
+	struct scoutfs_radix_allocator *alloc;
 	struct scoutfs_block_writer *wri;
-	struct scoutfs_balloc_root data_alloc;
-	struct scoutfs_balloc_root data_free;
+	struct scoutfs_radix_root data_avail;
+	struct scoutfs_radix_root data_freed;
 };
 
 #define DECLARE_DATA_INFO(sb, name) \
@@ -140,11 +125,6 @@ static u64 ext_last(struct unpacked_extent *ext)
 	return ext->iblock + ext->count - 1;
 }
 
-static u64 bitmap_base(u64 blkno)
-{
-	return blkno >> SCOUTFS_BLOCK_BITMAP_BASE_SHIFT;
-}
-
 /* The first possible iblock in an item that contains the given iblock */
 static u64 first_iblock(u64 iblock)
 {
@@ -163,8 +143,8 @@ static u64 last_iblock(u64 iblock)
  * flags.
  *
  * We also require that a given extent's allocation be from only one
- * bitmap item because the block bitmap clearing functions only operate
- * on one item.
+ * radix bitmap leaf block because the radix freeing functions only
+ * operate on one leaf block.
  */
 static bool extents_merge(struct unpacked_extent *left,
 			  struct unpacked_extent *right)
@@ -173,7 +153,8 @@ static bool extents_merge(struct unpacked_extent *left,
 	       ((!left->blkno && !right->blkno) ||
 	        (left->blkno + left->count == right->blkno)) &&
 	       (left->flags == right->flags) &&
-	       (bitmap_base(left->blkno) == bitmap_base(right->blkno));
+	       (scoutfs_radix_bit_leaf_nr(left->blkno) ==
+	        scoutfs_radix_bit_leaf_nr(right->blkno + right->count - 1));
 }
 
 static struct unpacked_extent *first_extent(struct unpacked_extents *unpe)
@@ -708,6 +689,7 @@ static int set_extent(struct super_block *sb, struct inode *inode,
 	return 0;
 }
 
+#if 0
 static bool block_bitmap_fits(u64 blkno, u64 count)
 {
 	return ((blkno & SCOUTFS_BLOCK_BITMAP_BIT_MASK) + count) <=
@@ -1298,6 +1280,7 @@ int scoutfs_data_add_free_blocks(struct super_block *sb,
 
 	return ret;
 }
+#endif
 
 /*
  * Find and remove or mark offline the block mappings that intersect
@@ -1350,7 +1333,10 @@ static s64 truncate_extents(struct super_block *sb, struct inode *inode,
 
 		if (ext->blkno) {
 			down_write(&datinf->alloc_rwsem);
-			err = free_blocks(sb, &datinf->data_free, blkno, count);
+			err = scoutfs_radix_free_data(sb, datinf->alloc,
+						      datinf->wri,
+						      &datinf->data_freed,
+						      blkno, count);
 			up_write(&datinf->alloc_rwsem);
 			if (err < 0) {
 				ret = err;
@@ -1482,11 +1468,11 @@ static int alloc_block(struct super_block *sb, struct inode *inode,
 	const u64 ino = scoutfs_ino(inode);
 	struct scoutfs_traced_extent te;
 	u64 blkno = 0;
-	u64 count;
 	u64 online;
 	u64 offline;
 	u64 last;
 	u8 flags;
+	int count;
 	int ret;
 	int err;
 
@@ -1517,11 +1503,13 @@ static int alloc_block(struct super_block *sb, struct inode *inode,
 
 	/* only strictly contiguous extending writes will try to preallocate */
 	if (iblock > 1 && iblock == online)
-		count = min(iblock, count);
+		count = min_t(u64, iblock, count);
 	else
 		count = 1;
 
-	ret = alloc_blocks(sb, count, &blkno, &count);
+	ret = scoutfs_radix_alloc_data(sb, datinf->alloc, datinf->wri,
+				       &datinf->data_avail, count, &blkno,
+				       &count);
 	if (ret < 0)
 		goto out;
 
@@ -1551,7 +1539,9 @@ static int alloc_block(struct super_block *sb, struct inode *inode,
 
 out:
 	if (ret < 0 && blkno > 0) {
-		err = free_blocks(sb, &datinf->data_alloc, blkno, count);
+		err = scoutfs_radix_free_data(sb, datinf->alloc, datinf->wri,
+					      &datinf->data_freed,
+					      blkno, count);
 		BUG_ON(err); /* leaked free blocks */
 	}
 
@@ -1946,7 +1936,7 @@ static int fallocate_extents(struct super_block *sb, struct inode *inode,
 	struct unpacked_extent *ext;
 	u8 ext_fl;
 	u64 blkno;
-	u64 count;
+	int count;
 	int done;
 	int ret;
 	int err;
@@ -1971,7 +1961,8 @@ static int fallocate_extents(struct super_block *sb, struct inode *inode,
 
 		} else if (ext->iblock <= iblock && ext->blkno) {
 			/* skip portion of allocated extent */
-			count = min(count, ext->count - (iblock - ext->iblock));
+			count = min_t(u64, count,
+				      ext->count - (iblock - ext->iblock));
 			iblock += count;
 			done += count;
 			ext = next_extent(ext);
@@ -1979,23 +1970,28 @@ static int fallocate_extents(struct super_block *sb, struct inode *inode,
 
 		} else if (ext->iblock <= iblock && !ext->blkno) {
 			/* alloc portion of unallocated extent */
-			count = min(count, ext->count - (iblock - ext->iblock));
+			count = min_t(u64, count,
+				      ext->count - (iblock - ext->iblock));
 			ext_fl = ext->flags;
 
 		} else if (iblock < ext->iblock) {
 			/* alloc hole until next extent */
-			count = min(count, ext->iblock - iblock);
+			count = min_t(u64, count, ext->iblock - iblock);
 		}
 
 		down_write(&datinf->alloc_rwsem);
 
-		ret = alloc_blocks(sb, count, &blkno, &count);
+		ret = scoutfs_radix_alloc_data(sb, datinf->alloc, datinf->wri,
+					       &datinf->data_avail, count,
+					       &blkno, &count);
 		if (ret == 0) {
 			ret = set_extent(sb, inode, ino, unpe, iblock, blkno,
 					 count, ext_fl | SEF_UNWRITTEN);
 			if (ret < 0) {
-				err = free_blocks(sb, &datinf->data_alloc,
-						  blkno, count);
+				err = scoutfs_radix_free_data(sb, datinf->alloc,
+							datinf->wri,
+							&datinf->data_avail,
+							blkno, count);
 				BUG_ON(err); /* inconsistent */
 			}
 		}
@@ -2576,7 +2572,7 @@ const struct file_operations scoutfs_file_fops = {
 };
 
 void scoutfs_data_init_btrees(struct super_block *sb,
-			      struct scoutfs_balloc_allocator *alloc,
+			      struct scoutfs_radix_allocator *alloc,
 			      struct scoutfs_block_writer *wri,
 			      struct scoutfs_log_trees *lt)
 {
@@ -2586,8 +2582,8 @@ void scoutfs_data_init_btrees(struct super_block *sb,
 
 	datinf->alloc = alloc;
 	datinf->wri = wri;
-	datinf->data_alloc = lt->data_alloc;
-	datinf->data_free = lt->data_free;
+	datinf->data_avail = lt->data_avail;
+	datinf->data_freed = lt->data_freed;
 
 	up_write(&datinf->alloc_rwsem);
 }
@@ -2599,8 +2595,8 @@ void scoutfs_data_get_btrees(struct super_block *sb,
 
 	down_read(&datinf->alloc_rwsem);
 
-	lt->data_alloc = datinf->data_alloc;
-	lt->data_free = datinf->data_free;
+	lt->data_avail = datinf->data_avail;
+	lt->data_freed = datinf->data_freed;
 
 	up_read(&datinf->alloc_rwsem);
 }

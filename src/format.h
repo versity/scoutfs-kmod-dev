@@ -8,6 +8,7 @@
 #define SCOUTFS_BLOCK_MAGIC_SUPER	0x103c428b
 #define SCOUTFS_BLOCK_MAGIC_BTREE	0xe597f96d
 #define SCOUTFS_BLOCK_MAGIC_BLOOM	0x31995604
+#define SCOUTFS_BLOCK_MAGIC_RADIX	0xebeb5e65
 
 /*
  * The super block and btree blocks are fixed 4k.
@@ -131,6 +132,43 @@ struct scoutfs_key {
 #define skpe_ino	_sk_first
 #define skpe_base	_sk_second
 #define skpe_part	_sk_fourth
+
+struct scoutfs_radix_block {
+	struct scoutfs_block_header hdr;
+	__le32 sm_first;
+	__le32 lg_first;
+	union {
+		struct scoutfs_radix_ref {
+			__le64 blkno;
+			__le64 seq;
+			__le64 sm_total;
+			__le64 lg_total;
+		} __packed refs[0];
+		__le64 bits[0];
+	} __packed;
+} __packed;
+
+struct scoutfs_radix_root {
+	__u8 height;
+	__le64 next_find_bit;
+	struct scoutfs_radix_ref ref;
+} __packed;
+
+#define SCOUTFS_RADIX_REFS \
+	((SCOUTFS_BLOCK_SIZE - offsetof(struct scoutfs_radix_block, refs[0])) /\
+		sizeof(struct scoutfs_radix_ref))
+
+/* 8 meg regions with 4k data blocks */
+#define SCOUTFS_RADIX_LG_SHIFT	11
+#define SCOUTFS_RADIX_LG_BITS	(1 << SCOUTFS_RADIX_LG_SHIFT)
+#define SCOUTFS_RADIX_LG_MASK	(SCOUTFS_RADIX_LG_BITS - 1)
+
+/* round block bits down to a multiple of large ranges */
+#define SCOUTFS_RADIX_BITS					\
+	(((SCOUTFS_BLOCK_SIZE -					\
+	   offsetof(struct scoutfs_radix_block, bits[0])) * 8) &	\
+	 ~(__u64)SCOUTFS_RADIX_LG_MASK)
+#define SCOUTFS_RADIX_BITS_BYTES (SCOUTFS_RADIX_BITS / 8)
 
 /*
  * The btree still uses memcmp() to compare keys.  We should fix that

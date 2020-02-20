@@ -2191,6 +2191,11 @@ DEFINE_EVENT(scoutfs_block_class, scoutfs_block_invalidate,
 		 int refcount, int io_count, unsigned long bits, u64 lru_moved),
 	TP_ARGS(sb, bp, blkno, refcount, io_count, bits, lru_moved)
 );
+DEFINE_EVENT(scoutfs_block_class, scoutfs_block_move,
+	TP_PROTO(struct super_block *sb, void *bp, u64 blkno,
+		 int refcount, int io_count, unsigned long bits, u64 lru_moved),
+	TP_ARGS(sb, bp, blkno, refcount, io_count, bits, lru_moved)
+);
 DEFINE_EVENT(scoutfs_block_class, scoutfs_block_mark_dirty,
 	TP_PROTO(struct super_block *sb, void *bp, u64 blkno,
 		 int refcount, int io_count, unsigned long bits, u64 lru_moved),

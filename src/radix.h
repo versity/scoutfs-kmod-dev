@@ -32,7 +32,7 @@ int scoutfs_radix_merge(struct super_block *sb,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_radix_root *dst,
 			struct scoutfs_radix_root *src,
-			struct scoutfs_radix_root *inp, u64 count);
+			struct scoutfs_radix_root *inp, bool meta, u64 count);
 void scoutfs_radix_init_alloc(struct scoutfs_radix_allocator *alloc,
 			      struct scoutfs_radix_root *avail,
 			      struct scoutfs_radix_root *freed);

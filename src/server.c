@@ -265,8 +265,14 @@ out:
 }
 
 /*
- * Give the client references to stable persistent trees that they'll
- * use to write their next transaction.
+ * Give the client roots to all the trees that they'll use to build
+ * their transaction.
+ *
+ * We make sure that their alloc trees have sufficient blocks to
+ * allocate metadata and data for the transaction.  We merge their freed
+ * trees back into the core allocators.  They're were committed with the
+ * previous transaction so they're stable and can now be reused, even by
+ * the server in this commit.
  */
 static int server_get_log_trees(struct super_block *sb,
 				struct scoutfs_net_connection *conn,
@@ -326,6 +332,17 @@ static int server_get_log_trees(struct super_block *sb,
 		scoutfs_radix_root_init(sb, &ltv.data_avail, false);
 		scoutfs_radix_root_init(sb, &ltv.data_freed, false);
 	}
+
+	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &server->alloc.avail,
+				  &ltv.meta_freed, &ltv.meta_freed,
+				  le64_to_cpu(ltv.meta_freed.ref.sm_total)) ?:
+	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &super->core_data_avail,
+				  &ltv.data_freed, &ltv.data_freed,
+				  le64_to_cpu(ltv.data_freed.ref.sm_total));
+	if (ret < 0)
+		goto unlock;
 
 	/* ensure client has enough free metadata blocks for a transaction */
 	target = (64*1024*1024) / SCOUTFS_BLOCK_SIZE;
@@ -429,8 +446,6 @@ static int server_commit_log_trees(struct super_block *sb,
 			goto unlock;
 	}
 
-	/* XXX probably want to merge free blocks */
-
 	update_free_blocks(&super->free_meta_blocks, &ltv.meta_avail,
 			   &lt->meta_avail);
 	update_free_blocks(&super->free_meta_blocks, &ltv.meta_freed,
@@ -469,14 +484,17 @@ out:
  * log tree items.  The item trees and bloom refs stay around to be read
  * and eventually merged and we reclaim all the allocator items.
  *
- * The caller holds the commit rwsem which means we do all this work
- * in one server commit.  We'll need to keep the total amount of blocks
- * in trees in check.
+ * The caller holds the commit rwsem which means we do all this work in
+ * one server commit.  We'll need to keep the total amount of blocks in
+ * trees in check.
  *
  * By the time we're evicting a client they've either synced their data
  * or have been forcefully removed.  The free blocks in the allocator
  * roots are stable and can be merged back into allocator items for use
  * without risking overwriting stable data.
+ *
+ * We can return an error without fully reclaiming all the log item's
+ * referenced data.
  */
 static int reclaim_log_trees(struct super_block *sb, u64 rid)
 {
@@ -486,6 +504,7 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	struct scoutfs_log_trees_key ltk;
 	struct scoutfs_log_trees_val ltv;
 	int ret;
+	int err;
 
 	mutex_lock(&server->logs_mutex);
 	down_write(&server->alloc_rwsem);
@@ -513,17 +532,33 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 		goto out;
 	}
 
+	/*
+	 * All of these can return errors after having modified the
+	 * radix trees.  We have to try and update the roots in the
+	 * log item.
+	 */
 	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &server->alloc.avail,
+				  &ltv.meta_avail, &ltv.meta_avail,
+				  le64_to_cpu(ltv.meta_avail.ref.sm_total)) ?:
+	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &server->alloc.avail,
+				  &ltv.meta_freed, &ltv.meta_freed,
+				  le64_to_cpu(ltv.meta_freed.ref.sm_total)) ?:
+	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &super->core_data_avail,
 				  &ltv.data_avail, &ltv.data_avail,
-				  le64_to_cpu(ltv.data_avail.ref.sm_total));
-	if (ret < 0)
-		goto out;
-
-	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  le64_to_cpu(ltv.data_avail.ref.sm_total)) ?:
+	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &super->core_data_avail,
 				  &ltv.data_freed, &ltv.data_freed,
 				  le64_to_cpu(ltv.data_freed.ref.sm_total));
+
+	err = scoutfs_btree_update(sb, &server->alloc, &server->wri,
+				  &super->logs_root, &ltk, sizeof(ltk),
+				  &ltv, sizeof(ltv));
+	BUG_ON(err != 0); /* alloc and log item roots out of sync */
+
 out:
 	up_write(&server->alloc_rwsem);
 	mutex_unlock(&server->logs_mutex);

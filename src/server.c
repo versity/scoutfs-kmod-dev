@@ -145,6 +145,18 @@ static inline int wait_for_commit(struct commit_waiter *cw)
 }
 
 /*
+ * The caller is about to overwrite a ref to an alloc tree.  As we do
+ * so we update the given super free block counter with the difference
+ * between the old and new allocator roots.
+ */
+static void update_free_blocks(__le64 *blocks, struct scoutfs_radix_root *prev,
+			       struct scoutfs_radix_root *next)
+{
+	le64_add_cpu(blocks, le64_to_cpu(next->ref.sm_total) -
+			     le64_to_cpu(prev->ref.sm_total));
+}
+
+/*
  * A core function of request processing is to modify the manifest and
  * allocator.  Often the processing needs to make the modifications
  * persistent before replying.  We'd like to batch these commits as much
@@ -183,6 +195,11 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 		scoutfs_err(sb, "server error writing btree blocks: %d", ret);
 		goto out;
 	}
+
+	update_free_blocks(&super->free_meta_blocks, &super->core_meta_avail,
+			   &server->alloc.avail);
+	update_free_blocks(&super->free_meta_blocks, &super->core_meta_freed,
+			   &server->alloc.freed);
 
 	super->core_meta_avail = server->alloc.avail;
 	super->core_meta_freed = server->alloc.freed;
@@ -413,6 +430,15 @@ static int server_commit_log_trees(struct super_block *sb,
 	}
 
 	/* XXX probably want to merge free blocks */
+
+	update_free_blocks(&super->free_meta_blocks, &ltv.meta_avail,
+			   &lt->meta_avail);
+	update_free_blocks(&super->free_meta_blocks, &ltv.meta_freed,
+			   &lt->meta_freed);
+	update_free_blocks(&super->free_data_blocks, &ltv.data_avail,
+			   &lt->data_avail);
+	update_free_blocks(&super->free_data_blocks, &ltv.data_freed,
+			   &lt->data_freed);
 
 	ltv.meta_avail = lt->meta_avail;
 	ltv.meta_freed = lt->meta_freed;
@@ -712,7 +738,9 @@ static int server_statfs(struct super_block *sb,
 		nstatfs.total_blocks = super->total_meta_blocks;
 		le64_add_cpu(&nstatfs.total_blocks,
 			     le64_to_cpu(super->total_data_blocks));
-		nstatfs.bfree = super->free_blocks;
+		nstatfs.bfree = super->free_meta_blocks;
+		le64_add_cpu(&nstatfs.bfree,
+			     le64_to_cpu(super->free_data_blocks));
 		up_read(&server->alloc_rwsem);
 		ret = 0;
 	} else {

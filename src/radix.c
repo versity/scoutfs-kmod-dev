@@ -357,19 +357,14 @@ static u64 bit_from_inds(struct radix_path *path)
 	return bit;
 }
 
-/* return the last bit that can be stored in a tree with the given height */
-static u64 last_from_height(u8 height)
+static u64 last_from_super(struct super_block *sb, bool meta)
 {
-	u64 bit = SCOUTFS_RADIX_BITS - 1;
-	u64 mult = SCOUTFS_RADIX_BITS;
-	int i;
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 
-	for (i = 1; i < U8_MAX; i++) {
-		bit += (u64)(SCOUTFS_RADIX_REFS - 1) * mult;
-		mult *= SCOUTFS_RADIX_REFS;
-	}
-
-	return bit;
+	if (meta)
+		return le64_to_cpu(super->last_meta_blkno);
+	else
+		return le64_to_cpu(super->last_data_blkno);
 }
 
 static u8 height_from_last(u64 last)
@@ -535,6 +530,14 @@ static void fixup_first_total(struct super_block *sb, struct radix_path *path,
 	}
 }
 
+static void store_next_find_bit(struct super_block *sb, bool meta,
+				struct scoutfs_radix_root *root, u64 bit)
+{
+	if (bit > last_from_super(sb, meta))
+		bit = 0;
+	root->next_find_bit = cpu_to_le64(bit);
+}
+
 /*
  * Allocate (clear and return) a region of bits from the leaf block of a
  * path.  The leaf walk has ensured that we have at least one block free.
@@ -548,7 +551,8 @@ static void fixup_first_total(struct super_block *sb, struct radix_path *path,
  * This means that we can return recently freed blocks just behind the
  * next free cursor.  I'm not sure if that's much of a problem.
  */
-static void alloc_leaf_bits(struct super_block *sb, struct radix_path *path,
+static void alloc_leaf_bits(struct super_block *sb, bool meta,
+			    struct radix_path *path,
 			    int nbits, u64 *bit_ret, int *nbits_ret)
 {
 	struct scoutfs_radix_block *rdx = path->bls[0]->data;
@@ -583,6 +587,8 @@ static void alloc_leaf_bits(struct super_block *sb, struct radix_path *path,
 
 	*bit_ret = path->leaf_bit + ind;
 	*nbits_ret = nbits;
+
+	store_next_find_bit(sb, meta, path->root, path->leaf_bit + ind + nbits);
 }
 
 /*
@@ -600,7 +606,7 @@ static u64 change_alloc_meta(struct super_block *sb, struct radix_change *chg)
 					alloc_head);
 	BUG_ON(!path); /* shouldn't be possible */
 
-	alloc_leaf_bits(sb, path, 1, &bit, &nbits_ret);
+	alloc_leaf_bits(sb, true, path, 1, &bit, &nbits_ret);
 
 	/* remove the path from the alloc list once its empty */
 	ref = path_ref(path, 0);
@@ -904,7 +910,8 @@ static int get_all_paths(struct super_block *sb,
 		if (chg->alloc_bits < chg->block_allocs + chg->caller_allocs) {
 			stable = false;
 
-			if (next_meta == start_meta && meta_wrapped) {
+			/* we're not modifying as we go, check for wrapping */
+			if (next_meta >= start_meta && meta_wrapped) {
 				ret = -ENOSPC;
 				break;
 			}
@@ -913,13 +920,9 @@ static int get_all_paths(struct super_block *sb,
 				       next_meta, &adding);
 			if (ret < 0) {
 				if (ret == -ENOENT) {
-					if (next_meta != 0) {
-						next_meta = 0;
-						meta_wrapped = true;
-						continue;
-					} else {
-						ret = -ENOSPC;
-					}
+					meta_wrapped = true;
+					next_meta = 0;
+					continue;
 				}
 				break;
 			}
@@ -998,8 +1001,6 @@ static int get_all_paths(struct super_block *sb,
 		ret = 0;
 	} while (!stable);
 
-	alloc->avail.next_find_bit = cpu_to_le64(next_meta);
-
 	return ret;
 }
 
@@ -1049,13 +1050,6 @@ static void dirty_all_path_blocks(struct super_block *sb,
 			ref->seq = rdx->hdr.seq;
 		}
 	}
-}
-
-static void store_next_find_bit(struct scoutfs_radix_root *root, u64 bit)
-{
-	if (bit > last_from_height(root->height))
-		bit = 0;
-	root->next_find_bit = cpu_to_le64(bit);
 }
 
 static bool valid_free_bit_range(struct super_block *sb, bool meta,
@@ -1208,14 +1202,12 @@ find_next:
 	}
 	list_add_tail(&path->head, &chg->new_paths);
 
-	store_next_find_bit(root, bit);
-
 	ret = get_all_paths(sb, alloc, chg);
 	if (ret < 0)
 		goto out;
 
 	dirty_all_path_blocks(sb, alloc, wri, chg);
-	alloc_leaf_bits(sb, path, nbits, blkno_ret, count_ret);
+	alloc_leaf_bits(sb, false, path, nbits, blkno_ret, count_ret);
 	ret = 0;
 out:
 	free_change(sb, chg);
@@ -1285,7 +1277,7 @@ int scoutfs_radix_merge(struct super_block *sb,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_radix_root *dst,
 			struct scoutfs_radix_root *src,
-			struct scoutfs_radix_root *inp, u64 count)
+			struct scoutfs_radix_root *inp, bool meta, u64 count)
 {
 	struct scoutfs_radix_block *inp_rdx;
 	struct scoutfs_radix_block *src_rdx;
@@ -1402,7 +1394,7 @@ wrapped:
 		free_change(sb, chg);
 		chg = NULL;
 
-		store_next_find_bit(src, bit + SCOUTFS_RADIX_BITS);
+		store_next_find_bit(sb, meta, src, bit + SCOUTFS_RADIX_BITS);
 		count -= min_t(u64, count, sm_delta);
 	}
 
@@ -1431,13 +1423,7 @@ void scoutfs_radix_init_alloc(struct scoutfs_radix_allocator *alloc,
 void scoutfs_radix_root_init(struct super_block *sb,
 			     struct scoutfs_radix_root *root, bool meta)
 {
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	u64 last;
-
-	if (meta)
-		last = le64_to_cpu(super->last_meta_blkno);
-	else
-		last = le64_to_cpu(super->last_data_blkno);
+	u64 last = last_from_super(sb, meta);
 
 	root->height = height_from_last(last);
 	root->next_find_bit = cpu_to_le64(0);

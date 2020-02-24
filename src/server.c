@@ -389,11 +389,11 @@ static int server_get_log_trees(struct super_block *sb,
 
 	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &server->alloc.avail,
-				  &ltv.meta_freed, &ltv.meta_freed,
+				  &ltv.meta_freed, &ltv.meta_freed, true,
 				  le64_to_cpu(ltv.meta_freed.ref.sm_total)) ?:
 	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &super->core_data_avail,
-				  &ltv.data_freed, &ltv.data_freed,
+				  &ltv.data_freed, &ltv.data_freed, false,
 				  le64_to_cpu(ltv.data_freed.ref.sm_total));
 	if (ret < 0)
 		goto unlock;
@@ -406,7 +406,7 @@ static int server_get_log_trees(struct super_block *sb,
 		ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 					  &ltv.meta_avail,
 					  &server->alloc.avail,
-					  &server->alloc.avail, count);
+					  &server->alloc.avail, true, count);
 		if (ret < 0)
 			goto unlock;
 	}
@@ -419,7 +419,8 @@ static int server_get_log_trees(struct super_block *sb,
 		ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 					  &ltv.data_avail,
 					  &super->core_data_avail,
-					  &super->core_data_avail, count);
+					  &super->core_data_avail, false,
+					  count);
 		if (ret < 0)
 			goto unlock;
 	}
@@ -586,19 +587,19 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	 */
 	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &server->alloc.avail,
-				  &ltv.meta_avail, &ltv.meta_avail,
+				  &ltv.meta_avail, &ltv.meta_avail, true,
 				  le64_to_cpu(ltv.meta_avail.ref.sm_total)) ?:
 	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &server->alloc.avail,
-				  &ltv.meta_freed, &ltv.meta_freed,
+				  &ltv.meta_freed, &ltv.meta_freed, true,
 				  le64_to_cpu(ltv.meta_freed.ref.sm_total)) ?:
 	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &super->core_data_avail,
-				  &ltv.data_avail, &ltv.data_avail,
+				  &ltv.data_avail, &ltv.data_avail, false,
 				  le64_to_cpu(ltv.data_avail.ref.sm_total)) ?:
 	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
 				  &super->core_data_avail,
-				  &ltv.data_freed, &ltv.data_freed,
+				  &ltv.data_freed, &ltv.data_freed, false,
 				  le64_to_cpu(ltv.data_freed.ref.sm_total));
 
 	err = scoutfs_btree_update(sb, &server->alloc, &server->wri,

@@ -465,6 +465,19 @@ retry:
 	}
 	new = (void *)new_bl->data;
 
+	/* free old stable blkno we're about to overwrite */
+	if (ref && ref->blkno) {
+		ret = scoutfs_radix_free(sb, alloc, wri,
+					 le64_to_cpu(ref->blkno));
+		if (ret) {
+			ret = scoutfs_radix_free(sb, alloc, wri, blkno);
+			BUG_ON(ret); /* radix should have been dirty */
+			scoutfs_block_put(sb, new_bl);
+			new_bl = NULL;
+			goto out;
+		}
+	}
+
 	scoutfs_block_writer_mark_dirty(sb, wri, new_bl);
 
 	trace_scoutfs_btree_dirty_block(sb, blkno, seq,
@@ -1171,14 +1184,18 @@ int scoutfs_btree_delete(struct super_block *sb,
 		bt = bl->data;
 		pos = find_pos(bt, key, key_len, &cmp);
 		if (cmp == 0) {
-			delete_item(bt, pos);
-			ret = 0;
-
-			/* delete the final block in the tree */
-			if (bt->nr_items == 0) {
-				root->height = 0;
-				root->ref.blkno = 0;
-				root->ref.seq = 0;
+			if (le32_to_cpu(bt->nr_items) == 1) {
+				/* remove final empty block */
+				ret = scoutfs_radix_free(sb, alloc, wri,
+							 bl->blkno);
+				if (ret == 0) {
+					root->height = 0;
+					root->ref.blkno = 0;
+					root->ref.seq = 0;
+				}
+			} else {
+				delete_item(bt, pos);
+				ret = 0;
 			}
 		} else {
 			ret = -ENOENT;

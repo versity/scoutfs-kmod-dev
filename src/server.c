@@ -114,10 +114,19 @@ static void stop_server(struct server_info *server)
  * current commit and prevents the commit worker from acquiring the
  * exclusive write lock to write the commit.  This can fail for the
  * first holder failing to prepare a new commit.
+ *
+ * We reclaim the server's stable meta_freed blocks.  This is run before
+ * anything has modified allocators in the server.  We know that the
+ * stable meta_freed tree in the super contains all the stable free
+ * blocks which can be merged back into avail.  We reference the stable
+ * freed tree in the super because the server allocator's freed tree is
+ * going to be added to as blocks are freed during the merge.
  */
 static int hold_commit(struct super_block *sb)
 {
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_SERVER_INFO(sb, server);
+	u64 tot;
 	int ret = 0;
 
 	down_read(&server->commit_rwsem);
@@ -126,12 +135,25 @@ static int hold_commit(struct super_block *sb)
 		up_read(&server->commit_rwsem);
 		down_write(&server->commit_rwsem);
 
-		server->prepared_commit = true;
-		ret = 0;
+		if (!server->prepared_commit) {
+			BUG_ON(scoutfs_block_writer_dirty_bytes(sb,
+								&server->wri));
+			tot = le64_to_cpu(super->core_meta_freed.ref.sm_total);
+
+			ret = scoutfs_radix_merge(sb, &server->alloc,
+						  &server->wri,
+						  &server->alloc.avail,
+						  &server->alloc.freed,
+						  &super->core_meta_freed,
+						  true, tot);
+			if (ret == 0)
+				server->prepared_commit = true;
+		}
 
 		up_write(&server->commit_rwsem);
-		if (ret)
+		if (ret < 0)
 			break;
+
 		down_read(&server->commit_rwsem);
 	}
 

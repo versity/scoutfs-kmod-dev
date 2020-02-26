@@ -457,6 +457,61 @@ static struct radix_path *walk_paths(struct rb_root *rbroot,
 }
 
 /*
+ * Make sure radix metadata is consistent.
+ */
+static void check_first_total(struct radix_path *path)
+{
+	struct scoutfs_radix_block *rdx;
+	struct scoutfs_radix_ref *ref;
+	int level;
+	u64 st;
+	u64 lt;
+	u32 sf;
+	u32 lf;
+	int i;
+
+	for (level = 0; level < path->height; level++) {
+		rdx = path->bls[level]->data;
+		ref = path_ref(path, level);
+
+		if (level == 0) {
+			st = bitmap_weight((long *)rdx->bits,
+					   SCOUTFS_RADIX_BITS);
+			lt = count_lg_bits(rdx->bits, 0, SCOUTFS_RADIX_BITS);
+
+			sf = find_next_bit_le(rdx->bits, SCOUTFS_RADIX_BITS, 0);
+			lf = find_next_lg(rdx->bits, 0);
+		} else {
+			st = 0;
+			lt = 0;
+			sf = SCOUTFS_RADIX_REFS;
+			lf = SCOUTFS_RADIX_REFS;
+			for (i = 0; i < SCOUTFS_RADIX_REFS; i++) {
+				st += le64_to_cpu(rdx->refs[i].sm_total);
+				lt += le64_to_cpu(rdx->refs[i].lg_total);
+				if (rdx->refs[i].sm_total != 0 && i < sf)
+					sf = i;
+				if (rdx->refs[i].lg_total != 0 && i < lf)
+					lf = i;
+			}
+		}
+
+		if (le64_to_cpu(ref->sm_total) != st ||
+		    le64_to_cpu(ref->lg_total) != lt ||
+		    le32_to_cpu(rdx->sm_first) > sf ||
+		    le32_to_cpu(rdx->lg_first) > lf) {
+			printk("radix inconsistency: level %u calced sf %u st %llu lf %u lt %llu, stored sf %u st %llu lf %u lt %llu\n",
+				level, sf, st, lf, lt,
+				le32_to_cpu(rdx->sm_first), 
+				le64_to_cpu(ref->sm_total), 
+				le32_to_cpu(rdx->lg_first), 
+				le64_to_cpu(ref->lg_total));
+			BUG();
+		}
+	}
+}
+
+/*
  * Update the first tracking in a block after the caller has modified
  * the block at the given index.  If the modification at the index is
  * populated we check to see if first should be earler.  If the
@@ -528,6 +583,9 @@ static void fixup_first_total(struct super_block *sb, struct radix_path *path,
 				     ref->lg_total == 0);
 		}
 	}
+
+	if (0) /* expensive, would be nice to make conditional */
+		check_first_total(path);
 }
 
 static void store_next_find_bit(struct super_block *sb, bool meta,

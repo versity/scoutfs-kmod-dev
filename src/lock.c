@@ -222,6 +222,7 @@ static void lock_free(struct lock_info *linfo, struct scoutfs_lock *lock)
 	BUG_ON(!list_empty(&lock->lru_head));
 	BUG_ON(!list_empty(&lock->cov_list));
 
+	scoutfs_forest_clear_lock(sb, lock);
 	kfree(lock);
 }
 

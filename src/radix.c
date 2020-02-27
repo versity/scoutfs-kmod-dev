@@ -51,8 +51,9 @@
  * merge process.
  *
  * Allocations search for the next free bit from a cursor that's stored
- * in the root of each tree.  We track the next set parent ref or leaf
- * bit in references to blocks to avoid searching entire blocks.
+ * in the root of each tree.  We track the first set parent ref or leaf
+ * bit in references to blocks to avoid searching entire blocks every
+ * time.
  *
  * The radix isn't always fully populated.  References can contain
  * blknos with 0 or ~0 to indicate that its referenced subtree is either
@@ -296,14 +297,15 @@ static u64 count_lg_bits(void *bits, int ind, int nbits)
 {
 	u64 count = 0;
 	int end;
+	int i;
 
-	ind = round_down(ind, SCOUTFS_RADIX_LG_BITS);
+	i = round_down(ind, SCOUTFS_RADIX_LG_BITS);
 	end = round_up(ind + nbits, SCOUTFS_RADIX_LG_BITS);
 
-	while (ind < end) {
-		if (lg_is_full(bits, ind))
+	while (i < end) {
+		if (lg_is_full(bits, i))
 			count += SCOUTFS_RADIX_LG_BITS;
-		ind += SCOUTFS_RADIX_LG_BITS;
+		i += SCOUTFS_RADIX_LG_BITS;
 	}
 
 	return count;
@@ -319,7 +321,7 @@ static u64 count_lg_bitmap(void *result, void *input)
 	u64 count = 0;
 	int ind = 0;
 
-	while ((ind = find_next_bit(input, SCOUTFS_RADIX_BITS, ind))
+	while ((ind = find_next_bit_le(input, SCOUTFS_RADIX_BITS, ind))
 			< SCOUTFS_RADIX_BITS) {
 		if (lg_is_full(result, ind))
 			count += SCOUTFS_RADIX_LG_BITS;
@@ -511,76 +513,42 @@ static void check_first_total(struct radix_path *path)
 	}
 }
 
-/*
- * Update the first tracking in a block after the caller has modified
- * the block at the given index.  If the modification at the index is
- * populated we check to see if first should be earler.  If the
- * modification at the index is now empty (cleared leaf bits or parent
- * ref total going to 0) we can advance the first tracker by an offset
- * (number of bits in the leaf, to the next ref in parents), or set
- * first to the end of the block if the entire block is now empty.
- *
- * The first field is only guaranteed to be before the first set region,
- * if there is any.  It's only advanced when the current first is
- * cleared.  If regions are cleared out of order then you can be left
- * with a first less than the limit in a block with none set.
- */
-static void update_first(__le32 *first, int ind, u32 limit, s32 offset,
-			 bool empty_ind, bool entirely_empty)
-{
-	if (!empty_ind) {
-		if (ind < le32_to_cpup(first))
-			*first = cpu_to_le32(ind);
-
-	} else {
-		if (entirely_empty)
-			*first = cpu_to_le32(limit);
-		else if (ind == le32_to_cpup(first))
-			le32_add_cpu(first, offset);
-	}
-}
+#define set_first_nonzero_ref(rdx, ind, first, total)			\
+do {									\
+	int _ind = min_t(u32, le32_to_cpu(rdx->first), (ind));		\
+									\
+	while (_ind < SCOUTFS_RADIX_REFS && rdx->refs[_ind].total == 0)	\
+		_ind++;							\
+									\
+	rdx->first = cpu_to_le32(_ind);					\
+} while (0)
 
 /*
- * The caller has changed bits in a leaf block.  We update the first
- * fields in the block header and the total fields in block references.
+ * The caller has changed bits in a leaf block and updated the block's
+ * first tracking.  We update the first tracking and totals in parent
+ * blocks and refs up to the root ref.  We do this after modifying
+ * leaves, instead of during descent, because we descend through clean
+ * blocks and then dirty all he blocks in all the paths before modifying
+ * leaves.
  */
-static void fixup_first_total(struct super_block *sb, struct radix_path *path,
-			      int ind, s64 sm_delta, s64 lg_delta)
+static void fixup_parent_refs(struct radix_path *path,
+			      s64 sm_delta, s64 lg_delta)
 {
 	struct scoutfs_radix_block *rdx;
-	struct scoutfs_radix_ref *rdx_ref;
 	struct scoutfs_radix_ref *ref;
 	int level;
+	int ind;
 
 	for (level = 0; level < path->height; level++) {
 		rdx = path->bls[level]->data;
 		ref = path_ref(path, level);
-		if (level > 0) {
-			ind = path->inds[level];
-			rdx_ref = &rdx->refs[ind];
-		}
 
 		le64_add_cpu(&ref->sm_total, sm_delta);
 		le64_add_cpu(&ref->lg_total, lg_delta);
-
-		if (level == 0) {
-			update_first(&rdx->sm_first, ind, SCOUTFS_RADIX_BITS,
-				     -sm_delta, sm_delta < 0,
-				     ref->sm_total == 0);
-			update_first(&rdx->lg_first,
-				     round_down(ind, SCOUTFS_RADIX_LG_BITS),
-				     SCOUTFS_RADIX_BITS,
-				     -lg_delta, lg_delta < 0,
-				     ref->lg_total == 0);
-		} else {
-			update_first(&rdx->sm_first, ind, SCOUTFS_RADIX_REFS,
-				     1, rdx_ref->sm_total == 0,
-				     ref->sm_total == 0);
-			update_first(&rdx->lg_first,
-				     round_down(ind, SCOUTFS_RADIX_LG_BITS),
-				     SCOUTFS_RADIX_REFS,
-				     1, rdx_ref->lg_total == 0,
-				     ref->lg_total == 0);
+		if (level > 0) {
+			ind = path->inds[level];
+			set_first_nonzero_ref(rdx, ind, sm_first, sm_total);
+			set_first_nonzero_ref(rdx, ind, lg_first, lg_total);
 		}
 	}
 
@@ -615,7 +583,9 @@ static void alloc_leaf_bits(struct super_block *sb, bool meta,
 {
 	struct scoutfs_radix_block *rdx = path->bls[0]->data;
 	struct scoutfs_radix_ref *ref = path_ref(path, 0);
-	s64 lg_delta;
+	u32 sm_first;
+	u32 lg_first;
+	int lg_nbits;
 	int ind;
 	int end;
 
@@ -623,6 +593,8 @@ static void alloc_leaf_bits(struct super_block *sb, bool meta,
 		/* always allocate large allocs from full large regions */
 		ind = le32_to_cpu(rdx->lg_first);
 		ind = find_next_lg(rdx->bits, ind);
+		sm_first = le32_to_cpu(rdx->sm_first);
+		lg_first = round_up(ind + nbits, SCOUTFS_RADIX_LG_BITS);
 
 	} else {
 		/* otherwise alloc as much as we can from the next small */
@@ -633,15 +605,21 @@ static void alloc_leaf_bits(struct super_block *sb, bool meta,
 			end = find_next_zero_bit_le(rdx->bits, SCOUTFS_RADIX_BITS, ind);
 			nbits = min(nbits, end - ind);
 		}
+
+		sm_first = ind + nbits;
+		lg_first = le32_to_cpu(rdx->lg_first);
 	}
 
 	/* callers and structures should have ensured success */
 	BUG_ON(ind >= SCOUTFS_RADIX_BITS);
 
-	lg_delta = count_lg_bits(rdx->bits, ind, nbits);
+	lg_nbits = count_lg_bits(rdx->bits, ind, nbits);
 	bitmap_clear_le(rdx->bits, ind, nbits);
 
-	fixup_first_total(sb, path, ind, -nbits, -lg_delta);
+	/* always update the first we searched through */
+	rdx->sm_first = cpu_to_le32(sm_first);
+	rdx->lg_first = cpu_to_le32(lg_first);
+	fixup_parent_refs(path, -nbits, -lg_nbits);
 
 	*bit_ret = path->leaf_bit + ind;
 	*nbits_ret = nbits;
@@ -678,6 +656,7 @@ static void set_path_leaf_bits(struct super_block *sb, struct radix_path *path,
 			       u64 bit, int nbits)
 {
 	struct scoutfs_radix_block *rdx;
+	int lg_ind;
 	int ind;
 
 	BUG_ON(nbits <= 0);
@@ -686,13 +665,18 @@ static void set_path_leaf_bits(struct super_block *sb, struct radix_path *path,
 
 	rdx = path->bls[0]->data;
 	ind = bit - path->leaf_bit;
+	lg_ind = round_down(ind, SCOUTFS_RADIX_LG_BITS);
 
 	/* should have returned an error if it was set while we got paths */
 	BUG_ON(!bitmap_empty_region_le(rdx->bits, ind, nbits));
 	bitmap_set_le(rdx->bits, ind, nbits);
 
-	fixup_first_total(sb, path, ind, nbits,
-			  count_lg_bits(rdx->bits, ind, nbits));
+	if (ind < le32_to_cpu(rdx->sm_first))
+		rdx->sm_first = cpu_to_le32(ind);
+	if (lg_ind < le32_to_cpu(rdx->lg_first) &&
+	    lg_is_full(rdx->bits, lg_ind))
+		rdx->lg_first = cpu_to_le32(lg_ind);
+	fixup_parent_refs(path, nbits, count_lg_bits(rdx->bits, ind, nbits));
 
 	trace_scoutfs_radix_set(sb, path->root, path->bls[0]->blkno,
 				bit, ind, nbits);
@@ -724,7 +708,7 @@ static void init_ref(struct scoutfs_radix_ref *ref, int level, bool full)
 		ref->blkno = cpu_to_le64(U64_MAX);
 		ref->seq = cpu_to_le64(0);
 		ref->sm_total = cpu_to_le64(tot);
-		ref->lg_total = cpu_to_le64(tot >> SCOUTFS_RADIX_LG_SHIFT);
+		ref->lg_total = cpu_to_le64(tot);
 	} else {
 
 		ref->blkno = cpu_to_le64(0);
@@ -1348,6 +1332,7 @@ int scoutfs_radix_merge(struct super_block *sb,
 	s64 dst_lg_delta;
 	s64 sm_delta;
 	u64 bit;
+	int lg_ind;
 	int ind;
 	int ret;
 
@@ -1402,6 +1387,7 @@ wrapped:
 		sm_delta = le64_to_cpu(path_ref(inp_path, 0)->sm_total);
 		ind = find_next_bit_le(inp_rdx->bits, SCOUTFS_RADIX_BITS,
 				       le32_to_cpu(inp_rdx->sm_first));
+		lg_ind = round_down(ind, SCOUTFS_RADIX_LG_BITS);
 
 		/* back out and retry if no input left, or inp not ro */
 		if (sm_delta == 0 ||
@@ -1439,8 +1425,14 @@ wrapped:
 		bitmap_xor((void *)src_rdx->bits, (void *)src_rdx->bits,
 			   (void *)inp_rdx->bits, SCOUTFS_RADIX_BITS);
 
-		fixup_first_total(sb, src_path, ind, -sm_delta, -src_lg_delta);
-		fixup_first_total(sb, dst_path, ind, sm_delta, dst_lg_delta);
+		if (ind < le32_to_cpu(dst_rdx->sm_first))
+			dst_rdx->sm_first = cpu_to_le32(ind);
+		/* first doesn't have to be precise, search will cleanup */
+		if (lg_ind < le32_to_cpu(dst_rdx->lg_first))
+			dst_rdx->lg_first = cpu_to_le32(lg_ind);
+
+		fixup_parent_refs(src_path, -sm_delta, -src_lg_delta);
+		fixup_parent_refs(dst_path, sm_delta, dst_lg_delta);
 
 		trace_scoutfs_radix_merge(sb, src, src_path->bls[0]->blkno,
 					  dst, dst_path->bls[0]->blkno, count,

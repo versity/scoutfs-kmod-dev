@@ -261,9 +261,22 @@ int scoutfs_write_super(struct super_block *sb,
 	return ret;
 }
 
+enum {
+	BH_ScoutfsReadGroup = BH_PrivateStart,
+};
+BUFFER_FNS(ScoutfsReadGroup, scoutfs_read_group);
+
 /*
  * Read the super block.  If it's valid store it in the caller's super
  * struct.
+ *
+ * The caller requires a current version of the super as they call.  We
+ * can't use a cached version from before they called.  We use a bit and
+ * bh_private as a counter to satisfy groups of waiting readers with
+ * each issued read rather than have every call issue a read.  We have
+ * to be careful to serialize clearing uptodate when forcing media
+ * access so that it doesn't cause blocked readers to get spurious read
+ * errors.
  */
 int scoutfs_read_super(struct super_block *sb,
 		       struct scoutfs_super_block *super_res)
@@ -271,17 +284,42 @@ int scoutfs_read_super(struct super_block *sb,
 	struct scoutfs_super_block *super;
 	struct buffer_head *bh = NULL;
 	__le32 calc;
+	int group;
 	int ret;
 
 	bh = sb_getblk(sb, SCOUTFS_SUPER_BLKNO);
-	if (bh) {
-		lock_buffer(bh);
-		clear_buffer_uptodate(bh);
-		unlock_buffer(bh);
-		brelse(bh);
+	if (bh == NULL) {
+		ret = -ENOMEM;
+		scoutfs_err(sb, "error alloationg buffer for super block: %d",
+			    ret);
+		goto out;
 	}
-	bh = sb_bread(sb, SCOUTFS_SUPER_BLKNO);
-	if (!bh) {
+
+	/* wait for current group to finish */
+	group = !!buffer_scoutfs_read_group(bh);
+	lock_buffer(bh);
+	while (!!buffer_scoutfs_read_group(bh) == group &&
+               (unsigned long)bh->b_private != 0) {
+		unlock_buffer(bh);
+		cond_resched();
+		lock_buffer(bh);
+	}
+
+	if ((unsigned long)(bh->b_private)++ == 0) {
+		/* first group locker advances group, submits, and relocks */
+		if (buffer_scoutfs_read_group(bh))
+			clear_buffer_scoutfs_read_group(bh);
+		else
+			set_buffer_scoutfs_read_group(bh);
+		clear_buffer_uptodate(bh);
+		bh->b_end_io = end_buffer_read_sync;
+		get_bh(bh);
+		submit_bh(READ | REQ_META | REQ_PRIO, bh);
+		lock_buffer(bh);
+	} else {
+		/* additional group lockers acquired after read completed */
+	}
+	if (!buffer_uptodate(bh)) {
 		ret = -EIO;
 		scoutfs_err(sb, "error reading super block: %d", ret);
 		goto out;
@@ -332,7 +370,11 @@ int scoutfs_read_super(struct super_block *sb,
 	*super_res = *super;
 	ret = 0;
 out:
-	brelse(bh);
+	if (bh != NULL) {
+		(unsigned long)(bh->b_private)--;
+		unlock_buffer(bh);
+		brelse(bh);
+	}
 	return ret;
 }
 

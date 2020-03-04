@@ -328,11 +328,11 @@ struct scoutfs_bloom_block {
 } __packed;
 
 /*
- * Log trees include a tree of items that make up a fixed size bloom
- * filter.  Just a few megs worth of items lets us test for the presence
- * of locks that cover billions of files with a .1% chance of false
- * positives.  The log trees should be finalized and merged long before
- * the bloom filters fill up and start returning excessive false positives.
+ * Item log trees are accompanied by a block of bits that make up a
+ * bloom filter which indicate if the item log trees may contain items
+ * covered by a lock.  The log trees should be finalized and merged long
+ * before the bloom filters fill up and start returning excessive false
+ * positives.
  */
 #define SCOUTFS_FOREST_BLOOM_NRS		7
 #define SCOUTFS_FOREST_BLOOM_BITS \

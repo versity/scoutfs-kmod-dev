@@ -24,29 +24,16 @@
 	EXPAND_COUNTER(block_cache_shrink)			\
 	EXPAND_COUNTER(btree_read_error)			\
 	EXPAND_COUNTER(btree_stale_read)			\
-	EXPAND_COUNTER(btree_write_error)			\
 	EXPAND_COUNTER(client_farewell_error)			\
 	EXPAND_COUNTER(corrupt_btree_block_level)		\
 	EXPAND_COUNTER(corrupt_btree_no_child_ref)		\
-	EXPAND_COUNTER(corrupt_data_extent_trunc_cleanup)	\
-	EXPAND_COUNTER(corrupt_data_extent_alloc_cleanup)	\
-	EXPAND_COUNTER(corrupt_data_extent_fallocate_cleanup)	\
 	EXPAND_COUNTER(corrupt_dirent_backref_name_len)		\
 	EXPAND_COUNTER(corrupt_dirent_name_len)			\
 	EXPAND_COUNTER(corrupt_dirent_readdir_name_len)		\
 	EXPAND_COUNTER(corrupt_inode_block_counts)		\
-	EXPAND_COUNTER(corrupt_extent_add_cleanup)		\
-	EXPAND_COUNTER(corrupt_extent_rem_cleanup)		\
-	EXPAND_COUNTER(corrupt_server_extent_cleanup)		\
 	EXPAND_COUNTER(corrupt_symlink_inode_size)		\
 	EXPAND_COUNTER(corrupt_symlink_missing_item)		\
 	EXPAND_COUNTER(corrupt_symlink_not_null_term)		\
-	EXPAND_COUNTER(data_end_writeback_page)			\
-	EXPAND_COUNTER(data_invalidatepage)			\
-	EXPAND_COUNTER(data_readpage)				\
-	EXPAND_COUNTER(data_write_begin)			\
-	EXPAND_COUNTER(data_write_end)				\
-	EXPAND_COUNTER(data_writepage)				\
 	EXPAND_COUNTER(dentry_revalidate_error)			\
 	EXPAND_COUNTER(dentry_revalidate_invalid)		\
 	EXPAND_COUNTER(dentry_revalidate_locked)		\
@@ -55,12 +42,6 @@
 	EXPAND_COUNTER(dentry_revalidate_root)			\
 	EXPAND_COUNTER(dentry_revalidate_valid)			\
 	EXPAND_COUNTER(dir_backref_excessive_retries)		\
-	EXPAND_COUNTER(extent_add)				\
-	EXPAND_COUNTER(extent_delete)				\
-	EXPAND_COUNTER(extent_insert)				\
-	EXPAND_COUNTER(extent_next)				\
-	EXPAND_COUNTER(extent_prev)				\
-	EXPAND_COUNTER(extent_remove)				\
 	EXPAND_COUNTER(lock_alloc)				\
 	EXPAND_COUNTER(lock_free)				\
 	EXPAND_COUNTER(lock_grace_elapsed)			\
@@ -96,7 +77,6 @@
 	EXPAND_COUNTER(quorum_elected_leader)			\
 	EXPAND_COUNTER(quorum_election_timeout)			\
 	EXPAND_COUNTER(quorum_failure)				\
-	EXPAND_COUNTER(quorum_new_leader)			\
 	EXPAND_COUNTER(quorum_read_block)			\
 	EXPAND_COUNTER(quorum_read_block_error)			\
 	EXPAND_COUNTER(quorum_read_invalid_block)		\

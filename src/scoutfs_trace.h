@@ -61,6 +61,27 @@ struct lock_info;
 #define DECLARE_TRACED_EXTENT(name) \
 	struct scoutfs_traced_extent name = {0}
 
+DECLARE_EVENT_CLASS(scoutfs_ino_ret_class,
+	TP_PROTO(struct super_block *sb, u64 ino, int ret),
+
+	TP_ARGS(sb, ino, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, ino)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->ino = ino;
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" ino %llu ret %d",
+		  SCSB_TRACE_ARGS, __entry->ino, __entry->ret)
+);
+
 TRACE_EVENT(scoutfs_setattr,
 	TP_PROTO(struct dentry *dentry, struct iattr *attr),
 
@@ -228,6 +249,11 @@ TRACE_EVENT(scoutfs_data_file_extent_class,
 		  SCSB_TRACE_ARGS, __entry->ino, STE_ENTRY_ARGS(ext))
 );
 DEFINE_EVENT(scoutfs_data_file_extent_class, scoutfs_data_alloc_block,
+	TP_PROTO(struct super_block *sb, __u64 ino,
+		 struct scoutfs_traced_extent *te),
+	TP_ARGS(sb, ino, te)
+);
+DEFINE_EVENT(scoutfs_data_file_extent_class, scoutfs_data_convert_unwritten,
 	TP_PROTO(struct super_block *sb, __u64 ino,
 		 struct scoutfs_traced_extent *te),
 	TP_ARGS(sb, ino, te)
@@ -471,31 +497,15 @@ TRACE_EVENT(scoutfs_trans_track_item,
 		  __entry->res_vals)
 );
 
-TRACE_EVENT(scoutfs_ioc_release_ret,
-	TP_PROTO(struct super_block *sb, int ret),
-
-	TP_ARGS(sb, ret),
-
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(int, ret)
-	),
-
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->ret = ret;
-	),
-
-	TP_printk(SCSBF" ret %d", SCSB_TRACE_ARGS, __entry->ret)
-);
-
 TRACE_EVENT(scoutfs_ioc_release,
-	TP_PROTO(struct super_block *sb, struct scoutfs_ioctl_release *args),
+	TP_PROTO(struct super_block *sb, u64 ino,
+		 struct scoutfs_ioctl_release *args),
 
-	TP_ARGS(sb, args),
+	TP_ARGS(sb, ino, args),
 
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
+		__field(__u64, ino)
 		__field(__u64, block)
 		__field(__u64, count)
 		__field(__u64, vers)
@@ -503,13 +513,52 @@ TRACE_EVENT(scoutfs_ioc_release,
 
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
+		__entry->ino = ino;
 		__entry->block = args->block;
 		__entry->count = args->count;
 		__entry->vers = args->data_version;
 	),
 
-	TP_printk(SCSBF" block %llu count %llu vers %llu", SCSB_TRACE_ARGS,
-		  __entry->block, __entry->count, __entry->vers)
+	TP_printk(SCSBF" ino %llu block %llu count %llu vers %llu",
+		  SCSB_TRACE_ARGS, __entry->ino, __entry->block,
+		  __entry->count, __entry->vers)
+);
+
+DEFINE_EVENT(scoutfs_ino_ret_class, scoutfs_ioc_release_ret,
+	TP_PROTO(struct super_block *sb, u64 ino, int ret),
+	TP_ARGS(sb, ino, ret)
+);
+
+TRACE_EVENT(scoutfs_ioc_stage,
+	TP_PROTO(struct super_block *sb, u64 ino,
+		 struct scoutfs_ioctl_stage *args),
+
+	TP_ARGS(sb, ino, args),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, ino)
+		__field(__u64, vers)
+		__field(__u64, offset)
+		__field(__s32, count)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->ino = ino;
+		__entry->vers = args->data_version;
+		__entry->offset = args->offset;
+		__entry->count = args->count;
+	),
+
+	TP_printk(SCSBF" ino %llu vers %llu offset %llu count %d",
+		  SCSB_TRACE_ARGS, __entry->ino, __entry->vers,
+		  __entry->offset, __entry->count)
+);
+
+DEFINE_EVENT(scoutfs_ino_ret_class, scoutfs_ioc_stage_ret,
+	TP_PROTO(struct super_block *sb, u64 ino, int ret),
+	TP_ARGS(sb, ino, ret)
 );
 
 TRACE_EVENT(scoutfs_ioc_walk_inodes,

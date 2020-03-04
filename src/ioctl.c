@@ -281,7 +281,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
 		return -EFAULT;
 
-	trace_scoutfs_ioc_release(sb, &args);
+	trace_scoutfs_ioc_release(sb, scoutfs_ino(inode), &args);
 
 	if (args.count == 0)
 		return 0;
@@ -344,7 +344,7 @@ out:
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 
-	trace_scoutfs_ioc_release_ret(sb, ret);
+	trace_scoutfs_ioc_release_ret(sb, scoutfs_ino(inode), ret);
 	return ret;
 }
 
@@ -394,6 +394,8 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 
 	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
 		return -EFAULT;
+
+	trace_scoutfs_ioc_stage(sb, scoutfs_ino(inode), &args);
 
 	end_size = args.offset + args.count;
 
@@ -464,6 +466,7 @@ out:
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 
+	trace_scoutfs_ioc_stage_ret(sb, scoutfs_ino(inode), ret);
 	return ret;
 }
 

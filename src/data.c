@@ -972,6 +972,7 @@ static int convert_unwritten(struct super_block *sb, struct inode *inode,
 			     struct unpacked_extent *ext, u64 iblock,
 			     struct scoutfs_lock *lock)
 {
+	struct scoutfs_traced_extent te;
 	u64 blkno;
 	u8 ext_fl;
 	int err;
@@ -979,6 +980,9 @@ static int convert_unwritten(struct super_block *sb, struct inode *inode,
 
 	blkno = ext->blkno + (iblock - ext->iblock);
 	ext_fl = ext->flags;
+
+	init_traced_extent(&te, iblock, 1, blkno, ext_fl);
+	trace_scoutfs_data_convert_unwritten(sb, scoutfs_ino(inode), &te);
 
 	ret = set_extent(sb, inode, scoutfs_ino(inode), unpe, iblock,
 			 blkno, 1, ext_fl & ~(SEF_OFFLINE|SEF_UNWRITTEN));

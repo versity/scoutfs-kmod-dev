@@ -961,7 +961,10 @@ retry:
 unlock:
 	up_read(&lpriv->rwsem);
 
-	rbtree_postorder_for_each_entry_safe(ip, nip, &iter_root, node) {
+	/* destroy_ rebalances so postorder traversal could skip nodes */
+	for (ip = first_iter_pos(&iter_root);
+	     ip && (nip = next_iter_pos(ip), 1);
+	     ip = nip) {
 		destroy_iter_pos(ip, &iter_root);
 	}
 

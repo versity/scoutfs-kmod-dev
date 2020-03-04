@@ -260,6 +260,7 @@ static struct scoutfs_block *read_bloom_ref(struct super_block *sb,
 
 	if (!scoutfs_block_consistent_ref(sb, bl, ref->seq, ref->blkno,
 					  SCOUTFS_BLOCK_MAGIC_BLOOM)) {
+		scoutfs_block_invalidate(sb, bl);
 		scoutfs_block_put(sb, bl);
 		return ERR_PTR(-ESTALE);
 	}

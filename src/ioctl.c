@@ -590,19 +590,19 @@ static long scoutfs_ioc_setattr_more(struct file *file, unsigned long arg)
 	if (ret)
 		goto unlock;
 
-	/* create offline extents in potentially many transactions */
-	if (sm.flags & SCOUTFS_IOC_SETATTR_MORE_OFFLINE) {
-		ret = scoutfs_data_init_offline_extent(inode, sm.i_size, lock);
-		if (ret)
-			goto unlock;
-	}
-
 	/* can only change size/dv on untouched regular files */
 	if ((sm.i_size != 0 || sm.data_version != 0) &&
 	    ((!S_ISREG(inode->i_mode) ||
 	      scoutfs_inode_data_version(inode) != 0))) {
 		ret = -EINVAL;
 		goto unlock;
+	}
+
+	/* create offline extents in potentially many transactions */
+	if (sm.flags & SCOUTFS_IOC_SETATTR_MORE_OFFLINE) {
+		ret = scoutfs_data_init_offline_extent(inode, sm.i_size, lock);
+		if (ret)
+			goto unlock;
 	}
 
 	/* setting only so we don't see 0 data seq with nonzero data_version */

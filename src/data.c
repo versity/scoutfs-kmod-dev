@@ -1674,6 +1674,8 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		ret = load_unpacked_extents(sb, ino, iblock, last, false,
 					    &unpe, lock);
 		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
 			last_flags = FIEMAP_EXTENT_LAST;
 			break;
 		}

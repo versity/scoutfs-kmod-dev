@@ -1579,6 +1579,10 @@ int scoutfs_data_init_offline_extent(struct inode *inode, u64 size,
 		if (ret < 0)
 			goto out;
 
+		ret = store_packed_extents(sb, ino, unpe, lock);
+		if (ret < 0)
+			goto out;
+
 		free_unpacked_extents(unpe);
 		unpe = NULL;
 

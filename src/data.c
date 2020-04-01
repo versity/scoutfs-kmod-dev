@@ -1572,7 +1572,7 @@ int scoutfs_data_init_offline_extent(struct inode *inode, u64 size,
 		if (ret < 0)
 			goto out;
 
-		count = min(blocks, last_iblock(iblock) - iblock + 1);
+		count = min(blocks - iblock, last_iblock(iblock) - iblock + 1);
 
 		ret = set_extent(sb, inode, ino, unpe, iblock, 0, count,
 				 SEF_OFFLINE);

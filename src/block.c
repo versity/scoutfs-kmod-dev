@@ -919,6 +919,107 @@ out:
 	return min_t(u64, binf->lru_nr * SCOUTFS_PAGES_PER_BLOCK, INT_MAX);
 }
 
+#define SCOUTFS_SM_BLOCK_SHIFT	12
+#define SCOUTFS_SM_BLOCK_SIZE	(1 << SCOUTFS_SM_BLOCK_SHIFT)
+
+struct sm_block_completion {
+	struct completion comp;
+	int err;
+};
+
+static void sm_block_bio_end_io(struct bio *bio, int err)
+{
+	struct sm_block_completion *sbc = bio->bi_private;
+
+	sbc->err = err;
+	complete(&sbc->comp);
+	bio_put(bio);
+}
+
+/*
+ * Perform a private synchronous read or write of a small fixed size 4K
+ * block.  We allocate a private page and bio and copy to or from the
+ * caller's buffer.
+ *
+ * The interface is a little weird because our blocks always start with
+ * a block header that contains a crc of the entire block.  We're the
+ * only layer that sees the full block buffer so we pass the calculated
+ * crc to the caller for them to check in their context.
+ */
+static int sm_block_io(struct super_block *sb, int rw, u64 blkno,
+		       struct scoutfs_block_header *hdr, size_t len,
+		       __le32 *blk_crc)
+{
+	struct scoutfs_block_header *pg_hdr;
+	struct sm_block_completion sbc;
+	struct page *page;
+	struct bio *bio;
+	int ret;
+
+	BUILD_BUG_ON(PAGE_SIZE < SCOUTFS_SM_BLOCK_SIZE);
+	/* block calc crc is assuming block size, they'll be different later */
+	BUILD_BUG_ON(SCOUTFS_SM_BLOCK_SIZE != SCOUTFS_BLOCK_SIZE);
+
+	if (WARN_ON_ONCE(len > SCOUTFS_SM_BLOCK_SIZE) ||
+	    WARN_ON_ONCE(!(rw & WRITE) && !blk_crc))
+		return -EINVAL;
+
+	page = alloc_page(GFP_NOFS);
+	if (!page)
+		return -ENOMEM;
+
+	pg_hdr = page_address(page);
+
+	if (rw & WRITE) {
+		memcpy(pg_hdr, hdr, len);
+		if (len < SCOUTFS_SM_BLOCK_SIZE)
+			memset((char *)pg_hdr + len, 0,
+			       SCOUTFS_SM_BLOCK_SIZE - len);
+		pg_hdr->crc = scoutfs_block_calc_crc(pg_hdr);
+	}
+
+	bio = bio_alloc(GFP_NOFS, 1);
+	if (!bio) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	bio->bi_sector = blkno << (SCOUTFS_SM_BLOCK_SHIFT - 9);
+	bio->bi_bdev = sb->s_bdev;
+	bio->bi_end_io = sm_block_bio_end_io;
+	bio->bi_private = &sbc;
+	bio_add_page(bio, page, SCOUTFS_SM_BLOCK_SIZE, 0);
+
+	init_completion(&sbc.comp);
+	sbc.err = 0;
+
+	submit_bio((rw & WRITE) ? WRITE_SYNC : READ_SYNC, bio);
+
+	wait_for_completion(&sbc.comp);
+	ret = sbc.err;
+
+	if (ret == 0 && !(rw & WRITE)) {
+		memcpy(hdr, pg_hdr, len);
+		*blk_crc = scoutfs_block_calc_crc(pg_hdr);
+	}
+out:
+	__free_page(page);
+	return ret;
+}
+
+int scoutfs_block_read_sm(struct super_block *sb, u64 blkno,
+			  struct scoutfs_block_header *hdr, size_t len,
+			  __le32 *blk_crc)
+{
+	return sm_block_io(sb, READ, blkno, hdr, len, blk_crc);
+}
+
+int scoutfs_block_write_sm(struct super_block *sb, u64 blkno,
+			   struct scoutfs_block_header *hdr, size_t len)
+{
+	return sm_block_io(sb, WRITE, blkno, hdr, len, NULL);
+}
+
 int scoutfs_block_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);

@@ -474,8 +474,10 @@ static int server_commit_log_trees(struct super_block *sb,
 	lt = arg;
 
 	ret = hold_commit(sb);
-	if (ret < 0)
+	if (ret < 0) {
+		scoutfs_err(sb, "server error preparing commit: %d", ret);
 		goto out;
+	}
 
 	mutex_lock(&server->logs_mutex);
 
@@ -485,13 +487,17 @@ static int server_commit_log_trees(struct super_block *sb,
 	ltk.nr = le64_to_be64(lt->nr);
 	ret = scoutfs_btree_lookup(sb, &super->logs_root,
 				   &ltk, sizeof(ltk), &iref);
-	if (ret < 0 && ret != -ENOENT)
+	if (ret < 0 && ret != -ENOENT) {
+		scoutfs_err(sb, "server error finding client logs: %d", ret);
 		goto unlock;
+	}
 	if (ret == 0) {
 		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
 			memcpy(&ltv, iref.val, iref.val_len);
 		} else {
 			ret = -EIO;
+			scoutfs_err(sb, "server error, invalid log item: %d",
+				    ret);
 		}
 		scoutfs_btree_put_iref(&iref);
 		if (ret < 0)
@@ -517,11 +523,15 @@ static int server_commit_log_trees(struct super_block *sb,
 	ret = scoutfs_btree_update(sb, &server->alloc, &server->wri,
 				   &super->logs_root, &ltk, sizeof(ltk),
 				   &ltv, sizeof(ltv));
+	if (ret < 0)
+		scoutfs_err(sb, "server error updating client logs: %d", ret);
 
 unlock:
 	mutex_unlock(&server->logs_mutex);
 
 	ret = apply_commit(sb, ret);
+	if (ret < 0)
+		scoutfs_err(sb, "server error commiting client logs: %d", ret);
 out:
 	WARN_ON_ONCE(ret < 0);
 	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);

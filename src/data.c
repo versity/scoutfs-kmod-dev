@@ -1017,8 +1017,7 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 
 	/* make sure caller holds a cluster lock */
 	lock = scoutfs_per_task_get(&si->pt_data_lock);
-	if (WARN_ON_ONCE(!lock) ||
-	    WARN_ON_ONCE(!create && si->staging)) {
+	if (WARN_ON_ONCE(!lock)) {
 		ret = -EINVAL;
 		goto out;
 	}

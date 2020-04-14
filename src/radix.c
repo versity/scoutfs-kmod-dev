@@ -1355,6 +1355,13 @@ int scoutfs_radix_merge(struct super_block *sb,
 
 	mutex_lock(&alloc->mutex);
 
+	/* can't try to free too much when inp is read-only */
+	if (inp != src &&
+	    WARN_ON_ONCE(count > le64_to_cpu(inp->ref.sm_total))) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	while (count > 0) {
 
 		chg = alloc_change();

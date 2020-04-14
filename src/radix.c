@@ -245,6 +245,23 @@ static void bitmap_set_le(__le64 *map, int ind, int nbits)
 		set_bit_le(ind++, map);
 }
 
+/*
+ * xor the destination bitmap with the source.  bitmap_xor() requires 2
+ * const inputs so I'm not comfortable giving it the changing
+ * destination pointer as one of the const input pointers.
+ */
+static void bitmap_xor_bitmap_le(__le64 *dst, __le64 *src, int nbits)
+{
+	int i;
+
+	BUG_ON((unsigned long)src & 7);
+	BUG_ON((unsigned long)dst & 7);
+	BUG_ON(nbits & 63);
+
+	for (i = 0; i < nbits; i += 64)
+		*(dst++) ^= *(src++);
+}
+
 static void bitmap_clear_le(__le64 *map, int ind, int nbits)
 {
 	unsigned int full;
@@ -1417,13 +1434,13 @@ wrapped:
 		}
 
 		/* carefully modify src last, it might also be inp */
-		bitmap_xor((void *)dst_rdx->bits, (void *)dst_rdx->bits,
-			   (void *)inp_rdx->bits, SCOUTFS_RADIX_BITS);
+		bitmap_xor_bitmap_le(dst_rdx->bits, inp_rdx->bits,
+				     SCOUTFS_RADIX_BITS);
 		dst_lg_delta = count_lg_bitmap(dst_rdx->bits, inp_rdx->bits);
 
 		src_lg_delta = count_lg_bitmap(src_rdx->bits, inp_rdx->bits);
-		bitmap_xor((void *)src_rdx->bits, (void *)src_rdx->bits,
-			   (void *)inp_rdx->bits, SCOUTFS_RADIX_BITS);
+		bitmap_xor_bitmap_le(src_rdx->bits, inp_rdx->bits,
+				     SCOUTFS_RADIX_BITS);
 
 		if (ind < le32_to_cpu(dst_rdx->sm_first))
 			dst_rdx->sm_first = cpu_to_le32(ind);

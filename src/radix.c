@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/crc32c.h>
+#include <linux/random.h>
 
 #include "super.h"
 #include "format.h"
@@ -1102,7 +1103,7 @@ static void dirty_all_path_blocks(struct super_block *sb,
 
 			rdx = bl->data;
 			rdx->hdr.blkno = cpu_to_le64(bl->blkno);
-			le64_add_cpu(&rdx->hdr.seq, 1);
+			prandom_bytes(&rdx->hdr.seq, sizeof(rdx->hdr.seq));
 
 			ref = path_ref(path, level);
 			ref->blkno = rdx->hdr.blkno;

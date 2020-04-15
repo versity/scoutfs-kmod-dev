@@ -901,9 +901,29 @@ static int get_path(struct super_block *sb, struct scoutfs_radix_root *root,
 				ind++;
 		}
 
+		/*
+		 * Didn't find a ref in the rest of the block at
+		 * this level.  If we're the root block there's no
+		 * more next bits to return.  If we're further down
+		 * we bubble up a level and continue on a depth-first
+		 * search.  We check the next ref from our parent and reset
+		 * all the child inds to the left spine of the new
+		 * subtree.
+		 */
 		if (ind >= SCOUTFS_RADIX_REFS) {
-			ret = -ENOENT;
-			goto out;
+			if (level == root->height - 1) {
+				ret = -ENOENT;
+				goto out;
+			}
+			path->inds[level + 1]++;
+			for (i = level; i >= 0; i--)
+				path->inds[i] = 0;
+			for (i = level; i <= level + 1; i++) {
+				scoutfs_block_put(sb, path->bls[i]);
+				path->bls[i] = NULL;
+			}
+			level += 2;
+			continue;
 		}
 
 		/* reset all lower indices if we searched */

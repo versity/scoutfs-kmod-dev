@@ -2317,19 +2317,23 @@ DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_set,
 
 TRACE_EVENT(scoutfs_radix_merge,
 	TP_PROTO(struct super_block *sb,
+		 struct scoutfs_radix_root *inp, u64 inp_blkno,
 		 struct scoutfs_radix_root *src, u64 src_blkno,
 		 struct scoutfs_radix_root *dst, u64 dst_blkno,
-		 u64 count, int ind, int sm_delta, int src_lg_delta,
-		 int dst_lg_delta),
-	TP_ARGS(sb, src, src_blkno, dst, dst_blkno, count, ind,
-		sm_delta, src_lg_delta, dst_lg_delta),
+		 u64 count, u64 leaf_bit, int ind, int sm_delta,
+		 int src_lg_delta, int dst_lg_delta),
+	TP_ARGS(sb, inp, inp_blkno, src, src_blkno, dst, dst_blkno, count,
+		leaf_bit, ind, sm_delta, src_lg_delta, dst_lg_delta),
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
+		__field(__u64, inp_root_blkno)
+		__field(__u64, inp_blkno)
 		__field(__u64, src_root_blkno)
 		__field(__u64, src_blkno)
 		__field(__u64, dst_root_blkno)
 		__field(__u64, dst_blkno)
 		__field(__u64, count)
+		__field(__u64, leaf_bit)
 		__field(int, ind)
 		__field(int, sm_delta)
 		__field(int, src_lg_delta)
@@ -2337,22 +2341,26 @@ TRACE_EVENT(scoutfs_radix_merge,
 	),
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
+		__entry->inp_root_blkno = le64_to_cpu(inp->ref.blkno);
+		__entry->inp_blkno = inp_blkno;
 		__entry->src_root_blkno = le64_to_cpu(src->ref.blkno);
 		__entry->src_blkno = src_blkno;
 		__entry->dst_root_blkno = le64_to_cpu(dst->ref.blkno);
 		__entry->dst_blkno = dst_blkno;
 		__entry->count = count;
+		__entry->leaf_bit = leaf_bit;
 		__entry->ind = ind;
 		__entry->sm_delta = sm_delta;
 		__entry->src_lg_delta = src_lg_delta;
 		__entry->dst_lg_delta = dst_lg_delta;
 	),
-	TP_printk(SCSBF" src_root_blkno %llu src_blkno %llu dst_root_blkno %llu dst_blkno %llu count %llu ind %u sm_delta %d src_lg_delta %d dst_lg_delta %d",
-		  SCSB_TRACE_ARGS,
+	TP_printk(SCSBF" irb %llu ib %llu srb %llu sb %llu drb %llu db %llu cnt %llu lb %llu ind %u smd %d sld %d dld %d",
+		  SCSB_TRACE_ARGS, __entry->inp_root_blkno, __entry->inp_blkno,
 		  __entry->src_root_blkno, __entry->src_blkno,
 		  __entry->dst_root_blkno, __entry->dst_blkno,
-		  __entry->count, __entry->ind, __entry->sm_delta,
-		  __entry->src_lg_delta, __entry->dst_lg_delta)
+		  __entry->count, __entry->leaf_bit, __entry->ind,
+		  __entry->sm_delta, __entry->src_lg_delta,
+		  __entry->dst_lg_delta)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

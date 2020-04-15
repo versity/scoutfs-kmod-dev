@@ -1459,9 +1459,10 @@ wrapped:
 		fixup_parent_refs(src_path, -sm_delta, -src_lg_delta);
 		fixup_parent_refs(dst_path, sm_delta, dst_lg_delta);
 
-		trace_scoutfs_radix_merge(sb, src, src_path->bls[0]->blkno,
+		trace_scoutfs_radix_merge(sb, inp, inp_path->bls[0]->blkno,
+					  src, src_path->bls[0]->blkno,
 					  dst, dst_path->bls[0]->blkno, count,
-					  ind, sm_delta, src_lg_delta,
+					  bit, ind, sm_delta, src_lg_delta,
 					  dst_lg_delta);
 
 		free_path(sb, inp_path);

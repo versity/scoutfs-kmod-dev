@@ -500,7 +500,7 @@ static int KC_DECLARE_READDIR(scoutfs_readdir, struct file *file,
 		pos = le64_to_cpu(key.skd_major);
 		kc_readdir_pos(file, ctx) = pos;
 
-		if (!kc_dir_emit(ctx, dent, dent->name, name_len, pos,
+		if (!kc_dir_emit(ctx, dirent, dent->name, name_len, pos,
 				le64_to_cpu(dent->ino),
 				dentry_type(dent->type))) {
 			ret = 0;

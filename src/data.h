@@ -1,5 +1,5 @@
-#ifndef _SCOUTFS_FILERW_H_
-#define _SCOUTFS_FILERW_H_
+#ifndef _SCOUTFS_DATA_H_
+#define _SCOUTFS_DATA_H_
 
 struct scoutfs_lock;
 struct scoutfs_ioctl_data_waiting_entry;

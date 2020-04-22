@@ -1526,6 +1526,12 @@ void scoutfs_radix_root_init(struct super_block *sb,
 	init_ref(&root->ref, 0, false);
 }
 
+u64 scoutfs_radix_root_free_bytes(struct super_block *sb,
+				  struct scoutfs_radix_root *root)
+{
+	return le64_to_cpu(root->ref.sm_total) << SCOUTFS_BLOCK_SHIFT;
+}
+
 /*
  * The first bit nr in a leaf containing the bit, used by callers to
  * identify regions that span leafs and would need to be freed in

@@ -35,6 +35,7 @@
 #include "lock_server.h"
 #include "endian_swap.h"
 #include "quorum.h"
+#include "trans.h"
 
 /*
  * Every active mount can act as the server that listens on a net
@@ -412,7 +413,7 @@ static int server_get_log_trees(struct super_block *sb,
 	}
 
 	/* ensure client has enough free data blocks for a transaction */
-	target = (2ULL*1024*1024*1024) / SCOUTFS_BLOCK_SIZE;
+	target = SCOUTFS_TRANS_DATA_ALLOC_HWM / SCOUTFS_BLOCK_SIZE;
 	if (le64_to_cpu(ltv.data_avail.ref.sm_total) < target) {
 		count = target - le64_to_cpu(ltv.data_avail.ref.sm_total);
 

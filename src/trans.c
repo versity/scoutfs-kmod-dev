@@ -315,6 +315,13 @@ struct scoutfs_reservation {
  * we piggy back on their hold.  We wait if the writer is trying to
  * write out the transation.  And if our items won't fit then we kick off
  * a write.
+ *
+ * This is called as a condition for wait_event.  It is very limited in
+ * the locking (blocking) it can do because the caller has set the task
+ * state before testing the condition safely race with waking after
+ * setting the condition.  Our checking the amount of dirty metadata
+ * blocks and free data blocks is racy, but we don't mind the risk of
+ * delaying or prematurely forcing commits.
  */
 static bool acquired_hold(struct super_block *sb,
 			  struct scoutfs_reservation *rsv,
@@ -350,6 +357,13 @@ static bool acquired_hold(struct super_block *sb,
 	if (scoutfs_block_writer_dirty_bytes(sb, &tri->wri) >=
 			(8 * 1024 * 1024)) {
 		scoutfs_inc_counter(sb, trans_commit_full);
+		queue_trans_work(sbi);
+		goto out;
+	}
+
+	/* Try to refill data allocator before premature enospc */
+	if (scoutfs_data_alloc_free_bytes(sb) <= SCOUTFS_TRANS_DATA_ALLOC_LWM) {
+		scoutfs_inc_counter(sb, trans_commit_data_alloc_low);
 		queue_trans_work(sbi);
 		goto out;
 	}

@@ -85,6 +85,7 @@
 	EXPAND_COUNTER(quorum_write_block)			\
 	EXPAND_COUNTER(quorum_write_block_error)		\
 	EXPAND_COUNTER(quorum_fenced)				\
+	EXPAND_COUNTER(trans_commit_data_alloc_low)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\
 	EXPAND_COUNTER(trans_commit_sync_fs)			\

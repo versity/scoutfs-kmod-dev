@@ -834,6 +834,7 @@ static int get_path(struct super_block *sb, struct scoutfs_radix_root *root,
 				synth = chg->next_synth++;
 			/* careful not to go too high or wrap */
 			if (synth == U64_MAX || synth < RADIX_SYNTH_BLKNO) {
+				scoutfs_inc_counter(sb, radix_enospc_synth);
 				ret = -ENOSPC;
 				goto out;
 			}
@@ -992,6 +993,7 @@ static int get_all_paths(struct super_block *sb,
 
 			/* we're not modifying as we go, check for wrapping */
 			if (next_meta >= start_meta && meta_wrapped) {
+				scoutfs_inc_counter(sb, radix_enospc_paths);
 				ret = -ENOSPC;
 				break;
 			}
@@ -1276,6 +1278,7 @@ find_next:
 				root->next_find_bit = 0;
 				goto find_next;
 			}
+			scoutfs_inc_counter(sb, radix_enospc_data);
 			ret = -ENOSPC;
 		}
 		goto out;

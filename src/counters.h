@@ -85,6 +85,9 @@
 	EXPAND_COUNTER(quorum_write_block)			\
 	EXPAND_COUNTER(quorum_write_block_error)		\
 	EXPAND_COUNTER(quorum_fenced)				\
+	EXPAND_COUNTER(radix_enospc_data)			\
+	EXPAND_COUNTER(radix_enospc_paths)			\
+	EXPAND_COUNTER(radix_enospc_synth)			\
 	EXPAND_COUNTER(trans_commit_data_alloc_low)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\

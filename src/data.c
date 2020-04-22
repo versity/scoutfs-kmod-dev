@@ -2017,6 +2017,16 @@ void scoutfs_data_get_btrees(struct super_block *sb,
 	up_read(&datinf->alloc_rwsem);
 }
 
+/*
+ * This isn't serializing with allocators so it can be a bit racey.
+ */
+u64 scoutfs_data_alloc_free_bytes(struct super_block *sb)
+{
+	DECLARE_DATA_INFO(sb, datinf);
+
+	return scoutfs_radix_root_free_bytes(sb, &datinf->data_avail);
+}
+
 int scoutfs_data_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);

@@ -1,6 +1,11 @@
 #ifndef _SCOUTFS_TRANS_H_
 #define _SCOUTFS_TRANS_H_
 
+/* the server will attempt to fill data allocs for each trans */
+#define SCOUTFS_TRANS_DATA_ALLOC_HWM	(2ULL * 1024 * 1024 * 1024)
+/* the client will force commits if data allocators get too low */
+#define SCOUTFS_TRANS_DATA_ALLOC_LWM	(256ULL * 1024 * 1024)
+
 #include "count.h"
 
 void scoutfs_trans_write_func(struct work_struct *work);

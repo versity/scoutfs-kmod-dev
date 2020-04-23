@@ -301,7 +301,6 @@ static int refresh_bloom_roots(struct super_block *sb,
 {
 	DECLARE_FOREST_INFO(sb, finf);
 	struct forest_lock_private *lpriv = ACCESS_ONCE(lock->forest_private);
-	struct scoutfs_log_trees_key ltk;
 	struct scoutfs_log_trees_val ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct forest_bloom_nrs bloom;
@@ -309,6 +308,7 @@ static int refresh_bloom_roots(struct super_block *sb,
 	struct forest_root *fr = NULL;
 	struct scoutfs_bloom_block *bb;
 	struct scoutfs_block *bl;
+	struct scoutfs_key key;
 	int ret;
 	int i;
 
@@ -328,11 +328,10 @@ static int refresh_bloom_roots(struct super_block *sb,
 
 	calc_bloom_nrs(&bloom, &lock->start);
 
-	memset(&ltk, 0, sizeof(ltk));
-	for (;; be64_add_cpu(&ltk.nr, 1)) {
+	scoutfs_key_init_log_trees(&key, 0, 0);
+	for (;; scoutfs_key_inc(&key)) {
 
-		ret = scoutfs_btree_next(sb, &super.logs_root,
-					 &ltk, sizeof(ltk), &iref);
+		ret = scoutfs_btree_next(sb, &super.logs_root, &key, &iref);
 		if (ret == -ENOENT) {
 			ret = 0;
 			break;
@@ -340,9 +339,8 @@ static int refresh_bloom_roots(struct super_block *sb,
 		if (ret < 0)
 			goto out;
 
-		if (iref.key_len == sizeof(struct scoutfs_log_trees_key) &&
-		    iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
-			memcpy(&ltk, iref.key, iref.key_len);
+		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
+			key = *iref.key;
 			memcpy(&ltv, iref.val, iref.val_len);
 		} else {
 			ret = -EIO;
@@ -369,8 +367,8 @@ static int refresh_bloom_roots(struct super_block *sb,
 		scoutfs_block_put(sb, bl);
 
 		trace_scoutfs_forest_bloom_search(sb, &lock->start,
-					be64_to_cpu(ltk.rid),
-					be64_to_cpu(ltk.nr),
+					le64_to_cpu(key.sklt_rid),
+					le64_to_cpu(key.sklt_nr),
 					le64_to_cpu(ltv.bloom_ref.blkno),
 					le64_to_cpu(ltv.bloom_ref.seq),
 					i);
@@ -380,8 +378,8 @@ static int refresh_bloom_roots(struct super_block *sb,
 			continue;
 
 		/* use our dirty log instead of the old committed version */
-		if (be64_to_cpu(ltk.rid) == le64_to_cpu(finf->our_log.rid) &&
-		    be64_to_cpu(ltk.nr) == le64_to_cpu(finf->our_log.nr)) {
+		if (key.sklt_rid == finf->our_log.rid &&
+		    key.sklt_nr == finf->our_log.nr) {
 			add_our_log_root(finf, lpriv);
 			continue;
 		}
@@ -394,8 +392,8 @@ static int refresh_bloom_roots(struct super_block *sb,
 		}
 
 		fr->item_root = ltv.item_root;
-		fr->rid = be64_to_cpu(ltk.rid);
-		fr->nr = be64_to_cpu(ltk.nr);
+		fr->rid = le64_to_cpu(key.sklt_rid);
+		fr->nr = le64_to_cpu(key.sklt_nr);
 
 		list_add_tail(&fr->entry, &lpriv->roots);
 
@@ -568,7 +566,6 @@ int scoutfs_forest_lookup(struct super_block *sb, struct scoutfs_key *key,
 	DECLARE_STALE_TRACKING_SUPER_REFS(prev_srefs, srefs);
 	struct forest_lock_private *lpriv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_key_be kbe;
 	struct forest_root *fr;
 	u64 found_vers;
 	u64 vers;
@@ -584,8 +581,6 @@ int scoutfs_forest_lookup(struct super_block *sb, struct scoutfs_key *key,
 		goto out;
 	}
 
-	scoutfs_key_to_be(&kbe, key);
-
 retry:
 	down_read(&lpriv->rwsem);
 
@@ -600,8 +595,7 @@ retry:
 			break;
 
 		read_lock_forest_root(finf, lpriv, fr);
-		err = scoutfs_btree_lookup(sb, &fr->item_root,
-					   &kbe, sizeof(kbe), &iref);
+		err = scoutfs_btree_lookup(sb, &fr->item_root, key, &iref);
 		if (err < 0)
 			read_unlock_forest_root(finf, lpriv, fr);
 		if (err == -ENOENT)
@@ -705,14 +699,14 @@ static inline bool forest_iter_key_within(struct scoutfs_key *a,
 
 static inline int forest_iter_btree_search(struct super_block *sb,
 					   struct scoutfs_btree_root *root,
-					   void *key, unsigned key_len,
+					   struct scoutfs_key *key,
 					   struct scoutfs_btree_item_ref *iref,
 					   bool forward)
 {
 	if (forward)
-		return scoutfs_btree_next(sb, root, key, key_len, iref);
+		return scoutfs_btree_next(sb, root, key, iref);
 	else
-		return scoutfs_btree_prev(sb, root, key, key_len, iref);
+		return scoutfs_btree_prev(sb, root, key, iref);
 }
 
 struct forest_iter_pos {
@@ -835,7 +829,6 @@ static int forest_iter(struct super_block *sb, struct scoutfs_key *key,
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct rb_root iter_root = RB_ROOT;
 	struct scoutfs_key found_key;
-	struct scoutfs_key_be kbe;
 	struct forest_iter_pos *nip;
 	struct forest_iter_pos *ip;
 	struct forest_root *fr;
@@ -896,12 +889,9 @@ retry:
 
 		/* search for the next item in the root */
 		if (ip->vers == 0) {
-			scoutfs_key_to_be(&kbe, &ip->key);
-
 			read_lock_forest_root(finf, lpriv, fr);
 			ret = forest_iter_btree_search(sb, &fr->item_root,
-						       &kbe, sizeof(kbe),
-						       &iref, fwd);
+						       &ip->key, &iref, fwd);
 			if (ret < 0)
 				read_unlock_forest_root(finf, lpriv, fr);
 			if (ret == -ENOENT) {
@@ -911,7 +901,7 @@ retry:
 			if (ret < 0)
 				goto unlock;
 
-			scoutfs_key_from_be(&ip->key, iref.key);
+			ip->key = *iref.key;
 			ip->vers = item_vers(lpriv, fr, iref.val);
 			ip->deletion = item_is_deletion(lpriv, fr, iref.val);
 
@@ -1026,11 +1016,10 @@ int scoutfs_forest_next_hint(struct super_block *sb, struct scoutfs_key *key,
 {
 	DECLARE_STALE_TRACKING_SUPER_REFS(prev_srefs, srefs);
 	struct scoutfs_super_block super;
-	struct scoutfs_log_trees_key ltk;
 	struct scoutfs_log_trees_val ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_key_be kbe;
 	struct scoutfs_key found;
+	struct scoutfs_key ltk;
 	bool have_next;
 	int ret;
 
@@ -1042,13 +1031,12 @@ retry:
 	srefs.fs_ref = super.fs_root.ref;
 	srefs.logs_ref = super.logs_root.ref;
 
-	memset(&ltk, 0, sizeof(ltk));
+	scoutfs_key_init_log_trees(&ltk, 0, 0);
 	have_next = false;
 
-	for (;; be64_add_cpu(&ltk.nr, 1)) {
+	for (;; scoutfs_key_inc(&ltk)) {
 
-		ret = scoutfs_btree_next(sb, &super.logs_root,
-					 &ltk, sizeof(ltk), &iref);
+		ret = scoutfs_btree_next(sb, &super.logs_root, &ltk, &iref);
 		if (ret == -ENOENT) {
 			if (have_next)
 				ret = 0;
@@ -1059,9 +1047,8 @@ retry:
 		if (ret < 0)
 			goto out;
 
-		if (iref.key_len == sizeof(ltk) &&
-		    iref.val_len == sizeof(ltv)) {
-			memcpy(&ltk, iref.key, iref.key_len);
+		if (iref.val_len == sizeof(ltv)) {
+			ltk = *iref.key;
 			memcpy(&ltv, iref.val, iref.val_len);
 		} else {
 			ret = -EIO;
@@ -1070,9 +1057,7 @@ retry:
 		if (ret < 0)
 			goto out;
 
-		scoutfs_key_to_be(&kbe, key);
-		ret = scoutfs_btree_next(sb, &ltv.item_root,
-					 &kbe, sizeof(kbe), &iref);
+		ret = scoutfs_btree_next(sb, &ltv.item_root, key, &iref);
 		if (ret == -ENOENT)
 			continue;
 		if (ret == -ESTALE)
@@ -1080,13 +1065,8 @@ retry:
 		if (ret < 0)
 			goto out;
 
-		if (iref.key_len == sizeof(kbe))
-			scoutfs_key_from_be(&found, iref.key);
-		else
-			ret = -EIO;
+		found = *iref.key;
 		scoutfs_btree_put_iref(&iref);
-		if (ret < 0)
-			goto out;
 
 		if (!have_next || scoutfs_key_compare(&found, next) < 0) {
 			have_next = true;
@@ -1274,7 +1254,6 @@ static int forest_insert(struct super_block *sb, struct scoutfs_key *key,
 			 bool check_eexist, bool check_enoent)
 {
 	DECLARE_FOREST_INFO(sb, finf);
-	struct scoutfs_key_be kbe;
 	struct kvec *iv = NULL;
 	int ret;
 
@@ -1303,11 +1282,9 @@ static int forest_insert(struct super_block *sb, struct scoutfs_key *key,
 		goto out;
 	}
 
-	scoutfs_key_to_be(&kbe, key);
-
 	down_write(&finf->rwsem);
 	ret = scoutfs_btree_force(sb, finf->alloc, finf->wri,
-				  &finf->our_log.item_root, &kbe, sizeof(kbe),
+				  &finf->our_log.item_root, key,
 				  iv->iov_base, iv->iov_len);
 	up_write(&finf->rwsem);
 	kfree(iv);
@@ -1372,7 +1349,6 @@ static int forest_delete(struct super_block *sb, struct scoutfs_key *key,
 {
 	DECLARE_FOREST_INFO(sb, finf);
 	struct scoutfs_log_item_value liv;
-	struct scoutfs_key_be kbe;
 	int ret;
 
 	if (check_enoent) {
@@ -1385,14 +1361,13 @@ static int forest_delete(struct super_block *sb, struct scoutfs_key *key,
 	if (ret < 0)
 		goto out;
 
-	scoutfs_key_to_be(&kbe, key);
 	liv.vers = cpu_to_le64(lock->write_version);
 	liv.flags = SCOUTFS_LOG_ITEM_FLAG_DELETION;
 
 	down_write(&finf->rwsem);
 	ret = scoutfs_btree_force(sb, finf->alloc, finf->wri,
-				  &finf->our_log.item_root,
-				  &kbe, sizeof(kbe), &liv, sizeof(liv));
+				  &finf->our_log.item_root, key, &liv,
+				  sizeof(liv));
 	up_write(&finf->rwsem);
 out:
 	return ret;

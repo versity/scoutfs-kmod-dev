@@ -84,32 +84,22 @@ enum {
 	 BTW_DELETE	= (1 <<  7), /* walking to delete, try merging */
 };
 
-/*
- * This greatest key value is stored down the right spine of the tree
- * and has to be sorted by memcmp() greater than all possible keys in
- * all btrees.
- */
-static char max_key[SCOUTFS_BTREE_MAX_KEY_LEN] = {
-	[0 ... (SCOUTFS_BTREE_MAX_KEY_LEN - 1)] = 0xff,
-};
-
-/* number of contiguous bytes used by the item header, key, and value */
-static inline unsigned int len_bytes(unsigned key_len, unsigned val_len)
+/* number of contiguous bytes used by the item and it's value */
+static inline unsigned int len_bytes(unsigned val_len)
 {
-	return sizeof(struct scoutfs_btree_item) + key_len + val_len;
+	return sizeof(struct scoutfs_btree_item) + val_len;
 }
 
 /* number of contiguous bytes used an existing item */
 static inline unsigned int item_bytes(struct scoutfs_btree_item *item)
 {
-	return len_bytes(le16_to_cpu(item->key_len), le16_to_cpu(item->val_len));
+	return len_bytes(le16_to_cpu(item->val_len));
 }
 
 /* total block bytes used by an item: header, item, key, value */
-static inline unsigned int all_len_bytes(unsigned key_len, unsigned val_len)
+static inline unsigned int all_len_bytes(unsigned val_len)
 {
-	return sizeof(struct scoutfs_btree_item_header) +
-		len_bytes(key_len, val_len);
+	return sizeof(struct scoutfs_btree_item_header) + len_bytes(val_len);
 }
 
 /*
@@ -138,8 +128,7 @@ static inline int min_used_bytes(int block_size)
 /* total block bytes used by an existing item */
 static inline unsigned int all_item_bytes(struct scoutfs_btree_item *item)
 {
-	return all_len_bytes(le16_to_cpu(item->key_len),
-			     le16_to_cpu(item->val_len));
+	return all_len_bytes(le16_to_cpu(item->val_len));
 }
 
 /* number of free bytes between last item header and first item */
@@ -176,30 +165,19 @@ last_item(struct scoutfs_btree_block *bt)
 	return pos_item(bt, le32_to_cpu(bt->nr_items) - 1);
 }
 
-static inline void *item_key(struct scoutfs_btree_item *item)
+static inline struct scoutfs_key *item_key(struct scoutfs_btree_item *item)
 {
-	return item->data;
-}
-
-static inline unsigned item_key_len(struct scoutfs_btree_item *item)
-{
-	return le16_to_cpu(item->key_len);
+	return &item->key;
 }
 
 static inline void *item_val(struct scoutfs_btree_item *item)
 {
-	return item_key(item) + le16_to_cpu(item->key_len);
+	return item->val;
 }
 
 static inline unsigned item_val_len(struct scoutfs_btree_item *item)
 {
 	return le16_to_cpu(item->val_len);
-}
-
-static inline int cmp_keys(void *a, unsigned a_len, void *b, unsigned b_len)
-{
-	return memcmp(a, b, min(a_len, b_len)) ?:
-	       a_len < b_len ? -1 : a_len > b_len ? 1 : 0;
 }
 
 /*
@@ -213,7 +191,7 @@ static inline int cmp_keys(void *a, unsigned a_len, void *b, unsigned b_len)
  * If the given key is greater then all items' keys then the number of
  * items can be returned.
  */
-static int find_pos(struct scoutfs_btree_block *bt, void *key, unsigned key_len,
+static int find_pos(struct scoutfs_btree_block *bt, struct scoutfs_key *key,
 		    int *cmp)
 {
 	struct scoutfs_btree_item *item;
@@ -227,7 +205,7 @@ static int find_pos(struct scoutfs_btree_block *bt, void *key, unsigned key_len,
 		pos = start + (end - start) / 2;
 
 		item = pos_item(bt, pos);
-		*cmp = cmp_keys(key, key_len, item_key(item), item_key_len(item));
+		*cmp = scoutfs_key_compare(key, item_key(item));
 		if (*cmp < 0) {
 			end = pos;
 		} else if (*cmp > 0) {
@@ -250,20 +228,19 @@ static int find_pos(struct scoutfs_btree_block *bt, void *key, unsigned key_len,
  * there's space for the item and its metadata.
  */
 static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
-			void *key, unsigned key_len, void *val,
-			unsigned val_len)
+			struct scoutfs_key *key, void *val, unsigned val_len)
 {
 	unsigned int nr = le32_to_cpu(bt->nr_items);
 	struct scoutfs_btree_item *item;
 	unsigned all_bytes;
 
-	all_bytes = all_len_bytes(key_len, val_len);
+	all_bytes = all_len_bytes(val_len);
 	BUG_ON(free_bytes(bt) < all_bytes);
 
 	if (pos < nr)
 		memmove_arr(bt->item_hdrs, pos + 1, pos, nr - pos);
 
-	le32_add_cpu(&bt->free_end, -len_bytes(key_len, val_len));
+	le32_add_cpu(&bt->free_end, -len_bytes(val_len));
 	bt->item_hdrs[pos].off = bt->free_end;
 	nr++;
 	bt->nr_items = cpu_to_le32(nr);
@@ -272,10 +249,9 @@ static void create_item(struct scoutfs_btree_block *bt, unsigned int pos,
 	       offsetof(struct scoutfs_btree_block, item_hdrs[nr]));
 
 	item = pos_item(bt, pos);
-	item->key_len = cpu_to_le16(key_len);
+	*item_key(item) = *key;
 	item->val_len = cpu_to_le16(val_len);
 
-	memcpy(item_key(item), key, key_len);
 	if (val_len)
 		memcpy(item_val(item), val, val_len);
 }
@@ -361,8 +337,8 @@ static void move_items(struct scoutfs_btree_block *dst,
 	while (f < le32_to_cpu(src->nr_items) && to_move > 0) {
 		from = pos_item(src, f);
 
-		create_item(dst, t, item_key(from), item_key_len(from),
-			    item_val(from), item_val_len(from));
+		create_item(dst, t, item_key(from), item_val(from),
+			    item_val_len(from));
 
 		to_move -= all_item_bytes(from);
 
@@ -522,14 +498,14 @@ out:
  */
 static void create_parent_item(struct scoutfs_btree_block *parent,
 			       unsigned pos, struct scoutfs_btree_block *child,
-			       void *key, unsigned key_len)
+			       struct scoutfs_key *key)
 {
 	struct scoutfs_btree_ref ref = {
 		.blkno = child->hdr.blkno,
 		.seq = child->hdr.seq,
 	};
 
-	create_item(parent, pos, key, key_len, &ref, sizeof(ref));
+	create_item(parent, pos, key, &ref, sizeof(ref));
 }
 
 /*
@@ -543,8 +519,7 @@ static void update_parent_item(struct scoutfs_btree_block *parent,
 	struct scoutfs_btree_item *item = last_item(child);
 
 	delete_item(parent, pos);
-	create_parent_item(parent, pos, child,
-			   item_key(item), item_key_len(item));
+	create_parent_item(parent, pos, child, item_key(item));
 }
 
 /*
@@ -562,7 +537,7 @@ static int try_split(struct super_block *sb,
 		     struct scoutfs_radix_allocator *alloc,
 		     struct scoutfs_block_writer *wri,
 		     struct scoutfs_btree_root *root,
-		     void *key, unsigned key_len, unsigned val_len,
+		     struct scoutfs_key *key, unsigned val_len,
 		     struct scoutfs_btree_block *parent, unsigned pos,
 		     struct scoutfs_btree_block *right)
 {
@@ -570,6 +545,7 @@ static int try_split(struct super_block *sb,
 	struct scoutfs_block *par_bl = NULL;
 	struct scoutfs_btree_block *left;
 	struct scoutfs_btree_item *item;
+	struct scoutfs_key max_key;
 	unsigned int all_bytes;
 	int ret;
 	int err;
@@ -579,7 +555,7 @@ static int try_split(struct super_block *sb,
 	else if (right->level)
 		all_bytes = SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES;
 	else
-		all_bytes = all_len_bytes(key_len, val_len);
+		all_bytes = all_len_bytes(val_len);
 
 	if (free_bytes(right) >= all_bytes)
 		return 0;
@@ -608,16 +584,16 @@ static int try_split(struct super_block *sb,
 		root->ref.blkno = parent->hdr.blkno;
 		root->ref.seq = parent->hdr.seq;
 
+		scoutfs_key_set_ones(&max_key);
+
 		pos = 0;
-		create_parent_item(parent, pos, right,
-				   &max_key, sizeof(max_key));
+		create_parent_item(parent, pos, right, &max_key);
 	}
 
 	move_items(left, right, false, used_total(right) / 2);
 
 	item = last_item(left);
-	create_parent_item(parent, pos, left,
-			   item_key(item), item_key_len(item));
+	create_parent_item(parent, pos, left, item_key(item));
 
 	scoutfs_block_put(sb, left_bl);
 	scoutfs_block_put(sb, par_bl);
@@ -751,8 +727,8 @@ static int verify_btree_block(struct scoutfs_btree_block *bt, int level)
 		item = pos_item(bt, i);
 		bytes += item_bytes(item);
 
-		if (i > 0 && cmp_keys(item_key(item), item_key_len(item),
-				      item_key(prev), item_key_len(prev)) <= 0)
+		if (i > 0 && scoutfs_key_compare(item_key(item),
+						 item_key(prev)) <= 0)
 			goto out;
 
 		prev = item;
@@ -773,30 +749,14 @@ out:
 			after_off, bytes);
 		for (i = 0; i < nr; i++) {
 			item = pos_item(bt, i);
-			printk("  [%u] off %u key_len %u val_len %u\n",
+			printk("  [%u] off %u val_len %u\n",
 			       i, le32_to_cpu(bt->item_hdrs[i].off),
-			       item_key_len(item), item_val_len(item));
+			       item_val_len(item));
 		}
 		BUG_ON(bad);
 	}
 
 	return 0;
-}
-
-/* XXX bleh, this should probably share code with the key_buf equivalent */
-static void inc_key(u8 *bytes, unsigned *len)
-{
-	int i;
-
-	if (*len < SCOUTFS_BTREE_MAX_KEY_LEN) {
-		memset(bytes + *len, 0, SCOUTFS_BTREE_MAX_KEY_LEN - *len);
-		*len = SCOUTFS_BTREE_MAX_KEY_LEN;
-	}
-
-	for (i = *len - 1; i >= 0; i--) {
-		if (++bytes[i] != 0)
-			break;
-	}
 }
 
 /*
@@ -819,10 +779,10 @@ static int btree_walk(struct super_block *sb,
 		      struct scoutfs_radix_allocator *alloc,
 		      struct scoutfs_block_writer *wri,
 		      struct scoutfs_btree_root *root,
-		      int flags, void *key, unsigned key_len,
+		      int flags, struct scoutfs_key *key,
 		      unsigned int val_len,
-		      struct scoutfs_block **bl_ret, void *iter_key,
-		      unsigned *iter_len)
+		      struct scoutfs_block **bl_ret,
+		      struct scoutfs_key *iter_key)
 {
 	struct scoutfs_block *par_bl = NULL;
 	struct scoutfs_block *bl = NULL;
@@ -848,8 +808,6 @@ restart:
 	bl = NULL;
 	bt = NULL;
 	level = root->height;
-	if (iter_len)
-		*iter_len = 0;
 	pos = 0;
 	ret = 0;
 
@@ -906,8 +864,8 @@ restart:
 		 */
 		ret = 0;
 		if (flags & (BTW_INSERT | BTW_DELETE))
-			ret = try_split(sb, alloc, wri, root, key, key_len,
-					val_len, parent, pos, bt);
+			ret = try_split(sb, alloc, wri, root, key, val_len,
+					parent, pos, bt);
 		if (ret == 0 && (flags & BTW_DELETE) && parent)
 			ret = try_merge(sb, alloc, wri, root, parent, pos, bt);
 		if (ret > 0)
@@ -922,7 +880,7 @@ restart:
 		nr = le32_to_cpu(bt->nr_items);
 
 		/* Find the next child block for the search key. */
-		pos = find_pos(bt, key, key_len, &cmp);
+		pos = find_pos(bt, key, &cmp);
 		if (pos >= nr) {
 			scoutfs_corruption(sb, SC_BTREE_NO_CHILD_REF,
 					   corrupt_btree_block_level,
@@ -940,14 +898,12 @@ restart:
 		/* give the caller the next key to iterate towards */
 		if (iter_key && (flags & BTW_NEXT) && (pos < (nr - 1))) {
 			item = pos_item(bt, pos);
-			*iter_len = item_key_len(item);
-			memcpy(iter_key, item_key(item), *iter_len);
-			inc_key(iter_key, iter_len);
+			*iter_key = *item_key(item);
+			scoutfs_key_inc(iter_key);
 
 		} else if (iter_key && (flags & BTW_PREV) && (pos > 0)) {
 			item = pos_item(bt, pos - 1);
-			*iter_len = item_key_len(item);
-			memcpy(iter_key, item_key(item), *iter_len);
+			*iter_key = *item_key(item);
 		}
 
 		scoutfs_block_put(sb, par_bl);
@@ -982,7 +938,6 @@ static void init_item_ref(struct scoutfs_btree_item_ref *iref,
 	iref->sb = sb;
 	iref->bl = bl;
 	iref->key = item_key(item);
-	iref->key_len = le16_to_cpu(item->key_len);
 	iref->val = item_val(item);
 	iref->val_len = le16_to_cpu(item->val_len);
 }
@@ -1000,8 +955,9 @@ void scoutfs_btree_put_iref(struct scoutfs_btree_item_ref *iref)
  * item ref.  They're given a reference to the block that they'll drop
  * when they're done.
  */
-int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_btree_root *root,
-			 void *key, unsigned key_len,
+int scoutfs_btree_lookup(struct super_block *sb,
+			 struct scoutfs_btree_root *root,
+			 struct scoutfs_key *key,
 			 struct scoutfs_btree_item_ref *iref)
 {
 	struct scoutfs_btree_item *item;
@@ -1014,11 +970,10 @@ int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_btree_root *root
 	if (WARN_ON_ONCE(iref->key))
 		return -EINVAL;
 
-	ret = btree_walk(sb, NULL, NULL, root, 0, key, key_len, 0, &bl,
-			 NULL, NULL);
+	ret = btree_walk(sb, NULL, NULL, root, 0, key, 0, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
-		pos = find_pos(bt, key, key_len, &cmp);
+		pos = find_pos(bt, key, &cmp);
 		if (cmp == 0) {
 			item = pos_item(bt, pos);
 			init_item_ref(iref, sb, bl, item);
@@ -1033,11 +988,9 @@ int scoutfs_btree_lookup(struct super_block *sb, struct scoutfs_btree_root *root
 	return ret;
 }
 
-static bool invalid_item(void *key, unsigned key_len, unsigned val_len)
+static bool invalid_item(unsigned val_len)
 {
-	return WARN_ON_ONCE(key_len == 0) ||
-	       WARN_ON_ONCE(key_len > SCOUTFS_BTREE_MAX_KEY_LEN) ||
-	       WARN_ON_ONCE(val_len > SCOUTFS_BTREE_MAX_VAL_LEN);
+	return WARN_ON_ONCE(val_len > SCOUTFS_BTREE_MAX_VAL_LEN);
 }
 
 /*
@@ -1053,7 +1006,7 @@ int scoutfs_btree_insert(struct super_block *sb,
 			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
-			 void *key, unsigned key_len,
+			 struct scoutfs_key *key,
 			 void *val, unsigned val_len)
 {
 	struct scoutfs_btree_block *bt;
@@ -1062,16 +1015,16 @@ int scoutfs_btree_insert(struct super_block *sb,
 	int cmp;
 	int ret;
 
-	if (invalid_item(key, key_len, val_len))
+	if (invalid_item(val_len))
 		return -EINVAL;
 
-	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT,
-			 key, key_len, val_len, &bl, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT, key,
+			 val_len, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
-		pos = find_pos(bt, key, key_len, &cmp);
+		pos = find_pos(bt, key, &cmp);
 		if (cmp) {
-			create_item(bt, pos, key, key_len, val, val_len);
+			create_item(bt, pos, key, val, val_len);
 			ret = 0;
 		} else {
 			ret = -EEXIST;
@@ -1097,7 +1050,7 @@ int scoutfs_btree_update(struct super_block *sb,
 			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
-			 void *key, unsigned key_len,
+			 struct scoutfs_key *key,
 			 void *val, unsigned val_len)
 {
 	struct scoutfs_btree_block *bt;
@@ -1106,17 +1059,17 @@ int scoutfs_btree_update(struct super_block *sb,
 	int cmp;
 	int ret;
 
-	if (invalid_item(key, key_len, val_len))
+	if (invalid_item(val_len))
 		return -EINVAL;
 
-	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT,
-			 key, key_len, val_len, &bl, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT, key,
+			 val_len, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
-		pos = find_pos(bt, key, key_len, &cmp);
+		pos = find_pos(bt, key, &cmp);
 		if (cmp == 0) {
 			delete_item(bt, pos);
-			create_item(bt, pos, key, key_len, val, val_len);
+			create_item(bt, pos, key, val, val_len);
 			ret = 0;
 		} else {
 			ret = -ENOENT;
@@ -1136,7 +1089,7 @@ int scoutfs_btree_force(struct super_block *sb,
 			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
-			void *key, unsigned key_len,
+			struct scoutfs_key *key,
 			void *val, unsigned val_len)
 {
 	struct scoutfs_btree_block *bt;
@@ -1145,17 +1098,17 @@ int scoutfs_btree_force(struct super_block *sb,
 	int cmp;
 	int ret;
 
-	if (invalid_item(key, key_len, val_len))
+	if (invalid_item(val_len))
 		return -EINVAL;
 
-	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT,
-			 key, key_len, val_len, &bl, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT, key,
+			 val_len, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
-		pos = find_pos(bt, key, key_len, &cmp);
+		pos = find_pos(bt, key, &cmp);
 		if (cmp == 0)
 			delete_item(bt, pos);
-		create_item(bt, pos, key, key_len, val, val_len);
+		create_item(bt, pos, key, val, val_len);
 		scoutfs_block_put(sb, bl);
 	}
 
@@ -1170,7 +1123,7 @@ int scoutfs_btree_delete(struct super_block *sb,
 			 struct scoutfs_radix_allocator *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
-			 void *key, unsigned key_len)
+			 struct scoutfs_key *key)
 {
 	struct scoutfs_btree_block *bt;
 	struct scoutfs_block *bl;
@@ -1178,11 +1131,11 @@ int scoutfs_btree_delete(struct super_block *sb,
 	int cmp;
 	int ret;
 
-	ret = btree_walk(sb, alloc, wri, root, BTW_DELETE | BTW_DIRTY,
-			 key, key_len, 0, &bl, NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DELETE | BTW_DIRTY, key,
+			 0, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
-		pos = find_pos(bt, key, key_len, &cmp);
+		pos = find_pos(bt, key, &cmp);
 		if (cmp == 0) {
 			if (le32_to_cpu(bt->nr_items) == 1) {
 				/* remove final empty block */
@@ -1220,16 +1173,14 @@ int scoutfs_btree_delete(struct super_block *sb,
  * blocks.
  */
 static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
-		      int flags, void *key, unsigned key_len,
+		      int flags, struct scoutfs_key *key,
 		      struct scoutfs_btree_item_ref *iref)
 {
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
 	struct scoutfs_block *bl;
-	unsigned iter_len;
-	unsigned walk_len;
-	void *iter_key;
-	void *walk_key;
+	struct scoutfs_key iter_key;
+	struct scoutfs_key walk_key;
 	int pos;
 	int cmp;
 	int ret;
@@ -1238,24 +1189,17 @@ static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
 	    WARN_ON_ONCE(iref->key))
 		return -EINVAL;
 
-	walk_key = kmalloc(SCOUTFS_BTREE_MAX_KEY_LEN, GFP_NOFS);
-	iter_key = kmalloc(SCOUTFS_BTREE_MAX_KEY_LEN, GFP_NOFS);
-	if (!walk_key || !iter_key) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	memcpy(walk_key, key, key_len);
-	walk_len = key_len;
+	walk_key = *key;
 
 	for (;;) {
-		ret = btree_walk(sb, NULL, NULL, root, flags, walk_key,
-				 walk_len, 0, &bl, iter_key, &iter_len);
+		scoutfs_key_set_zeros(&iter_key);
+		ret = btree_walk(sb, NULL, NULL, root, flags, &walk_key,
+				 0, &bl, &iter_key);
 		if (ret < 0)
 			break;
 		bt = bl->data;
 
-		pos = find_pos(bt, key, key_len, &cmp);
+		pos = find_pos(bt, key, &cmp);
 
 		/* point pos towards iteration, find_pos already for _NEXT */
 		if ((flags & BTW_AFTER) && cmp == 0)
@@ -1276,9 +1220,8 @@ static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
 		scoutfs_block_put(sb, bl);
 
 		/* nothing in this leaf, walk gave us a key */
-		if (iter_len > 0) {
-			memcpy(walk_key, iter_key, iter_len);
-			walk_len = iter_len;
+		if (!scoutfs_key_is_zeros(&iter_key)) {
+			walk_key = iter_key;
 			continue;
 		}
 
@@ -1286,39 +1229,36 @@ static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
 		break;
 	}
 
-out:
-	kfree(walk_key);
-	kfree(iter_key);
-
 	return ret;
 }
 
 int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
-		       void *key, unsigned key_len,
+		       struct scoutfs_key *key,
 		       struct scoutfs_btree_item_ref *iref)
 {
-	return btree_iter(sb, root, BTW_NEXT, key, key_len, iref);
+	return btree_iter(sb, root, BTW_NEXT, key, iref);
 }
 
 int scoutfs_btree_after(struct super_block *sb, struct scoutfs_btree_root *root,
-		        void *key, unsigned key_len,
+		        struct scoutfs_key *key,
 		        struct scoutfs_btree_item_ref *iref)
 {
-	return btree_iter(sb, root, BTW_NEXT | BTW_AFTER, key, key_len, iref);
+	return btree_iter(sb, root, BTW_NEXT | BTW_AFTER, key, iref);
 }
 
 int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
-		       void *key, unsigned key_len,
+		       struct scoutfs_key *key,
 		       struct scoutfs_btree_item_ref *iref)
 {
-	return btree_iter(sb, root, BTW_PREV, key, key_len, iref);
+	return btree_iter(sb, root, BTW_PREV, key, iref);
 }
 
-int scoutfs_btree_before(struct super_block *sb, struct scoutfs_btree_root *root,
-		         void *key, unsigned key_len,
+int scoutfs_btree_before(struct super_block *sb,
+			 struct scoutfs_btree_root *root,
+		         struct scoutfs_key *key,
 		         struct scoutfs_btree_item_ref *iref)
 {
-	return btree_iter(sb, root, BTW_PREV | BTW_BEFORE, key, key_len, iref);
+	return btree_iter(sb, root, BTW_PREV | BTW_BEFORE, key, iref);
 }
 
 /*
@@ -1332,18 +1272,17 @@ int scoutfs_btree_dirty(struct super_block *sb,
 			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
-			void *key, unsigned key_len)
+			struct scoutfs_key *key)
 {
 	struct scoutfs_btree_block *bt;
 	struct scoutfs_block *bl;
 	int cmp;
 	int ret;
 
-	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY, key, key_len, 0, &bl,
-			 NULL, NULL);
+	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY, key, 0, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
-		find_pos(bt, key, key_len, &cmp);
+		find_pos(bt, key, &cmp);
 		if (cmp == 0)
 			ret = 0;
 		else

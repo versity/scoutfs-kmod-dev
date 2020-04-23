@@ -575,6 +575,14 @@ out:
 	return ret;
 }
 
+static void init_lock_clients_key(struct scoutfs_key *key, u64 rid)
+{
+	*key = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_LOCK_CLIENTS_ZONE,
+		.sklc_rid = cpu_to_le64(rid),
+	};
+}
+
 /*
  * The server received a greeting from a client for the first time.  If
  * the client had already talked to the server then we must find an
@@ -589,23 +597,22 @@ int scoutfs_lock_server_greeting(struct super_block *sb, u64 rid,
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_lock_client_btree_key cbk;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key key;
 	int ret;
 
-	cbk.rid = cpu_to_be64(rid);
+	init_lock_clients_key(&key, rid);
 
 	mutex_lock(&inf->mutex);
 	if (should_exist) {
-		ret = scoutfs_btree_lookup(sb, &super->lock_clients,
-					   &cbk, sizeof(cbk), &iref);
+		ret = scoutfs_btree_lookup(sb, &super->lock_clients, &key,
+					   &iref);
 		if (ret == 0)
 			scoutfs_btree_put_iref(&iref);
 	} else {
 		ret = scoutfs_btree_insert(sb, inf->alloc, inf->wri,
 					   &super->lock_clients,
-					   &cbk, sizeof(cbk), NULL, 0);
+					   &key, NULL, 0);
 	}
 	mutex_unlock(&inf->mutex);
 
@@ -738,15 +745,12 @@ out:
 	return ret;
 }
 
-static int get_rid_and_put_ref(struct scoutfs_btree_item_ref *iref,
-			       u64 *rid)
+static int get_rid_and_put_ref(struct scoutfs_btree_item_ref *iref, u64 *rid)
 {
-	struct scoutfs_lock_client_btree_key *cbk;
 	int ret;
 
-	if (iref->key_len == sizeof(*cbk) && iref->val_len == 0) {
-		cbk = iref->key;
-		*rid = be64_to_cpu(cbk->rid);
+	if (iref->val_len == 0) {
+		*rid = le64_to_cpu(iref->key->sklc_rid);
 		ret = 0;
 	} else {
 		ret = -EIO;
@@ -767,8 +771,8 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 						    recovery_dwork.work);
 	struct super_block *sb = inf->sb;
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_lock_client_btree_key cbk;
 	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct scoutfs_key key;
 	bool timed_out;
 	u64 rid;
 	int ret;
@@ -779,9 +783,8 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 
 	/* we enter recovery if there are any client records */
 	for (rid = 0; ; rid++) {
-		cbk.rid = cpu_to_be64(rid);
-		ret = scoutfs_btree_next(sb, &super->lock_clients,
-					 &cbk, sizeof(cbk), &iref);
+		init_lock_clients_key(&key, rid);
+		ret = scoutfs_btree_next(sb, &super->lock_clients, &key, &iref);
 		if (ret == -ENOENT) {
 			ret = 0;
 			break;
@@ -806,10 +809,9 @@ static void scoutfs_lock_server_recovery_timeout(struct work_struct *work)
 		scoutfs_err(sb, "client rid %016llx lock recovery timed out",
 			    rid);
 
-		cbk.rid = cpu_to_be64(rid);
+		init_lock_clients_key(&key, rid);
 		ret = scoutfs_btree_delete(sb, inf->alloc, inf->wri,
-					   &super->lock_clients,
-					   &cbk, sizeof(cbk));
+					   &super->lock_clients, &key);
 		if (ret)
 			break;
 	}
@@ -838,7 +840,6 @@ int scoutfs_lock_server_farewell(struct super_block *sb, u64 rid)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_lock_client_btree_key cli;
 	struct client_lock_entry *clent;
 	struct client_lock_entry *tmp;
 	struct server_lock_node *snode;
@@ -847,10 +848,10 @@ int scoutfs_lock_server_farewell(struct super_block *sb, u64 rid)
 	bool freed;
 	int ret = 0;
 
-	cli.rid = cpu_to_be64(rid);
 	mutex_lock(&inf->mutex);
+	init_lock_clients_key(&key, rid);
 	ret = scoutfs_btree_delete(sb, inf->alloc, inf->wri,
-				   &super->lock_clients, &cli, sizeof(cli));
+				   &super->lock_clients, &key);
 	mutex_unlock(&inf->mutex);
 	if (ret == -ENOENT) {
 		ret = 0;
@@ -958,7 +959,7 @@ int scoutfs_lock_server_setup(struct super_block *sb,
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct lock_server_info *inf;
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_lock_client_btree_key cbk;
+	struct scoutfs_key key;
 	unsigned int nr;
 	u64 rid;
 	int ret;
@@ -990,9 +991,8 @@ int scoutfs_lock_server_setup(struct super_block *sb,
 	/* we enter recovery if there are any client records */
 	nr = 0;
 	for (rid = 0; ; rid++) {
-		cbk.rid = cpu_to_be64(rid);
-		ret = scoutfs_btree_next(sb, &super->lock_clients,
-					 &cbk, sizeof(cbk), &iref);
+		init_lock_clients_key(&key, rid);
+		ret = scoutfs_btree_next(sb, &super->lock_clients, &key, &iref);
 		if (ret == -ENOENT)
 			break;
 		if (ret == 0)

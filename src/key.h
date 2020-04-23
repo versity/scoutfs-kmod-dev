@@ -80,6 +80,13 @@ static inline void scoutfs_key_set_zeros(struct scoutfs_key *key)
 	key->_sk_fourth = 0;
 }
 
+static inline bool scoutfs_key_is_zeros(struct scoutfs_key *key)
+{
+	return key->sk_zone == 0 && key->_sk_first == 0 && key->sk_type == 0 &&
+	       key->_sk_second == 0 && key->_sk_third == 0 &&
+	       key->_sk_fourth == 0;
+}
+
 static inline void scoutfs_key_copy_or_zeros(struct scoutfs_key *dst,
 					     struct scoutfs_key *src)
 {

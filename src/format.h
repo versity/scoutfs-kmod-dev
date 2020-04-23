@@ -184,6 +184,17 @@ struct scoutfs_radix_root {
 	 ~(__u64)SCOUTFS_RADIX_LG_MASK)
 #define SCOUTFS_RADIX_BITS_BYTES (SCOUTFS_RADIX_BITS / 8)
 
+struct scoutfs_avl_root {
+	__le16 node;
+} __packed;
+
+struct scoutfs_avl_node {
+	__le16 parent;
+	__le16 left;
+	__le16 right;
+	__u8 height;
+} __packed;
+
 /* when we split we want to have multiple items on each side */
 #define SCOUTFS_BTREE_MAX_VAL_LEN (SCOUTFS_BLOCK_SIZE / 8)
 

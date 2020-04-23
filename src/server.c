@@ -340,9 +340,9 @@ static int server_get_log_trees(struct super_block *sb,
 	u64 rid = scoutfs_net_client_rid(conn);
 	DECLARE_SERVER_INFO(sb, server);
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_log_trees_key ltk;
 	struct scoutfs_log_trees_val ltv;
 	struct scoutfs_log_trees lt;
+	struct scoutfs_key key;
 	u64 count;
 	u64 target;
 	int ret;
@@ -358,20 +358,16 @@ static int server_get_log_trees(struct super_block *sb,
 
 	mutex_lock(&server->logs_mutex);
 
-	memset(&ltk, 0, sizeof(ltk));
-	ltk.rid = cpu_to_be64(rid);
-	ltk.nr = cpu_to_be64(U64_MAX);
+	scoutfs_key_init_log_trees(&key, rid, U64_MAX);
 
-	ret = scoutfs_btree_prev(sb, &super->logs_root,
-				 &ltk, sizeof(ltk), &iref);
+	ret = scoutfs_btree_prev(sb, &super->logs_root, &key, &iref);
 	if (ret < 0 && ret != -ENOENT)
 		goto unlock;
 	if (ret == 0) {
-		if (iref.key_len == sizeof(struct scoutfs_log_trees_key) &&
-		    iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
-			memcpy(&ltk, iref.key, iref.key_len);
+		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
+			key = *iref.key;
 			memcpy(&ltv, iref.val, iref.val_len);
-			if (be64_to_cpu(ltk.rid) != rid)
+			if (le64_to_cpu(key.sklt_rid) != rid)
 				ret = -ENOENT;
 		} else {
 			ret = -EIO;
@@ -383,8 +379,8 @@ static int server_get_log_trees(struct super_block *sb,
 
 	/* initialize new roots if we don't have any */
 	if (ret == -ENOENT) {
-		ltk.rid = cpu_to_be64(rid);
-		ltk.nr = cpu_to_be64(1);
+		key.sklt_rid = cpu_to_le64(rid);
+		key.sklt_nr = cpu_to_le64(1);
 		memset(&ltv, 0, sizeof(ltv));
 		scoutfs_radix_root_init(sb, &ltv.meta_avail, true);
 		scoutfs_radix_root_init(sb, &ltv.meta_freed, true);
@@ -432,8 +428,7 @@ static int server_get_log_trees(struct super_block *sb,
 
 	/* update client's log tree's item */
 	ret = scoutfs_btree_force(sb, &server->alloc, &server->wri,
-				  &super->logs_root, &ltk, sizeof(ltk),
-				  &ltv, sizeof(ltv));
+				  &super->logs_root, &key, &ltv, sizeof(ltv));
 unlock:
 	mutex_unlock(&server->logs_mutex);
 
@@ -445,8 +440,8 @@ unlock:
 		lt.bloom_ref = ltv.bloom_ref;
 		lt.data_avail = ltv.data_avail;
 		lt.data_freed = ltv.data_freed;
-		lt.rid = be64_to_le64(ltk.rid);
-		lt.nr = be64_to_le64(ltk.nr);
+		lt.rid = key.sklt_rid;
+		lt.nr = key.sklt_nr;
 	}
 
 out:
@@ -467,9 +462,9 @@ static int server_commit_log_trees(struct super_block *sb,
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_SERVER_INFO(sb, server);
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_log_trees_key ltk;
 	struct scoutfs_log_trees_val ltv;
 	struct scoutfs_log_trees *lt;
+	struct scoutfs_key key;
 	int ret;
 
 	if (arg_len != sizeof(struct scoutfs_log_trees)) {
@@ -487,11 +482,9 @@ static int server_commit_log_trees(struct super_block *sb,
 	mutex_lock(&server->logs_mutex);
 
 	/* find the client's existing item */
-	memset(&ltk, 0, sizeof(ltk));
-	ltk.rid = le64_to_be64(lt->rid);
-	ltk.nr = le64_to_be64(lt->nr);
-	ret = scoutfs_btree_lookup(sb, &super->logs_root,
-				   &ltk, sizeof(ltk), &iref);
+	scoutfs_key_init_log_trees(&key, le64_to_cpu(lt->rid),
+				   le64_to_cpu(lt->nr));
+	ret = scoutfs_btree_lookup(sb, &super->logs_root, &key, &iref);
 	if (ret < 0 && ret != -ENOENT) {
 		scoutfs_err(sb, "server error finding client logs: %d", ret);
 		goto unlock;
@@ -526,8 +519,7 @@ static int server_commit_log_trees(struct super_block *sb,
 	ltv.data_freed = lt->data_freed;
 
 	ret = scoutfs_btree_update(sb, &server->alloc, &server->wri,
-				   &super->logs_root, &ltk, sizeof(ltk),
-				   &ltv, sizeof(ltv));
+				   &super->logs_root, &key, &ltv, sizeof(ltv));
 	if (ret < 0)
 		scoutfs_err(sb, "server error updating client logs: %d", ret);
 
@@ -564,8 +556,8 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_SERVER_INFO(sb, server);
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_log_trees_key ltk;
 	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_key key;
 	int ret;
 	int err;
 
@@ -573,16 +565,13 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	down_write(&server->alloc_rwsem);
 
 	/* find the client's existing item */
-	ltk.rid = cpu_to_be64(rid);
-	ltk.nr = 0;
-	ret = scoutfs_btree_next(sb, &super->logs_root,
-				 &ltk, sizeof(ltk), &iref);
+	scoutfs_key_init_log_trees(&key, rid, 0);
+	ret = scoutfs_btree_next(sb, &super->logs_root, &key, &iref);
 	if (ret == 0) {
-		if (iref.key_len == sizeof(struct scoutfs_log_trees_key) &&
-		    iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
-			memcpy(&ltk, iref.key, iref.key_len);
+		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
+			key = *iref.key;
 			memcpy(&ltv, iref.val, iref.val_len);
-			if (be64_to_cpu(ltk.rid) != rid)
+			if (le64_to_cpu(key.sklt_rid) != rid)
 				ret = -ENOENT;
 		} else {
 			ret = -EIO;
@@ -618,8 +607,7 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 				  le64_to_cpu(ltv.data_freed.ref.sm_total));
 
 	err = scoutfs_btree_update(sb, &server->alloc, &server->wri,
-				  &super->logs_root, &ltk, sizeof(ltk),
-				  &ltv, sizeof(ltv));
+				  &super->logs_root, &key, &ltv, sizeof(ltv));
 	BUG_ON(err != 0); /* alloc and log item roots out of sync */
 
 out:
@@ -627,6 +615,15 @@ out:
 	mutex_unlock(&server->logs_mutex);
 
 	return ret;
+}
+
+static void init_trans_seq_key(struct scoutfs_key *key, u64 seq, u64 rid)
+{
+	*key = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_TRANS_SEQ_ZONE,
+		.skts_trans_seq = cpu_to_le64(seq),
+		.skts_rid = cpu_to_le64(rid),
+	};
 }
 
 /*
@@ -653,8 +650,8 @@ static int server_advance_seq(struct super_block *sb,
 	struct scoutfs_super_block *super = &sbi->super;
 	__le64 their_seq;
 	__le64 next_seq;
-	struct scoutfs_trans_seq_btree_key tsk;
 	u64 rid = scoutfs_net_client_rid(conn);
+	struct scoutfs_key key;
 	int ret;
 
 	if (arg_len != sizeof(__le64)) {
@@ -670,12 +667,9 @@ static int server_advance_seq(struct super_block *sb,
 	down_write(&server->seq_rwsem);
 
 	if (their_seq != 0) {
-		tsk.trans_seq = le64_to_be64(their_seq);
-		tsk.rid = cpu_to_be64(rid);
-
+		init_trans_seq_key(&key, le64_to_cpu(their_seq), rid);
 		ret = scoutfs_btree_delete(sb, &server->alloc, &server->wri,
-					   &super->trans_seqs,
-					   &tsk, sizeof(tsk));
+					   &super->trans_seqs, &key);
 		if (ret < 0 && ret != -ENOENT)
 			goto out;
 	}
@@ -686,12 +680,9 @@ static int server_advance_seq(struct super_block *sb,
 	trace_scoutfs_trans_seq_advance(sb, rid, le64_to_cpu(their_seq),
 					le64_to_cpu(next_seq));
 
-	tsk.trans_seq = le64_to_be64(next_seq);
-	tsk.rid = cpu_to_be64(rid);
-
+	init_trans_seq_key(&key, le64_to_cpu(next_seq), rid);
 	ret = scoutfs_btree_insert(sb, &server->alloc, &server->wri,
-				   &super->trans_seqs,
-				   &tsk, sizeof(tsk), NULL, 0);
+				   &super->trans_seqs, &key, NULL, 0);
 out:
 	up_write(&server->seq_rwsem);
 	ret = scoutfs_server_apply_commit(sb, ret);
@@ -712,39 +703,35 @@ static int remove_trans_seq(struct super_block *sb, u64 rid)
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_trans_seq_btree_key tsk;
 	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct scoutfs_key key;
 	int ret = 0;
 
 	down_write(&server->seq_rwsem);
 
-	tsk.trans_seq = 0;
-	tsk.rid = 0;
+	init_trans_seq_key(&key, 0, 0);
 
 	for (;;) {
-		ret = scoutfs_btree_next(sb, &super->trans_seqs,
-					 &tsk, sizeof(tsk), &iref);
+		ret = scoutfs_btree_next(sb, &super->trans_seqs, &key, &iref);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
 
-		memcpy(&tsk, iref.key, iref.key_len);
+		key = *iref.key;
 		scoutfs_btree_put_iref(&iref);
 
-		if (be64_to_cpu(tsk.rid) == rid) {
+		if (le64_to_cpu(key.skts_rid) == rid) {
 			trace_scoutfs_trans_seq_farewell(sb, rid,
-						be64_to_cpu(tsk.trans_seq));
+					le64_to_cpu(key.skts_trans_seq));
 			ret = scoutfs_btree_delete(sb, &server->alloc,
 						   &server->wri,
-						   &super->trans_seqs,
-						   &tsk, sizeof(tsk));
+						   &super->trans_seqs, &key);
 			break;
 		}
 
-		be64_add_cpu(&tsk.trans_seq, 1);
-		tsk.rid = 0;
+		scoutfs_key_inc(&key);
 	}
 
 	up_write(&server->seq_rwsem);
@@ -767,9 +754,9 @@ static int server_get_last_seq(struct super_block *sb,
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_trans_seq_btree_key tsk;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	u64 rid = scoutfs_net_client_rid(conn);
+	struct scoutfs_key key;
 	__le64 last_seq = 0;
 	int ret;
 
@@ -780,26 +767,19 @@ static int server_get_last_seq(struct super_block *sb,
 
 	down_read(&server->seq_rwsem);
 
-	tsk.trans_seq = 0;
-	tsk.rid = 0;
-
-	ret = scoutfs_btree_next(sb, &super->trans_seqs,
-				 &tsk, sizeof(tsk), &iref);
+	init_trans_seq_key(&key, 0, 0);
+	ret = scoutfs_btree_next(sb, &super->trans_seqs, &key, &iref);
 	if (ret == 0) {
-		if (iref.key_len != sizeof(tsk)) {
-			ret = -EINVAL;
-		} else {
-			memcpy(&tsk, iref.key, iref.key_len);
-			last_seq = cpu_to_le64(be64_to_cpu(tsk.trans_seq) - 1);
-		}
+		key = *iref.key;
 		scoutfs_btree_put_iref(&iref);
+		last_seq = key.skts_trans_seq;
 
 	} else if (ret == -ENOENT) {
 		last_seq = super->next_trans_seq;
-		le64_add_cpu(&last_seq, -1ULL);
 		ret = 0;
 	}
 
+	le64_add_cpu(&last_seq, -1ULL);
 	trace_scoutfs_trans_seq_last(sb, rid, le64_to_cpu(last_seq));
 
 	up_read(&server->seq_rwsem);
@@ -926,22 +906,30 @@ int scoutfs_server_lock_recover_request(struct super_block *sb, u64 rid,
 					      NULL, NULL);
 }
 
+static void init_mounted_client_key(struct scoutfs_key *key, u64 rid)
+{
+	*key = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_MOUNTED_CLIENT_ZONE,
+		.skmc_rid = cpu_to_le64(rid),
+	};
+}
+
 static int insert_mounted_client(struct super_block *sb, u64 rid,
 				 u64 gr_flags)
 {
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_mounted_client_btree_key mck;
 	struct scoutfs_mounted_client_btree_val mcv;
+	struct scoutfs_key key;
 
-	mck.rid = cpu_to_be64(rid);
+	init_mounted_client_key(&key, rid);
 	mcv.flags = 0;
 	if (gr_flags & SCOUTFS_NET_GREETING_FLAG_VOTER)
 		mcv.flags |= SCOUTFS_MOUNTED_CLIENT_VOTER;
 
 	return scoutfs_btree_insert(sb, &server->alloc, &server->wri,
-				    &super->mounted_clients,
-				    &mck, sizeof(mck), &mcv, sizeof(mcv));
+				    &super->mounted_clients, &key, &mcv,
+				    sizeof(mcv));
 }
 
 /*
@@ -958,14 +946,13 @@ static int delete_mounted_client(struct super_block *sb, u64 rid)
 {
 	DECLARE_SERVER_INFO(sb, server);
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_mounted_client_btree_key mck;
+	struct scoutfs_key key;
 	int ret;
 
-	mck.rid = cpu_to_be64(rid);
+	init_mounted_client_key(&key, rid);
 
 	ret = scoutfs_btree_delete(sb, &server->alloc, &server->wri,
-				   &super->mounted_clients,
-				   &mck, sizeof(mck));
+				   &super->mounted_clients, &key);
 	if (ret == -ENOENT)
 		ret = 0;
 
@@ -1101,9 +1088,7 @@ struct farewell_request {
 
 static bool invalid_mounted_client_item(struct scoutfs_btree_item_ref *iref)
 {
-	return (iref->key_len !=
-			sizeof(struct scoutfs_mounted_client_btree_key)) ||
-	       (iref->val_len !=
+	return (iref->val_len !=
 			sizeof(struct scoutfs_mounted_client_btree_val));
 }
 
@@ -1139,13 +1124,13 @@ static void farewell_worker(struct work_struct *work)
 						  farewell_work);
 	struct super_block *sb = server->sb;
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_mounted_client_btree_key mck;
 	struct scoutfs_mounted_client_btree_val *mcv;
 	struct farewell_request *tmp;
 	struct farewell_request *fw;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	unsigned int nr_unmounting = 0;
 	unsigned int nr_mounted = 0;
+	struct scoutfs_key key;
 	LIST_HEAD(reqs);
 	LIST_HEAD(send);
 	bool deleted = false;
@@ -1161,9 +1146,9 @@ static void farewell_worker(struct work_struct *work)
 	/* count how many reqs requests are from voting clients */
 	nr_unmounting = 0;
 	list_for_each_entry_safe(fw, tmp, &reqs, entry) {
-		mck.rid = cpu_to_be64(fw->rid);
-		ret = scoutfs_btree_lookup(sb, &super->mounted_clients,
-					   &mck, sizeof(mck), &iref);
+		init_mounted_client_key(&key, fw->rid);
+		ret = scoutfs_btree_lookup(sb, &super->mounted_clients, &key,
+					   &iref);
 		if (ret == 0 && invalid_mounted_client_item(&iref)) {
 			scoutfs_btree_put_iref(&iref);
 			ret = -EIO;
@@ -1189,10 +1174,10 @@ static void farewell_worker(struct work_struct *work)
 	}
 
 	/* see how many mounted clients could vote for quorum */
-	memset(&mck, 0, sizeof(mck));
+	init_mounted_client_key(&key, 0);
 	for (;;) {
-		ret = scoutfs_btree_next(sb, &super->mounted_clients,
-					 &mck, sizeof(mck), &iref);
+		ret = scoutfs_btree_next(sb, &super->mounted_clients, &key,
+					 &iref);
 		if (ret == 0 && invalid_mounted_client_item(&iref)) {
 			scoutfs_btree_put_iref(&iref);
 			ret = -EIO;
@@ -1203,15 +1188,14 @@ static void farewell_worker(struct work_struct *work)
 			goto out;
 		}
 
-		memcpy(&mck, iref.key, sizeof(mck));
+		key = *iref.key;
 		mcv = iref.val;
 
 		if (mcv->flags & SCOUTFS_MOUNTED_CLIENT_VOTER)
 			nr_mounted++;
 
 		scoutfs_btree_put_iref(&iref);
-		be64_add_cpu(&mck.rid, 1);
-
+		scoutfs_key_inc(&key);
 	}
 
 	/* send as many responses as we can to maintain quorum */

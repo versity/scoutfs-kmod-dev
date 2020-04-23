@@ -186,29 +186,19 @@ static inline void scoutfs_key_dec(struct scoutfs_key *key)
 	key->sk_zone--;
 }
 
-static inline void scoutfs_key_to_be(struct scoutfs_key_be *be,
-				     struct scoutfs_key *key)
-{
-	BUILD_BUG_ON(sizeof(struct scoutfs_key_be) !=
-		     sizeof(struct scoutfs_key));
+/*
+ * Some key types are used by multiple subsystems and shouldn't have
+ * duplicate private key init functions.
+ */
 
-	be->sk_zone = key->sk_zone;
-	be->_sk_first = le64_to_be64(key->_sk_first);
-	be->sk_type = key->sk_type;
-	be->_sk_second = le64_to_be64(key->_sk_second);
-	be->_sk_third = le64_to_be64(key->_sk_third);
-	be->_sk_fourth = key->_sk_fourth;
-}
-
-static inline void scoutfs_key_from_be(struct scoutfs_key *key,
-				       struct scoutfs_key_be *be)
+static inline void scoutfs_key_init_log_trees(struct scoutfs_key *key,
+					      u64 rid, u64 nr)
 {
-	key->sk_zone = be->sk_zone;
-	key->_sk_first = be64_to_le64(be->_sk_first);
-	key->sk_type = be->sk_type;
-	key->_sk_second = be64_to_le64(be->_sk_second);
-	key->_sk_third = be64_to_le64(be->_sk_third);
-	key->_sk_fourth = be->_sk_fourth;
+	*key = (struct scoutfs_key) {
+		.sk_zone = SCOUTFS_LOG_TREES_ZONE,
+		.sklt_rid = cpu_to_le64(rid),
+		.sklt_nr = cpu_to_le64(nr),
+	};
 }
 
 #endif

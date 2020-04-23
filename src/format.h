@@ -133,6 +133,20 @@ struct scoutfs_key {
 #define skpe_base	_sk_second
 #define skpe_part	_sk_fourth
 
+/* log trees */
+#define sklt_rid	_sk_first
+#define sklt_nr		_sk_second
+
+/* lock clients */
+#define sklc_rid	_sk_first
+
+/* seqs */
+#define skts_trans_seq	_sk_first
+#define skts_rid	_sk_second
+
+/* mounted clients */
+#define skmc_rid	_sk_first
+
 struct scoutfs_radix_block {
 	struct scoutfs_block_header hdr;
 	__le32 sm_first;
@@ -170,34 +184,17 @@ struct scoutfs_radix_root {
 	 ~(__u64)SCOUTFS_RADIX_LG_MASK)
 #define SCOUTFS_RADIX_BITS_BYTES (SCOUTFS_RADIX_BITS / 8)
 
-/*
- * The btree still uses memcmp() to compare keys.  We should fix that
- * before too long.
- */
-struct scoutfs_key_be {
-	__u8	sk_zone;
-	__be64	_sk_first;
-	__u8	sk_type;
-	__be64	_sk_second;
-	__be64	_sk_third;
-	__u8	_sk_fourth;
-}__packed;
-
-/* chose reasonable max key lens that have room for some u64s */
-#define SCOUTFS_BTREE_MAX_KEY_LEN 40
 /* when we split we want to have multiple items on each side */
 #define SCOUTFS_BTREE_MAX_VAL_LEN (SCOUTFS_BLOCK_SIZE / 8)
 
 /*
  * The min number of free bytes we must leave in a parent as we descend
- * to modify.  This leaves enough free bytes to insert a possibly maximal
- * sized key as a seperator for a child block.  Fewer bytes then this
- * and split/merge might try to insert a max child item in the parent
- * that wouldn't fit.
+ * to modify.  This guarantees enough free bytes in a parent to insert a
+ * new child reference item as a child block splits.
  */
 #define SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES				\
 	(sizeof(struct scoutfs_btree_item_header) +			\
-	 sizeof(struct scoutfs_btree_item) + SCOUTFS_BTREE_MAX_KEY_LEN +\
+	 sizeof(struct scoutfs_btree_item) +				\
 	 sizeof(struct scoutfs_btree_ref))
 
 /*
@@ -233,9 +230,9 @@ struct scoutfs_btree_item_header {
 } __packed;
 
 struct scoutfs_btree_item {
-	__le16 key_len;
+	struct scoutfs_key key;
 	__le16 val_len;
-	__u8 data[0];
+	__u8 val[0];
 } __packed;
 
 struct scoutfs_btree_block {
@@ -244,30 +241,6 @@ struct scoutfs_btree_block {
 	__le32 nr_items;
 	__u8 level;
 	struct scoutfs_btree_item_header item_hdrs[0];
-} __packed;
-
-/*
- * The lock server keeps a persistent record of connected clients so that
- * server failover knows who to wait for before resuming operations.
- */
-struct scoutfs_lock_client_btree_key {
-	__be64 rid;
-} __packed;
-
-/*
- * The server tracks transaction sequence numbers that clients have
- * open.  This limits results that can be returned from the seq indices.
- */
-struct scoutfs_trans_seq_btree_key {
-	__be64 trans_seq;
-	__be64 rid;
-} __packed;
-
-/*
- * The server keeps a persistent record of mounted clients.
- */
-struct scoutfs_mounted_client_btree_key {
-	__be64 rid;
 } __packed;
 
 struct scoutfs_mounted_client_btree_val {
@@ -290,11 +263,6 @@ struct scoutfs_log_trees {
 	struct scoutfs_radix_root data_freed;
 	__le64 rid;
 	__le64 nr;
-} __packed;
-
-struct scoutfs_log_trees_key {
-	__be64 rid;
-	__be64 nr;
 } __packed;
 
 struct scoutfs_log_trees_val {
@@ -348,6 +316,11 @@ struct scoutfs_bloom_block {
 #define SCOUTFS_RID_ZONE			3
 #define SCOUTFS_FS_ZONE				4
 #define SCOUTFS_LOCK_ZONE			5
+/* Items only stored in server btrees */
+#define SCOUTFS_LOG_TREES_ZONE			6
+#define SCOUTFS_LOCK_CLIENTS_ZONE		7
+#define SCOUTFS_TRANS_SEQ_ZONE			8
+#define SCOUTFS_MOUNTED_CLIENT_ZONE		9
 
 /* inode index zone */
 #define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	1

@@ -348,7 +348,6 @@ struct scoutfs_bloom_block {
 #define SCOUTFS_RID_ZONE			3
 #define SCOUTFS_FS_ZONE				4
 #define SCOUTFS_LOCK_ZONE			5
-#define SCOUTFS_MAX_ZONE			8 /* power of 2 is efficient */
 
 /* inode index zone */
 #define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	1
@@ -372,9 +371,6 @@ struct scoutfs_bloom_block {
 
 /* lock zone, only ever found in lock ranges, never in persistent items */
 #define SCOUTFS_RENAME_TYPE			1
-
-#define SCOUTFS_MAX_TYPE			8 /* power of 2 is efficient */
-
 
 /*
  * The extents that map blocks in a fixed-size logical region of a file

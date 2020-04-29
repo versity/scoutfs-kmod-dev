@@ -202,14 +202,6 @@ struct scoutfs_avl_node {
 #define SCOUTFS_BTREE_VAL_OWNER_BYTES	sizeof(__le16)
 
 /*
- * When debugging we can tune the splitting and merging thresholds to
- * create much larger trees by having blocks with many fewer items.  We
- * implement this by pretending the blocks are tiny.  They're still
- * large enough for a handful of items.
- */
-#define SCOUTFS_BTREE_TINY_BLOCK_SIZE	512
-
-/*
  * A 4EB test image measured a worst case height of 17.  This is plenty
  * generous.
  */

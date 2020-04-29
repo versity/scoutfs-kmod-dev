@@ -78,13 +78,11 @@
 /* btree walking has a bunch of behavioural bit flags */
 enum {
 	 BTW_NEXT	= (1 <<  0), /* return >= key */
-	 BTW_AFTER	= (1 <<  1), /* return > key */
-	 BTW_PREV	= (1 <<  2), /* return <= key */
-	 BTW_BEFORE	= (1 <<  3), /* return < key */
-	 BTW_DIRTY	= (1 <<  4), /* cow stable blocks */
-	 BTW_ALLOC	= (1 <<  5), /* allocate a new block for 0 ref */
-	 BTW_INSERT	= (1 <<  6), /* walking to insert, try splitting */
-	 BTW_DELETE	= (1 <<  7), /* walking to delete, try joining */
+	 BTW_PREV	= (1 <<  1), /* return <= key */
+	 BTW_DIRTY	= (1 <<  2), /* cow stable blocks */
+	 BTW_ALLOC	= (1 <<  3), /* allocate a new block for 0 ref */
+	 BTW_INSERT	= (1 <<  4), /* walking to insert, try splitting */
+	 BTW_DELETE	= (1 <<  5), /* walking to delete, try joining */
 };
 
 /* total length of the value payload */
@@ -1500,26 +1498,11 @@ int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 	return btree_iter(sb, root, BTW_NEXT, key, iref);
 }
 
-int scoutfs_btree_after(struct super_block *sb, struct scoutfs_btree_root *root,
-		        struct scoutfs_key *key,
-		        struct scoutfs_btree_item_ref *iref)
-{
-	return btree_iter(sb, root, BTW_NEXT | BTW_AFTER, key, iref);
-}
-
 int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *key,
 		       struct scoutfs_btree_item_ref *iref)
 {
 	return btree_iter(sb, root, BTW_PREV, key, iref);
-}
-
-int scoutfs_btree_before(struct super_block *sb,
-			 struct scoutfs_btree_root *root,
-		         struct scoutfs_key *key,
-		         struct scoutfs_btree_item_ref *iref)
-{
-	return btree_iter(sb, root, BTW_PREV | BTW_BEFORE, key, iref);
 }
 
 /*

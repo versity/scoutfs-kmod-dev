@@ -49,16 +49,9 @@ int scoutfs_btree_delete(struct super_block *sb,
 int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *key,
 		       struct scoutfs_btree_item_ref *iref);
-int scoutfs_btree_after(struct super_block *sb, struct scoutfs_btree_root *root,
-		        struct scoutfs_key *key,
-		        struct scoutfs_btree_item_ref *iref);
 int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *key,
 		       struct scoutfs_btree_item_ref *iref);
-int scoutfs_btree_before(struct super_block *sb,
-			 struct scoutfs_btree_root *root,
-		         struct scoutfs_key *key,
-		         struct scoutfs_btree_item_ref *iref);
 int scoutfs_btree_dirty(struct super_block *sb,
 			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri,

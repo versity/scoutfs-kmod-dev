@@ -196,17 +196,10 @@ struct scoutfs_avl_node {
 } __packed;
 
 /* when we split we want to have multiple items on each side */
-#define SCOUTFS_BTREE_MAX_VAL_LEN (SCOUTFS_BLOCK_SIZE / 8)
+#define SCOUTFS_BTREE_MAX_VAL_LEN 512
 
-/*
- * The min number of free bytes we must leave in a parent as we descend
- * to modify.  This guarantees enough free bytes in a parent to insert a
- * new child reference item as a child block splits.
- */
-#define SCOUTFS_BTREE_PARENT_MIN_FREE_BYTES				\
-	(sizeof(struct scoutfs_btree_item_header) +			\
-	 sizeof(struct scoutfs_btree_item) +				\
-	 sizeof(struct scoutfs_btree_ref))
+/* each value ends with an offset which lets compaction iterate over values */
+#define SCOUTFS_BTREE_VAL_OWNER_BYTES	sizeof(__le16)
 
 /*
  * When debugging we can tune the splitting and merging thresholds to
@@ -236,23 +229,36 @@ struct scoutfs_btree_root {
 	__u8 height;
 } __packed;
 
-struct scoutfs_btree_item_header {
-	__le32 off;
-} __packed;
-
 struct scoutfs_btree_item {
+	struct scoutfs_avl_node node;
 	struct scoutfs_key key;
+	__le16 val_off;
 	__le16 val_len;
-	__u8 val[0];
 } __packed;
 
 struct scoutfs_btree_block {
 	struct scoutfs_block_header hdr;
-	__le32 free_end;
-	__le32 nr_items;
+	struct scoutfs_avl_root item_root;
+	__le16 nr_items;
+	__le16 total_item_bytes;
+	__le16 mid_free_len;
+	__le16 last_free_off;
+	__le16 last_free_len;
 	__u8 level;
-	struct scoutfs_btree_item_header item_hdrs[0];
+	struct scoutfs_btree_item items[0];
+	/* leaf blocks have a fixed size item offset hash table at the end */
 } __packed;
+
+/*
+ * Try to aim for a 75% load in a leaf full of items with no value.
+ * We'll almost never see this because most items have values and most
+ * blocks aren't full.
+ */
+#define SCOUTFS_BTREE_LEAF_ITEM_HASH_NR					  \
+	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) /	  \
+	 (sizeof(struct scoutfs_btree_item) + (sizeof(__le16))) * 100 / 75)
+#define SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES \
+	(SCOUTFS_BTREE_LEAF_ITEM_HASH_NR * sizeof(__le16))
 
 struct scoutfs_mounted_client_btree_val {
 	__u8 flags;

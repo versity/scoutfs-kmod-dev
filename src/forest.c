@@ -174,10 +174,10 @@ static void clear_roots(struct forest_lock_private *lpriv)
 
 /*
  * Make sure that our log btree will be at the head of the list of
- * btrees to read.  This can be racing with clearing the list to check
- * the bloom blocks again.  We want the addition of the log btree to
- * persist across clearing the lists so we set the rid/nr which causes
- * the root to be added to the list after the bloom blocks are checked.
+ * btrees to read.  We update the forest_root to refer to the most
+ * recent version of our log root before we try and use it instead of
+ * updating every instance of the forest_roots on locks as commits give
+ * us new versions of the same log tree.
  */
 static void add_our_log_root(struct forest_info *finf,
 			     struct forest_lock_private *lpriv)
@@ -186,13 +186,11 @@ static void add_our_log_root(struct forest_info *finf,
 
 	BUG_ON(!rwsem_is_locked(&lpriv->rwsem));
 
-	if (fr->rid == 0) {
+	if (list_empty(&fr->entry)) {
 		fr->rid = le64_to_cpu(finf->our_log.rid);
 		fr->nr = le64_to_cpu(finf->our_log.nr);
-	}
-
-	if (list_empty(&fr->entry))
 		list_add(&fr->entry, &lpriv->roots);
+	}
 }
 
 /*
@@ -214,6 +212,10 @@ void scoutfs_forest_clear_lock(struct super_block *sb,
  * All the btrees we read are stable and read-only except for our log
  * btree which is being actively modified in memory by locked writers.
  * Once we lock it we need to get the current version of the root.
+ *
+ * The finf rwsem protects updates of the finf root fields, the first
+ * caller here will change the fr fields and the rest will overwrite
+ * them with the same values.
  */
 static void read_lock_forest_root(struct forest_info *finf,
 				  struct forest_lock_private *lpriv,
@@ -222,6 +224,8 @@ static void read_lock_forest_root(struct forest_info *finf,
 	if (is_our_log_root(lpriv, fr)) {
 		down_read(&finf->rwsem);
 		fr->item_root = finf->our_log.item_root;
+		fr->rid = le64_to_cpu(finf->our_log.rid);
+		fr->nr = le64_to_cpu(finf->our_log.nr);
 	}
 }
 
@@ -375,7 +379,7 @@ static int refresh_bloom_roots(struct super_block *sb,
 		if (i != ARRAY_SIZE(bloom.nrs))
 			continue;
 
-		/* add our current log tree if we see its bloom */
+		/* use our dirty log instead of the old committed version */
 		if (be64_to_cpu(ltk.rid) == le64_to_cpu(finf->our_log.rid) &&
 		    be64_to_cpu(ltk.nr) == le64_to_cpu(finf->our_log.nr)) {
 			add_our_log_root(finf, lpriv);
@@ -400,8 +404,8 @@ static int refresh_bloom_roots(struct super_block *sb,
 				le64_to_cpu(fr->item_root.ref.seq));
 	}
 
-	/* add our current log root if a locked writer added it */
-	if (lpriv->our_log_root.rid != 0)
+	/* make sure readers search our dirty log after writers set bloom */
+	if (test_lpriv_flag(lpriv, LPRIV_FLAG_ALL_BLOOM_BITS))
 		add_our_log_root(finf, lpriv);
 
 	/* always add the fs root at the tail */
@@ -1469,10 +1473,12 @@ void scoutfs_forest_init_btrees(struct super_block *sb,
 	finf->alloc = alloc;
 	finf->wri = wri;
 
-	/* we use the item and bloom trees */
+	/* the lt allocator fields have been used by the caller */
 	memset(&finf->our_log, 0, sizeof(finf->our_log));
 	finf->our_log.item_root = lt->item_root;
 	finf->our_log.bloom_ref = lt->bloom_ref;
+	finf->our_log.rid = lt->rid;
+	finf->our_log.nr = lt->nr;
 
 	up_write(&finf->rwsem);
 }

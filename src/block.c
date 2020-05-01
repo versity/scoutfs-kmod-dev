@@ -108,18 +108,18 @@ do {									\
  * be refactored away.
  */
 
-__le32 scoutfs_block_calc_crc(struct scoutfs_block_header *hdr)
+__le32 scoutfs_block_calc_crc(struct scoutfs_block_header *hdr, u32 size)
 {
 	int off = offsetof(struct scoutfs_block_header, crc) +
 		  FIELD_SIZEOF(struct scoutfs_block_header, crc);
-	u32 calc = crc32c(~0, (char *)hdr + off, SCOUTFS_BLOCK_SIZE - off);
+	u32 calc = crc32c(~0, (char *)hdr + off, size - off);
 
 	return cpu_to_le32(calc);
 }
 
-bool scoutfs_block_valid_crc(struct scoutfs_block_header *hdr)
+bool scoutfs_block_valid_crc(struct scoutfs_block_header *hdr, u32 size)
 {
-	return hdr->crc == scoutfs_block_calc_crc(hdr);
+	return hdr->crc == scoutfs_block_calc_crc(hdr, size);
 }
 
 bool scoutfs_block_valid_ref(struct super_block *sb,
@@ -157,19 +157,19 @@ static struct block_private *block_alloc(struct super_block *sb, u64 blkno)
 	 * more careful with a partial page allocator when allocating
 	 * blocks and would make the lru per-page instead of per-block.
 	 */
-	BUILD_BUG_ON(PAGE_SIZE > SCOUTFS_BLOCK_SIZE);
+	BUILD_BUG_ON(PAGE_SIZE > SCOUTFS_BLOCK_LG_SIZE);
 
 	bp = kzalloc(sizeof(struct block_private), GFP_NOFS);
 	if (!bp)
 		goto out;
 
-	bp->page = alloc_pages(GFP_NOFS, SCOUTFS_BLOCK_PAGE_ORDER);
+	bp->page = alloc_pages(GFP_NOFS, SCOUTFS_BLOCK_LG_PAGE_ORDER);
 	if (bp->page) {
 		scoutfs_inc_counter(sb, block_cache_alloc_page_order);
 		set_bit(BLOCK_BIT_PAGE_ALLOC, &bp->bits);
 		bp->bl.data = page_address(bp->page);
 	} else {
-		bp->virt = __vmalloc(SCOUTFS_BLOCK_SIZE,
+		bp->virt = __vmalloc(SCOUTFS_BLOCK_LG_SIZE,
 				     GFP_NOFS | __GFP_HIGHMEM, PAGE_KERNEL);
 		if (!bp->virt) {
 			kfree(bp);
@@ -206,7 +206,7 @@ static void block_free(struct super_block *sb, struct block_private *bp)
 	TRACE_BLOCK(free, bp);
 
 	if (test_bit(BLOCK_BIT_PAGE_ALLOC, &bp->bits))
-		__free_pages(bp->page, SCOUTFS_BLOCK_PAGE_ORDER);
+		__free_pages(bp->page, SCOUTFS_BLOCK_LG_PAGE_ORDER);
 	else if (test_bit(BLOCK_BIT_VIRT, &bp->bits))
 		vfree(bp->virt);
 	else
@@ -441,7 +441,7 @@ static int block_submit_bio(struct super_block *sb, struct block_private *bp,
 	sector_t sector;
 	int ret = 0;
 
-	sector = bp->bl.blkno << (SCOUTFS_BLOCK_SHIFT - 9);
+	sector = bp->bl.blkno << (SCOUTFS_BLOCK_LG_SHIFT - 9);
 
 	WARN_ON_ONCE(bp->bl.blkno == U64_MAX);
 	WARN_ON_ONCE(sector == U64_MAX || sector == 0);
@@ -453,9 +453,9 @@ static int block_submit_bio(struct super_block *sb, struct block_private *bp,
 
 	blk_start_plug(&plug);
 
-	for (off = 0; off < SCOUTFS_BLOCK_SIZE; off += PAGE_SIZE) {
+	for (off = 0; off < SCOUTFS_BLOCK_LG_SIZE; off += PAGE_SIZE) {
 		if (!bio) {
-			bio = bio_alloc(GFP_NOFS, SCOUTFS_PAGES_PER_BLOCK);
+			bio = bio_alloc(GFP_NOFS, SCOUTFS_BLOCK_LG_PAGES_PER);
 			if (!bio) {
 				ret = -ENOMEM;
 				break;
@@ -634,6 +634,7 @@ void scoutfs_block_invalidate(struct super_block *sb, struct scoutfs_block *bl)
 	}
 }
 
+/* This is only used for large metadata blocks */
 bool scoutfs_block_consistent_ref(struct super_block *sb,
 				  struct scoutfs_block *bl,
 				  __le64 seq, __le64 blkno, u32 magic)
@@ -643,7 +644,8 @@ bool scoutfs_block_consistent_ref(struct super_block *sb,
 	struct scoutfs_block_header *hdr = bl->data;
 
 	if (!test_bit(BLOCK_BIT_CRC_VALID, &bp->bits)) {
-		if (hdr->crc != scoutfs_block_calc_crc(hdr))
+		if (hdr->crc !=
+		    scoutfs_block_calc_crc(hdr, SCOUTFS_BLOCK_LG_SIZE))
 			return false;
 		set_bit(BLOCK_BIT_CRC_VALID, &bp->bits);
 	}
@@ -722,7 +724,7 @@ int scoutfs_block_writer_write(struct super_block *sb,
 	/* checksum everything to reduce time between io submission merging */
 	list_for_each_entry(bp, &wri->dirty_list, dirty_entry) {
 		hdr = bp->bl.data;
-		hdr->crc = scoutfs_block_calc_crc(hdr);
+		hdr->crc = scoutfs_block_calc_crc(hdr, SCOUTFS_BLOCK_LG_SIZE);
 	}
 
         blk_start_plug(&plug);
@@ -866,7 +868,7 @@ bool scoutfs_block_writer_has_dirty(struct super_block *sb,
 u64 scoutfs_block_writer_dirty_bytes(struct super_block *sb,
 				     struct scoutfs_block_writer *wri)
 {
-	return wri->nr_dirty_blocks * SCOUTFS_BLOCK_SIZE;
+	return wri->nr_dirty_blocks * SCOUTFS_BLOCK_LG_SIZE;
 }
 
 /*
@@ -916,11 +918,8 @@ static int block_shrink(struct shrinker *shrink, struct shrink_control *sc)
 	spin_unlock(&binf->lock);
 
 out:
-	return min_t(u64, binf->lru_nr * SCOUTFS_PAGES_PER_BLOCK, INT_MAX);
+	return min_t(u64, binf->lru_nr * SCOUTFS_BLOCK_LG_PAGES_PER, INT_MAX);
 }
-
-#define SCOUTFS_SM_BLOCK_SHIFT	12
-#define SCOUTFS_SM_BLOCK_SIZE	(1 << SCOUTFS_SM_BLOCK_SHIFT)
 
 struct sm_block_completion {
 	struct completion comp;
@@ -956,11 +955,9 @@ static int sm_block_io(struct super_block *sb, int rw, u64 blkno,
 	struct bio *bio;
 	int ret;
 
-	BUILD_BUG_ON(PAGE_SIZE < SCOUTFS_SM_BLOCK_SIZE);
-	/* block calc crc is assuming block size, they'll be different later */
-	BUILD_BUG_ON(SCOUTFS_SM_BLOCK_SIZE != SCOUTFS_BLOCK_SIZE);
+	BUILD_BUG_ON(PAGE_SIZE < SCOUTFS_BLOCK_SM_SIZE);
 
-	if (WARN_ON_ONCE(len > SCOUTFS_SM_BLOCK_SIZE) ||
+	if (WARN_ON_ONCE(len > SCOUTFS_BLOCK_SM_SIZE) ||
 	    WARN_ON_ONCE(!(rw & WRITE) && !blk_crc))
 		return -EINVAL;
 
@@ -972,10 +969,11 @@ static int sm_block_io(struct super_block *sb, int rw, u64 blkno,
 
 	if (rw & WRITE) {
 		memcpy(pg_hdr, hdr, len);
-		if (len < SCOUTFS_SM_BLOCK_SIZE)
+		if (len < SCOUTFS_BLOCK_SM_SIZE)
 			memset((char *)pg_hdr + len, 0,
-			       SCOUTFS_SM_BLOCK_SIZE - len);
-		pg_hdr->crc = scoutfs_block_calc_crc(pg_hdr);
+			       SCOUTFS_BLOCK_SM_SIZE - len);
+		pg_hdr->crc = scoutfs_block_calc_crc(pg_hdr,
+						     SCOUTFS_BLOCK_SM_SIZE);
 	}
 
 	bio = bio_alloc(GFP_NOFS, 1);
@@ -984,11 +982,11 @@ static int sm_block_io(struct super_block *sb, int rw, u64 blkno,
 		goto out;
 	}
 
-	bio->bi_sector = blkno << (SCOUTFS_SM_BLOCK_SHIFT - 9);
+	bio->bi_sector = blkno << (SCOUTFS_BLOCK_SM_SHIFT - 9);
 	bio->bi_bdev = sb->s_bdev;
 	bio->bi_end_io = sm_block_bio_end_io;
 	bio->bi_private = &sbc;
-	bio_add_page(bio, page, SCOUTFS_SM_BLOCK_SIZE, 0);
+	bio_add_page(bio, page, SCOUTFS_BLOCK_SM_SIZE, 0);
 
 	init_completion(&sbc.comp);
 	sbc.err = 0;
@@ -1000,7 +998,8 @@ static int sm_block_io(struct super_block *sb, int rw, u64 blkno,
 
 	if (ret == 0 && !(rw & WRITE)) {
 		memcpy(hdr, pg_hdr, len);
-		*blk_crc = scoutfs_block_calc_crc(pg_hdr);
+		*blk_crc = scoutfs_block_calc_crc(pg_hdr,
+						  SCOUTFS_BLOCK_SM_SIZE);
 	}
 out:
 	__free_page(page);

@@ -244,7 +244,7 @@ static void load_inode(struct inode *inode, struct scoutfs_inode *cinode)
 	 * maintained as blocks come and go.
 	 */
 	inode->i_blocks = (ci->online_blocks + ci->offline_blocks)
-				<< SCOUTFS_BLOCK_SECTOR_SHIFT;
+				<< SCOUTFS_BLOCK_SM_SECTOR_SHIFT;
 
 	set_item_info(ci, cinode);
 }
@@ -390,7 +390,8 @@ int scoutfs_complete_truncate(struct inode *inode, struct scoutfs_lock *lock)
 	if (!(ci->flags & SCOUTFS_INO_FLAG_TRUNCATE))
 		return 0;
 
-	start = (i_size_read(inode) + SCOUTFS_BLOCK_SIZE - 1) >> SCOUTFS_BLOCK_SHIFT;
+	start = (i_size_read(inode) + SCOUTFS_BLOCK_SM_SIZE - 1) >>
+		SCOUTFS_BLOCK_SM_SHIFT;
 	ret = scoutfs_data_truncate_items(inode->i_sb, inode,
 					  scoutfs_ino(inode), start, ~0ULL,
 					  false, lock);
@@ -573,7 +574,7 @@ void scoutfs_inode_add_onoff(struct inode *inode, s64 on, s64 off)
 		si->online_blocks += on;
 		si->offline_blocks += off;
 		/* XXX not sure if this is right */
-		inode->i_blocks += (on + off) * SCOUTFS_BLOCK_SECTORS;
+		inode->i_blocks += (on + off) * SCOUTFS_BLOCK_SM_SECTORS;
 
 		trace_scoutfs_online_offline_blocks(inode, on, off,
 						    si->online_blocks,

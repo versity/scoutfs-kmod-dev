@@ -111,7 +111,7 @@ static inline unsigned int item_bytes(struct scoutfs_btree_item *item)
  */
 static unsigned int join_low_watermark(void)
 {
-	return (SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) / 4;
+	return (SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_btree_block)) / 4;
 }
 
 /*
@@ -121,7 +121,7 @@ static unsigned int join_low_watermark(void)
 static unsigned int item_full_pct(struct scoutfs_btree_block *bt)
 {
 	return (int)le16_to_cpu(bt->total_item_bytes) * 100 /
-		(SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block));
+		(SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_btree_block));
 }
 
 static inline __le16 ptr_off(struct scoutfs_btree_block *bt, void *ptr)
@@ -216,7 +216,7 @@ static int leaf_item_hash_ind(struct scoutfs_key *key)
 
 static __le16 *leaf_item_hash_buckets(struct scoutfs_btree_block *bt)
 {
-	return (void *)bt + SCOUTFS_BLOCK_SIZE -
+	return (void *)bt + SCOUTFS_BLOCK_LG_SIZE -
 		SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES;
 }
 
@@ -760,11 +760,11 @@ retry:
 
 	if (bt) {
 		/* returning a cow of an existing block */
-		memcpy(new, bt, SCOUTFS_BLOCK_SIZE);
+		memcpy(new, bt, SCOUTFS_BLOCK_LG_SIZE);
 		scoutfs_block_put(sb, bl);
 	} else {
 		/* returning a newly allocated block */
-		memset(new, 0, SCOUTFS_BLOCK_SIZE);
+		memset(new, 0, SCOUTFS_BLOCK_LG_SIZE);
 		new->hdr.fsid = super->hdr.fsid;
 	}
 	bl = new_bl;
@@ -828,7 +828,7 @@ static void init_btree_block(struct scoutfs_btree_block *bt, int level)
 {
 	int free;
 
-	free = SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block);
+	free = SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_btree_block);
 	if (level == 0)
 		free -= SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES;
 

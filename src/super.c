@@ -103,7 +103,7 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 
 	kst->f_bfree = le64_to_cpu(nstatfs.bfree);
 	kst->f_type = SCOUTFS_SUPER_MAGIC;
-	kst->f_bsize = SCOUTFS_BLOCK_SIZE;
+	kst->f_bsize = SCOUTFS_BLOCK_SM_SIZE;
 	kst->f_blocks = le64_to_cpu(nstatfs.total_blocks);
 	kst->f_bavail = kst->f_bfree;
 
@@ -115,7 +115,7 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	kst->f_fsid.val[0] = le32_to_cpu(uuid[0]) ^ le32_to_cpu(uuid[1]);
 	kst->f_fsid.val[1] = le32_to_cpu(uuid[2]) ^ le32_to_cpu(uuid[3]);
 	kst->f_namelen = SCOUTFS_NAME_LEN;
-	kst->f_frsize = SCOUTFS_BLOCK_SIZE;
+	kst->f_frsize = SCOUTFS_BLOCK_SM_SIZE;
 	/* the vfs fills f_flags */
 
 	/*
@@ -379,8 +379,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	sbi->opts = opts;
 
-	ret = sb_set_blocksize(sb, SCOUTFS_BLOCK_SIZE);
-	if (ret != SCOUTFS_BLOCK_SIZE) {
+	ret = sb_set_blocksize(sb, SCOUTFS_BLOCK_SM_SIZE);
+	if (ret != SCOUTFS_BLOCK_SM_SIZE) {
 		scoutfs_err(sb, "failed to set blocksize, returned %d", ret);
 		ret = -EIO;
 		goto out;

@@ -144,7 +144,7 @@ struct quorum_block_head {
 	struct list_head head;
 	union {
 		struct scoutfs_quorum_block blk;
-		u8 bytes[SCOUTFS_BLOCK_SIZE];
+		u8 bytes[SCOUTFS_BLOCK_SM_SIZE];
 	};
 };
 
@@ -184,13 +184,13 @@ static size_t quorum_block_bytes(struct scoutfs_quorum_block *blk)
 static bool invalid_quorum_block(struct buffer_head *bh,
 				 struct scoutfs_quorum_block *blk)
 {
-	return bh->b_size != SCOUTFS_BLOCK_SIZE ||
-	       sizeof(struct scoutfs_quorum_block) > SCOUTFS_BLOCK_SIZE ||
+	return bh->b_size != SCOUTFS_BLOCK_SM_SIZE ||
+	       sizeof(struct scoutfs_quorum_block) > SCOUTFS_BLOCK_SM_SIZE ||
 	       quorum_block_crc(blk) != blk->crc ||
 	       le64_to_cpu(blk->blkno) != bh->b_blocknr ||
 	       blk->term == 0 ||
 	       blk->log_nr > SCOUTFS_QUORUM_LOG_MAX ||
-	       quorum_block_bytes(blk) > SCOUTFS_BLOCK_SIZE;
+	       quorum_block_bytes(blk) > SCOUTFS_BLOCK_SM_SIZE;
 }
 
 /* true if a is stale and should be ignored */
@@ -296,7 +296,8 @@ static int write_quorum_block(struct super_block *sb,
 	size_t size;
 	int ret;
 
-	BUILD_BUG_ON(sizeof(struct scoutfs_quorum_block) > SCOUTFS_BLOCK_SIZE);
+	BUILD_BUG_ON(sizeof(struct scoutfs_quorum_block) >
+		     SCOUTFS_BLOCK_SM_SIZE);
 
 	bh = sb_getblk(sb, SCOUTFS_QUORUM_BLKNO +
 			   prandom_u32_max(SCOUTFS_QUORUM_BLOCKS));
@@ -306,8 +307,7 @@ static int write_quorum_block(struct super_block *sb,
 	}
 
 	size = quorum_block_bytes(our_blk);
-	if (WARN_ON_ONCE(size > SCOUTFS_BLOCK_SIZE ||
-			 size > bh->b_size)) {
+	if (WARN_ON_ONCE(size > SCOUTFS_BLOCK_SM_SIZE || size > bh->b_size)) {
 		ret = -EIO;
 		goto out;
 	}
@@ -530,7 +530,7 @@ int scoutfs_quorum_election(struct super_block *sb, ktime_t timeout_abs,
 	trace_scoutfs_quorum_election(sb, prev_term);
 
 	super = kmalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
-	our_blk = kmalloc(SCOUTFS_BLOCK_SIZE, GFP_NOFS);
+	our_blk = kmalloc(SCOUTFS_BLOCK_SM_SIZE, GFP_NOFS);
 	if (!super || !our_blk) {
 		ret = -ENOMEM;
 		goto out;
@@ -548,7 +548,7 @@ int scoutfs_quorum_election(struct super_block *sb, ktime_t timeout_abs,
 			    SCOUTFS_QUORUM_TERM_HI_MS);
 
 	for (;;) {
-		memset(our_blk, 0, SCOUTFS_BLOCK_SIZE);
+		memset(our_blk, 0, SCOUTFS_BLOCK_SM_SIZE);
 
 		scoutfs_inc_counter(sb, quorum_cycle);
 

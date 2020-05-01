@@ -1163,9 +1163,9 @@ static int set_lock_bloom_bits(struct super_block *sb,
 			err = scoutfs_radix_free(sb, finf->alloc, finf->wri,
 						  le64_to_cpu(ref->blkno));
 			BUG_ON(err); /* could have dirtied */
-			memcpy(new_bl->data, bl->data, SCOUTFS_BLOCK_SIZE);
+			memcpy(new_bl->data, bl->data, SCOUTFS_BLOCK_LG_SIZE);
 		} else {
-			memset(new_bl->data, 0, SCOUTFS_BLOCK_SIZE);
+			memset(new_bl->data, 0, SCOUTFS_BLOCK_LG_SIZE);
 		}
 
 		scoutfs_block_writer_mark_dirty(sb, finf->wri, new_bl);

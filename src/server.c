@@ -400,7 +400,7 @@ static int server_get_log_trees(struct super_block *sb,
 		goto unlock;
 
 	/* ensure client has enough free metadata blocks for a transaction */
-	target = (64*1024*1024) / SCOUTFS_BLOCK_SIZE;
+	target = (64*1024*1024) / SCOUTFS_BLOCK_LG_SIZE;
 	if (le64_to_cpu(ltv.meta_avail.ref.sm_total) < target) {
 		count = target - le64_to_cpu(ltv.meta_avail.ref.sm_total);
 
@@ -413,7 +413,7 @@ static int server_get_log_trees(struct super_block *sb,
 	}
 
 	/* ensure client has enough free data blocks for a transaction */
-	target = SCOUTFS_TRANS_DATA_ALLOC_HWM / SCOUTFS_BLOCK_SIZE;
+	target = SCOUTFS_TRANS_DATA_ALLOC_HWM / SCOUTFS_BLOCK_SM_SIZE;
 	if (le64_to_cpu(ltv.data_avail.ref.sm_total) < target) {
 		count = target - le64_to_cpu(ltv.data_avail.ref.sm_total);
 

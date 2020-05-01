@@ -318,8 +318,8 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 	inode_dio_wait(inode);
 
 	/* drop all clean and dirty cached blocks in the range */
-	start = args.block << SCOUTFS_BLOCK_SHIFT;
-	end_inc = ((args.block + args.count) << SCOUTFS_BLOCK_SHIFT) - 1;
+	start = args.block << SCOUTFS_BLOCK_SM_SHIFT;
+	end_inc = ((args.block + args.count) << SCOUTFS_BLOCK_SM_SHIFT) - 1;
 	truncate_inode_pages_range(&inode->i_data, start, end_inc);
 
 	ret = scoutfs_data_truncate_items(sb, inode, scoutfs_ino(inode),
@@ -330,8 +330,8 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 		scoutfs_inode_get_onoff(inode, &online, &offline);
 		isize = i_size_read(inode);
 		if (online == 0 && isize) {
-			start = (isize + SCOUTFS_BLOCK_SIZE - 1)
-					>> SCOUTFS_BLOCK_SHIFT;
+			start = (isize + SCOUTFS_BLOCK_SM_SIZE - 1)
+					>> SCOUTFS_BLOCK_SM_SHIFT;
 			ret = scoutfs_data_truncate_items(sb, inode,
 							  scoutfs_ino(inode),
 							  start, U64_MAX,
@@ -371,8 +371,8 @@ static long scoutfs_ioc_data_wait_err(struct file *file, unsigned long arg)
 
 	trace_scoutfs_ioc_data_wait_err(sb, &args);
 
-	sblock = args.offset >> SCOUTFS_BLOCK_SHIFT;
-	eblock = (args.offset + args.count - 1) >> SCOUTFS_BLOCK_SHIFT;
+	sblock = args.offset >> SCOUTFS_BLOCK_SM_SHIFT;
+	eblock = (args.offset + args.count - 1) >> SCOUTFS_BLOCK_SM_SHIFT;
 
 	if (sblock > eblock)
 		return -EINVAL;
@@ -460,7 +460,7 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 
 	/* verify arg constraints that aren't dependent on file */
 	if (args.count < 0 || (end_size < args.offset) ||
-	    args.offset & SCOUTFS_BLOCK_MASK)
+	    args.offset & SCOUTFS_BLOCK_SM_MASK)
 		return -EINVAL;
 
 	if (args.count == 0)
@@ -494,7 +494,7 @@ static long scoutfs_ioc_stage(struct file *file, unsigned long arg)
 	    (file->f_flags & (O_APPEND | O_DIRECT | O_DSYNC)) ||
 	    IS_SYNC(file->f_mapping->host) ||
 	    (end_size > isize) ||
-	    ((end_size & SCOUTFS_BLOCK_MASK) && (end_size != isize))) {
+	    ((end_size & SCOUTFS_BLOCK_SM_MASK) && (end_size != isize))) {
 		ret = -EINVAL;
 		goto out;
 	}

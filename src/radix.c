@@ -83,7 +83,7 @@
  * stubbed out refs that reference entirely empty or full subtrees.
  * They're moved to properly allocated blknos.
  */
-#define RADIX_SYNTH_BLKNO (SCOUTFS_BLOCK_MAX + 1)
+#define RADIX_SYNTH_BLKNO (SCOUTFS_BLOCK_LG_MAX + 1)
 
 struct radix_path {
 	struct rb_node node;
@@ -763,7 +763,7 @@ static void init_block(struct super_block *sb, struct scoutfs_radix_block *rdx,
 		else
 			memset(rdx->bits, 0, SCOUTFS_RADIX_BITS_BYTES);
 
-		tail = SCOUTFS_BLOCK_SIZE -
+		tail = SCOUTFS_BLOCK_LG_SIZE -
 		       offsetof(struct scoutfs_radix_block, bits) -
 		       SCOUTFS_RADIX_BITS_BYTES;
 	} else {
@@ -772,14 +772,14 @@ static void init_block(struct super_block *sb, struct scoutfs_radix_block *rdx,
 		for (i = 0; i < SCOUTFS_RADIX_REFS; i++)
 			memcpy(&rdx->refs[i], &ref, sizeof(ref));
 
-		tail = SCOUTFS_BLOCK_SIZE -
+		tail = SCOUTFS_BLOCK_LG_SIZE -
 		       offsetof(struct scoutfs_radix_block,
 				refs[SCOUTFS_RADIX_REFS]);
 	}
 
 	/* make sure we don't write uninitialized tail kernel memory to disk */
 	if (tail)
-		memset((void *)rdx + SCOUTFS_BLOCK_SIZE - tail, 0, tail);
+		memset((void *)rdx + SCOUTFS_BLOCK_LG_SIZE - tail, 0, tail);
 }
 
 /* get path flags */
@@ -1529,10 +1529,10 @@ void scoutfs_radix_root_init(struct super_block *sb,
 	init_ref(&root->ref, 0, false);
 }
 
-u64 scoutfs_radix_root_free_bytes(struct super_block *sb,
-				  struct scoutfs_radix_root *root)
+u64 scoutfs_radix_root_free_blocks(struct super_block *sb,
+				   struct scoutfs_radix_root *root)
 {
-	return le64_to_cpu(root->ref.sm_total) << SCOUTFS_BLOCK_SHIFT;
+	return le64_to_cpu(root->ref.sm_total);
 }
 
 /*

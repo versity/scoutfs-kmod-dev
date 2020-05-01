@@ -803,8 +803,8 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 	WARN_ON_ONCE(inode && !mutex_is_locked(&inode->i_mutex));
 
 	/* clamp last to the last possible block? */
-	if (last > SCOUTFS_BLOCK_MAX)
-		last = SCOUTFS_BLOCK_MAX;
+	if (last > SCOUTFS_BLOCK_SM_MAX)
+		last = SCOUTFS_BLOCK_SM_MAX;
 
 	trace_scoutfs_data_truncate_items(sb, iblock, last, offline);
 
@@ -1060,7 +1060,7 @@ out:
 		offset = iblock - ext->iblock;
 		map_bh(bh, inode->i_sb, ext->blkno + offset);
 		bh->b_size = min_t(u64, bh->b_size,
-				(ext->count - offset) << SCOUTFS_BLOCK_SHIFT);
+			     (ext->count - offset) << SCOUTFS_BLOCK_SM_SHIFT);
 	}
 
 	if (ext)
@@ -1483,8 +1483,8 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
                         goto out;
         }
 
-	iblock = offset >> SCOUTFS_BLOCK_SHIFT;
-	last = (offset + len - 1) >> SCOUTFS_BLOCK_SHIFT;
+	iblock = offset >> SCOUTFS_BLOCK_SM_SHIFT;
+	last = (offset + len - 1) >> SCOUTFS_BLOCK_SM_SHIFT;
 
 	while(iblock <= last) {
 
@@ -1496,7 +1496,7 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 		ret = fallocate_extents(sb, inode, iblock, last, lock);
 
 		if (ret >= 0 && !(mode & FALLOC_FL_KEEP_SIZE)) {
-			end = (iblock + ret) << SCOUTFS_BLOCK_SHIFT;
+			end = (iblock + ret) << SCOUTFS_BLOCK_SM_SHIFT;
 			if (end > offset + len)
 				end = offset + len;
 			if (end > i_size_read(inode))
@@ -1549,7 +1549,7 @@ int scoutfs_data_init_offline_extent(struct inode *inode, u64 size,
 	u64 off;
 	int ret;
 
-	blocks = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SIZE);
+	blocks = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SM_SIZE);
 
 	scoutfs_inode_get_onoff(inode, &on, &off);
 	iblock = off;
@@ -1622,9 +1622,9 @@ static int fill_extent(struct fiemap_extent_info *fieinfo,
 		flags |= FIEMAP_EXTENT_UNWRITTEN;
 
 	return fiemap_fill_next_extent(fieinfo,
-				       ext->iblock << SCOUTFS_BLOCK_SHIFT,
-				       ext->blkno << SCOUTFS_BLOCK_SHIFT,
-				       ext->count << SCOUTFS_BLOCK_SHIFT,
+				       ext->iblock << SCOUTFS_BLOCK_SM_SHIFT,
+				       ext->blkno << SCOUTFS_BLOCK_SM_SHIFT,
+				       ext->count << SCOUTFS_BLOCK_SM_SHIFT,
 				       flags);
 }
 
@@ -1666,8 +1666,8 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	memset(&cur, 0, sizeof(cur));
 	last_flags = 0;
 
-	iblock = start >> SCOUTFS_BLOCK_SHIFT;
-	last = (start + len - 1) >> SCOUTFS_BLOCK_SHIFT;
+	iblock = start >> SCOUTFS_BLOCK_SM_SHIFT;
+	last = (start + len - 1) >> SCOUTFS_BLOCK_SM_SHIFT;
 
 	for (;;) {
 		ret = load_unpacked_extents(sb, ino, iblock, last, false,
@@ -1831,8 +1831,8 @@ int scoutfs_data_wait_check(struct inode *inode, loff_t pos, loff_t len,
 		}
 	}
 
-	iblock = pos >> SCOUTFS_BLOCK_SHIFT;
-	last_block = (pos + len - 1) >> SCOUTFS_BLOCK_SHIFT;
+	iblock = pos >> SCOUTFS_BLOCK_SM_SHIFT;
+	last_block = (pos + len - 1) >> SCOUTFS_BLOCK_SM_SHIFT;
 
 	while(iblock <= last_block) {
 
@@ -2056,7 +2056,8 @@ u64 scoutfs_data_alloc_free_bytes(struct super_block *sb)
 {
 	DECLARE_DATA_INFO(sb, datinf);
 
-	return scoutfs_radix_root_free_bytes(sb, &datinf->data_avail);
+	return scoutfs_radix_root_free_blocks(sb, &datinf->data_avail) <<
+		SCOUTFS_BLOCK_SM_SHIFT;
 }
 
 int scoutfs_data_setup(struct super_block *sb)

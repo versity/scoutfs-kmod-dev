@@ -11,24 +11,42 @@
 #define SCOUTFS_BLOCK_MAGIC_RADIX	0xebeb5e65
 
 /*
- * The super block and btree blocks are fixed 4k.
+ * The super block, quorum block, and file data allocation granularity
+ * use the smaller 4KB block.
  */
-#define SCOUTFS_BLOCK_SHIFT 12
-#define SCOUTFS_BLOCK_SIZE (1 << SCOUTFS_BLOCK_SHIFT)
-#define SCOUTFS_BLOCK_MASK (SCOUTFS_BLOCK_SIZE - 1)
-#define SCOUTFS_BLOCKS_PER_PAGE (PAGE_SIZE / SCOUTFS_BLOCK_SIZE)
-#define SCOUTFS_BLOCK_SECTOR_SHIFT (SCOUTFS_BLOCK_SHIFT - 9)
-#define SCOUTFS_BLOCK_SECTORS (1 << SCOUTFS_BLOCK_SECTOR_SHIFT)
-#define SCOUTFS_BLOCK_MAX (U64_MAX >> SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_BLOCK_SM_SHIFT		12
+#define SCOUTFS_BLOCK_SM_SIZE		(1 << SCOUTFS_BLOCK_SM_SHIFT)
+#define SCOUTFS_BLOCK_SM_MASK		(SCOUTFS_BLOCK_SM_SIZE - 1)
+#define SCOUTFS_BLOCK_SM_PER_PAGE	(PAGE_SIZE / SCOUTFS_BLOCK_SM_SIZE)
+#define SCOUTFS_BLOCK_SM_SECTOR_SHIFT	(SCOUTFS_BLOCK_SM_SHIFT - 9)
+#define SCOUTFS_BLOCK_SM_SECTORS	(1 << SCOUTFS_BLOCK_SM_SECTOR_SHIFT)
+#define SCOUTFS_BLOCK_SM_MAX		(U64_MAX >> SCOUTFS_BLOCK_SM_SHIFT)
+#define SCOUTFS_BLOCK_SM_PAGES_PER	(SCOUTFS_BLOCK_SM_SIZE / PAGE_SIZE)
+#define SCOUTFS_BLOCK_SM_PAGE_ORDER	(SCOUTFS_BLOCK_SM_SHIFT - PAGE_SHIFT)
 
-#define SCOUTFS_PAGES_PER_BLOCK (SCOUTFS_BLOCK_SIZE / PAGE_SIZE)
-#define SCOUTFS_BLOCK_PAGE_ORDER (SCOUTFS_BLOCK_SHIFT - PAGE_SHIFT)
+/*
+ * The radix and btree structures, and the forest bloom block, use the
+ * larger 64KB metadata block size.
+ */
+#define SCOUTFS_BLOCK_LG_SHIFT		16
+#define SCOUTFS_BLOCK_LG_SIZE		(1 << SCOUTFS_BLOCK_LG_SHIFT)
+#define SCOUTFS_BLOCK_LG_MASK		(SCOUTFS_BLOCK_LG_SIZE - 1)
+#define SCOUTFS_BLOCK_LG_PER_PAGE	(PAGE_SIZE / SCOUTFS_BLOCK_LG_SIZE)
+#define SCOUTFS_BLOCK_LG_SECTOR_SHIFT	(SCOUTFS_BLOCK_LG_SHIFT - 9)
+#define SCOUTFS_BLOCK_LG_SECTORS	(1 << SCOUTFS_BLOCK_LG_SECTOR_SHIFT)
+#define SCOUTFS_BLOCK_LG_MAX		(U64_MAX >> SCOUTFS_BLOCK_LG_SHIFT)
+#define SCOUTFS_BLOCK_LG_PAGES_PER	(SCOUTFS_BLOCK_LG_SIZE / PAGE_SIZE)
+#define SCOUTFS_BLOCK_LG_PAGE_ORDER	(SCOUTFS_BLOCK_LG_SHIFT - PAGE_SHIFT)
+
+#define SCOUTFS_BLOCK_SM_LG_SHIFT	(SCOUTFS_BLOCK_LG_SHIFT - \
+					 SCOUTFS_BLOCK_SM_SHIFT)
+
 
 /*
  * The super block leaves some room before the first block for platform
  * structures like boot loaders.
  */
-#define SCOUTFS_SUPER_BLKNO ((64ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_SUPER_BLKNO ((64ULL * 1024) >> SCOUTFS_BLOCK_SM_SHIFT)
 
 /*
  * A reasonably large region of aligned quorum blocks follow the super
@@ -38,8 +56,8 @@
  * mounts that have a reasonable probability of not overwriting each
  * other's random block locations.
  */
-#define SCOUTFS_QUORUM_BLKNO		((256ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
-#define SCOUTFS_QUORUM_BLOCKS		((256ULL * 1024) >> SCOUTFS_BLOCK_SHIFT)
+#define SCOUTFS_QUORUM_BLKNO	((256ULL * 1024) >> SCOUTFS_BLOCK_SM_SHIFT)
+#define SCOUTFS_QUORUM_BLOCKS	((256ULL * 1024) >> SCOUTFS_BLOCK_SM_SHIFT)
 
 #define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
 
@@ -168,8 +186,9 @@ struct scoutfs_radix_root {
 	struct scoutfs_radix_ref ref;
 } __packed;
 
-#define SCOUTFS_RADIX_REFS \
-	((SCOUTFS_BLOCK_SIZE - offsetof(struct scoutfs_radix_block, refs[0])) /\
+#define SCOUTFS_RADIX_REFS					\
+	((SCOUTFS_BLOCK_LG_SIZE -				\
+	  offsetof(struct scoutfs_radix_block, refs[0])) /	\
 		sizeof(struct scoutfs_radix_ref))
 
 /* 8 meg regions with 4k data blocks */
@@ -178,8 +197,8 @@ struct scoutfs_radix_root {
 #define SCOUTFS_RADIX_LG_MASK	(SCOUTFS_RADIX_LG_BITS - 1)
 
 /* round block bits down to a multiple of large ranges */
-#define SCOUTFS_RADIX_BITS					\
-	(((SCOUTFS_BLOCK_SIZE -					\
+#define SCOUTFS_RADIX_BITS						\
+	(((SCOUTFS_BLOCK_LG_SIZE -					\
 	   offsetof(struct scoutfs_radix_block, bits[0])) * 8) &	\
 	 ~(__u64)SCOUTFS_RADIX_LG_MASK)
 #define SCOUTFS_RADIX_BITS_BYTES (SCOUTFS_RADIX_BITS / 8)
@@ -247,7 +266,7 @@ struct scoutfs_btree_block {
  * blocks aren't full.
  */
 #define SCOUTFS_BTREE_LEAF_ITEM_HASH_NR					  \
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_btree_block)) /	  \
+	((SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_btree_block)) /	  \
 	 (sizeof(struct scoutfs_btree_item) + (sizeof(__le16))) * 100 / 75)
 #define SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES \
 	(SCOUTFS_BTREE_LEAF_ITEM_HASH_NR * sizeof(__le16))
@@ -313,9 +332,9 @@ struct scoutfs_bloom_block {
  */
 #define SCOUTFS_FOREST_BLOOM_NRS		7
 #define SCOUTFS_FOREST_BLOOM_BITS \
-	(((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_bloom_block)) /	\
-	 member_sizeof(struct scoutfs_bloom_block, bits[0])) *		\
-	 member_sizeof(struct scoutfs_bloom_block, bits[0]) * 8)	\
+	(((SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_bloom_block)) /  \
+	 member_sizeof(struct scoutfs_bloom_block, bits[0])) *		  \
+	 member_sizeof(struct scoutfs_bloom_block, bits[0]) * 8)	  \
 
 /*
  * Keys are first sorted by major key zones.
@@ -380,10 +399,10 @@ struct scoutfs_packed_extent {
 	__u8 le_blkno_diff[0];
 } __packed;
 
-#define SCOUTFS_PACKEXT_BLOCKS		(8 * 1024 * 1024 / SCOUTFS_BLOCK_SIZE)
-#define SCOUTFS_PACKEXT_BASE_SHIFT	(ilog2(SCOUTFS_PACKEXT_BLOCKS))
-#define SCOUTFS_PACKEXT_BASE_MASK	(~((__u64)SCOUTFS_PACKEXT_BLOCKS - 1))
-#define SCOUTFS_PACKEXT_MAX_BYTES	SCOUTFS_MAX_VAL_SIZE
+#define SCOUTFS_PACKEXT_BLOCKS	     (8 * 1024 * 1024 / SCOUTFS_BLOCK_SM_SIZE)
+#define SCOUTFS_PACKEXT_BASE_SHIFT   (ilog2(SCOUTFS_PACKEXT_BLOCKS))
+#define SCOUTFS_PACKEXT_BASE_MASK    (~((__u64)SCOUTFS_PACKEXT_BLOCKS - 1))
+#define SCOUTFS_PACKEXT_MAX_BYTES    SCOUTFS_MAX_VAL_SIZE
 
 #define SEF_OFFLINE	(1 << 0)
 #define SEF_UNWRITTEN	(1 << 1)
@@ -445,8 +464,8 @@ struct scoutfs_quorum_block {
 	} __packed log[0];
 } __packed;
 
-#define SCOUTFS_QUORUM_LOG_MAX						\
-	((SCOUTFS_BLOCK_SIZE - sizeof(struct scoutfs_quorum_block)) /	\
+#define SCOUTFS_QUORUM_LOG_MAX						  \
+	((SCOUTFS_BLOCK_SM_SIZE - sizeof(struct scoutfs_quorum_block)) /  \
 		sizeof(struct scoutfs_quorum_log))
 
 struct scoutfs_super_block {

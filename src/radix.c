@@ -247,20 +247,34 @@ static void bitmap_set_le(__le64 *map, int ind, int nbits)
 }
 
 /*
- * xor the destination bitmap with the source.  bitmap_xor() requires 2
- * const inputs so I'm not comfortable giving it the changing
- * destination pointer as one of the const input pointers.
+ * xor at least nbits total dst bits with set src bits, a full word at a
+ * time, starting around the given starting index.  The src and dst
+ * pointers can be to the same bitmap.  We might xor bits before the
+ * starting index and might xor a bit more than nbits because we're
+ * working an __le64 at a time.  Return the total amount xored and
+ * set the caller's size that includes the last word we modified.
  */
-static void bitmap_xor_bitmap_le(__le64 *dst, __le64 *src, int nbits)
+static int bitmap_xor_bitmap_le(__le64 *dst, __le64 *src, int ind, int nbits,
+				int *size)
 {
+	int xored = 0;
 	int i;
 
 	BUG_ON((unsigned long)src & 7);
 	BUG_ON((unsigned long)dst & 7);
-	BUG_ON(nbits & 63);
 
-	for (i = 0; i < nbits; i += 64)
-		*(dst++) ^= *(src++);
+	while (xored < nbits &&
+	       (ind = find_next_bit_le(src, SCOUTFS_RADIX_BITS, ind)) <
+		SCOUTFS_RADIX_BITS) {
+		i = ind / 64;
+		xored += hweight64((u64 __force)src[i]);
+		dst[i] = dst[i] ^ src[i];
+		ind = round_up(ind + 1, 64);
+		if (size)
+			*size = ind;
+	}
+
+	return xored;
 }
 
 static void bitmap_clear_le(__le64 *map, int ind, int nbits)
@@ -334,13 +348,11 @@ static u64 count_lg_bits(void *bits, int ind, int nbits)
  * count the number of bits in corresponding large regions that are
  * fully set in the result bitmap.
  */
-static u64 count_lg_bitmap(void *result, void *input)
+static u64 count_lg_from_set(void *result, void *input, int ind, int size)
 {
 	u64 count = 0;
-	int ind = 0;
 
-	while ((ind = find_next_bit_le(input, SCOUTFS_RADIX_BITS, ind))
-			< SCOUTFS_RADIX_BITS) {
+	while ((ind = find_next_bit_le(input, size, ind)) < size) {
 		if (lg_is_full(result, ind))
 			count += SCOUTFS_RADIX_LG_BITS;
 		ind = round_up(ind + 1, SCOUTFS_RADIX_LG_BITS);
@@ -1347,8 +1359,8 @@ int scoutfs_radix_free_data(struct super_block *sb,
  *
  * The caller specifies the minimum count to move.  -ENOENT will be
  * returned if the source tree runs out of bits, potentially after
- * having already moved bits.  More than the minimum can be moved
- * because whole leaves worth of bits are moved.
+ * having already moved bits.  Up to 63 bits more than the minimum can
+ * be moved because bits are manipulated in chunks of 64 bits.
  *
  * This is pretty expensive because it fully references full leaf blocks
  * a few times.  It could be more efficient if it short circuited walks
@@ -1371,8 +1383,10 @@ int scoutfs_radix_merge(struct super_block *sb,
 	struct radix_path *dst_path;
 	s64 src_lg_delta;
 	s64 dst_lg_delta;
-	s64 sm_delta;
 	u64 bit;
+	int merge_size;
+	int merged;
+	int inp_sm;
 	int lg_ind;
 	int ind;
 	int ret;
@@ -1432,13 +1446,13 @@ wrapped:
 		src_rdx = src_path->bls[0]->data;
 		dst_rdx = dst_path->bls[0]->data;
 
-		sm_delta = le64_to_cpu(path_ref(inp_path, 0)->sm_total);
+		inp_sm = le64_to_cpu(path_ref(inp_path, 0)->sm_total);
 		ind = find_next_bit_le(inp_rdx->bits, SCOUTFS_RADIX_BITS,
 				       le32_to_cpu(inp_rdx->sm_first));
 		lg_ind = round_down(ind, SCOUTFS_RADIX_LG_BITS);
 
 		/* back out and retry if no input left, or inp not ro */
-		if (sm_delta == 0 ||
+		if (inp_sm == 0 ||
 		    (inp != src && paths_share_blocks(inp_path, src_path))) {
 			free_path(sb, inp_path);
 			inp_path = NULL;
@@ -1465,13 +1479,16 @@ wrapped:
 		}
 
 		/* carefully modify src last, it might also be inp */
-		bitmap_xor_bitmap_le(dst_rdx->bits, inp_rdx->bits,
-				     SCOUTFS_RADIX_BITS);
-		dst_lg_delta = count_lg_bitmap(dst_rdx->bits, inp_rdx->bits);
+		merged = bitmap_xor_bitmap_le(dst_rdx->bits, inp_rdx->bits,
+					      ind, min_t(u64, inp_sm, count),
+					      &merge_size);
+		dst_lg_delta = count_lg_from_set(dst_rdx->bits, inp_rdx->bits,
+						 ind, merge_size);
 
-		src_lg_delta = count_lg_bitmap(src_rdx->bits, inp_rdx->bits);
-		bitmap_xor_bitmap_le(src_rdx->bits, inp_rdx->bits,
-				     SCOUTFS_RADIX_BITS);
+		src_lg_delta = count_lg_from_set(src_rdx->bits, inp_rdx->bits,
+						 ind, merge_size);
+		bitmap_xor_bitmap_le(src_rdx->bits, inp_rdx->bits, ind, merged,
+				     NULL);
 
 		if (ind < le32_to_cpu(dst_rdx->sm_first))
 			dst_rdx->sm_first = cpu_to_le32(ind);
@@ -1479,13 +1496,13 @@ wrapped:
 		if (lg_ind < le32_to_cpu(dst_rdx->lg_first))
 			dst_rdx->lg_first = cpu_to_le32(lg_ind);
 
-		fixup_parent_refs(src_path, -sm_delta, -src_lg_delta);
-		fixup_parent_refs(dst_path, sm_delta, dst_lg_delta);
+		fixup_parent_refs(src_path, -merged, -src_lg_delta);
+		fixup_parent_refs(dst_path, merged, dst_lg_delta);
 
 		trace_scoutfs_radix_merge(sb, inp, inp_path->bls[0]->blkno,
 					  src, src_path->bls[0]->blkno,
 					  dst, dst_path->bls[0]->blkno, count,
-					  bit, ind, sm_delta, src_lg_delta,
+					  bit, ind, merged, src_lg_delta,
 					  dst_lg_delta);
 
 		free_path(sb, inp_path);
@@ -1494,7 +1511,7 @@ wrapped:
 		chg = NULL;
 
 		store_next_find_bit(sb, meta, src, bit + SCOUTFS_RADIX_BITS);
-		count -= min_t(u64, count, sm_delta);
+		count -= min_t(u64, count, merged);
 	}
 
 	ret = 0;

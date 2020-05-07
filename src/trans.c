@@ -169,6 +169,8 @@ void scoutfs_trans_write_func(struct work_struct *work)
 		if (sbi->trans_deadline_expired)
 			scoutfs_inc_counter(sb, trans_commit_timer);
 
+		scoutfs_inc_counter(sb, trans_commit_written);
+
 		ret = scoutfs_inode_walk_writeback(sb, true) ?:
 		      scoutfs_block_writer_write(sb, &tri->wri) ?:
 		      scoutfs_inode_walk_writeback(sb, false) ?:

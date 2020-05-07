@@ -22,6 +22,8 @@ struct scoutfs_lock {
 	struct rb_node range_node;
 	u64 refresh_gen;
 	u64 write_version;
+	struct scoutfs_btree_root fs_root;
+	struct scoutfs_btree_root logs_root;
 	struct list_head lru_head;
 	wait_queue_head_t waitq;
 	struct work_struct shrink_work;
@@ -49,7 +51,7 @@ struct scoutfs_lock_coverage {
 };
 
 int scoutfs_lock_grant_response(struct super_block *sb,
-				struct scoutfs_net_lock *nl);
+				struct scoutfs_net_lock_grant_response *gr);
 int scoutfs_lock_invalidate_request(struct super_block *sb, u64 net_id,
 				    struct scoutfs_net_lock *nl);
 int scoutfs_lock_recover_request(struct super_block *sb, u64 net_id,

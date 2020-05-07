@@ -58,12 +58,15 @@ do {								\
 
 int scoutfs_server_lock_request(struct super_block *sb, u64 rid,
 				struct scoutfs_net_lock *nl);
-int scoutfs_server_lock_response(struct super_block *sb, u64 rid,
-				 u64 id, struct scoutfs_net_lock *nl);
+int scoutfs_server_lock_response(struct super_block *sb, u64 rid, u64 id,
+				 struct scoutfs_net_lock_grant_response *gr);
 int scoutfs_server_lock_recover_request(struct super_block *sb, u64 rid,
 					struct scoutfs_key *key);
 int scoutfs_server_hold_commit(struct super_block *sb);
 int scoutfs_server_apply_commit(struct super_block *sb, int err);
+void scoutfs_server_get_fs_roots(struct super_block *sb,
+				 struct scoutfs_btree_root *fs_root,
+				 struct scoutfs_btree_root *logs_root);
 
 struct sockaddr_in;
 struct scoutfs_quorum_elected_info;

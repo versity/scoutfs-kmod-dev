@@ -1015,9 +1015,9 @@ int scoutfs_forest_prev(struct super_block *sb, struct scoutfs_key *key,
  * that have been synced.  We ask the server for the current roots to
  * check.
  *
- * We don't bother skipping deletion or reservation items here.  They're
- * unlikely.  The caller will iterate them over safely and call again to
- * find the next hint after them.
+ * We don't bother skipping deletion items here.  The caller will safely
+ * skip over them when really reading from their locked region and will
+ * call again after them to find the next hint.
  *
  * We're reading from stable persistent trees so we don't need to lock
  * against writers, their writes are cow into free blocks.
@@ -1028,10 +1028,12 @@ int scoutfs_forest_next_hint(struct super_block *sb, struct scoutfs_key *key,
 	DECLARE_STALE_TRACKING_SUPER_REFS(prev_refs, refs);
 	struct scoutfs_btree_root fs_root;
 	struct scoutfs_btree_root logs_root;
-	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_btree_root item_root;
+	struct scoutfs_log_trees_val *ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key found;
 	struct scoutfs_key ltk;
+	bool checked_fs;
 	bool have_next;
 	int ret;
 
@@ -1046,32 +1048,42 @@ retry:
 	refs.logs_ref = logs_root.ref;
 
 	scoutfs_key_init_log_trees(&ltk, 0, 0);
+	checked_fs = false;
 	have_next = false;
 
-	for (;; scoutfs_key_inc(&ltk)) {
-
-		ret = scoutfs_btree_next(sb, &logs_root, &ltk, &iref);
-		if (ret == -ENOENT) {
-			if (have_next)
-				ret = 0;
-			break;
-		}
-		if (ret == -ESTALE)
-			break;
-		if (ret < 0)
-			goto out;
-
-		if (iref.val_len == sizeof(ltv)) {
-			ltk = *iref.key;
-			memcpy(&ltv, iref.val, iref.val_len);
+	for (;;) {
+		if (!checked_fs) {
+			checked_fs = true;
+			item_root = fs_root;
 		} else {
-			ret = -EIO;
-		}
-		scoutfs_btree_put_iref(&iref);
-		if (ret < 0)
-			goto out;
+			ret = scoutfs_btree_next(sb, &logs_root, &ltk, &iref);
+			if (ret == -ENOENT) {
+				if (have_next)
+					ret = 0;
+				break;
+			}
+			if (ret == -ESTALE)
+				break;
+			if (ret < 0)
+				goto out;
 
-		ret = scoutfs_btree_next(sb, &ltv.item_root, key, &iref);
+			if (iref.val_len == sizeof(*ltv)) {
+				ltk = *iref.key;
+				scoutfs_key_inc(&ltk);
+				ltv = iref.val;
+				item_root = ltv->item_root;
+			} else {
+				ret = -EIO;
+			}
+			scoutfs_btree_put_iref(&iref);
+			if (ret < 0)
+				goto out;
+
+			if (item_root.ref.blkno == 0)
+				continue;
+		}
+
+		ret = scoutfs_btree_next(sb, &item_root, key, &iref);
 		if (ret == -ENOENT)
 			continue;
 		if (ret == -ESTALE)

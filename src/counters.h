@@ -95,10 +95,11 @@
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\
 	EXPAND_COUNTER(trans_commit_sync_fs)			\
-	EXPAND_COUNTER(trans_commit_timer)
+	EXPAND_COUNTER(trans_commit_timer)			\
+	EXPAND_COUNTER(trans_commit_written)
 
 #define FIRST_COUNTER	block_cache_access
-#define LAST_COUNTER	trans_commit_timer
+#define LAST_COUNTER	trans_commit_written
 
 #undef EXPAND_COUNTER
 #define EXPAND_COUNTER(which) struct percpu_counter which;

@@ -24,6 +24,7 @@
 #include "radix.h"
 #include "block.h"
 #include "forest.h"
+#include "counters.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -76,7 +77,7 @@ struct forest_root {
 	u64 nr;
 };
 
-struct forest_super_refs {
+struct forest_refs {
 	struct scoutfs_btree_ref fs_ref;
 	struct scoutfs_btree_ref logs_ref;
 } __packed;
@@ -93,6 +94,7 @@ struct forest_bloom_nrs {
 struct forest_lock_private {
 	u64 last_refreshed;
 	struct rw_semaphore rwsem;
+	unsigned int used_lock_roots:1;
 	struct list_head roots;
 	struct forest_root fs_root;
 	struct forest_root our_log_root;
@@ -283,28 +285,29 @@ static struct scoutfs_block *read_bloom_ref(struct super_block *sb,
  *
  * This doesn't deal with rereading stale blocks itself.. it returns
  * ESTALE to the caller who already has to deal with retrying stale
- * blocks from their btree reads.  We give them the super refs we read
- * so that they can identify persistent stale block errors that come
- * from corruption.
+ * blocks from their btree reads.  We give them the refs we read so that
+ * they can identify persistent stale block errors that come from
+ * corruption.
  *
- * Because we're starting all the reads from a stable read super this
- * will not see any dirty blocks we have in memory.  We don't have to
- * lock any of the btree reads.  It also won't find the currently dirty
- * version of our log btree.  Writers mark our static log btree in lpriv
- * to indicate that we should include our dirty log btree in reads.
- * We'll also naturally add it if we see a persistent version on disk
- * with all of the bloom bits set.
+ * Because we're starting all the reads from stable refs from the
+ * server, this will not see any dirty blocks we have in memory.  We
+ * don't have to lock any of the btree reads.  It also won't find the
+ * currently dirty version of our log btree.  Writers mark our static
+ * log btree in lpriv to indicate that we should include our dirty log
+ * btree in reads.  We'll also naturally add it if we see a persistent
+ * version on disk with all of the bloom bits set.
  */
 static int refresh_bloom_roots(struct super_block *sb,
 			       struct scoutfs_lock *lock,
-			       struct forest_super_refs *srefs)
+			       struct forest_refs *refs)
 {
 	DECLARE_FOREST_INFO(sb, finf);
 	struct forest_lock_private *lpriv = ACCESS_ONCE(lock->forest_private);
+	struct scoutfs_btree_root fs_root;
+	struct scoutfs_btree_root logs_root;
 	struct scoutfs_log_trees_val ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct forest_bloom_nrs bloom;
-	struct scoutfs_super_block super;
 	struct forest_root *fr = NULL;
 	struct scoutfs_bloom_block *bb;
 	struct scoutfs_block *bl;
@@ -312,26 +315,36 @@ static int refresh_bloom_roots(struct super_block *sb,
 	int ret;
 	int i;
 
-	memset(srefs, 0, sizeof(*srefs));
+	memset(refs, 0, sizeof(*refs));
+
+	down_write(&lpriv->rwsem);
 
 	/* empty the list so no one iterates until someone's added */
 	clear_roots(lpriv);
 
-	ret = scoutfs_read_super(sb, &super);
-	if (ret)
-		goto out;
+	/* first use the lock's constant roots, then sample newer roots */
+	if (!lpriv->used_lock_roots) {
+		lpriv->used_lock_roots = 1;
+		fs_root = lock->fs_root;
+		logs_root = lock->logs_root;
+		scoutfs_inc_counter(sb, forest_roots_lock);
+	} else {
+		ret = scoutfs_client_get_fs_roots(sb, &fs_root, &logs_root);
+		if (ret)
+			goto out;
+		scoutfs_inc_counter(sb, forest_roots_server);
+	}
 
-	trace_scoutfs_forest_read_super(sb, &super);
-
-	srefs->fs_ref = super.fs_root.ref;
-	srefs->logs_ref = super.logs_root.ref;
+	trace_scoutfs_forest_using_roots(sb, &fs_root, &logs_root);
+	refs->fs_ref = fs_root.ref;
+	refs->logs_ref = logs_root.ref;
 
 	calc_bloom_nrs(&bloom, &lock->start);
 
 	scoutfs_key_init_log_trees(&key, 0, 0);
 	for (;; scoutfs_key_inc(&key)) {
 
-		ret = scoutfs_btree_next(sb, &super.logs_root, &key, &iref);
+		ret = scoutfs_btree_next(sb, &logs_root, &key, &iref);
 		if (ret == -ENOENT) {
 			ret = 0;
 			break;
@@ -408,7 +421,7 @@ static int refresh_bloom_roots(struct super_block *sb,
 
 	/* always add the fs root at the tail */
 	fr = &lpriv->fs_root;
-	fr->item_root = super.fs_root;
+	fr->item_root = fs_root;
 	fr->rid = 0;
 	fr->nr = 0;
 	list_add_tail(&fr->entry, &lpriv->roots);
@@ -420,14 +433,15 @@ static int refresh_bloom_roots(struct super_block *sb,
 out:
 	if (ret < 0)
 		clear_roots(lpriv);
+
+	up_write(&lpriv->rwsem);
 	return ret;
 }
 
-/* initialize some super refs that initially aren't equal */
-#define DECLARE_STALE_TRACKING_SUPER_REFS(a, b)			\
-	struct forest_super_refs a = {{cpu_to_le64(0),}};	\
-	struct forest_super_refs b = {{cpu_to_le64(1),}}
-
+/* initialize some refs that initially aren't equal */
+#define DECLARE_STALE_TRACKING_SUPER_REFS(a, b)		\
+	struct forest_refs a = {{cpu_to_le64(0),}};	\
+	struct forest_refs b = {{cpu_to_le64(1),}}
 
 /*
  * The caller saw stale blocks.  If they're seeing the same root refs
@@ -439,19 +453,16 @@ out:
  */
 static int refresh_check_stale(struct super_block *sb,
 			       struct scoutfs_lock *lock,
-			       struct forest_super_refs *prev_srefs,
-			       struct forest_super_refs *srefs)
+			       struct forest_refs *prev_refs,
+			       struct forest_refs *refs)
 {
-	struct forest_lock_private *lpriv = ACCESS_ONCE(lock->forest_private);
 	int ret;
 
-	if (memcmp(prev_srefs, srefs, sizeof(*srefs)) == 0)
+	if (memcmp(prev_refs, refs, sizeof(*refs)) == 0)
 		return -EIO;
-	*prev_srefs = *srefs;
+	*prev_refs = *refs;
 
-	down_write(&lpriv->rwsem);
-	ret = refresh_bloom_roots(sb, lock, srefs);
-	up_write(&lpriv->rwsem);
+	ret = refresh_bloom_roots(sb, lock, refs);
 	if (ret == -ESTALE)
 		ret = 0;
 
@@ -563,7 +574,7 @@ int scoutfs_forest_lookup(struct super_block *sb, struct scoutfs_key *key,
 			  struct kvec *val, struct scoutfs_lock *lock)
 {
 	DECLARE_FOREST_INFO(sb, finf);
-	DECLARE_STALE_TRACKING_SUPER_REFS(prev_srefs, srefs);
+	DECLARE_STALE_TRACKING_SUPER_REFS(prev_refs, refs);
 	struct forest_lock_private *lpriv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct forest_root *fr;
@@ -625,7 +636,7 @@ retry:
 	up_read(&lpriv->rwsem);
 
 	if (err == -ESTALE) {
-		err = refresh_check_stale(sb, lock, &prev_srefs, &srefs);
+		err = refresh_check_stale(sb, lock, &prev_refs, &refs);
 		if (err == 0)
 			goto retry;
 		ret = err;
@@ -823,7 +834,7 @@ static int forest_iter(struct super_block *sb, struct scoutfs_key *key,
 		       struct scoutfs_key *end, struct kvec *val,
 		       struct scoutfs_lock *lock, bool fwd)
 {
-	DECLARE_STALE_TRACKING_SUPER_REFS(prev_srefs, srefs);
+	DECLARE_STALE_TRACKING_SUPER_REFS(prev_refs, refs);
 	struct forest_lock_private *lpriv;
 	DECLARE_FOREST_INFO(sb, finf);
 	SCOUTFS_BTREE_ITEM_REF(iref);
@@ -964,7 +975,7 @@ unlock:
 	}
 
 	if (ret == -ESTALE) {
-		ret = refresh_check_stale(sb, lock, &prev_srefs, &srefs);
+		ret = refresh_check_stale(sb, lock, &prev_refs, &refs);
 		if (ret == 0)
 			goto retry;
 	}
@@ -1001,8 +1012,8 @@ int scoutfs_forest_prev(struct super_block *sb, struct scoutfs_key *key,
  * This is an unlocked iteration across all the btrees to find a hint at
  * the next key that the caller could read.  It's used to find out what
  * next key range to lock, presuming you're allowed to only see items
- * that have been synced.  We read the super every time to get the most
- * recent trees.
+ * that have been synced.  We ask the server for the current roots to
+ * check.
  *
  * We don't bother skipping deletion or reservation items here.  They're
  * unlikely.  The caller will iterate them over safely and call again to
@@ -1014,8 +1025,9 @@ int scoutfs_forest_prev(struct super_block *sb, struct scoutfs_key *key,
 int scoutfs_forest_next_hint(struct super_block *sb, struct scoutfs_key *key,
 			     struct scoutfs_key *next)
 {
-	DECLARE_STALE_TRACKING_SUPER_REFS(prev_srefs, srefs);
-	struct scoutfs_super_block super;
+	DECLARE_STALE_TRACKING_SUPER_REFS(prev_refs, refs);
+	struct scoutfs_btree_root fs_root;
+	struct scoutfs_btree_root logs_root;
 	struct scoutfs_log_trees_val ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key found;
@@ -1024,19 +1036,21 @@ int scoutfs_forest_next_hint(struct super_block *sb, struct scoutfs_key *key,
 	int ret;
 
 retry:
-	ret = scoutfs_read_super(sb, &super);
+	scoutfs_inc_counter(sb, forest_roots_next_hint);
+	ret = scoutfs_client_get_fs_roots(sb, &fs_root, &logs_root);
 	if (ret)
 		goto out;
 
-	srefs.fs_ref = super.fs_root.ref;
-	srefs.logs_ref = super.logs_root.ref;
+	trace_scoutfs_forest_using_roots(sb, &fs_root, &logs_root);
+	refs.fs_ref = fs_root.ref;
+	refs.logs_ref = logs_root.ref;
 
 	scoutfs_key_init_log_trees(&ltk, 0, 0);
 	have_next = false;
 
 	for (;; scoutfs_key_inc(&ltk)) {
 
-		ret = scoutfs_btree_next(sb, &super.logs_root, &ltk, &iref);
+		ret = scoutfs_btree_next(sb, &logs_root, &ltk, &iref);
 		if (ret == -ENOENT) {
 			if (have_next)
 				ret = 0;
@@ -1075,9 +1089,9 @@ retry:
 	}
 
 	if (ret == -ESTALE) {
-		if (memcmp(&prev_srefs, &srefs, sizeof(srefs)) == 0)
+		if (memcmp(&prev_refs, &refs, sizeof(refs)) == 0)
 			return -EIO;
-		prev_srefs = srefs;
+		prev_refs = refs;
 		goto retry;
 	}
 out:

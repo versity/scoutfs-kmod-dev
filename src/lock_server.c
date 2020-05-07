@@ -489,6 +489,7 @@ static int process_waiting_requests(struct super_block *sb,
 				    struct server_lock_node *snode)
 {
 	DECLARE_LOCK_SERVER_INFO(sb, inf);
+	struct scoutfs_net_lock_grant_response gres;
 	struct scoutfs_net_lock nl;
 	struct client_lock_entry *req;
 	struct client_lock_entry *req_tmp;
@@ -552,8 +553,12 @@ static int process_waiting_requests(struct super_block *sb,
 			nl.write_version = cpu_to_le64(wv);
 		}
 
+		gres.nl = nl;
+		scoutfs_server_get_fs_roots(sb, &gres.nfr.fs_root,
+					    &gres.nfr.logs_root);
+
 		ret = scoutfs_server_lock_response(sb, req->rid,
-						   req->net_id, &nl);
+						   req->net_id, &gres);
 		if (ret)
 			goto out;
 

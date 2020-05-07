@@ -42,6 +42,9 @@
 	EXPAND_COUNTER(dentry_revalidate_root)			\
 	EXPAND_COUNTER(dentry_revalidate_valid)			\
 	EXPAND_COUNTER(dir_backref_excessive_retries)		\
+	EXPAND_COUNTER(forest_roots_next_hint)			\
+	EXPAND_COUNTER(forest_roots_lock)			\
+	EXPAND_COUNTER(forest_roots_server)			\
 	EXPAND_COUNTER(lock_alloc)				\
 	EXPAND_COUNTER(lock_free)				\
 	EXPAND_COUNTER(lock_grace_elapsed)			\

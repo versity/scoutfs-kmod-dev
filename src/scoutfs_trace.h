@@ -2044,12 +2044,12 @@ TRACE_EVENT(scoutfs_forest_prepare_commit,
 		  __entry->bloom_blkno, __entry->bloom_seq)
 );
 
-TRACE_EVENT(scoutfs_forest_read_super,
-	TP_PROTO(struct super_block *sb, struct scoutfs_super_block *super),
-	TP_ARGS(sb, super),
+TRACE_EVENT(scoutfs_forest_using_roots,
+	TP_PROTO(struct super_block *sb, struct scoutfs_btree_root *fs_root,
+		 struct scoutfs_btree_root *logs_root),
+	TP_ARGS(sb, fs_root, logs_root),
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(__u64, hdr_seq)
 		__field(__u64, fs_blkno)
 		__field(__u64, fs_seq)
 		__field(__u64, logs_blkno)
@@ -2057,15 +2057,14 @@ TRACE_EVENT(scoutfs_forest_read_super,
 	),
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->hdr_seq = le64_to_cpu(super->hdr.seq);
-		__entry->fs_blkno = le64_to_cpu(super->fs_root.ref.blkno);
-		__entry->fs_seq = le64_to_cpu(super->fs_root.ref.seq);
-		__entry->logs_blkno = le64_to_cpu(super->logs_root.ref.blkno);
-		__entry->logs_seq = le64_to_cpu(super->logs_root.ref.seq);
+		__entry->fs_blkno = le64_to_cpu(fs_root->ref.blkno);
+		__entry->fs_seq = le64_to_cpu(fs_root->ref.seq);
+		__entry->logs_blkno = le64_to_cpu(logs_root->ref.blkno);
+		__entry->logs_seq = le64_to_cpu(logs_root->ref.seq);
 	),
-	TP_printk(SCSBF" hdr seq %llu fs blkno %llu seq %llu logs blkno %llu seq %llu",
-		  SCSB_TRACE_ARGS, __entry->hdr_seq, __entry->fs_blkno,
-		  __entry->fs_seq, __entry->logs_blkno, __entry->logs_seq)
+	TP_printk(SCSBF" fs blkno %llu seq %llu logs blkno %llu seq %llu",
+		  SCSB_TRACE_ARGS, __entry->fs_blkno, __entry->fs_seq,
+		  __entry->logs_blkno, __entry->logs_seq)
 );
 
 TRACE_EVENT(scoutfs_forest_add_root,

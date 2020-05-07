@@ -91,6 +91,7 @@
 	EXPAND_COUNTER(radix_enospc_data)			\
 	EXPAND_COUNTER(radix_enospc_paths)			\
 	EXPAND_COUNTER(radix_enospc_synth)			\
+	EXPAND_COUNTER(radix_merge_retry)			\
 	EXPAND_COUNTER(trans_commit_data_alloc_low)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\

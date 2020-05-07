@@ -1454,6 +1454,7 @@ wrapped:
 		/* back out and retry if no input left, or inp not ro */
 		if (inp_sm == 0 ||
 		    (inp != src && paths_share_blocks(inp_path, src_path))) {
+			scoutfs_inc_counter(sb, radix_merge_retry);
 			free_path(sb, inp_path);
 			inp_path = NULL;
 			free_change(sb, chg);

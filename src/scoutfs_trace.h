@@ -2226,123 +2226,87 @@ DEFINE_EVENT(scoutfs_block_class, scoutfs_block_shrink,
 	TP_ARGS(sb, bp, blkno, refcount, io_count, bits, lru_moved)
 );
 
-TRACE_EVENT(scoutfs_radix_dirty,
+TRACE_EVENT(scoutfs_radix_get_block,
 	TP_PROTO(struct super_block *sb, struct scoutfs_radix_root *root,
-		 u64 orig_blkno, u64 dirty_blkno, u64 par_blkno),
-	TP_ARGS(sb, root, orig_blkno, dirty_blkno, par_blkno),
+		 int glf, int level, u64 par_blkno, u64 ref_blkno, u64 blkno),
+	TP_ARGS(sb, root, glf, level, par_blkno, ref_blkno, blkno),
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, root_blkno)
-		__field(__u64, orig_blkno)
-		__field(__u64, dirty_blkno)
+		__field(int, glf)
+		__field(int, level)
 		__field(__u64, par_blkno)
+		__field(__u64, ref_blkno)
+		__field(__u64, blkno)
 	),
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
 		__entry->root_blkno = le64_to_cpu(root->ref.blkno);
-		__entry->orig_blkno = orig_blkno;
-		__entry->dirty_blkno = dirty_blkno;
+		__entry->glf = glf;
+		__entry->level = level;
 		__entry->par_blkno = par_blkno;
+		__entry->ref_blkno = ref_blkno;
+		__entry->blkno = blkno;
 	),
-	TP_printk(SCSBF" root_blkno %llu orig_blkno %llu dirty_blkno %llu par_blkno %llu",
-		  SCSB_TRACE_ARGS, __entry->root_blkno, __entry->orig_blkno,
-		  __entry->dirty_blkno, __entry->par_blkno)
+	TP_printk(SCSBF" root_blkno %llu glf 0x%x level %u par_blkno %llu ref_blkno %llu blkno %llu",
+		  SCSB_TRACE_ARGS, __entry->root_blkno, __entry->glf,
+		  __entry->level, __entry->par_blkno, __entry->ref_blkno,
+		  __entry->blkno)
 );
 
 TRACE_EVENT(scoutfs_radix_walk,
 	TP_PROTO(struct super_block *sb, struct scoutfs_radix_root *root,
-		 int grl, int level, u64 blkno, int ind, u64 bit, u64 next),
-	TP_ARGS(sb, root, grl, level, blkno, ind, bit, next),
+		 int glf, int level, u64 blkno, int ind, u64 bit),
+	TP_ARGS(sb, root, glf, level, blkno, ind, bit),
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, root_blkno)
-		__field(unsigned int, grl)
+		__field(unsigned int, glf)
 		__field(__u64, blkno)
 		__field(int, level)
 		__field(int, ind)
 		__field(__u64, bit)
-		__field(__u64, next)
 	),
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
 		__entry->root_blkno = le64_to_cpu(root->ref.blkno);
-		__entry->grl = grl;
+		__entry->glf = glf;
 		__entry->blkno = blkno;
 		__entry->level = level;
 		__entry->ind = ind;
 		__entry->bit = bit;
-		__entry->next = next;
 	),
-	TP_printk(SCSBF" root_blkno %llu grl 0x%x blkno %llu level %d ind %d bit %llu next %llu",
-		  SCSB_TRACE_ARGS, __entry->root_blkno, __entry->grl,
-		  __entry->blkno, __entry->level, __entry->ind, __entry->bit,
-		  __entry->next)
-);
-
-TRACE_EVENT(scoutfs_radix_fixup_refs,
-	TP_PROTO(struct super_block *sb, struct scoutfs_radix_root *root,
-		 u32 sm_first, u64 sm_total, u16 lg_first, u64 lg_total,
-		 u64 blkno, int level),
-	TP_ARGS(sb, root, sm_first, sm_total, lg_first, lg_total, blkno, level),
-	TP_STRUCT__entry(
-		SCSB_TRACE_FIELDS
-		__field(__u64, root_blkno)
-		__field(__u32, sm_first)
-		__field(__u64, sm_total)
-		__field(__u16, lg_first)
-		__field(__u64, lg_total)
-		__field(__u64, blkno)
-		__field(int, level)
-	),
-	TP_fast_assign(
-		SCSB_TRACE_ASSIGN(sb);
-		__entry->root_blkno = le64_to_cpu(root->ref.blkno);
-		__entry->sm_first = sm_first;
-		__entry->sm_total = sm_total;
-		__entry->lg_first = lg_first;
-		__entry->lg_total = lg_total;
-		__entry->blkno = blkno;
-		__entry->level = level;
-	),
-	TP_printk(SCSBF" root_blkno %llu sm_first %u sm_total %llu lg_first %u lg_total %llu blkno %llu level %u",
-		  SCSB_TRACE_ARGS, __entry->root_blkno, __entry->sm_first,
-		  __entry->sm_total, __entry->lg_first, __entry->lg_total,
-		  __entry->blkno, __entry->level)
+	TP_printk(SCSBF" root_blkno %llu glf 0x%x blkno %llu level %d par_ind %d bit %llu",
+		  SCSB_TRACE_ARGS, __entry->root_blkno, __entry->glf,
+		  __entry->blkno, __entry->level, __entry->ind, __entry->bit)
 );
 
 DECLARE_EVENT_CLASS(scoutfs_radix_bitop,
-	TP_PROTO(struct super_block *sb, struct scoutfs_radix_root *root,
-		 u64 blkno, u64 bit, int ind, int nbits),
-	TP_ARGS(sb, root, blkno, bit, ind, nbits),
+	TP_PROTO(struct super_block *sb, u64 blkno, int ind, int nbits),
+	TP_ARGS(sb, blkno, ind, nbits),
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
-		__field(__u64, root_blkno)
 		__field(__u64, blkno)
-		__field(__u64, bit)
 		__field(int, ind)
 		__field(int, nbits)
 	),
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
-		__entry->root_blkno = le64_to_cpu(root->ref.blkno);
 		__entry->blkno = blkno;
-		__entry->bit = bit;
 		__entry->ind = ind;
 		__entry->nbits = nbits;
 	),
-	TP_printk(SCSBF" root_blkno %llu blkno %llu bit %llu ind %d nbits %d",
-		  SCSB_TRACE_ARGS, __entry->root_blkno, __entry->blkno,
-		  __entry->bit, __entry->ind, __entry->nbits)
+	TP_printk(SCSBF" blkno %llu ind %d nbits %d",
+		  SCSB_TRACE_ARGS, __entry->blkno, __entry->ind,
+		  __entry->nbits)
 );
-DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_clear,
-	TP_PROTO(struct super_block *sb, struct scoutfs_radix_root *root,
-		 u64 blkno, u64 bit, int ind, int nbits),
-	TP_ARGS(sb, root, blkno, bit, ind, nbits)
+DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_clear_bits,
+	TP_PROTO(struct super_block *sb, u64 blkno, int ind, int nbits),
+	TP_ARGS(sb, blkno, ind, nbits)
 );
-DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_set,
-	TP_PROTO(struct super_block *sb, struct scoutfs_radix_root *root,
-		 u64 blkno, u64 bit, int ind, int nbits),
-	TP_ARGS(sb, root, blkno, bit, ind, nbits)
+DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_set_bits,
+	TP_PROTO(struct super_block *sb, u64 blkno, int ind, int nbits),
+	TP_ARGS(sb, blkno, ind, nbits)
 );
 
 TRACE_EVENT(scoutfs_radix_merge,

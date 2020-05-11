@@ -52,9 +52,7 @@
  * merge process.
  *
  * Allocations search for the next free bit from a cursor that's stored
- * in the root of each tree.  We track the first set parent ref or leaf
- * bit in references to blocks to avoid searching entire blocks every
- * time.
+ * in the root of each tree.
  *
  * The radix isn't always fully populated.  References can contain
  * blknos with 0 or ~0 to indicate that its referenced subtree is either
@@ -64,10 +62,14 @@
  * descends.  This lets mkfs initialize a tree with a large contigious
  * set region without having to populate all its blocks.
  *
- * The radix is used to allocate and free blocks when performing cow
- * updates of the blocks that make up radix itself.  Recursion is
- * carefully avoided by building up references to all the blocks needed
- * for the operation and then dirtying and modifying them all at once.
+ * The metadata allocator radix tree itself is used to allocate and free
+ * its own blocks as it makes cow updates to itself.  Recursion is
+ * avoided by tracking all the blocks we dirty with their parents,
+ * making sure we have dirty leaves to record frees and allocs for all
+ * the dirtied blocks, and using a read-only cursor to find blknos for
+ * each new dirty block.  This lets us either atomically set and clear
+ * all the leaf bits once we have all the dirty blocks or unwind all the
+ * dirty blocks and restore their parent references.
  *
  * Radix block references contain totals of bits set in its referenced
  * subtree.  This helps us balance the number of free bits stored across
@@ -79,147 +81,65 @@
  */
 
 /*
+ * This is just a sanity test at run time.  It's log base
+ * SCOUTFS_RADIX_BITS of SCOUTFS_BLOCK_SM_MAX, but we can come close by
+ * dividing bit widths by shifts if we under-estimate the number of bits
+ * in a leaf by rounding it down to a power of two.  In practice the
+ * trees are sized for the capacity of the device and are very short.
+ */
+#define RADIX_MAX_HEIGHT (((64 - SCOUTFS_BLOCK_SM_SHIFT) %	\
+			   (SCOUTFS_BLOCK_LG_SHIFT + 2)) + 2)
+
+/*
  * We create temporary synthetic blocks past possible blocks to populate
  * stubbed out refs that reference entirely empty or full subtrees.
  * They're moved to properly allocated blknos.
  */
 #define RADIX_SYNTH_BLKNO (SCOUTFS_BLOCK_LG_MAX + 1)
 
-struct radix_path {
-	struct rb_node node;
-	struct list_head head;
-	struct list_head alloc_head;
-	u8 height;
-	struct scoutfs_radix_root *root;
-	u64 leaf_bit;
-	/* path and index arrays indexed by level, [0] is leaf */
-	struct scoutfs_block **bls;
-	unsigned int *inds;
+static bool is_synth(u64 blkno)
+{
+	return blkno >= RADIX_SYNTH_BLKNO;
+}
+
+/* we use fake blknos to indicate subtrees either entirely empty or full */
+static bool is_stub(u64 blkno)
+{
+	return blkno == 0 || blkno == U64_MAX;
+}
+
+struct radix_block_private {
+	struct scoutfs_block *bl;
+	struct list_head entry;
+	struct list_head dirtied_entry;
+	struct scoutfs_block *parent;
+	struct scoutfs_radix_ref *ref;
+	struct scoutfs_radix_ref orig_ref;
+	struct scoutfs_block *blkno_bl;
+	struct scoutfs_block *old_blkno_bl;
+	int blkno_ind;
+	int old_blkno_ind;
 };
+
+static bool was_dirtied(struct radix_block_private *priv)
+{
+	return !list_empty(&priv->dirtied_entry);
+}
 
 struct radix_change {
-	struct list_head paths;
-	struct list_head new_paths;
-	struct list_head alloc_paths;
-	struct rb_root rbroot;
-	u64 block_allocs;
-	u64 caller_allocs;
-	u64 alloc_bits;
+	struct scoutfs_radix_root *avail;
+	struct list_head blocks;
+	struct list_head dirtied_blocks;
 	u64 next_synth;
+	u64 next_find_bit;
+	u64 first_free;
+	struct scoutfs_block *free_bl;
+	u64 free_leaf_bit;
+	unsigned int free_ind;
 };
 
-static struct radix_path *alloc_path(struct scoutfs_radix_root *root)
-{
-	struct radix_path *path;
-	u8 height = root->height;
-
-	path = kzalloc(sizeof(struct radix_path) +
-		       (member_sizeof(struct radix_path, inds[0]) * height) +
-		       (member_sizeof(struct radix_path, bls[0]) * height),
-		       GFP_NOFS);
-	if (path) {
-		RB_CLEAR_NODE(&path->node);
-		INIT_LIST_HEAD(&path->head);
-		INIT_LIST_HEAD(&path->alloc_head);
-		path->height = root->height;
-		path->root = root;
-		path->bls = (void *)(path + 1);
-		path->inds = (void *)(&path->bls[height]);
-	}
-	return path;
-}
-
-/* Return a pointer to a reference in the path to a block at the given level. */
-static struct scoutfs_radix_ref *path_ref(struct radix_path *path, int level)
-{
-	struct scoutfs_radix_block *rdx;
-
-	BUG_ON(level < 0 || level >= path->height);
-
-	if (level == path->height - 1) {
-		return &path->root->ref;
-	} else {
-		rdx = path->bls[level + 1]->data;
-		return &rdx->refs[path->inds[level + 1]];
-	}
-}
-
-static bool paths_share_blocks(struct radix_path *a, struct radix_path *b)
-{
-	int i;
-
-	for (i = 0; i < min(a->height, b->height); i++) {
-		if (a->bls[i] == b->bls[i])
-			return true;
-	}
-
-	return false;
-}
-
-/*
- * Drop a path's reference to blocks and free its memory.  If we still
- * have synthetic blocks then we reset their references to the original
- * empty or full blknos.  Ref sequence numbers aren't updated when we
- * initially reference synthetic blocks.
- */
-static void free_path(struct super_block *sb, struct radix_path *path)
-{
-	struct scoutfs_radix_ref *ref;
-	struct scoutfs_block *bl;
-	__le64 orig;
-	int i;
-
-	if (!IS_ERR_OR_NULL(path)) {
-		for (i = 0; i < path->height; i++) {
-			bl = path->bls[i];
-			if (bl == NULL)
-				continue;
-
-			if (bl->blkno >= RADIX_SYNTH_BLKNO) {
-				ref = path_ref(path, i);
-				if (bl->blkno & 1)
-					orig = cpu_to_le64(U64_MAX);
-				else
-					orig = 0;
-
-				if (ref->blkno != orig)
-					ref->blkno = orig;
-			}
-			scoutfs_block_put(sb, bl);
-		}
-		kfree(path);
-	}
-}
-
-static struct radix_change *alloc_change(void)
-{
-	struct radix_change *chg;
-
-	chg = kzalloc(sizeof(struct radix_change), GFP_NOFS);
-	if (chg) {
-		INIT_LIST_HEAD(&chg->paths);
-		INIT_LIST_HEAD(&chg->new_paths);
-		INIT_LIST_HEAD(&chg->alloc_paths);
-		chg->rbroot = RB_ROOT;
-		chg->next_synth = RADIX_SYNTH_BLKNO;
-	}
-	return chg;
-}
-
-static void free_change(struct super_block *sb, struct radix_change *chg)
-{
-	struct radix_path *path;
-	struct radix_path *tmp;
-
-	if (!IS_ERR_OR_NULL(chg)) {
-		list_splice_init(&chg->new_paths, &chg->paths);
-		list_for_each_entry_safe(path, tmp, &chg->paths, head) {
-			list_del_init(&path->head);
-			free_path(sb, path);
-		}
-		kfree(chg);
-	}
-}
+#define DECLARE_RADIX_CHANGE(a) \
+	struct radix_change a = {NULL, }
 
 /*
  * We can use native longs to set full aligned regions, but we have to
@@ -375,14 +295,14 @@ static int find_next_lg(__le64 *map, int ind)
 	return SCOUTFS_RADIX_BITS;
 }
 
-static u64 bit_from_inds(struct radix_path *path)
+static u64 bit_from_inds(u32 *level_inds, u8 height)
 {
-	u64 bit = path->inds[0];
+	u64 bit = level_inds[0];
 	u64 mult = SCOUTFS_RADIX_BITS;
 	int i;
 
-	for (i = 1; i < path->height; i++) {
-		bit += (u64)path->inds[i] * mult;
+	for (i = 1; i < height; i++) {
+		bit += (u64)level_inds[i] * mult;
 		mult *= SCOUTFS_RADIX_REFS;
 	}
 
@@ -428,17 +348,17 @@ static u64 full_subtree_total(int level)
 	return total;
 }
 
-static void calc_level_inds(struct radix_path *path, u64 bit)
+static void calc_level_inds(u32 *level_inds, u8 height, u64 bit)
 {
 	u32 ind;
 	int i;
 
 	bit = div_u64_rem(bit, SCOUTFS_RADIX_BITS, &ind);
-	path->inds[0] = ind;
+	level_inds[0] = ind;
 
-	for (i = 1; i < path->height; i++) {
+	for (i = 1; i < height; i++) {
 		bit = div_u64_rem(bit, SCOUTFS_RADIX_REFS, &ind);
-		path->inds[i] = ind;
+		level_inds[i] = ind;
 	}
 }
 
@@ -450,279 +370,127 @@ static u64 calc_leaf_bit(u64 bit)
 	return bit - ind;
 }
 
-static int compare_path(struct scoutfs_radix_root *root, u64 leaf_bit,
-		        struct radix_path *path)
-{
-	return scoutfs_cmp((unsigned long)root, (unsigned long)path->root) ?:
-	       scoutfs_cmp(leaf_bit, path->leaf_bit);
-}
-
-static struct radix_path *walk_paths(struct rb_root *rbroot,
-				     struct scoutfs_radix_root *root,
-				     u64 leaf_bit, struct radix_path *ins)
-{
-	struct rb_node **node = &rbroot->rb_node;
-	struct rb_node *parent = NULL;
-	struct radix_path *path;
-	int cmp;
-
-	while (*node) {
-		parent = *node;
-		path = container_of(*node, struct radix_path, node);
-
-		cmp = compare_path(root, leaf_bit, path);
-		if (cmp < 0)
-			node = &(*node)->rb_left;
-		else if (cmp > 0)
-			node = &(*node)->rb_right;
-		else
-			return path;
-	}
-
-	if (ins) {
-		rb_link_node(&ins->node, parent, node);
-		rb_insert_color(&ins->node, rbroot);
-		return ins;
-	}
-
-	return NULL;
-}
-
 /*
- * Make sure radix metadata is consistent.
+ * Make sure ref total tracking is correct after having modified a leaf
+ * and updated all the parent refs.
  */
-static void check_first_total(struct radix_path *path)
+static void check_totals(struct scoutfs_block *leaf)
 {
+	struct radix_block_private *priv;
+	struct scoutfs_block *bl = leaf;
 	struct scoutfs_radix_block *rdx;
 	struct scoutfs_radix_ref *ref;
 	int level;
 	u64 st;
 	u64 lt;
-	u32 sf;
-	u32 lf;
 	int i;
 
-	for (level = 0; level < path->height; level++) {
-		rdx = path->bls[level]->data;
-		ref = path_ref(path, level);
+	for (level = 0; bl; level++, bl = priv->parent) {
+		priv = bl->priv;
+		rdx = bl->data;
+		ref = priv->ref;
 
 		if (level == 0) {
 			st = bitmap_weight((long *)rdx->bits,
 					   SCOUTFS_RADIX_BITS);
 			lt = count_lg_bits(rdx->bits, 0, SCOUTFS_RADIX_BITS);
-
-			sf = find_next_bit_le(rdx->bits, SCOUTFS_RADIX_BITS, 0);
-			lf = find_next_lg(rdx->bits, 0);
 		} else {
 			st = 0;
 			lt = 0;
-			sf = SCOUTFS_RADIX_REFS;
-			lf = SCOUTFS_RADIX_REFS;
 			for (i = 0; i < SCOUTFS_RADIX_REFS; i++) {
 				st += le64_to_cpu(rdx->refs[i].sm_total);
 				lt += le64_to_cpu(rdx->refs[i].lg_total);
-				if (rdx->refs[i].sm_total != 0 && i < sf)
-					sf = i;
-				if (rdx->refs[i].lg_total != 0 && i < lf)
-					lf = i;
 			}
 		}
 
 		if (le64_to_cpu(ref->sm_total) != st ||
-		    le64_to_cpu(ref->lg_total) != lt ||
-		    le32_to_cpu(rdx->sm_first) > sf ||
-		    le32_to_cpu(rdx->lg_first) > lf) {
-			printk("radix inconsistency: level %u calced sf %u st %llu lf %u lt %llu, stored sf %u st %llu lf %u lt %llu\n",
-				level, sf, st, lf, lt,
-				le32_to_cpu(rdx->sm_first), 
+		    le64_to_cpu(ref->lg_total) != lt) {
+			printk("radix inconsistency: level %u calced st %llu lt %llu, stored st %llu lt %llu\n",
+				level, st, lt,
 				le64_to_cpu(ref->sm_total), 
-				le32_to_cpu(rdx->lg_first), 
 				le64_to_cpu(ref->lg_total));
 			BUG();
 		}
+
+		bl = priv->parent;
 	}
 }
 
-#define set_first_nonzero_ref(rdx, ind, first, total)			\
-do {									\
-	int _ind = min_t(u32, le32_to_cpu(rdx->first), (ind));		\
-									\
-	while (_ind < SCOUTFS_RADIX_REFS && rdx->refs[_ind].total == 0)	\
-		_ind++;							\
-									\
-	rdx->first = cpu_to_le32(_ind);					\
-} while (0)
-
 /*
- * The caller has changed bits in a leaf block and updated the block's
- * first tracking.  We update the first tracking and totals in parent
- * blocks and refs up to the root ref.  We do this after modifying
- * leaves, instead of during descent, because we descend through clean
- * blocks and then dirty all he blocks in all the paths before modifying
- * leaves.
+ * The caller has changed bits in a leaf block.  We update the totals in
+ * rers up to the root ref.
  */
-static void fixup_parent_refs(struct radix_path *path,
+static void fixup_parent_refs(struct super_block *sb,
+			      struct scoutfs_block *leaf,
 			      s64 sm_delta, s64 lg_delta)
 {
-	struct scoutfs_radix_block *rdx;
+	struct radix_block_private *priv;
 	struct scoutfs_radix_ref *ref;
-	int level;
-	int ind;
+	struct scoutfs_block *bl;
 
-	for (level = 0; level < path->height; level++) {
-		rdx = path->bls[level]->data;
-		ref = path_ref(path, level);
+	for (bl = leaf; bl; bl = priv->parent) {
+		priv = bl->priv;
+		ref = priv->ref;
 
 		le64_add_cpu(&ref->sm_total, sm_delta);
 		le64_add_cpu(&ref->lg_total, lg_delta);
-		if (level > 0) {
-			ind = path->inds[level];
-			set_first_nonzero_ref(rdx, ind, sm_first, sm_total);
-			set_first_nonzero_ref(rdx, ind, lg_first, lg_total);
-		}
 	}
 
 	if (0) /* expensive, would be nice to make conditional */
-		check_first_total(path);
+		check_totals(leaf);
+}
+
+/* return 0 if the bit is past the last bit for the device */
+static u64 wrap_bit(struct super_block *sb, bool meta, u64 bit)
+{
+	return bit > last_from_super(sb, meta) ? 0 : bit;
 }
 
 static void store_next_find_bit(struct super_block *sb, bool meta,
 				struct scoutfs_radix_root *root, u64 bit)
 {
-	if (bit > last_from_super(sb, meta))
-		bit = 0;
-	root->next_find_bit = cpu_to_le64(bit);
+	root->next_find_bit = cpu_to_le64(wrap_bit(sb, meta, bit));
 }
 
-/*
- * Allocate (clear and return) a region of bits from the leaf block of a
- * path.  The leaf walk has ensured that we have at least one block free.
- *
- * We always try to allocate smaller multi-block allocations from the
- * start of the small region.  This at least gets a single task extending
- * a file one large extent.  Multiple tasks extending writes will interleave.
- * It'll do for now.
- *
- * We always search for free bits from the start of the leaf.
- * This means that we can return recently freed blocks just behind the
- * next free cursor.  I'm not sure if that's much of a problem.
- */
-static void alloc_leaf_bits(struct super_block *sb, bool meta,
-			    struct radix_path *path,
-			    int nbits, u64 *bit_ret, int *nbits_ret)
+static void bug_on_bad_bits(int ind, int nbits)
 {
-	struct scoutfs_radix_block *rdx = path->bls[0]->data;
-	struct scoutfs_radix_ref *ref = path_ref(path, 0);
-	u32 sm_first;
-	u32 lg_first;
+	BUG_ON(ind < 0 || ind > SCOUTFS_RADIX_BITS);
+	BUG_ON(nbits < 0 || nbits > SCOUTFS_RADIX_BITS);
+	BUG_ON(ind + nbits > SCOUTFS_RADIX_BITS);
+}
+
+static void set_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
+			  int ind, int nbits)
+{
+	struct scoutfs_radix_block *rdx = bl->data;
 	int lg_nbits;
-	int ind;
-	int end;
 
-	if (nbits >= SCOUTFS_RADIX_LG_BITS && ref->lg_total != 0) {
-		/* always allocate large allocs from full large regions */
-		ind = le32_to_cpu(rdx->lg_first);
-		ind = find_next_lg(rdx->bits, ind);
-		sm_first = le32_to_cpu(rdx->sm_first);
-		lg_first = round_up(ind + nbits, SCOUTFS_RADIX_LG_BITS);
+	bug_on_bad_bits(ind, nbits);
 
-	} else {
-		/* otherwise alloc as much as we can from the next small */
-		ind = le32_to_cpu(rdx->sm_first);
-		ind = find_next_bit_le(rdx->bits, SCOUTFS_RADIX_BITS, ind);
+	/* must never double-free bits */
+	BUG_ON(!bitmap_empty_region_le(rdx->bits, ind, nbits));
+	bitmap_set_le(rdx->bits, ind, nbits);
+	lg_nbits = count_lg_bits(rdx->bits, ind, nbits);
 
-		if (nbits > 1) {
-			end = find_next_zero_bit_le(rdx->bits, SCOUTFS_RADIX_BITS, ind);
-			nbits = min(nbits, end - ind);
-		}
+	fixup_parent_refs(sb, bl, nbits, lg_nbits);
+	trace_scoutfs_radix_set_bits(sb, bl->blkno, ind, nbits);
+}
 
-		sm_first = ind + nbits;
-		lg_first = le32_to_cpu(rdx->lg_first);
-	}
+static void clear_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
+			    int ind, int nbits)
+{
+	struct scoutfs_radix_block *rdx = bl->data;
+	int lg_nbits;
 
-	/* callers and structures should have ensured success */
-	BUG_ON(ind >= SCOUTFS_RADIX_BITS);
+	bug_on_bad_bits(ind, nbits);
 
+	/* must never alloc in-use bits */
+	BUG_ON(!bitmap_full_region_le(rdx->bits, ind, nbits));
 	lg_nbits = count_lg_bits(rdx->bits, ind, nbits);
 	bitmap_clear_le(rdx->bits, ind, nbits);
 
-	/* always update the first we searched through */
-	rdx->sm_first = cpu_to_le32(sm_first);
-	rdx->lg_first = cpu_to_le32(lg_first);
-	fixup_parent_refs(path, -nbits, -lg_nbits);
-
-	*bit_ret = path->leaf_bit + ind;
-	*nbits_ret = nbits;
-
-	store_next_find_bit(sb, meta, path->root, path->leaf_bit + ind + nbits);
-}
-
-/*
- * Allocate a metadata blkno for the caller from the leaves of paths
- * which were stored in the change for metadata allocation.
- */
-static u64 change_alloc_meta(struct super_block *sb, struct radix_change *chg)
-{
-	struct scoutfs_radix_ref *ref;
-	struct radix_path *path;
-	int nbits_ret;
-	u64 bit;
-
-	path = list_first_entry_or_null(&chg->alloc_paths, struct radix_path,
-					alloc_head);
-	BUG_ON(!path); /* shouldn't be possible */
-
-	alloc_leaf_bits(sb, true, path, 1, &bit, &nbits_ret);
-
-	/* remove the path from the alloc list once its empty */
-	ref = path_ref(path, 0);
-	if (ref->sm_total == 0)
-		list_del_init(&path->alloc_head);
-
-	return bit;
-}
-
-static void set_path_leaf_bits(struct super_block *sb, struct radix_path *path,
-			       u64 bit, int nbits)
-{
-	struct scoutfs_radix_block *rdx;
-	int lg_ind;
-	int ind;
-
-	BUG_ON(nbits <= 0);
-	BUG_ON(calc_leaf_bit(bit) != calc_leaf_bit(bit + nbits - 1));
-	BUG_ON(calc_leaf_bit(bit) != path->leaf_bit);
-
-	rdx = path->bls[0]->data;
-	ind = bit - path->leaf_bit;
-	lg_ind = round_down(ind, SCOUTFS_RADIX_LG_BITS);
-
-	/* should have returned an error if it was set while we got paths */
-	BUG_ON(!bitmap_empty_region_le(rdx->bits, ind, nbits));
-	bitmap_set_le(rdx->bits, ind, nbits);
-
-	if (ind < le32_to_cpu(rdx->sm_first))
-		rdx->sm_first = cpu_to_le32(ind);
-	if (lg_ind < le32_to_cpu(rdx->lg_first) &&
-	    lg_is_full(rdx->bits, lg_ind))
-		rdx->lg_first = cpu_to_le32(lg_ind);
-	fixup_parent_refs(path, nbits, count_lg_bits(rdx->bits, ind, nbits));
-
-	trace_scoutfs_radix_set(sb, path->root, path->bls[0]->blkno,
-				bit, ind, nbits);
-}
-
-/* Find the path for the root and bit in the change and set the region */
-static void set_change_leaf_bits(struct super_block *sb,
-				 struct radix_change *chg,
-				 struct scoutfs_radix_root *root,
-				 u64 bit, int nbits)
-{
-	struct radix_path *path;
-
-	path = walk_paths(&chg->rbroot, root, calc_leaf_bit(bit), NULL);
-	BUG_ON(!path); /* should have gotten paths for all leaves to set */
-	set_path_leaf_bits(sb, path, bit, nbits);
+	fixup_parent_refs(sb, bl, -nbits, -lg_nbits);
+	trace_scoutfs_radix_clear_bits(sb, bl->blkno, ind, nbits);
 }
 
 /*
@@ -754,7 +522,6 @@ static void init_block(struct super_block *sb, struct scoutfs_radix_block *rdx,
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	struct scoutfs_radix_ref ref;
-	u32 first = full ? 0 : level ? SCOUTFS_RADIX_REFS : SCOUTFS_RADIX_BITS;
 	int tail;
 	int i;
 
@@ -766,8 +533,6 @@ static void init_block(struct super_block *sb, struct scoutfs_radix_block *rdx,
 	rdx->hdr.magic = cpu_to_le32(SCOUTFS_BLOCK_MAGIC_RADIX);
 	rdx->hdr.blkno = cpu_to_le64(blkno);
 	rdx->hdr.seq = seq;
-	rdx->sm_first = cpu_to_le32(first);
-	rdx->lg_first = cpu_to_le32(first);
 
 	if (level == 0) {
 		if (full)
@@ -794,76 +559,62 @@ static void init_block(struct super_block *sb, struct scoutfs_radix_block *rdx,
 		memset((void *)rdx + SCOUTFS_BLOCK_LG_SIZE - tail, 0, tail);
 }
 
-/* get path flags */
+static int find_next_change_blkno(struct super_block *sb,
+				  struct radix_change *chg,
+				  u64 *blkno);
+
 enum {
-	GPF_NEXT_SM	= (1 << 0),
-	GPF_NEXT_LG	= (1 << 1),
+	GLF_NEXT_SM	= (1 << 0),
+	GLF_NEXT_LG	= (1 << 1),
+	GLF_DIRTY	= (1 << 2),
 };
+
 /*
- * Give the caller an allocated path that holds references to the blocks
- * traversed to the leaf of the given root.
+ * Get the caller their block for walking down the radix.  We can have
+ * to populate synthetic blocks, read existing blocks, and cow new dirty
+ * copies of either of those for callers who need to modify.  We update
+ * references and record the blocks and references in the change for
+ * callers to further build atomic changes with.
  */
-static int get_path(struct super_block *sb, struct scoutfs_radix_root *root,
-		    struct radix_change *chg, int gpf, u64 bit,
-		    struct radix_path **path_ret)
+static int get_radix_block(struct super_block *sb,
+			   struct scoutfs_radix_allocator *alloc,
+			   struct scoutfs_block_writer *wri,
+			   struct radix_change *chg,
+			   struct scoutfs_radix_root *root, int glf,
+			   struct scoutfs_block *parent,
+			   struct scoutfs_radix_ref *ref, int level,
+			   struct scoutfs_block **bl_ret)
 {
-	struct scoutfs_radix_block *rdx;
-	struct scoutfs_radix_ref *ref;
-	struct radix_path *path = NULL;
-	struct scoutfs_block *bl;
+	struct radix_block_private *priv = NULL;
 	bool saw_inconsistent = false;
+	struct scoutfs_radix_block *rdx;
+	struct scoutfs_block *bl = NULL;
+	struct scoutfs_block *dirty;
+	bool put_block = true;
 	u64 blkno;
 	u64 synth;
-	int level;
-	int ind;
 	int ret;
-	int i;
 
-	/* can't operate outside radix until we support growing devices */
-	if (WARN_ON_ONCE(root->height < height_from_last(bit)) ||
-	    WARN_ON_ONCE((gpf & GPF_NEXT_SM) && (gpf & GPF_NEXT_LG)))
-		return -EINVAL;
-
-	path = alloc_path(root);
-	if (!path) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	/* switch to searching for small bits if no large found */
-	if ((gpf & GPF_NEXT_LG) && le64_to_cpu(root->ref.lg_total) == 0)
-		gpf ^= GPF_NEXT_LG | GPF_NEXT_SM;
-
-	calc_level_inds(path, bit);
-
-	for (level = root->height - 1; level >= 0; level--) {
-		ref = path_ref(path, level);
-
-		blkno = le64_to_cpu(ref->blkno);
-		if (blkno == U64_MAX || blkno == 0) {
-			synth = chg->next_synth++;
-			if ((blkno & 1) != (synth & 1))
-				synth = chg->next_synth++;
-			/* careful not to go too high or wrap */
-			if (synth == U64_MAX || synth < RADIX_SYNTH_BLKNO) {
-				scoutfs_inc_counter(sb, radix_enospc_synth);
-				ret = -ENOSPC;
-				goto out;
-			}
-			bl = scoutfs_block_create(sb, synth);
-			if (!IS_ERR_OR_NULL(bl)) {
-				init_block(sb, bl->data, synth, ref->seq, level,
-					   blkno == U64_MAX);
-				ref->blkno = cpu_to_le64(bl->blkno);
-
-			}
-		} else {
-			bl = scoutfs_block_read(sb, blkno);
-		}
-		if (IS_ERR(bl)) {
-			ret = PTR_ERR(bl);
+	/* create a synthetic block or read an existing block */
+	blkno = le64_to_cpu(ref->blkno);
+	if (is_stub(blkno)) {
+		synth = chg->next_synth++;
+		/* don't create synth mistaken for all-full */
+		if (synth == U64_MAX) {
+			scoutfs_inc_counter(sb, radix_enospc_synth);
+			ret = -ENOSPC;
 			goto out;
 		}
+		bl = scoutfs_block_create(sb, synth);
+		if (!IS_ERR_OR_NULL(bl)) {
+			init_block(sb, bl->data, synth, ref->seq, level,
+				   blkno == U64_MAX);
+			scoutfs_inc_counter(sb, radix_create_synth);
+		}
+	} else {
+		bl = scoutfs_block_read(sb, blkno);
+		if (!IS_ERR_OR_NULL(bl))
+			scoutfs_inc_counter(sb, radix_block_read);
 
 		/*
 		 * We can have a stale block in the cache but the tree
@@ -872,46 +623,153 @@ static int get_path(struct super_block *sb, struct scoutfs_radix_root *root,
 		 * consistent block after reading from the device then
 		 * we've found corruption.
 		 */
-		if (!scoutfs_block_consistent_ref(sb, bl, ref->seq, ref->blkno,
+		while (!IS_ERR(bl) &&
+		       !scoutfs_block_consistent_ref(sb, bl, ref->seq,
+						     ref->blkno,
 						  SCOUTFS_BLOCK_MAGIC_RADIX)) {
+			scoutfs_inc_counter(sb, radix_inconsistent_ref);
+			scoutfs_block_writer_forget(sb, wri, bl);
+			scoutfs_block_invalidate(sb, bl);
+			BUG_ON(bl->priv != NULL);
+			scoutfs_block_put(sb, bl);
+			bl = NULL;
 			if (!saw_inconsistent) {
-				scoutfs_block_invalidate(sb, bl);
-				scoutfs_block_put(sb, bl);
 				saw_inconsistent = true;
-				level++;
-				continue;
+				bl = scoutfs_block_read(sb, blkno);
+			} else {
+				bl = ERR_PTR(-EIO);
+				scoutfs_inc_counter(sb, radix_inconsistent_eio);
 			}
-			ret = -EIO;
-			goto out;
 		}
 		saw_inconsistent = false;
+	}
+	if (IS_ERR(bl)) {
+		ret = PTR_ERR(bl);
+		goto out;
+	}
 
-		path->bls[level] = bl;
+	if ((glf & GLF_DIRTY) && !scoutfs_block_writer_is_dirty(sb, bl)) {
+		/* make a cow copy for the caller that needs a dirty block */
+		ret = find_next_change_blkno(sb, chg, &blkno);
+		if (ret < 0)
+			goto out;
+
+		dirty = scoutfs_block_create(sb, blkno);
+		if (IS_ERR(dirty)) {
+			ret = PTR_ERR(dirty);
+			goto out;
+		}
+
+		memcpy(dirty->data, bl->data, SCOUTFS_BLOCK_LG_SIZE);
+		scoutfs_block_put(sb, bl);
+		bl = dirty;
+		scoutfs_inc_counter(sb, radix_block_cow);
+	}
+
+	priv = bl->priv;
+	if (!priv) {
+		priv = kzalloc(sizeof(struct radix_block_private), GFP_NOFS);
+		if (!priv) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		bl->priv = priv;
+		priv->bl = bl;
+		INIT_LIST_HEAD(&priv->dirtied_entry);
+		priv->parent = parent;
+		priv->ref = ref;
+		priv->orig_ref = *ref;
+		/* put at head so for_each restores refs in reverse */
+		list_add(&priv->entry, &chg->blocks);
+		/* priv holds bl get, put as change is completed */
+		put_block = false;
+	}
+
+	if ((glf & GLF_DIRTY) && !scoutfs_block_writer_is_dirty(sb, bl)) {
+		scoutfs_block_writer_mark_dirty(sb, wri, bl);
+		list_add(&priv->dirtied_entry, &chg->dirtied_blocks);
+	}
+
+	trace_scoutfs_radix_get_block(sb, root, glf, level,
+				      parent ? parent->blkno : 0,
+				      le64_to_cpu(ref->blkno), bl->blkno);
+
+	/* update refs to new synth or dirty blocks */
+	if (le64_to_cpu(ref->blkno) != bl->blkno) {
+		rdx = bl->data;
+		rdx->hdr.blkno = cpu_to_le64(bl->blkno);
+		prandom_bytes(&rdx->hdr.seq, sizeof(rdx->hdr.seq));
+		ref->blkno = rdx->hdr.blkno;
+		ref->seq = rdx->hdr.seq;
+	}
+
+	ret = 0;
+out:
+	if (put_block)
+		scoutfs_block_put(sb, bl);
+	if (ret < 0)
+		bl = NULL;
+
+	*bl_ret = bl;
+	return ret;
+}
+
+static int get_leaf_walk(struct super_block *sb,
+			 struct scoutfs_radix_allocator *alloc,
+			 struct scoutfs_block_writer *wri,
+			 struct radix_change *chg,
+			 struct scoutfs_radix_root *root,
+			 int glf, u64 bit, u64 *leaf_bit_ret,
+			 struct scoutfs_block **bl_ret)
+{
+	struct scoutfs_radix_block *rdx;
+	struct scoutfs_radix_ref *ref;
+	struct scoutfs_block *parent = NULL;
+	struct scoutfs_block *bl;
+	u32 level_inds[RADIX_MAX_HEIGHT];
+	int level;
+	int ind = 0;
+	int ret;
+	int i;
+
+	/* can't operate outside radix until we support growing devices */
+	if (WARN_ON_ONCE(root->height < height_from_last(bit)) ||
+	    WARN_ON_ONCE(root->height > RADIX_MAX_HEIGHT) ||
+	    WARN_ON_ONCE((glf & GLF_NEXT_SM) && (glf & GLF_NEXT_LG)))
+		return -EINVAL;
+
+	calc_level_inds(level_inds, root->height, bit);
+	ref = &root->ref;
+
+	for (level = root->height - 1; level >= 0; level--) {
+		ret = get_radix_block(sb, alloc, wri, chg, root, glf, parent,
+				      ref, level, &bl);
+		if (ret)
+			goto out;
+
+		trace_scoutfs_radix_walk(sb, root, glf, level, bl->blkno, ind,
+					 bit);
+
 		if (level == 0) {
-			/* path's leaf_bit is first in the leaf block */
-			path->inds[0] = 0;
+			/* returned leaf_bit is first in the leaf block */
+			level_inds[0] = 0;
 			break;
 		}
 
 		rdx = bl->data;
-		ind = path->inds[level];
+		ind = level_inds[level];
 
-		/* search for a path to a leaf with a set large region */
-		while ((gpf & GPF_NEXT_LG) && ind < SCOUTFS_RADIX_REFS &&
+		/* search for a ref to a child with a set large region */
+		while ((glf & GLF_NEXT_LG) && ind < SCOUTFS_RADIX_REFS &&
 		       le64_to_cpu(rdx->refs[ind].lg_total) == 0) {
-			if (ind < le32_to_cpu(rdx->lg_first))
-				ind = le32_to_cpu(rdx->lg_first);
-			else
-				ind++;
+			ind++;
 		}
 
-		/* search for a path to a leaf with a any bits set */
-		while ((gpf & GPF_NEXT_SM) && ind < SCOUTFS_RADIX_REFS &&
+		/* search for a ref to a child with any bits set */
+		while ((glf & GLF_NEXT_SM) && ind < SCOUTFS_RADIX_REFS &&
 		       le64_to_cpu(rdx->refs[ind].sm_total) == 0) {
-			if (ind < le32_to_cpu(rdx->sm_first))
-				ind = le32_to_cpu(rdx->sm_first);
-			else
-				ind++;
+			ind++;
 		}
 
 		/*
@@ -928,222 +786,330 @@ static int get_path(struct super_block *sb, struct scoutfs_radix_root *root,
 				ret = -ENOENT;
 				goto out;
 			}
-			path->inds[level + 1]++;
+			level_inds[level + 1]++;
 			for (i = level; i >= 0; i--)
-				path->inds[i] = 0;
-			for (i = level; i <= level + 1; i++) {
-				scoutfs_block_put(sb, path->bls[i]);
-				path->bls[i] = NULL;
-			}
+				level_inds[i] = 0;
 			level += 2;
 			continue;
 		}
 
 		/* reset all lower indices if we searched */
-		if (ind != path->inds[level]) {
+		if (ind != level_inds[level]) {
 			for (i = level - 1; i >= 0; i--)
-				path->inds[i] = 0;
-			path->inds[level] = ind;
+				level_inds[i] = 0;
+			level_inds[level] = ind;
+		}
+
+		parent = bl;
+		ref = &rdx->refs[ind];
+	}
+
+	*leaf_bit_ret = bit_from_inds(level_inds, root->height);
+	ret = 0;
+	scoutfs_inc_counter(sb, radix_walk);
+out:
+	if (ret < 0)
+		*bl_ret = NULL;
+	else
+		*bl_ret = bl;
+	return ret;
+}
+
+/*
+ * Get the caller their leaf block in which they'll set or clear bits.
+ * If they're asking for a dirty block then the leaf walk might dirty
+ * blocks.  For each newly dirtied block we also make sure we have dirty
+ * blocks for the leaves that contain the bits for each newly dirtied
+ * block's old blkno and new blkno.
+ */
+static int get_leaf(struct super_block *sb,
+		    struct scoutfs_radix_allocator *alloc,
+		    struct scoutfs_block_writer *wri, struct radix_change *chg,
+		    struct scoutfs_radix_root *root, int glf, u64 bit,
+		    u64 *leaf_bit_ret, struct scoutfs_block **bl_ret)
+{
+	struct radix_block_private *priv;
+	struct scoutfs_block *bl;
+	u64 leaf_bit;
+	u64 old_blkno;
+	int ret;
+
+	ret = get_leaf_walk(sb, alloc, wri, chg, root, glf, bit, leaf_bit_ret,
+			    bl_ret);
+	if (ret < 0 || !(glf & GLF_DIRTY))
+		goto out;
+
+	/* walk to leaves containing bits of newly dirtied block's blknos */
+	while ((priv = list_first_entry_or_null(&chg->dirtied_blocks,
+						struct radix_block_private,
+						dirtied_entry))) {
+		/* done when we see tail blocks with their blkno_bl set */
+		if (priv->blkno_bl != NULL)
+			break;
+
+		old_blkno = le64_to_cpu(priv->orig_ref.blkno);
+		if (!is_stub(old_blkno) && !is_synth(old_blkno)) {
+			ret = get_leaf_walk(sb, alloc, wri, chg, &alloc->freed,
+					    GLF_DIRTY, old_blkno, &leaf_bit,
+					    &bl);
+			if (ret < 0)
+				break;
+			priv->old_blkno_ind = old_blkno - leaf_bit;
+			priv->old_blkno_bl = bl;
+		}
+
+		ret = get_leaf_walk(sb, alloc, wri, chg, &alloc->avail,
+				    GLF_DIRTY, priv->bl->blkno, &leaf_bit,
+				    &bl);
+		if (ret < 0)
+			break;
+
+		priv->blkno_ind = priv->bl->blkno - leaf_bit;
+		priv->blkno_bl = bl;
+
+		list_move_tail(&priv->dirtied_entry, &chg->dirtied_blocks);
+	}
+out:
+	return ret;
+}
+
+/*
+ * Find the next region of set bits of the given size starting from the
+ * given bit.  This only finds the bits, it doesn't change anything.  We
+ * always try to return regions past the starting bit.  We can search to
+ * a leaf that has bits that are all past the starting bit and we'll
+ * retry.  This will wrap around to the start of the tree and fall back
+ * to satisfying large regions with small regions.
+ */
+static int find_next_set_bits(struct super_block *sb, struct radix_change *chg,
+			      struct scoutfs_radix_root *root, bool meta,
+			      u64 start, int nbits, u64 *bit_ret,
+			      int *nbits_ret, struct scoutfs_block **bl_ret)
+{
+	struct scoutfs_radix_block *rdx;
+	struct scoutfs_block *bl;
+	u64 leaf_bit;
+	u64 bit;
+	int end;
+	int ind;
+	int glf;
+	int ret;
+
+	bit = start;
+	glf = nbits > 1 ? GLF_NEXT_LG : GLF_NEXT_SM;
+retry:
+	ret = get_leaf(sb, NULL, NULL, chg, root, glf, bit, &leaf_bit, &bl);
+	if (ret == -ENOENT) {
+		if (bit != 0) {
+			bit = 0;
+			goto retry;
+		}
+
+		/* switch to searching for small bits if no large found */
+		if (glf == GLF_NEXT_LG) {
+			glf = GLF_NEXT_SM;
+			bit = start;
+			goto retry;
+		}
+		ret = -ENOSPC;
+		goto out;
+	}
+	rdx = bl->data;
+
+	/* start from search bit if it's in the leaf, otherwise 0 */
+	if (leaf_bit < bit && ((bit - leaf_bit) < SCOUTFS_RADIX_BITS))
+		ind = bit - leaf_bit;
+	else
+		ind = 0;
+
+	/* large allocs are always aligned from large regions */
+	if (nbits >= SCOUTFS_RADIX_LG_BITS && (glf == GLF_NEXT_LG)) {
+		ind = find_next_lg(rdx->bits, ind);
+		if (ind == SCOUTFS_RADIX_BITS) {
+			bit = wrap_bit(sb, meta, leaf_bit + SCOUTFS_RADIX_BITS);
+			goto retry;
+		}
+		nbits = SCOUTFS_RADIX_LG_BITS;
+		ret = 0;
+		goto out;
+	}
+
+	/* otherwise use as much of the next set region as we can */
+	ind = find_next_bit_le(rdx->bits, SCOUTFS_RADIX_BITS, ind);
+	if (ind == SCOUTFS_RADIX_BITS) {
+		bit = wrap_bit(sb, meta, leaf_bit + SCOUTFS_RADIX_BITS);
+		goto retry;
+	}
+
+	if (nbits > 1) {
+		end = find_next_zero_bit_le(rdx->bits, min_t(int, ind + nbits,
+					    SCOUTFS_RADIX_BITS), ind);
+		nbits = end - ind;
+	}
+	ret = 0;
+
+out:
+	*bit_ret = leaf_bit + ind;
+	*nbits_ret = nbits;
+	if (bl_ret)
+		*bl_ret = bl;
+
+	return ret;
+}
+
+static void prepare_change(struct radix_change *chg,
+			   struct scoutfs_radix_root *avail)
+{
+	memset(chg, 0, sizeof(struct radix_change));
+	chg->avail = avail;
+	INIT_LIST_HEAD(&chg->blocks);
+	INIT_LIST_HEAD(&chg->dirtied_blocks);
+	chg->next_synth = RADIX_SYNTH_BLKNO;
+	chg->next_find_bit = le64_to_cpu(avail->next_find_bit);
+}
+
+/*
+ * We successfully got all the dirty block references we need to make
+ * the change.  Set their old blkno's freed bits and clear all their new
+ * dirty blkno's avail bits.  We drop the blocks from the dirtied_blocks
+ * list here as we go so we won't attempt to do this all over again
+ * as we complete the change.
+ */
+static void apply_change_bits(struct super_block *sb, struct radix_change *chg)
+{
+	struct radix_block_private *priv;
+	struct scoutfs_block *bl;
+
+	/* first update the contents of the blocks */
+	list_for_each_entry(priv, &chg->blocks, entry) {
+		bl = priv->bl;
+
+		/* complete cow allocations for dirtied blocks */
+		if (was_dirtied(priv)) {
+			/* can't try to write to synth blknos */
+			BUG_ON(is_synth(bl->blkno));
+
+			clear_leaf_bits(sb, priv->blkno_bl, priv->blkno_ind, 1);
+			if (priv->old_blkno_bl) {
+				set_leaf_bits(sb, priv->old_blkno_bl,
+					      priv->old_blkno_ind, 1);
+			}
+			scoutfs_inc_counter(sb, radix_complete_dirty_block);
+
+			list_del_init(&priv->dirtied_entry);
+		}
+	}
+}
+
+/*
+ * Drop all references to the blocks that we held as we worked with the
+ * radix blocks.
+ *
+ * If the operation failed then we drop the blocks we dirtied during
+ * this change and restore their refs.  Nothing can update a ref to a
+ * dirty block so these will always be current.
+ *
+ * We always drop synthetic blocks.  They could been cowed so they might
+ * not be currently referenced.  Blocks are added to the head of the
+ * blocks list as they're first used so we're undoing ref changes in
+ * reverse order.  This means that the error case will always first
+ * unwind synthetic cows then the synthetic source block itself.
+ */
+static void complete_change(struct super_block *sb,
+			    struct scoutfs_block_writer *wri,
+			    struct radix_change *chg, int err)
+{
+	struct radix_block_private *priv;
+	struct radix_block_private *tmp;
+	struct scoutfs_block *bl;
+
+	/* only complete once for each call to prepare */
+	if (!chg->avail)
+		return;
+
+	/* finish dirty block frees and allocs on success */
+	if (err == 0 && !list_empty(&chg->dirtied_blocks))
+		apply_change_bits(sb, chg);
+
+	/* replace refs and remove blocks from the cache */
+	list_for_each_entry(priv, &chg->blocks, entry) {
+		bl = priv->bl;
+
+		if (is_synth(bl->blkno) || (err < 0 && was_dirtied(priv))) {
+			if (le64_to_cpu(priv->ref->blkno) == bl->blkno) {
+				*priv->ref = priv->orig_ref;
+				scoutfs_inc_counter(sb, radix_undo_ref);
+			}
+			scoutfs_block_writer_forget(sb, wri, bl);
+			scoutfs_block_invalidate(sb, bl);
 		}
 	}
 
-	path->leaf_bit = bit_from_inds(path);
+	/* finally put all blocks now that were done with contents */
+	list_for_each_entry_safe(priv, tmp, &chg->blocks, entry) {
+		bl = priv->bl;
+
+		bl->priv = NULL;
+		scoutfs_block_put(sb, bl);
+		list_del(&priv->entry);
+		kfree(priv);
+	}
+
+	if (err == 0)
+		store_next_find_bit(sb, true, chg->avail, chg->next_find_bit);
+	chg->avail = NULL;
+}
+
+/*
+ * Find the next free metadata blkno from the metadata allocator that
+ * the change is tracking.  This is used to find the next free blkno for
+ * the next cowed block without modifying the allocator.  Because it's
+ * not modifying the allocator it can wrap and find the same block
+ * twice, we watch for that.
+ */
+static int find_next_change_blkno(struct super_block *sb,
+				  struct radix_change *chg, u64 *blkno)
+{
+	struct scoutfs_radix_block *rdx;
+	u64 bit;
+	int nbits;
+	int ret;
+
+	if (chg->free_bl == NULL) {
+		ret = find_next_set_bits(sb, chg, chg->avail, true,
+					 chg->next_find_bit, 1, &bit, &nbits,
+					 &chg->free_bl);
+		if (ret < 0)
+			goto out;
+		chg->free_leaf_bit = calc_leaf_bit(bit);
+		chg->free_ind = bit - chg->free_leaf_bit;
+	}
+
+	bit = chg->free_leaf_bit + chg->free_ind;
+	if (chg->first_free == 0) {
+		chg->first_free = bit;
+	} else if (chg->first_free == bit) {
+		ret = -ENOSPC;
+		goto out;
+	}
+
+	*blkno = bit;
+
+	rdx = chg->free_bl->data;
+	chg->free_ind = find_next_bit_le(rdx->bits, SCOUTFS_RADIX_BITS,
+					 chg->free_ind + 1);
+	if (chg->free_ind >= SCOUTFS_RADIX_BITS) {
+		chg->free_ind = SCOUTFS_RADIX_BITS;
+		chg->free_bl = NULL;
+	}
+	chg->next_find_bit = wrap_bit(sb, true,
+				      chg->free_leaf_bit + chg->free_ind);
+
 	ret = 0;
 out:
-	if (ret < 0) {
-		free_path(sb, path);
-		path = NULL;
-	}
-
-	*path_ret = path;
+	if (ret == -ENOSPC)
+		scoutfs_inc_counter(sb, radix_enospc_meta);
 	return ret;
-}
-
-/*
- * Get all the paths we're going to need to dirty all the blocks in all
- * the paths in the change.  The caller has added their path to the leaf
- * that they want to change to start the process off.
- *
- * For every clean block in paths we can have to set a bit in a leaf to
- * free the old blkno and clear a bit in a leaf to allocate a new dirty
- * blkno.  We keep checking new paths for clean blocks until eventually
- * all the paths only contain blocks whose blknos are in leaves that we
- * already have paths to.
- */
-static int get_all_paths(struct super_block *sb,
-			 struct scoutfs_radix_allocator *alloc,
-			 struct radix_change *chg)
-{
-	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
-	struct scoutfs_radix_block *rdx;
-	struct scoutfs_radix_ref *ref;
-	struct scoutfs_block *bl;
-	struct radix_path *path;
-	struct radix_path *adding;
-	struct radix_path *found;
-	bool meta_wrapped;
-	bool stable;
-	u64 start_meta;
-	u64 next_meta;
-	u64 last_meta;
-	u64 leaf_bit;
-	int ind;
-	int ret;
-	int i;
-
-	start_meta = calc_leaf_bit(le64_to_cpu(alloc->avail.next_find_bit));
-	next_meta = start_meta;
-	last_meta = le64_to_cpu(super->last_meta_blkno);
-	meta_wrapped = false;
-
-	do {
-		stable = true;
-
-		/* get paths to leaves to allocate dirty blknos from */
-		if (chg->alloc_bits < chg->block_allocs + chg->caller_allocs) {
-			stable = false;
-
-			/* we're not modifying as we go, check for wrapping */
-			if (next_meta >= start_meta && meta_wrapped) {
-				scoutfs_inc_counter(sb, radix_enospc_paths);
-				ret = -ENOSPC;
-				break;
-			}
-
-			ret = get_path(sb, &alloc->avail, chg, GPF_NEXT_SM,
-				       next_meta, &adding);
-			if (ret < 0) {
-				if (ret == -ENOENT) {
-					meta_wrapped = true;
-					next_meta = 0;
-					continue;
-				}
-				break;
-			}
-
-			next_meta = adding->leaf_bit + SCOUTFS_RADIX_BITS;
-			if (next_meta > last_meta) {
-				meta_wrapped = true;
-				next_meta = 0;
-			}
-
-			/* might already have path, maybe add it to alloc */
-			found = walk_paths(&chg->rbroot, adding->root,
-					   adding->leaf_bit, adding);
-			if (found != adding) {
-				free_path(sb, adding);
-				adding = found;
-			} else {
-				list_add_tail(&adding->head, &chg->new_paths);
-			}
-			if (list_empty(&adding->alloc_head)) {
-				ref = path_ref(adding, 0);
-				chg->alloc_bits += le64_to_cpu(ref->sm_total);
-				list_add_tail(&adding->alloc_head,
-					      &chg->alloc_paths);
-			}
-		}
-
-		if ((path = list_first_entry_or_null(&chg->new_paths,
-						     struct radix_path,
-						     head))) {
-			list_move_tail(&path->head, &chg->paths);
-			stable = false;
-
-			/* check all the blocks in all new paths */
-			for (i = path->height - 1; i >= 0; i--) {
-				bl = path->bls[i];
-
-				/* dirty are done, only visit each block once */
-				if (scoutfs_block_writer_is_dirty(sb, bl) ||
-				    scoutfs_block_tas_visited(sb, bl))
-					continue;
-
-				/* record the number of allocs we'll need */
-				chg->block_allocs++;
-
-				/* don't need to free synth blknos */
-				if (bl->blkno >= RADIX_SYNTH_BLKNO)
-					continue;
-
-				/* see if we already a path to this leaf */
-				leaf_bit = calc_leaf_bit(bl->blkno);
-				if (walk_paths(&chg->rbroot, &alloc->freed,
-					       leaf_bit, NULL))
-					continue;
-
-				/* get a new path to freed leaf to set */
-				ret = get_path(sb, &alloc->freed, chg, 0,
-					       bl->blkno, &adding);
-				if (ret < 0)
-					break;
-
-				rdx = adding->bls[0]->data;
-				ind = bl->blkno - adding->leaf_bit;
-				if (test_bit_le(ind, rdx->bits)) {
-					/* XXX corruption, bit already set? */
-					ret = -EIO;
-					break;
-				}
-
-				walk_paths(&chg->rbroot, adding->root,
-					   adding->leaf_bit, adding);
-				list_add_tail(&adding->head, &chg->new_paths);
-			}
-		}
-
-		ret = 0;
-	} while (!stable);
-
-	return ret;
-}
-
-/*
- * We have pinned blocks in paths to all the leaves that we need to
- * modify to make a change to radix trees.  Walk through the paths
- * moving blocks to their new allocated blknos, freeing the old stable
- * blknos.
- */
-static void dirty_all_path_blocks(struct super_block *sb,
-				  struct scoutfs_radix_allocator *alloc,
-				  struct scoutfs_block_writer *wri,
-				  struct radix_change *chg)
-{
-	struct scoutfs_radix_block *rdx;
-	struct scoutfs_radix_ref *ref;
-	struct scoutfs_block *bl;
-	struct radix_path *path;
-	u64 blkno;
-	int level;
-
-	BUG_ON(!list_empty(&chg->new_paths));
-
-	list_for_each_entry(path, &chg->paths, head) {
-
-		for (level = path->height - 1; level >= 0; level--) {
-			bl = path->bls[level];
-
-			if (scoutfs_block_writer_is_dirty(sb, bl))
-				continue;
-
-			if (bl->blkno < RADIX_SYNTH_BLKNO)
-				set_change_leaf_bits(sb, chg, &alloc->freed,
-						     bl->blkno, 1);
-
-			blkno = change_alloc_meta(sb, chg);
-			scoutfs_block_clear_visited(sb, bl);
-			scoutfs_block_move(sb, wri, bl, blkno);
-			scoutfs_block_writer_mark_dirty(sb, wri, bl);
-
-			rdx = bl->data;
-			rdx->hdr.blkno = cpu_to_le64(bl->blkno);
-			prandom_bytes(&rdx->hdr.seq, sizeof(rdx->hdr.seq));
-
-			ref = path_ref(path, level);
-			ref->blkno = rdx->hdr.blkno;
-			ref->seq = rdx->hdr.seq;
-		}
-	}
 }
 
 static bool valid_free_bit_range(struct super_block *sb, bool meta,
@@ -1166,9 +1132,9 @@ static int radix_free(struct super_block *sb,
 		      struct scoutfs_radix_root *root, bool meta,
 		      u64 bit, int nbits)
 {
-	struct scoutfs_radix_block *rdx;
-	struct radix_change *chg;
-	struct radix_path *path;
+	struct scoutfs_block *bl;
+	DECLARE_RADIX_CHANGE(chg);
+	u64 leaf_bit;
 	int ind;
 	int ret;
 
@@ -1178,36 +1144,19 @@ static int radix_free(struct super_block *sb,
 		return -EINVAL;
 
 	mutex_lock(&alloc->mutex);
+	prepare_change(&chg, &alloc->avail);
 
-	chg = alloc_change();
-	if (!chg) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	ret = get_path(sb, root, chg, 0, bit, &path);
-	if (ret < 0)
-		goto out;
-	list_add_tail(&path->head, &chg->new_paths);
-
-	ind = bit - path->leaf_bit;
-	rdx = path->bls[0]->data;
-	if (!bitmap_empty_region_le(rdx->bits, ind, nbits)) {
-		/* XXX corruption, trying to free set bits */
-		ret = -EIO;
-		goto out;
-	}
-
-	ret = get_all_paths(sb, alloc, chg);
+	ret = get_leaf(sb, alloc, wri, &chg, root, GLF_DIRTY, bit,
+		       &leaf_bit, &bl);
 	if (ret < 0)
 		goto out;
 
-	dirty_all_path_blocks(sb, alloc, wri, chg);
-	set_path_leaf_bits(sb, path, bit, nbits);
-	ret = 0;
+	ind = bit - leaf_bit;
+	set_leaf_bits(sb, bl, ind, nbits);
 out:
-	free_change(sb, chg);
+	complete_change(sb, wri, &chg, ret);
 	mutex_unlock(&alloc->mutex);
+
 	return ret;
 }
 
@@ -1219,27 +1168,33 @@ int scoutfs_radix_alloc(struct super_block *sb,
 			struct scoutfs_radix_allocator *alloc,
 			struct scoutfs_block_writer *wri, u64 *blkno)
 {
-	struct radix_change *chg;
+	struct scoutfs_block *bl;
+	DECLARE_RADIX_CHANGE(chg);
+	u64 leaf_bit;
+	u64 bit;
+	int ind;
 	int ret;
 
+	scoutfs_inc_counter(sb, radix_alloc);
+
 	mutex_lock(&alloc->mutex);
+	prepare_change(&chg, &alloc->avail);
 
-	chg = alloc_change();
-	if (!chg) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	chg->caller_allocs = 1;
-	ret = get_all_paths(sb, alloc, chg);
+	ret = find_next_change_blkno(sb, &chg, &bit);
 	if (ret < 0)
 		goto out;
 
-	dirty_all_path_blocks(sb, alloc, wri, chg);
-	*blkno = change_alloc_meta(sb, chg);
+	ret = get_leaf(sb, alloc, wri, &chg, &alloc->avail, GLF_DIRTY, bit,
+		       &leaf_bit, &bl);
+	if (ret < 0)
+		goto out;
+
+	ind = bit - leaf_bit;
+	clear_leaf_bits(sb, bl, ind, 1);
+	*blkno = bit;
 	ret = 0;
 out:
-	free_change(sb, chg);
+	complete_change(sb, wri, &chg, ret);
 	mutex_unlock(&alloc->mutex);
 
 	return ret;
@@ -1257,12 +1212,15 @@ int scoutfs_radix_alloc_data(struct super_block *sb,
 			     struct scoutfs_radix_root *root,
 			     int count, u64 *blkno_ret, int *count_ret)
 {
-	struct radix_change *chg;
-	struct radix_path *path;
+	struct scoutfs_block *bl;
+	DECLARE_RADIX_CHANGE(chg);
+	u64 leaf_bit;
 	u64 bit;
 	int nbits;
-	int gpf;
+	int ind;
 	int ret;
+
+	scoutfs_inc_counter(sb, radix_alloc_data);
 
 	*blkno_ret = 0;
 	*count_ret = 0;
@@ -1271,41 +1229,32 @@ int scoutfs_radix_alloc_data(struct super_block *sb,
 		return -EINVAL;
 
 	nbits = min(count, SCOUTFS_RADIX_LG_BITS);
-	gpf = nbits > 1 ? GPF_NEXT_LG : GPF_NEXT_SM;
 
 	mutex_lock(&alloc->mutex);
+	prepare_change(&chg, &alloc->avail);
 
-	chg = alloc_change();
-	if (!chg) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-find_next:
-	bit = le64_to_cpu(root->next_find_bit);
-	ret = get_path(sb, root, chg, gpf, bit, &path);
-	if (ret) {
-		if (ret == -ENOENT) {
-			if (root->next_find_bit != 0) {
-				root->next_find_bit = 0;
-				goto find_next;
-			}
+	ret = find_next_set_bits(sb, &chg, root, false,
+				 le64_to_cpu(root->next_find_bit), nbits,
+				 &bit, &nbits, NULL);
+	if (ret < 0) {
+		if (ret == -ENOSPC)
 			scoutfs_inc_counter(sb, radix_enospc_data);
-			ret = -ENOSPC;
-		}
 		goto out;
 	}
-	list_add_tail(&path->head, &chg->new_paths);
 
-	ret = get_all_paths(sb, alloc, chg);
+	ret = get_leaf(sb, alloc, wri, &chg, root, GLF_DIRTY, bit,
+		       &leaf_bit, &bl);
 	if (ret < 0)
 		goto out;
 
-	dirty_all_path_blocks(sb, alloc, wri, chg);
-	alloc_leaf_bits(sb, false, path, nbits, blkno_ret, count_ret);
+	ind = bit - leaf_bit;
+	clear_leaf_bits(sb, bl, ind, nbits);
+	*blkno_ret = bit;
+	*count_ret = nbits;
+	store_next_find_bit(sb, false, root, bit + nbits);
 	ret = 0;
 out:
-	free_change(sb, chg);
+	complete_change(sb, wri, &chg, ret);
 	mutex_unlock(&alloc->mutex);
 
 	return ret;
@@ -1319,6 +1268,7 @@ int scoutfs_radix_free(struct super_block *sb,
 		       struct scoutfs_radix_allocator *alloc,
 		       struct scoutfs_block_writer *wri, u64 blkno)
 {
+	scoutfs_inc_counter(sb, radix_free);
 	return radix_free(sb, alloc, wri, &alloc->freed, true, blkno, 1);
 }
 
@@ -1332,6 +1282,7 @@ int scoutfs_radix_free_data(struct super_block *sb,
 			    struct scoutfs_radix_root *root,
 			    u64 blkno, int count)
 {
+	scoutfs_inc_counter(sb, radix_free_data);
 	return radix_free(sb, alloc, wri, root, false, blkno, count);
 }
 
@@ -1353,9 +1304,9 @@ int scoutfs_radix_free_data(struct super_block *sb,
  * read the old blocks.
  *
  * We can also be called with a src tree that is the current allocator
- * avail tree.  In this case dirtying the blocks in all the paths can
- * consume bits in the source tree.  We notice when dirtying allocation
- * empties the src block and we retry finding a new leaf to merge.
+ * avail tree.  In this case dirtying the leaf blocks can consume bits
+ * in the source tree.  We notice when dirtying the src block and we
+ * retry finding a new leaf to merge.
  *
  * The caller specifies the minimum count to move.  -ENOENT will be
  * returned if the source tree runs out of bits, potentially after
@@ -1377,19 +1328,20 @@ int scoutfs_radix_merge(struct super_block *sb,
 	struct scoutfs_radix_block *inp_rdx;
 	struct scoutfs_radix_block *src_rdx;
 	struct scoutfs_radix_block *dst_rdx;
-	struct radix_change *chg = NULL;
-	struct radix_path *inp_path = NULL;
-	struct radix_path *src_path;
-	struct radix_path *dst_path;
+	struct scoutfs_block *inp_bl;
+	struct scoutfs_block *src_bl;
+	struct scoutfs_block *dst_bl;
+	DECLARE_RADIX_CHANGE(chg);
 	s64 src_lg_delta;
 	s64 dst_lg_delta;
+	u64 leaf_bit;
 	u64 bit;
 	int merge_size;
 	int merged;
-	int inp_sm;
-	int lg_ind;
 	int ind;
 	int ret;
+
+	scoutfs_inc_counter(sb, radix_merge);
 
 	mutex_lock(&alloc->mutex);
 
@@ -1402,15 +1354,11 @@ int scoutfs_radix_merge(struct super_block *sb,
 
 	while (count > 0) {
 
-		chg = alloc_change();
-		if (!chg) {
-			ret = -ENOMEM;
-			goto out;
-		}
-
+		prepare_change(&chg, &alloc->avail);
 		bit = le64_to_cpu(src->next_find_bit);
 wrapped:
-		ret = get_path(sb, inp, chg, GPF_NEXT_SM, bit, &inp_path);
+		ret = get_leaf(sb, NULL, NULL, &chg, inp, GLF_NEXT_SM, bit,
+			       &leaf_bit, &inp_bl);
 		if (ret < 0) {
 			if (ret == -ENOENT) {
 				if (bit != 0) {
@@ -1422,43 +1370,28 @@ wrapped:
 			}
 			goto out;
 		}
-		/* unique input is not modified, not stored in the change */
-		bit = inp_path->leaf_bit;
+		bit = leaf_bit;
+		inp_rdx = inp_bl->data;
 
-		ret = get_path(sb, src, chg, 0, bit, &src_path);
+		ret = get_leaf(sb, alloc, wri, &chg, src, GLF_DIRTY, bit,
+			       &leaf_bit, &src_bl);
 		if (ret < 0)
 			goto out;
-		list_add_tail(&src_path->head, &chg->new_paths);
+		src_rdx = src_bl->data;
 
-		ret = get_path(sb, dst, chg, 0, bit, &dst_path);
+		ret = get_leaf(sb, alloc, wri, &chg, dst, GLF_DIRTY, bit,
+			       &leaf_bit, &dst_bl);
 		if (ret < 0)
 			goto out;
-		list_add_tail(&dst_path->head, &chg->new_paths);
+		dst_rdx = dst_bl->data;
 
-		ret = get_all_paths(sb, alloc, chg);
-		if (ret < 0)
-			goto out;
+		apply_change_bits(sb, &chg);
 
-		/* this can modify src/dst when they're alloc trees */
-		dirty_all_path_blocks(sb, alloc, wri, chg);
-
-		inp_rdx = inp_path->bls[0]->data;
-		src_rdx = src_path->bls[0]->data;
-		dst_rdx = dst_path->bls[0]->data;
-
-		inp_sm = le64_to_cpu(path_ref(inp_path, 0)->sm_total);
-		ind = find_next_bit_le(inp_rdx->bits, SCOUTFS_RADIX_BITS,
-				       le32_to_cpu(inp_rdx->sm_first));
-		lg_ind = round_down(ind, SCOUTFS_RADIX_LG_BITS);
-
-		/* back out and retry if no input left, or inp not ro */
-		if (inp_sm == 0 ||
-		    (inp != src && paths_share_blocks(inp_path, src_path))) {
-			scoutfs_inc_counter(sb, radix_merge_retry);
-			free_path(sb, inp_path);
-			inp_path = NULL;
-			free_change(sb, chg);
-			chg = NULL;
+		/* change allocs could have cleared all of inp if its avail */
+		ind = find_next_bit_le(inp_rdx->bits, SCOUTFS_RADIX_BITS, 0);
+		if (ind == SCOUTFS_RADIX_BITS) {
+			scoutfs_inc_counter(sb, radix_merge_empty);
+			complete_change(sb, wri, &chg, -EAGAIN);
 			continue;
 		}
 
@@ -1481,8 +1414,7 @@ wrapped:
 
 		/* carefully modify src last, it might also be inp */
 		merged = bitmap_xor_bitmap_le(dst_rdx->bits, inp_rdx->bits,
-					      ind, min_t(u64, inp_sm, count),
-					      &merge_size);
+					      ind, count, &merge_size);
 		dst_lg_delta = count_lg_from_set(dst_rdx->bits, inp_rdx->bits,
 						 ind, merge_size);
 
@@ -1491,25 +1423,15 @@ wrapped:
 		bitmap_xor_bitmap_le(src_rdx->bits, inp_rdx->bits, ind, merged,
 				     NULL);
 
-		if (ind < le32_to_cpu(dst_rdx->sm_first))
-			dst_rdx->sm_first = cpu_to_le32(ind);
-		/* first doesn't have to be precise, search will cleanup */
-		if (lg_ind < le32_to_cpu(dst_rdx->lg_first))
-			dst_rdx->lg_first = cpu_to_le32(lg_ind);
+		fixup_parent_refs(sb, src_bl, -merged, -src_lg_delta);
+		fixup_parent_refs(sb, dst_bl, merged, dst_lg_delta);
 
-		fixup_parent_refs(src_path, -merged, -src_lg_delta);
-		fixup_parent_refs(dst_path, merged, dst_lg_delta);
+		trace_scoutfs_radix_merge(sb, inp, inp_bl->blkno, src,
+					  src_bl->blkno, dst, dst_bl->blkno,
+					  count, bit, ind, merged,
+					  src_lg_delta, dst_lg_delta);
 
-		trace_scoutfs_radix_merge(sb, inp, inp_path->bls[0]->blkno,
-					  src, src_path->bls[0]->blkno,
-					  dst, dst_path->bls[0]->blkno, count,
-					  bit, ind, merged, src_lg_delta,
-					  dst_lg_delta);
-
-		free_path(sb, inp_path);
-		inp_path = NULL;
-		free_change(sb, chg);
-		chg = NULL;
+		complete_change(sb, wri, &chg, 0);
 
 		store_next_find_bit(sb, meta, src, bit + SCOUTFS_RADIX_BITS);
 		count -= min_t(u64, count, merged);
@@ -1517,8 +1439,7 @@ wrapped:
 
 	ret = 0;
 out:
-	free_path(sb, inp_path);
-	free_change(sb, chg);
+	complete_change(sb, wri, &chg, ret);
 	mutex_unlock(&alloc->mutex);
 
 	return ret;

@@ -167,8 +167,6 @@ struct scoutfs_key {
 
 struct scoutfs_radix_block {
 	struct scoutfs_block_header hdr;
-	__le32 sm_first;
-	__le32 lg_first;
 	union {
 		struct scoutfs_radix_ref {
 			__le64 blkno;

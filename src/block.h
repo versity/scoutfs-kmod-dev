@@ -10,6 +10,7 @@ struct scoutfs_block_writer {
 struct scoutfs_block {
 	u64 blkno;
 	void *data;
+	void *priv;
 };
 
 __le32 scoutfs_block_calc_crc(struct scoutfs_block_header *hdr, u32 size);

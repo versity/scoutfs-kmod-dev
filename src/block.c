@@ -19,7 +19,6 @@
 #include <linux/sched.h>
 #include <linux/bio.h>
 #include <linux/blkdev.h>
-#include <linux/rbtree.h>
 
 #include "format.h"
 #include "super.h"
@@ -46,7 +45,7 @@
 struct block_info {
 	struct super_block *sb;
 	spinlock_t lock;
-	struct rb_root root;
+	struct radix_tree_root radix;
 	struct list_head lru_list;
 	u64 lru_nr;
 	u64 lru_move_counter;
@@ -65,7 +64,7 @@ enum {
 	BLOCK_BIT_DIRTY,	/* dirty, writer will write */
 	BLOCK_BIT_IO_BUSY,	/* bios are in flight */
 	BLOCK_BIT_ERROR,	/* saw IO error */
-	BLOCK_BIT_DELETED,	/* has been deleted from rbtree */
+	BLOCK_BIT_DELETED,	/* has been deleted from radix tree */
 	BLOCK_BIT_PAGE_ALLOC,	/* page (possibly high order) allocation */
 	BLOCK_BIT_VIRT,		/* mapped virt allocation */
 	BLOCK_BIT_CRC_VALID,	/* crc has been verified */
@@ -74,7 +73,6 @@ enum {
 
 struct block_private {
 	struct scoutfs_block bl;
-	struct rb_node node;
 	struct super_block *sb;
 	atomic_t refcount;
 	union {
@@ -183,7 +181,6 @@ static struct block_private *block_alloc(struct super_block *sb, u64 blkno)
 	}
 
 	bp->bl.blkno = blkno;
-	RB_CLEAR_NODE(&bp->node);
 	bp->sb = sb;
 	atomic_set(&bp->refcount, 1);
 	INIT_LIST_HEAD(&bp->lru_entry);
@@ -253,39 +250,9 @@ static void block_put(struct super_block *sb, struct block_private *bp)
 	}
 }
 
-static struct block_private *walk_block_rbtree(struct rb_root *root,
-					       u64 blkno,
-					       struct block_private *ins)
-{
-	struct rb_node **node = &root->rb_node;
-	struct rb_node *parent = NULL;
-	struct block_private *bp;
-	int cmp;
-
-	while (*node) {
-		parent = *node;
-		bp = container_of(*node, struct block_private, node);
-
-		cmp = scoutfs_cmp_u64s(bp->bl.blkno, blkno);
-		if (cmp == 0)
-			return bp;
-		else if (cmp < 0)
-			node = &(*node)->rb_left;
-		else
-			node = &(*node)->rb_right;
-	}
-
-	if (ins) {
-		rb_link_node(&ins->node, parent, node);
-		rb_insert_color(&ins->node, root);
-		return ins;
-	}
-
-	return NULL;
-}
-
 /*
- * Add a new block into the cache.  The caller holds the lock.
+ * Add a new block into the cache.  The caller holds the lock and has
+ * preloaded the radix.
  */
 static void block_insert(struct super_block *sb, struct block_private *bp,
 			 u64 blkno)
@@ -294,10 +261,9 @@ static void block_insert(struct super_block *sb, struct block_private *bp,
 
 	assert_spin_locked(&binf->lock);
 	BUG_ON(!list_empty(&bp->lru_entry));
-	BUG_ON(!RB_EMPTY_NODE(&bp->node));
 
 	atomic_inc(&bp->refcount);
-	walk_block_rbtree(&binf->root, blkno, bp);
+	radix_tree_insert(&binf->radix, blkno, bp);
 	list_add_tail(&bp->lru_entry, &binf->lru_list);
 	bp->lru_moved = ++binf->lru_move_counter;
 	binf->lru_nr++;
@@ -345,10 +311,11 @@ static void block_remove(struct super_block *sb, struct block_private *bp)
 {
 	DECLARE_BLOCK_INFO(sb, binf);
 
+	assert_spin_locked(&binf->lock);
+
 	if (!test_and_set_bit(BLOCK_BIT_DELETED, &bp->bits)) {
 		BUG_ON(list_empty(&bp->lru_entry));
-		rb_erase(&bp->node, &binf->root);
-		RB_CLEAR_NODE(&bp->node);
+		radix_tree_delete(&binf->radix, bp->bl.blkno);
 		list_del_init(&bp->lru_entry);
 		binf->lru_nr--;
 		block_put(sb, bp);
@@ -368,18 +335,19 @@ static void block_remove_all(struct super_block *sb)
 {
 	DECLARE_BLOCK_INFO(sb, binf);
 	struct block_private *bp;
-	struct rb_node *node;
 
-	for (node = rb_first(&binf->root); node; ) {
-		bp = container_of(node, struct block_private, node);
-		node = rb_next(node);
+	spin_lock(&binf->lock);
+
+	while (radix_tree_gang_lookup(&binf->radix, (void **)&bp, 0, 1) == 1) {
 		wait_event(binf->waitq, !io_busy(bp));
 		block_remove(sb, bp);
 	}
 
+	spin_unlock(&binf->lock);
+
 	WARN_ON_ONCE(!list_empty(&binf->lru_list));
 	WARN_ON_ONCE(binf->lru_nr != 0);
-	WARN_ON_ONCE(!RB_EMPTY_ROOT(&binf->root));
+	WARN_ON_ONCE(binf->radix.rnode != NULL);
 }
 
 /*
@@ -497,8 +465,8 @@ static int block_submit_bio(struct super_block *sb, struct block_private *bp,
 
 /*
  * Return a reference to a cached block in the system, allocating a new
- * block if one isn't found in the rbtree.  Its contents are undefined
- * if it's newly allocated.
+ * block if one isn't found in the radix.  Its contents are undefined if
+ * it's newly allocated.
  */
 static struct block_private *block_get(struct super_block *sb, u64 blkno)
 {
@@ -507,11 +475,11 @@ static struct block_private *block_get(struct super_block *sb, u64 blkno)
 	struct block_private *bp;
 	int ret;
 
-	spin_lock(&binf->lock);
-	bp = walk_block_rbtree(&binf->root, blkno, NULL);
+	rcu_read_lock();
+	bp = radix_tree_lookup(&binf->radix, blkno);
 	if (bp)
 		atomic_inc(&bp->refcount);
-	spin_unlock(&binf->lock);
+	rcu_read_unlock();
 
 	/* drop failed reads that interrupted waiters abandoned */
 	if (bp && (test_bit(BLOCK_BIT_ERROR, &bp->bits) &&
@@ -530,15 +498,20 @@ static struct block_private *block_get(struct super_block *sb, u64 blkno)
 			goto out;
 		}
 
-		/* could refactor to insert in one walk */
+		ret = radix_tree_preload(GFP_NOFS);
+		if (ret)
+			goto out;
+
+		/* could use slot instead of lookup/insert */
 		spin_lock(&binf->lock);
-		found = walk_block_rbtree(&binf->root, blkno, NULL);
+		found = radix_tree_lookup(&binf->radix, blkno);
 		if (found) {
 			atomic_inc(&found->refcount);
 		} else {
 			block_insert(sb, bp, blkno);
 		}
 		spin_unlock(&binf->lock);
+		radix_tree_preload_end();
 
 		if (found) {
 			block_put(sb, bp);
@@ -985,7 +958,16 @@ int scoutfs_block_setup(struct super_block *sb)
 {
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct block_info *binf;
+	loff_t size;
 	int ret;
+
+	/* we store blknos in longs in the radix */
+	size = i_size_read(sb->s_bdev->bd_inode);
+	if ((size >> SCOUTFS_BLOCK_LG_SHIFT) >= LONG_MAX) {
+		scoutfs_err(sb, "Cant reference all blocks in %llu byte device with %u bit long radix tree indexes",
+			size, BITS_PER_LONG);
+		return -EINVAL;
+	}
 
 	binf = kzalloc(sizeof(struct block_info), GFP_KERNEL);
 	if (!binf) {
@@ -995,7 +977,7 @@ int scoutfs_block_setup(struct super_block *sb)
 
 	binf->sb = sb;
 	spin_lock_init(&binf->lock);
-	binf->root = RB_ROOT;
+	INIT_RADIX_TREE(&binf->radix, GFP_ATOMIC); /* insertion preloads */
 	INIT_LIST_HEAD(&binf->lru_list);
 	init_waitqueue_head(&binf->waitq);
 	binf->shrinker.shrink = block_shrink;

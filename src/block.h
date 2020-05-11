@@ -45,9 +45,6 @@ void scoutfs_block_writer_forget_all(struct super_block *sb,
 void scoutfs_block_writer_forget(struct super_block *sb,
 			         struct scoutfs_block_writer *wri,
 				 struct scoutfs_block *bl);
-void scoutfs_block_move(struct super_block *sb,
-			struct scoutfs_block_writer *wri,
-			struct scoutfs_block *bl, u64 blkno);
 bool scoutfs_block_writer_has_dirty(struct super_block *sb,
 				    struct scoutfs_block_writer *wri);
 u64 scoutfs_block_writer_dirty_bytes(struct super_block *sb,

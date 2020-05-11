@@ -813,44 +813,6 @@ void scoutfs_block_writer_forget(struct super_block *sb,
 }
 
 /*
- * Change a cached block's location.  We're careful to only change its
- * position in the rbtree.  If we find another block existing at the new
- * location then we remove it from the cache and forget it if it was
- * dirty.
- */
-void scoutfs_block_move(struct super_block *sb,
-			struct scoutfs_block_writer *wri,
-			struct scoutfs_block *bl, u64 blkno)
-{
-	DECLARE_BLOCK_INFO(sb, binf);
-	struct block_private *bp = BLOCK_PRIVATE(bl);
-	struct block_private *existing = NULL;
-
-	spin_lock(&binf->lock);
-
-	existing = walk_block_rbtree(&binf->root, blkno, NULL);
-	if (existing) {
-		/* only nesting of binf and wri locks */
-		if (test_bit(BLOCK_BIT_DIRTY, &bp->bits)) {
-			spin_lock(&wri->lock);
-			if (test_bit(BLOCK_BIT_DIRTY, &bp->bits))
-				block_forget(sb, wri, bp);
-			spin_unlock(&wri->lock);
-		}
-		block_remove(sb, existing);
-	}
-
-	rb_erase(&bp->node, &binf->root);
-	RB_CLEAR_NODE(&bp->node);
-	bp->bl.blkno = blkno;
-	walk_block_rbtree(&binf->root, blkno, bp);
-
-	TRACE_BLOCK(move, bp);
-
-	spin_unlock(&binf->lock);
-}
-
-/*
  * The caller has ensured that no more dirtying will take place.  This
  * helps the caller avoid doing a bunch of work before calling into the
  * writer to write dirty blocks that didn't exist.

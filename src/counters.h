@@ -105,6 +105,10 @@
 	EXPAND_COUNTER(radix_merge_empty)			\
 	EXPAND_COUNTER(radix_undo_ref)				\
 	EXPAND_COUNTER(radix_walk)				\
+	EXPAND_COUNTER(server_commit_hold)			\
+	EXPAND_COUNTER(server_commit_prepare)			\
+	EXPAND_COUNTER(server_commit_queue)			\
+	EXPAND_COUNTER(server_commit_worker)			\
 	EXPAND_COUNTER(trans_commit_data_alloc_low)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\

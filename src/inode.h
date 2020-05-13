@@ -10,12 +10,6 @@
 
 struct scoutfs_lock;
 
-struct scoutfs_inode_allocator {
-	spinlock_t lock;
-	u64 ino;
-	u64 nr;
-};
-
 struct scoutfs_inode_info {
 	/* read or initialized for each inode instance */
 	u64 ino;
@@ -41,9 +35,6 @@ struct scoutfs_inode_info {
 
 	/* updated at on each new lock acquisition */
 	atomic64_t last_refreshed;
-
-	/* reset for every new inode instance */
-	struct scoutfs_inode_allocator ino_alloc;
 
 	/* initialized once for slab object */
 	seqcount_t seqcount;
@@ -95,7 +86,7 @@ int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_lock *lock);
 void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
 			       struct list_head *ind_locks);
 
-int scoutfs_alloc_ino(struct inode *parent, u64 *ino);
+int scoutfs_alloc_ino(struct super_block *sb, bool is_dir, u64 *ino_ret);
 struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 				umode_t mode, dev_t rdev, u64 ino,
 				struct scoutfs_lock *lock);

@@ -47,9 +47,17 @@
  *  - describe data locking size problems
  */
 
+struct inode_allocator {
+	spinlock_t lock;
+	u64 ino;
+	u64 nr;
+};
+
 struct inode_sb_info {
 	spinlock_t writeback_lock;
 	struct rb_root writeback_inodes;
+	struct inode_allocator dir_ino_alloc;
+	struct inode_allocator ino_alloc;
 };
 
 #define DECLARE_INODE_SB_INFO(sb, name) \
@@ -74,7 +82,6 @@ static void scoutfs_inode_ctor(void *obj)
 	init_waitqueue_head(&ci->data_waitq.waitq);
 	init_rwsem(&ci->xattr_rwsem);
 	RB_CLEAR_NODE(&ci->writeback_node);
-	spin_lock_init(&ci->ino_alloc.lock);
 
 	inode_init_once(&ci->inode);
 }
@@ -682,8 +689,6 @@ struct inode *scoutfs_iget(struct super_block *sb, u64 ino)
 		/* XXX ensure refresh, instead clear in drop_inode? */
 		si = SCOUTFS_I(inode);
 		atomic64_set(&si->last_refreshed, 0);
-		si->ino_alloc.ino = 0;
-		si->ino_alloc.nr = 0;
 
 		ret = scoutfs_inode_refresh(inode, lock, 0);
 		if (ret) {
@@ -1322,13 +1327,15 @@ u64 scoutfs_last_ino(struct super_block *sb)
  * minimize that loss while still being large enough for typical
  * directory file counts.
  */
-int scoutfs_alloc_ino(struct inode *parent, u64 *ino_ret)
+int scoutfs_alloc_ino(struct super_block *sb, bool is_dir, u64 *ino_ret)
 {
-	struct scoutfs_inode_allocator *ia = &SCOUTFS_I(parent)->ino_alloc;
-	struct super_block *sb = parent->i_sb;
+	DECLARE_INODE_SB_INFO(sb, inf);
+	struct inode_allocator *ia;
 	u64 ino;
 	u64 nr;
 	int ret;
+
+	ia = is_dir ? &inf->dir_ino_alloc : &inf->ino_alloc;
 
 	spin_lock(&ia->lock);
 
@@ -1385,8 +1392,6 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	ci->have_item = false;
 	atomic64_set(&ci->last_refreshed, lock->refresh_gen);
 	ci->flags = 0;
-	ci->ino_alloc.ino = 0;
-	ci->ino_alloc.nr = 0;
 
 	scoutfs_inode_set_meta_seq(inode);
 	scoutfs_inode_set_data_seq(inode);
@@ -1725,6 +1730,8 @@ int scoutfs_inode_setup(struct super_block *sb)
 
 	spin_lock_init(&inf->writeback_lock);
 	inf->writeback_inodes = RB_ROOT;
+	spin_lock_init(&inf->dir_ino_alloc.lock);
+	spin_lock_init(&inf->ino_alloc.lock);
 
 	sbi->inode_sb_info = inf;
 

@@ -68,7 +68,6 @@ enum {
 	BLOCK_BIT_PAGE_ALLOC,	/* page (possibly high order) allocation */
 	BLOCK_BIT_VIRT,		/* mapped virt allocation */
 	BLOCK_BIT_CRC_VALID,	/* crc has been verified */
-	BLOCK_BIT_VISITED,	/* used by callers to track blocks */
 };
 
 struct block_private {
@@ -128,22 +127,6 @@ bool scoutfs_block_valid_ref(struct super_block *sb,
 
 	return hdr->fsid == super->hdr.fsid && hdr->seq == seq &&
 	       hdr->blkno == blkno;
-}
-
-bool scoutfs_block_tas_visited(struct super_block *sb,
-			       struct scoutfs_block *bl)
-{
-	struct block_private *bp = BLOCK_PRIVATE(bl);
-
-	return test_bit(BLOCK_BIT_VISITED, &bp->bits) != 0;
-}
-
-void scoutfs_block_clear_visited(struct super_block *sb,
-				 struct scoutfs_block *bl)
-{
-	struct block_private *bp = BLOCK_PRIVATE(bl);
-
-	clear_bit(BLOCK_BIT_VISITED, &bp->bits);
 }
 
 static struct block_private *block_alloc(struct super_block *sb, u64 blkno)

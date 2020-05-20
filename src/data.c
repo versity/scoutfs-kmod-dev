@@ -1923,6 +1923,8 @@ int scoutfs_data_wait(struct inode *inode, struct scoutfs_data_wait *dw)
 	spin_lock(&rt->lock);
 	rb_erase(&dw->node, &rt->root);
 	RB_CLEAR_NODE(&dw->node);
+	if (!ret && dw->err)
+		ret = dw->err;
 	spin_unlock(&rt->lock);
 
 	return ret;
@@ -1934,6 +1936,43 @@ void scoutfs_data_wait_changed(struct inode *inode)
 
 	atomic64_inc(&wq->changed);
 	wake_up(&wq->waitq);
+}
+
+long scoutfs_data_stage_err(struct inode *inode, u64 sblock, u64 eblock,
+			    long err)
+{
+	struct super_block *sb = inode->i_sb;
+	const u64 ino = scoutfs_ino(inode);
+	DECLARE_DATA_WAIT_ROOT(sb, rt);
+	struct scoutfs_data_wait *dw;
+	long nr = 0;
+
+	if (!err)
+		return 0;
+
+	spin_lock(&rt->lock);
+#if 0
+	if (!sblock)
+		dw = next_data_wait(&rt->root, ino - 1, U64_MAX);
+	else
+#endif
+	dw = next_data_wait(&rt->root, ino, sblock);
+
+	for (; dw; dw = dw_next(dw)) { 
+		if (dw->ino != ino)
+			break;
+		if (dw->iblock > eblock)
+			break;
+		if (!dw->err) {
+			dw->err = err;
+			nr++;
+		}
+	}
+
+	spin_unlock(&rt->lock);
+	if (nr)
+		scoutfs_data_wait_changed(inode);
+	return nr;
 }
 
 int scoutfs_data_waiting(struct super_block *sb, u64 ino, u64 iblock,

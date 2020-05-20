@@ -28,12 +28,14 @@ struct scoutfs_data_wait {
 	u64 chg;
 	u64 ino;
 	u64 iblock;
+	long err;
 	u8 op;
 };
 
 #define DECLARE_DATA_WAIT(nm)						\
 	struct scoutfs_data_wait nm = {					\
 		.node.__rb_parent_color = (unsigned long)(&nm.node),	\
+		.err = 0,						\
 	}
 
 struct scoutfs_traced_extent {
@@ -68,6 +70,8 @@ bool scoutfs_data_wait_found(struct scoutfs_data_wait *ow);
 int scoutfs_data_wait(struct inode *inode,
 			      struct scoutfs_data_wait *ow);
 void scoutfs_data_wait_changed(struct inode *inode);
+long scoutfs_data_stage_err(struct inode *inode, u64 sblock, u64 eblock,
+			    long err);
 int scoutfs_data_waiting(struct super_block *sb, u64 ino, u64 iblock,
 			 struct scoutfs_ioctl_data_waiting_entry *dwe,
 			 unsigned int nr);

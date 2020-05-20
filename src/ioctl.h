@@ -346,5 +346,20 @@ struct scoutfs_ioctl_statfs_more {
 #define SCOUTFS_IOC_STATFS_MORE _IOR(SCOUTFS_IOCTL_MAGIC, 10, \
 				     struct scoutfs_ioctl_statfs_more)
 
+/*
+ * Cause the offline data waiters within the specified range to report an error.
+ *
+ * Given the offline data waiter with inode version @version, cause any offline
+ * data waiters in the @start_offset to @end_offset byte range to return @err.
+ */
+struct scoutfs_ioctl_stage_err {
+	__u64 data_version;
+	__u64 start_offset;
+	__u64 end_offset;
+	__s64 err;
+};
+
+#define SCOUTFS_IOC_STAGE_ERR _IOW(SCOUTFS_IOCTL_MAGIC, 11, \
+				   struct scoutfs_ioctl_stage_err)
 
 #endif

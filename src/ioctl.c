@@ -348,6 +348,40 @@ out:
 	return ret;
 }
 
+static long scoutfs_ioc_stage_err(struct file *file, unsigned long arg)
+{
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_ioctl_stage_err args;
+	u64 sblock, eblock;
+	long ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
+		return -EFAULT;
+	if (!IS_ERR_VALUE(args.err))
+		return -EINVAL;
+	trace_scoutfs_ioc_stage_err(sb, scoutfs_ino(inode), &args);
+
+	sblock = args.start_offset >> SCOUTFS_BLOCK_SHIFT;
+	eblock = args.end_offset >> SCOUTFS_BLOCK_SHIFT;
+
+	if (sblock > eblock)
+		return -EINVAL;
+
+	mutex_lock(&inode->i_mutex);
+	if (!S_ISREG(inode->i_mode)) {
+		ret = -EINVAL;
+	} else if (scoutfs_inode_data_version(inode) != args.data_version) {
+		ret = -ESTALE;
+	} else {
+		ret = scoutfs_data_stage_err(inode, sblock, eblock, args.err);
+	}
+	mutex_unlock(&inode->i_mutex);
+	return ret;
+}
+
 /*
  * Write the archived contents of the file back if the data_version
  * still matches.
@@ -820,6 +854,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_release(file, arg);
 	case SCOUTFS_IOC_STAGE:
 		return scoutfs_ioc_stage(file, arg);
+	case SCOUTFS_IOC_STAGE_ERR:
+		return scoutfs_ioc_stage_err(file, arg);
 	case SCOUTFS_IOC_STAT_MORE:
 		return scoutfs_ioc_stat_more(file, arg);
 	case SCOUTFS_IOC_DATA_WAITING:

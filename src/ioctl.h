@@ -346,5 +346,22 @@ struct scoutfs_ioctl_statfs_more {
 #define SCOUTFS_IOC_STATFS_MORE _IOR(SCOUTFS_IOCTL_MAGIC, 10, \
 				     struct scoutfs_ioctl_statfs_more)
 
+/*
+ * Cause matching waiters to return an error.
+ *
+ * Find current waiters that match the inode, op, and block range to wake
+ * up and return an error.
+ */
+struct scoutfs_ioctl_data_wait_err {
+	__u64 ino;
+	__u64 data_version;
+	__u64 offset;
+	__u64 count;
+	__u64 op;
+	__s64 err;
+};
+
+#define SCOUTFS_IOC_DATA_WAIT_ERR _IOR(SCOUTFS_IOCTL_MAGIC, 11, \
+				       struct scoutfs_ioctl_data_wait_err)
 
 #endif

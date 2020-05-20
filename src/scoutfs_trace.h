@@ -556,6 +556,37 @@ TRACE_EVENT(scoutfs_ioc_stage,
 		  __entry->offset, __entry->count)
 );
 
+TRACE_EVENT(scoutfs_ioc_data_wait_err,
+	TP_PROTO(struct super_block *sb,
+		 struct scoutfs_ioctl_data_wait_err *args),
+
+	TP_ARGS(sb, args),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, ino)
+		__field(__u64, vers)
+		__field(__u64, offset)
+		__field(__u64, count)
+		__field(__u64, op)
+		__field(__s64, err)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->ino = args->ino;
+		__entry->vers = args->data_version;
+		__entry->offset = args->offset;
+		__entry->count = args->count;
+		__entry->op = args->op;
+		__entry->err = args->err;
+	),
+
+	TP_printk(SCSBF" ino %llu vers %llu offset %llu count %llu op %llx err %lld",
+		  SCSB_TRACE_ARGS, __entry->ino, __entry->vers,
+		  __entry->offset, __entry->count, __entry->op, __entry->err)
+);
+
 DEFINE_EVENT(scoutfs_ino_ret_class, scoutfs_ioc_stage_ret,
 	TP_PROTO(struct super_block *sb, u64 ino, int ret),
 	TP_ARGS(sb, ino, ret)

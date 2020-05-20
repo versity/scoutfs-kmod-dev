@@ -348,6 +348,65 @@ out:
 	return ret;
 }
 
+static long scoutfs_ioc_data_wait_err(struct file *file, unsigned long arg)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+	struct scoutfs_ioctl_data_wait_err args;
+	struct scoutfs_lock *lock = NULL;
+	struct inode *inode = NULL;
+	u64 sblock;
+	u64 eblock;
+	long ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
+		return -EFAULT;
+	if (args.count == 0)
+		return 0;
+	if ((args.op & SCOUTFS_IOC_DWO_UNKNOWN) || !IS_ERR_VALUE(args.err))
+		return -EINVAL;
+	if ((args.op & SCOUTFS_IOC_DWO_UNKNOWN) || !IS_ERR_VALUE(args.err))
+		return -EINVAL;
+
+	trace_scoutfs_ioc_data_wait_err(sb, &args);
+
+	sblock = args.offset >> SCOUTFS_BLOCK_SHIFT;
+	eblock = (args.offset + args.count - 1) >> SCOUTFS_BLOCK_SHIFT;
+
+	if (sblock > eblock)
+		return -EINVAL;
+
+	inode = scoutfs_ilookup(sb, args.ino);
+	if (!inode) {
+		ret = -ESTALE;
+		goto out;
+	}
+
+	mutex_lock(&inode->i_mutex);
+
+	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ,
+				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
+	if (ret)
+		goto unlock;
+
+	if (!S_ISREG(inode->i_mode)) {
+		ret = -EINVAL;
+	} else if (scoutfs_inode_data_version(inode) != args.data_version) {
+		ret = -ESTALE;
+	} else {
+		ret = scoutfs_data_wait_err(inode, sblock, eblock, args.op,
+					    args.err);
+	}
+
+	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
+unlock:
+	mutex_unlock(&inode->i_mutex);
+	iput(inode);
+out:
+	return ret;
+}
+
 /*
  * Write the archived contents of the file back if the data_version
  * still matches.
@@ -832,6 +891,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_find_xattrs(file, arg);
 	case SCOUTFS_IOC_STATFS_MORE:
 		return scoutfs_ioc_statfs_more(file, arg);
+	case SCOUTFS_IOC_DATA_WAIT_ERR:
+		return scoutfs_ioc_data_wait_err(file, arg);
 	}
 
 	return -ENOTTY;

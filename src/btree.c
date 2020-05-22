@@ -996,6 +996,186 @@ static int try_join(struct super_block *sb,
 	return 1;
 }
 
+static bool bad_item_off(int off, int nr)
+{
+	return (off < offsetof(struct scoutfs_btree_block, items[0])) ||
+	       (off >= offsetof(struct scoutfs_btree_block, items[nr])) ||
+	       ((off - offsetof(struct scoutfs_btree_block, items[0]))
+		% sizeof(struct scoutfs_btree_item));
+}
+
+static bool bad_avl_node_off(__le16 node_off, int nr)
+{
+	int item_off;
+
+	if (node_off == 0)
+		return false;
+
+	item_off = (int)le16_to_cpu(node_off) +
+		   offsetof(struct scoutfs_btree_block, item_root) -
+		   offsetof(struct scoutfs_btree_item, node);
+
+	return bad_item_off(item_off, nr);
+}
+
+/*
+ * XXX:
+ *  - values don't overlap items
+ *  - values don't overlap each other
+ *  - last_free_offset is in fact last free region
+ *  - call after leaf modification
+ */
+static void verify_btree_block(struct scoutfs_btree_block *bt, int level,
+			       struct scoutfs_key *start,
+			       struct scoutfs_key *end)
+{
+	__le16 *buckets = leaf_item_hash_buckets(bt);
+	struct scoutfs_btree_item *item;
+	char *reason = NULL;
+	int first_val = 0;
+	int hashed = 0;
+	__le16 *owner;
+	int end_off;
+	int tot = 0;
+	int i = 0;
+	int nr;
+
+	if (bt->level != level) {
+		reason = "unexpected level";
+		goto out;
+	}
+
+	end_off = SCOUTFS_BLOCK_LG_SIZE -
+		  (level ? 0 : SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES);
+
+	/* can have 0 item blocks during first insertion into a tree */
+	nr = le16_to_cpu(bt->nr_items);
+	if (nr < 0 || nr > SCOUTFS_BLOCK_LG_SIZE ||
+	    offsetof(struct scoutfs_btree_block, items[nr]) > end_off) {
+		reason = "nr_items out of range";
+		goto out;
+	}
+
+	if (bad_avl_node_off(bt->item_root.node, nr)) {
+		reason = "item_root node off";
+		goto out;
+	}
+
+	tot = 0;
+	first_val = end_off;
+
+	for (i = 0; i < le16_to_cpu(bt->nr_items); i++) {
+		item = &bt->items[i];
+
+		if (bad_avl_node_off(item->node.parent, nr) ||
+		    bad_avl_node_off(item->node.left, nr) ||
+		    bad_avl_node_off(item->node.right, nr)) {
+			reason = "item node off";
+			goto out;
+		}
+
+		if (scoutfs_key_compare(&item->key, start) < 0 ||
+		    scoutfs_key_compare(&item->key, end) > 0) {
+			reason = "item key out of parent range";
+			goto out;
+		}
+
+		if (level == 0 &&
+		    leaf_item_hash_search(bt, &item->key) != item) {
+			reason = "item not found in hash";
+			goto out;
+		}
+
+		if (le16_to_cpu(item->val_len) > SCOUTFS_BTREE_MAX_VAL_LEN) {
+			reason = "bad item val len";
+			goto out;
+		}
+
+		if (((int)le16_to_cpu(item->val_off) +
+		     le16_to_cpu(item->val_len) +
+		     SCOUTFS_BTREE_VAL_OWNER_BYTES) > end_off) {
+			reason = "item value outside valid";
+			goto out;
+		}
+
+		tot += sizeof(struct scoutfs_btree_item) +
+		       le16_to_cpu(item->val_len);
+
+		if (item->val_len != 0) {
+			owner = off_ptr(bt, le16_to_cpu(item->val_off) +
+					le16_to_cpu(item->val_len));
+			if (get_unaligned_le16(owner) !=
+			    offsetof(struct scoutfs_btree_block, items[i])) {
+				reason = "item value owner not item off";
+				goto out;
+			}
+
+			tot += SCOUTFS_BTREE_VAL_OWNER_BYTES;
+			first_val = min_t(int, first_val,
+					  le16_to_cpu(item->val_off));
+		}
+	}
+
+	for (i = 0; level == 0 && i < SCOUTFS_BTREE_LEAF_ITEM_HASH_NR; i++) {
+		if (buckets[i] == 0)
+			continue;
+
+		if (bad_item_off(le16_to_cpu(buckets[i]), nr)) {
+			reason = "bad item hash offset";
+			goto out;
+		}
+
+		hashed++;
+	}
+
+	if (level == 0 && hashed != nr) {
+		reason = "set hash buckets not nr";
+		goto out;
+	}
+
+	if (le16_to_cpu(bt->total_item_bytes) != tot) {
+		reason = "total_item_bytes not sum of items";
+		goto out;
+	}
+
+	/* value deletion doesn't merge with adjacent fragmented freed vals */
+	if (le16_to_cpu(bt->mid_free_len) >
+	    (first_val - offsetof(struct scoutfs_btree_block, items[nr]))) {
+		reason = "mid_free_len too large";
+		goto out;
+	}
+out:
+	if (!reason)
+		return;
+
+	printk("found btree block inconsistency: %s\n", reason);
+	printk("start "SK_FMT" end "SK_FMT"\n", SK_ARG(start), SK_ARG(end));
+	printk("calced: i %u tot %u hashed %u fv %u\n",
+	       i, tot, hashed, first_val);
+
+	printk("hdr: crc %x magic %x fsid %llx seq %llx blkno %llu\n", 
+		le32_to_cpu(bt->hdr.crc), le32_to_cpu(bt->hdr.magic),
+		le64_to_cpu(bt->hdr.fsid), le64_to_cpu(bt->hdr.seq),
+		le64_to_cpu(bt->hdr.blkno));
+	printk("item_root: node %u\n", le16_to_cpu(bt->item_root.node));
+	printk("nr %u tib %u mfl %u lfo %u lfl %u lvl %u\n",
+		le16_to_cpu(bt->nr_items), le16_to_cpu(bt->total_item_bytes),
+		le16_to_cpu(bt->mid_free_len), le16_to_cpu(bt->last_free_off),
+		le16_to_cpu(bt->last_free_len), bt->level);
+
+	for (i = 0; i < le16_to_cpu(bt->nr_items); i++) {
+		item = &bt->items[i];
+		printk(" %u: n %u,%u,%u,%u k "SK_FMT" vo %u vl %u\n",
+		       i, le16_to_cpu(item->node.parent),
+		       le16_to_cpu(item->node.left),
+		       le16_to_cpu(item->node.right), item->node.height,
+		       SK_ARG(&item->key), le16_to_cpu(item->val_off),
+		       le16_to_cpu(item->val_len));
+	}
+
+	BUG();
+}
+
 /*
  * Return the leaf block that should contain the given key.  The caller
  * is responsible for searching the leaf block and performing their
@@ -1031,6 +1211,8 @@ static int btree_walk(struct super_block *sb,
 	struct scoutfs_avl_node *next_node;
 	struct scoutfs_avl_node *node;
 	struct scoutfs_btree_ref *ref;
+	struct scoutfs_key start;
+	struct scoutfs_key end;
 	unsigned int level;
 	unsigned int nr;
 	int ret;
@@ -1047,6 +1229,8 @@ restart:
 	scoutfs_block_put(sb, bl);
 	bl = NULL;
 	bt = NULL;
+	scoutfs_key_set_zeros(&start);
+	scoutfs_key_set_ones(&end);
 	level = root->height;
 	ret = 0;
 
@@ -1072,6 +1256,9 @@ restart:
 		if (ret)
 			break;
 		bt = bl->data;
+
+		if (0)
+			verify_btree_block(bt, level, &start, &end);
 
 		/* XXX more aggressive block verification, before ref updates? */
 		if (bt->level != level) {
@@ -1139,6 +1326,13 @@ restart:
 			   (prev = prev_item(bt, item))) {
 			*iter_key = *item_key(prev);
 		}
+
+		/* possible range of keys in referenced child block */
+		if ((prev = prev_item(bt, item))) {
+			start = *item_key(prev);
+			scoutfs_key_inc(&start);
+		}
+		end = *item_key(item);
 
 		scoutfs_block_put(sb, par_bl);
 		par_bl = bl;

@@ -1252,6 +1252,9 @@ restart:
 	ref = &root->ref;
 
 	while(level-- > 0) {
+
+		trace_scoutfs_btree_walk(sb, root, key, flags, level, ref);
+
 		ret = get_ref_block(sb, alloc, wri, flags, ref, &bl);
 		if (ret)
 			break;

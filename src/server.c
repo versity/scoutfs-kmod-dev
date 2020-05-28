@@ -122,8 +122,12 @@ static void stop_server(struct server_info *server)
  * blocks which can be merged back into avail.  We reference the stable
  * freed tree in the super because the server allocator's freed tree is
  * going to be added to as blocks are freed during the merge.
+ *
+ * This is exported for server components isolated in their own files
+ * (lock_server) and which are not called directly by the server core
+ * (async timeout work).
  */
-static int hold_commit(struct super_block *sb)
+int scoutfs_server_hold_commit(struct super_block *sb)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_SERVER_INFO(sb, server);
@@ -178,7 +182,7 @@ static int hold_commit(struct super_block *sb)
  * will race to make their changes and they'll all be applied by the
  * next commit after that.
  */
-static int apply_commit(struct super_block *sb, int err)
+int scoutfs_server_apply_commit(struct super_block *sb, int err)
 {
 	DECLARE_SERVER_INFO(sb, server);
 	struct commit_waiter cw;
@@ -299,7 +303,7 @@ static int server_alloc_inodes(struct super_block *sb,
 
 	memcpy(&lecount, arg, arg_len);
 
-	ret = hold_commit(sb);
+	ret = scoutfs_server_hold_commit(sb);
 	if (ret)
 		goto out;
 
@@ -309,7 +313,7 @@ static int server_alloc_inodes(struct super_block *sb,
 	le64_add_cpu(&super->next_ino, nr);
 	spin_unlock(&sbi->next_ino_lock);
 
-	ret = apply_commit(sb, ret);
+	ret = scoutfs_server_apply_commit(sb, ret);
 	if (ret == 0) {
 		ial.ino = cpu_to_le64(ino);
 		ial.nr = cpu_to_le64(nr);
@@ -348,7 +352,7 @@ static int server_get_log_trees(struct super_block *sb,
 		goto out;
 	}
 
-	ret = hold_commit(sb);
+	ret = scoutfs_server_hold_commit(sb);
 	if (ret)
 		goto out;
 
@@ -433,7 +437,7 @@ static int server_get_log_trees(struct super_block *sb,
 unlock:
 	mutex_unlock(&server->logs_mutex);
 
-	ret = apply_commit(sb, ret);
+	ret = scoutfs_server_apply_commit(sb, ret);
 	if (ret == 0) {
 		lt.meta_avail = ltv.meta_avail;
 		lt.meta_freed = ltv.meta_freed;
@@ -474,7 +478,7 @@ static int server_commit_log_trees(struct super_block *sb,
 	}
 	lt = arg;
 
-	ret = hold_commit(sb);
+	ret = scoutfs_server_hold_commit(sb);
 	if (ret < 0) {
 		scoutfs_err(sb, "server error preparing commit: %d", ret);
 		goto out;
@@ -530,7 +534,7 @@ static int server_commit_log_trees(struct super_block *sb,
 unlock:
 	mutex_unlock(&server->logs_mutex);
 
-	ret = apply_commit(sb, ret);
+	ret = scoutfs_server_apply_commit(sb, ret);
 	if (ret < 0)
 		scoutfs_err(sb, "server error commiting client logs: %d", ret);
 out:
@@ -659,7 +663,7 @@ static int server_advance_seq(struct super_block *sb,
 	}
 	memcpy(&their_seq, arg, sizeof(their_seq));
 
-	ret = hold_commit(sb);
+	ret = scoutfs_server_hold_commit(sb);
 	if (ret)
 		goto out;
 
@@ -690,7 +694,7 @@ static int server_advance_seq(struct super_block *sb,
 				   &tsk, sizeof(tsk), NULL, 0);
 out:
 	up_write(&server->seq_rwsem);
-	ret = apply_commit(sb, ret);
+	ret = scoutfs_server_apply_commit(sb, ret);
 
 	return scoutfs_net_response(sb, conn, cmd, id, ret,
 				    &next_seq, sizeof(next_seq));
@@ -1022,7 +1026,7 @@ static int server_greeting(struct super_block *sb,
 	}
 
 	if (gr->server_term == 0) {
-		ret = hold_commit(sb);
+		ret = scoutfs_server_hold_commit(sb);
 		if (ret < 0)
 			goto send_err;
 
@@ -1035,7 +1039,7 @@ static int server_greeting(struct super_block *sb,
 					    le64_to_cpu(gr->flags));
 		mutex_unlock(&server->farewell_mutex);
 
-		ret = apply_commit(sb, ret);
+		ret = scoutfs_server_apply_commit(sb, ret);
 		queue_work(server->wq, &server->farewell_work);
 	} else {
 		umb = gr->unmount_barrier;
@@ -1074,13 +1078,13 @@ send_err:
 	if (le64_to_cpu(gr->server_term) != server->term) {
 
 		/* we're now doing two commits per greeting, not great */
-		ret = hold_commit(sb);
+		ret = scoutfs_server_hold_commit(sb);
 		if (ret)
 			goto out;
 
 		ret = scoutfs_lock_server_greeting(sb, le64_to_cpu(gr->rid),
 						   gr->server_term != 0);
-		ret = apply_commit(sb, ret);
+		ret = scoutfs_server_apply_commit(sb, ret);
 		if (ret)
 			goto out;
 	}
@@ -1224,7 +1228,7 @@ static void farewell_worker(struct work_struct *work)
 
 	/* process and send farewell responses */
 	list_for_each_entry_safe(fw, tmp, &send, entry) {
-		ret = hold_commit(sb);
+		ret = scoutfs_server_hold_commit(sb);
 		if (ret)
 			goto out;
 
@@ -1233,20 +1237,20 @@ static void farewell_worker(struct work_struct *work)
 		      reclaim_log_trees(sb, fw->rid) ?:
 		      delete_mounted_client(sb, fw->rid);
 
-		ret = apply_commit(sb, ret);
+		ret = scoutfs_server_apply_commit(sb, ret);
 		if (ret)
 			goto out;
 	}
 
 	/* update the unmount barrier if we deleted all voting clients */
 	if (deleted && nr_mounted == 0) {
-		ret = hold_commit(sb);
+		ret = scoutfs_server_hold_commit(sb);
 		if (ret)
 			goto out;
 
 		le64_add_cpu(&super->unmount_barrier, 1);
 
-		ret = apply_commit(sb, ret);
+		ret = scoutfs_server_apply_commit(sb, ret);
 		if (ret)
 			goto out;
 	}

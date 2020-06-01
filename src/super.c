@@ -242,6 +242,7 @@ int scoutfs_read_super(struct super_block *sb,
 {
 	struct scoutfs_super_block *super;
 	__le32 calc;
+	u64 blkno;
 	int ret;
 
 	super = kmalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
@@ -290,6 +291,51 @@ int scoutfs_read_super(struct super_block *sb,
 	    super->quorum_count > SCOUTFS_QUORUM_MAX_COUNT) {
 		scoutfs_err(sb, "super block has invalid quorum count %u, must be > 0 and <= %u",
 			    super->quorum_count, SCOUTFS_QUORUM_MAX_COUNT);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	blkno = (SCOUTFS_QUORUM_BLKNO + SCOUTFS_QUORUM_BLOCKS) >>
+		SCOUTFS_BLOCK_SM_LG_SHIFT;
+	if (le64_to_cpu(super->first_meta_blkno) < blkno) {
+		scoutfs_err(sb, "super block first meta blkno %llu is within quorum blocks",
+			le64_to_cpu(super->first_meta_blkno));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (le64_to_cpu(super->first_meta_blkno) >
+	    le64_to_cpu(super->last_meta_blkno)) {
+		scoutfs_err(sb, "super block first meta blkno %llu is greater than last meta blkno %llu",
+			le64_to_cpu(super->first_meta_blkno),
+			le64_to_cpu(super->last_meta_blkno));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	blkno = (le64_to_cpu(super->last_meta_blkno) + 1) <<
+		SCOUTFS_BLOCK_SM_LG_SHIFT;
+	if (le64_to_cpu(super->first_data_blkno) < blkno) {
+		scoutfs_err(sb, "super block first data blkno %llu is within last meta blkno %llu",
+			le64_to_cpu(super->first_data_blkno), blkno);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (le64_to_cpu(super->first_data_blkno) >
+	    le64_to_cpu(super->last_data_blkno)) {
+		scoutfs_err(sb, "super block first data blkno %llu is greater than last data blkno %llu",
+			le64_to_cpu(super->first_data_blkno),
+			le64_to_cpu(super->last_data_blkno));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	blkno = (i_size_read(sb->s_bdev->bd_inode) >>
+		 SCOUTFS_BLOCK_SM_SHIFT) - 1;
+	if (le64_to_cpu(super->last_data_blkno) > blkno) {
+		scoutfs_err(sb, "super block last data blkno %llu is outsite device size last blkno %llu",
+			le64_to_cpu(super->last_data_blkno), blkno);
 		ret = -EINVAL;
 		goto out;
 	}

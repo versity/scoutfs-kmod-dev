@@ -144,7 +144,8 @@ static struct block_private *block_alloc(struct super_block *sb, u64 blkno)
 	if (!bp)
 		goto out;
 
-	bp->page = alloc_pages(GFP_NOFS, SCOUTFS_BLOCK_LG_PAGE_ORDER);
+	bp->page = alloc_pages(GFP_NOFS | __GFP_NOWARN,
+			       SCOUTFS_BLOCK_LG_PAGE_ORDER);
 	if (bp->page) {
 		scoutfs_inc_counter(sb, block_cache_alloc_page_order);
 		set_bit(BLOCK_BIT_PAGE_ALLOC, &bp->bits);

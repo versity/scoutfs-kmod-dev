@@ -24,6 +24,7 @@
 #include "block.h"
 #include "forest.h"
 #include "hash.h"
+#include "srch.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
 
@@ -65,6 +66,10 @@ struct forest_info {
 	struct scoutfs_radix_allocator *alloc;
 	struct scoutfs_block_writer *wri;
 	struct scoutfs_log_trees our_log;
+
+	struct mutex srch_mutex;
+	struct scoutfs_srch_file srch_file;
+	struct scoutfs_block *srch_bl;
 };
 
 #define DECLARE_FOREST_INFO(sb, name) \
@@ -1457,6 +1462,27 @@ void scoutfs_forest_free_batch(struct super_block *sb, struct list_head *list)
 {
 }
 
+/*
+ * Add a srch entry to the current transaction's log file.  It will be
+ * committed in a transaction along with the dirty btree blocks that
+ * hold dirty items.  The srch entries aren't governed by lock
+ * consistency.
+ *
+ * We lock here because of the shared file and block reference.
+ * Typically these calls are a quick appending to the end of the block,
+ * but they will allocate or cow blocks every few thousand calls.
+ */
+int scoutfs_forest_srch_add(struct super_block *sb, u64 hash, u64 ino, u64 id)
+{
+	DECLARE_FOREST_INFO(sb, finf);
+	int ret;
+
+	mutex_lock(&finf->srch_mutex);
+	ret = scoutfs_srch_add(sb, finf->alloc, finf->wri, &finf->srch_file,
+			       &finf->srch_bl, hash, ino, id);
+	mutex_unlock(&finf->srch_mutex);
+	return ret;
+}
 
 /*
  * This is called from transactions as a new transaction opens and is
@@ -1480,6 +1506,9 @@ void scoutfs_forest_init_btrees(struct super_block *sb,
 	finf->our_log.bloom_ref = lt->bloom_ref;
 	finf->our_log.rid = lt->rid;
 	finf->our_log.nr = lt->nr;
+	finf->srch_file = lt->srch_file;
+	WARN_ON_ONCE(finf->srch_bl); /* commiting should have put the block */
+	finf->srch_bl = NULL;
 
 	up_write(&finf->rwsem);
 }
@@ -1497,6 +1526,10 @@ void scoutfs_forest_get_btrees(struct super_block *sb,
 
 	lt->item_root = finf->our_log.item_root;
 	lt->bloom_ref = finf->our_log.bloom_ref;
+	lt->srch_file = finf->srch_file;
+
+	scoutfs_block_put(sb, finf->srch_bl);
+	finf->srch_bl = NULL;
 
 	trace_scoutfs_forest_prepare_commit(sb, &lt->item_root.ref,
 					    &lt->bloom_ref);
@@ -1516,6 +1549,7 @@ int scoutfs_forest_setup(struct super_block *sb)
 
 	/* the finf fields will be setup as we open a transaction */
 	init_rwsem(&finf->rwsem);
+	mutex_init(&finf->srch_mutex);
 
 	sbi->forest_info = finf;
 	ret = 0;
@@ -1532,6 +1566,7 @@ void scoutfs_forest_destroy(struct super_block *sb)
 	struct forest_info *finf = SCOUTFS_SB(sb)->forest_info;
 
 	if (finf) {
+		scoutfs_block_put(sb, finf->srch_bl);
 		kfree(finf);
 		sbi->forest_info = NULL;
 	}

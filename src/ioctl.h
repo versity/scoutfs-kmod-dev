@@ -296,34 +296,57 @@ struct scoutfs_ioctl_listxattr_hidden {
 
 /*
  * Return the inode numbers of inodes which might contain the given
- * named xattr.  The inode may not have a set xattr with that name, the
- * caller must check the returned inodes to see if they match.
+ * xattr.  The inode may not have a set xattr with that name, the caller
+ * must check the returned inodes to see if they match.
  *
  * @next_ino: The next inode number that could be returned.  Initialized
  * to 0 when first searching and set to one past the last inode number
  * returned to continue searching.
- * @name_ptr: The address of the name of the xattr to search for.  It does
- * not need to be null terminated.
- * @inodes_ptr: The address of the array of uint64_t inode numbers in which
- * to store inode numbers that may contain the xattr.  EFAULT may be returned
- * if this address is not naturally aligned.
- * @name_bytes: The number of non-null bytes found in the name at name_ptr.
+ * @last_ino: The last inode number that could be returned.  U64_MAX to
+ * find all inodes.
+ * @name_ptr: The address of the name of the xattr to search for.  It is
+ * not null terminated.
+ * @inodes_ptr: The address of the array of uint64_t inode numbers in
+ * which to store inode numbers that may contain the xattr.  EFAULT may
+ * be returned if this address is not naturally aligned.
+ * @output_flags: Set as success is returned.  If an error is returned
+ * then this field is undefined and should not be read.
  * @nr_inodes: The number of elements in the array found at inodes_ptr.
+ * @name_bytes: The number of non-null bytes found in the name at
+ * name_ptr.
  *
  * This requires the CAP_SYS_ADMIN capability and will return -EPERM if
  * it's not granted.
+ *
+ * The number of inode numbers stored in the inodes_ptr array is
+ * returned.  If nr_inodes is 0 or last_ino is less than next_ino then 0
+ * will be immediately returned.
+ *
+ * Partial progress can be returned if an error is hit or if nr_inodes
+ * was larger than the internal limit on the number of inodes returned
+ * in a search pass.  The _END output flag is set if all the results
+ * including last_ino were searched in this pass.
+ *
+ * It's valuable to provide a large inodes array so that all the results
+ * can be found in one search pass and _END can be set.  There are
+ * significant constant costs for performing each search pass.
  */
-struct scoutfs_ioctl_find_xattrs {
+struct scoutfs_ioctl_search_xattrs {
 	__u64 next_ino;
+	__u64 last_ino;
 	__u64 name_ptr;
 	__u64 inodes_ptr;
+	__u64 output_flags;
+	__u64 nr_inodes;
 	__u16 name_bytes;
-	__u16 nr_inodes;
-	__u8 _pad[4];
+	__u8 _pad[6];
 };
 
-#define SCOUTFS_IOC_FIND_XATTRS _IOR(SCOUTFS_IOCTL_MAGIC, 9, \
-				     struct scoutfs_ioctl_find_xattrs)
+/* set in output_flags if returned inodes reached last_ino */
+#define SCOUTFS_SEARCH_XATTRS_OFLAG_END (1ULL << 0)
+
+#define SCOUTFS_IOC_SEARCH_XATTRS _IOR(SCOUTFS_IOCTL_MAGIC, 9, \
+				     struct scoutfs_ioctl_search_xattrs)
 
 /*
  * Give the user information about the filesystem.

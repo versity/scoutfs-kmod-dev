@@ -210,6 +210,28 @@ int scoutfs_client_lock_recover_response(struct super_block *sb, u64 net_id,
 				    net_id, 0, nlr, bytes);
 }
 
+/* Find srch files that need to be compacted. */
+int scoutfs_client_srch_get_compact(struct super_block *sb,
+				    struct scoutfs_srch_compact_input *scin)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return scoutfs_net_sync_request(sb, client->conn,
+					SCOUTFS_NET_CMD_SRCH_GET_COMPACT,
+					NULL, 0, scin, sizeof(*scin));
+}
+
+/* Commit the result of a srch file compaction. */
+int scoutfs_client_srch_commit_compact(struct super_block *sb,
+				struct scoutfs_srch_compact_result *scres)
+{
+	struct client_info *client = SCOUTFS_SB(sb)->client_info;
+
+	return scoutfs_net_sync_request(sb, client->conn,
+					SCOUTFS_NET_CMD_SRCH_COMMIT_COMPACT,
+					scres, sizeof(*scres), NULL, 0);
+}
+
 /* The client is receiving a invalidation request from the server */
 static int client_lock(struct super_block *sb,
 		       struct scoutfs_net_connection *conn, u8 cmd, u64 id,

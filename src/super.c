@@ -41,6 +41,7 @@
 #include "sysfs.h"
 #include "quorum.h"
 #include "forest.h"
+#include "srch.h"
 #include "scoutfs_trace.h"
 
 static struct dentry *scoutfs_debugfs_root;
@@ -178,6 +179,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	sbi->shutdown = true;
 
 	scoutfs_data_destroy(sb);
+	scoutfs_srch_destroy(sb);
 
 	scoutfs_unlock(sb, sbi->rid_lock, SCOUTFS_LOCK_WRITE);
 	sbi->rid_lock = NULL;
@@ -452,7 +454,8 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_client_setup(sb) ?:
 	      scoutfs_lock_rid(sb, SCOUTFS_LOCK_WRITE, 0, sbi->rid,
 				   &sbi->rid_lock) ?:
-	      scoutfs_trans_get_log_trees(sb);
+	      scoutfs_trans_get_log_trees(sb) ?:
+	      scoutfs_srch_setup(sb);
 	if (ret)
 		goto out;
 

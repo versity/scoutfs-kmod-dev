@@ -109,6 +109,24 @@
 	EXPAND_COUNTER(server_commit_prepare)			\
 	EXPAND_COUNTER(server_commit_queue)			\
 	EXPAND_COUNTER(server_commit_worker)			\
+	EXPAND_COUNTER(srch_add_entry)				\
+	EXPAND_COUNTER(srch_compact_dirty_block)		\
+	EXPAND_COUNTER(srch_compact_entry)			\
+	EXPAND_COUNTER(srch_compact_flush)			\
+	EXPAND_COUNTER(srch_compact_free_block)			\
+	EXPAND_COUNTER(srch_compact_log_page)			\
+	EXPAND_COUNTER(srch_compact_removed_entry)		\
+	EXPAND_COUNTER(srch_inconsistent_ref)			\
+	EXPAND_COUNTER(srch_rotate_log)				\
+	EXPAND_COUNTER(srch_search_log)				\
+	EXPAND_COUNTER(srch_search_log_block)			\
+	EXPAND_COUNTER(srch_search_retry_empty)			\
+	EXPAND_COUNTER(srch_search_sorted)			\
+	EXPAND_COUNTER(srch_search_sorted_block)		\
+	EXPAND_COUNTER(srch_search_stale_eio)			\
+	EXPAND_COUNTER(srch_search_stale_retry)			\
+	EXPAND_COUNTER(srch_search_xattrs)			\
+	EXPAND_COUNTER(srch_read_stale)				\
 	EXPAND_COUNTER(trans_commit_data_alloc_low)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\
 	EXPAND_COUNTER(trans_commit_full)			\

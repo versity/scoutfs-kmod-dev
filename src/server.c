@@ -36,6 +36,7 @@
 #include "endian_swap.h"
 #include "quorum.h"
 #include "trans.h"
+#include "srch.h"
 
 /*
  * Every active mount can act as the server that listens on a net
@@ -84,6 +85,7 @@ struct server_info {
 	struct scoutfs_block_writer wri;
 
 	struct mutex logs_mutex;
+	struct mutex srch_mutex;
 
 	/* stable versions stored from commits, given in locks and rpcs */
 	seqcount_t roots_seqcount;
@@ -238,12 +240,14 @@ void scoutfs_server_get_roots(struct super_block *sb,
 
 static void set_roots(struct server_info *server,
 		      struct scoutfs_btree_root *fs_root,
-		      struct scoutfs_btree_root *logs_root)
+		      struct scoutfs_btree_root *logs_root,
+		      struct scoutfs_btree_root *srch_root)
 {
 	preempt_disable();
 	write_seqcount_begin(&server->roots_seqcount);
 	server->roots.fs_root = *fs_root;
 	server->roots.logs_root = *logs_root;
+	server->roots.srch_root = *srch_root;
 	write_seqcount_end(&server->roots_seqcount);
 	preempt_enable();
 }
@@ -304,7 +308,8 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 	}
 
 	server->prepared_commit = false;
-	set_roots(server, &super->fs_root, &super->logs_root);
+	set_roots(server, &super->fs_root, &super->logs_root,
+		  &super->srch_root);
 	ret = 0;
 out:
 	node = llist_del_all(&server->commit_waiters);
@@ -475,6 +480,7 @@ unlock:
 		lt.bloom_ref = ltv.bloom_ref;
 		lt.data_avail = ltv.data_avail;
 		lt.data_freed = ltv.data_freed;
+		lt.srch_file = ltv.srch_file;
 		lt.rid = key.sklt_rid;
 		lt.nr = key.sklt_nr;
 	}
@@ -537,6 +543,16 @@ static int server_commit_log_trees(struct super_block *sb,
 			goto unlock;
 	}
 
+	/* try to rotate the srch log when big enough */
+	mutex_lock(&server->srch_mutex);
+	ret = scoutfs_srch_rotate_log(sb, &server->alloc, &server->wri,
+				      &super->srch_root, &lt->srch_file);
+	mutex_unlock(&server->srch_mutex);
+	if (ret < 0) {
+		scoutfs_err(sb, "server error, rotating srch log: %d", ret);
+		goto unlock;
+	}
+
 	update_free_blocks(&super->free_meta_blocks, &ltv.meta_avail,
 			   &lt->meta_avail);
 	update_free_blocks(&super->free_meta_blocks, &ltv.meta_freed,
@@ -552,6 +568,7 @@ static int server_commit_log_trees(struct super_block *sb,
 	ltv.bloom_ref = lt->bloom_ref;
 	ltv.data_avail = lt->data_avail;
 	ltv.data_freed = lt->data_freed;
+	ltv.srch_file = lt->srch_file;
 
 	ret = scoutfs_btree_update(sb, &server->alloc, &server->wri,
 				   &super->logs_root, &key, &ltv, sizeof(ltv));
@@ -970,6 +987,112 @@ int scoutfs_server_lock_recover_request(struct super_block *sb, u64 rid,
 					      NULL, NULL);
 }
 
+static int server_srch_get_compact(struct super_block *sb,
+				   struct scoutfs_net_connection *conn,
+				   u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	DECLARE_SERVER_INFO(sb, server);
+	u64 rid = scoutfs_net_client_rid(conn);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_srch_compact_input scin;
+	u64 blocks;
+	int ret;
+	int i;
+
+	memset(&scin, 0, sizeof(scin));
+	scoutfs_radix_root_init(sb, &scin.meta_avail, true);
+	scoutfs_radix_root_init(sb, &scin.meta_freed, true);
+
+	if (arg_len != 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = scoutfs_server_hold_commit(sb);
+	if (ret)
+		goto out;
+
+	mutex_lock(&server->srch_mutex);
+	ret = scoutfs_srch_get_compact(sb, &server->alloc, &server->wri,
+				       &super->srch_root, rid, &scin);
+	mutex_unlock(&server->srch_mutex);
+	if (ret == 0 && scin.nr == 0)
+		ret = -ENOENT;
+	if (ret < 0)
+		goto apply;
+
+	/* provide ~3x input blocks to allocate, write+delete+cow */
+	blocks = 0;
+	for (i = 0; i < scin.nr; i++)
+		blocks += le64_to_cpu(scin.sfl[i].blocks);
+	blocks *= 3;
+	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &scin.meta_avail, &server->alloc.avail,
+				  &server->alloc.avail, true, blocks);
+	if (ret < 0)
+		goto apply;
+
+	mutex_lock(&server->srch_mutex);
+	ret = scoutfs_srch_update_compact(sb, &server->alloc, &server->wri,
+					  &super->srch_root, rid, &scin);
+	mutex_unlock(&server->srch_mutex);
+
+apply:
+	ret = scoutfs_server_apply_commit(sb, ret);
+	WARN_ON_ONCE(ret < 0 && ret != -ENOENT); /* XXX leaked busy item */
+out:
+	return scoutfs_net_response(sb, conn, cmd, id, ret,
+				    &scin, sizeof(scin));
+}
+
+static int server_srch_commit_compact(struct super_block *sb,
+				      struct scoutfs_net_connection *conn,
+				      u8 cmd, u64 id, void *arg, u16 arg_len)
+{
+	DECLARE_SERVER_INFO(sb, server);
+	u64 rid = scoutfs_net_client_rid(conn);
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	struct scoutfs_super_block *super = &sbi->super;
+	struct scoutfs_srch_compact_result *scres;
+	struct scoutfs_radix_root av;
+	struct scoutfs_radix_root fr;
+	int ret;
+
+	scres = arg;
+	if (arg_len != sizeof(*scres)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = scoutfs_server_hold_commit(sb);
+	if (ret)
+		goto out;
+
+	mutex_lock(&server->srch_mutex);
+	ret = scoutfs_srch_commit_compact(sb, &server->alloc, &server->wri,
+					  &super->srch_root, rid, scres,
+					  &av, &fr);
+	mutex_unlock(&server->srch_mutex);
+	if (ret < 0) /* XXX very bad, leaks allocators */
+		goto apply;
+
+	/* XXX like all merges, doesn't reclaim allocator blocks themselves */
+
+	/* merge the client's allocators into freed, commit before reuse */
+	ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &server->alloc.freed, &av, &av, true,
+				  le64_to_cpu(av.ref.sm_total)) ?:
+	      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+				  &server->alloc.freed, &fr, &fr, true,
+				  le64_to_cpu(fr.ref.sm_total));
+apply:
+	ret = scoutfs_server_apply_commit(sb, ret);
+out:
+	WARN_ON(ret < 0); /* XXX leaks allocators */
+	return scoutfs_net_response(sb, conn, cmd, id, ret, NULL, 0);
+}
+
 static void init_mounted_client_key(struct scoutfs_key *key, u64 rid)
 {
 	*key = (struct scoutfs_key) {
@@ -1019,6 +1142,44 @@ static int delete_mounted_client(struct super_block *sb, u64 rid)
 				   &super->mounted_clients, &key);
 	if (ret == -ENOENT)
 		ret = 0;
+
+	return ret;
+}
+
+/*
+ * Remove all the busy items for srch compactions that the mount might
+ * have been responsible for and reclaim all their allocators.
+ */
+static int cancel_srch_compact(struct super_block *sb, u64 rid)
+{
+	DECLARE_SERVER_INFO(sb, server);
+	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_radix_root av;
+	struct scoutfs_radix_root fr;
+	int ret;
+
+	for (;;) {
+		mutex_lock(&server->srch_mutex);
+		ret = scoutfs_srch_cancel_compact(sb, &server->alloc,
+						  &server->wri,
+						  &super->srch_root, rid,
+						  &av, &fr);
+		mutex_unlock(&server->srch_mutex);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		ret = scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+					  &server->alloc.freed, &av, &av, true,
+					  le64_to_cpu(av.ref.sm_total)) ?:
+		      scoutfs_radix_merge(sb, &server->alloc, &server->wri,
+					  &server->alloc.freed, &fr, &fr, true,
+					  le64_to_cpu(fr.ref.sm_total));
+		if (WARN_ON_ONCE(ret < 0))
+			break;
+	}
 
 	return ret;
 }
@@ -1283,7 +1444,8 @@ static void farewell_worker(struct work_struct *work)
 		ret = scoutfs_lock_server_farewell(sb, fw->rid) ?:
 		      remove_trans_seq(sb, fw->rid) ?:
 		      reclaim_log_trees(sb, fw->rid) ?:
-		      delete_mounted_client(sb, fw->rid);
+		      delete_mounted_client(sb, fw->rid) ?:
+		      cancel_srch_compact(sb, fw->rid);
 
 		ret = scoutfs_server_apply_commit(sb, ret);
 		if (ret)
@@ -1397,6 +1559,8 @@ static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_GET_LAST_SEQ]		= server_get_last_seq,
 	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
 	[SCOUTFS_NET_CMD_LOCK]			= server_lock,
+	[SCOUTFS_NET_CMD_SRCH_GET_COMPACT]	= server_srch_get_compact,
+	[SCOUTFS_NET_CMD_SRCH_COMMIT_COMPACT]	= server_srch_commit_compact,
 	[SCOUTFS_NET_CMD_FAREWELL]		= server_farewell,
 };
 
@@ -1483,7 +1647,8 @@ static void scoutfs_server_worker(struct work_struct *work)
 	if (ret < 0)
 		goto shutdown;
 
-	set_roots(server, &super->fs_root, &super->logs_root);
+	set_roots(server, &super->fs_root, &super->logs_root,
+		  &super->srch_root);
 	scoutfs_radix_init_alloc(&server->alloc, &super->core_meta_avail,
 				 &super->core_meta_freed);
 	scoutfs_block_writer_init(sb, &server->wri);
@@ -1623,6 +1788,7 @@ int scoutfs_server_setup(struct super_block *sb)
 	INIT_LIST_HEAD(&server->farewell_requests);
 	INIT_WORK(&server->farewell_work, farewell_worker);
 	mutex_init(&server->logs_mutex);
+	mutex_init(&server->srch_mutex);
 	seqcount_init(&server->roots_seqcount);
 
 	server->wq = alloc_workqueue("scoutfs_server",

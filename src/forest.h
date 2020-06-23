@@ -38,6 +38,7 @@ int scoutfs_forest_delete_save(struct super_block *sb,
 int scoutfs_forest_restore(struct super_block *sb, struct list_head *list,
 			   struct scoutfs_lock *lock);
 void scoutfs_forest_free_batch(struct super_block *sb, struct list_head *list);
+int scoutfs_forest_srch_add(struct super_block *sb, u64 hash, u64 ino, u64 id);
 
 void scoutfs_forest_init_btrees(struct super_block *sb,
 				struct scoutfs_radix_allocator *alloc,

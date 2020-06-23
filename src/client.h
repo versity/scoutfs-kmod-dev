@@ -20,6 +20,10 @@ int scoutfs_client_lock_response(struct super_block *sb, u64 net_id,
 				struct scoutfs_net_lock *nl);
 int scoutfs_client_lock_recover_response(struct super_block *sb, u64 net_id,
 					 struct scoutfs_net_lock_recover *nlr);
+int scoutfs_client_srch_get_compact(struct super_block *sb,
+				    struct scoutfs_srch_compact_input *scin);
+int scoutfs_client_srch_commit_compact(struct super_block *sb,
+				struct scoutfs_srch_compact_result *scres);
 
 int scoutfs_client_setup(struct super_block *sb);
 void scoutfs_client_destroy(struct super_block *sb);

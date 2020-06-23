@@ -9,6 +9,8 @@
 #define SCOUTFS_BLOCK_MAGIC_BTREE	0xe597f96d
 #define SCOUTFS_BLOCK_MAGIC_BLOOM	0x31995604
 #define SCOUTFS_BLOCK_MAGIC_RADIX	0xebeb5e65
+#define SCOUTFS_BLOCK_MAGIC_SRCH_BLOCK	0x897e4a7d
+#define SCOUTFS_BLOCK_MAGIC_SRCH_PARENT	0xb23a2a05
 
 /*
  * The super block, quorum block, and file data allocation granularity
@@ -276,6 +278,93 @@ struct scoutfs_mounted_client_btree_val {
 #define SCOUTFS_MOUNTED_CLIENT_VOTER	(1 << 0)
 
 /*
+ * srch files are a contiguous run of blocks with compressed entries
+ * described by a dense parent radix.  The files can be stored in
+ * log_tree items when the files contain unsorted entries written by
+ * mounts during their transactions.  Sorted files of increasing size
+ * are kept in a btree off the super for searching and further
+ * compacting.
+ */
+struct scoutfs_srch_entry {
+	__le64 hash;
+	__le64 ino;
+	__le64 id;
+} __packed;
+
+#define SCOUTFS_SRCH_ENTRY_MAX_BYTES	(2 + (sizeof(__u64) * 3))
+
+struct scoutfs_srch_ref {
+	__le64 blkno;
+	__le64 seq;
+} __packed;
+
+struct scoutfs_srch_file {
+	struct scoutfs_srch_entry first;
+	struct scoutfs_srch_entry last;
+	__le64 blocks;
+	__le64 entries;
+	struct scoutfs_srch_ref ref;
+	__u8 height;
+} __packed;
+
+struct scoutfs_srch_parent {
+	struct scoutfs_block_header hdr;
+	struct scoutfs_srch_ref refs[0];
+} __packed;
+
+#define SCOUTFS_SRCH_PARENT_REFS				\
+	((SCOUTFS_BLOCK_LG_SIZE -				\
+	  offsetof(struct scoutfs_srch_parent, refs)) /		\
+	 sizeof(struct scoutfs_srch_ref))
+
+struct scoutfs_srch_block {
+	struct scoutfs_block_header hdr;
+	struct scoutfs_srch_entry first;
+	struct scoutfs_srch_entry last;
+	struct scoutfs_srch_entry tail;
+	__le32 entry_nr;
+	__le32 entry_bytes;
+	__u8 entries[0];
+} __packed;
+
+/*
+ * Decoding loads final small deltas with full __u64 loads.  Rather than
+ * check the size before each load we stop coding entries past the point
+ * where a full size entry could overflow the block.  A final entry can
+ * start at this byte count and consume the rest of the block, though
+ * its unlikely.
+ */
+#define SCOUTFS_SRCH_BLOCK_SAFE_BYTES					\
+	(SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_srch_block) -	\
+	 SCOUTFS_SRCH_ENTRY_MAX_BYTES)
+
+#define SCOUTFS_SRCH_LOG_BLOCK_LIMIT	(1024 * 1024 / SCOUTFS_BLOCK_LG_SIZE)
+#define SCOUTFS_SRCH_COMPACT_ORDER	3
+#define SCOUTFS_SRCH_COMPACT_NR		(1 << SCOUTFS_SRCH_COMPACT_ORDER)
+
+struct scoutfs_srch_compact_input {
+	struct scoutfs_radix_root meta_avail;
+	struct scoutfs_radix_root meta_freed;
+	__le64 id;
+	__u8 nr;
+	__u8 flags;
+	struct scoutfs_srch_file sfl[SCOUTFS_SRCH_COMPACT_NR];
+} __packed;
+
+struct scoutfs_srch_compact_result {
+	struct scoutfs_radix_root meta_avail;
+	struct scoutfs_radix_root meta_freed;
+	__le64 id;
+	__u8 flags;
+	struct scoutfs_srch_file sfl;
+} __packed;
+
+/* files are insorted logs */
+#define SCOUTFS_SRCH_COMPACT_FLAG_LOG (1 << 0)
+/* compaction failed, release inputs */
+#define SCOUTFS_SRCH_COMPACT_FLAG_ERROR (1 << 1)
+
+/*
  * XXX I imagine we should rename these now that they've evolved to track
  * all the btrees that clients use during a transaction.  It's not just
  * about item logs, it's about clients making changes to trees.
@@ -287,6 +376,7 @@ struct scoutfs_log_trees {
 	struct scoutfs_btree_ref bloom_ref;
 	struct scoutfs_radix_root data_avail;
 	struct scoutfs_radix_root data_freed;
+	struct scoutfs_srch_file srch_file;
 	__le64 rid;
 	__le64 nr;
 } __packed;
@@ -298,6 +388,7 @@ struct scoutfs_log_trees_val {
 	struct scoutfs_btree_ref bloom_ref;
 	struct scoutfs_radix_root data_avail;
 	struct scoutfs_radix_root data_freed;
+	struct scoutfs_srch_file srch_file;
 } __packed;
 
 struct scoutfs_log_item_value {
@@ -348,6 +439,7 @@ struct scoutfs_bloom_block {
 #define SCOUTFS_LOCK_CLIENTS_ZONE		7
 #define SCOUTFS_TRANS_SEQ_ZONE			8
 #define SCOUTFS_MOUNTED_CLIENT_ZONE		9
+#define SCOUTFS_SRCH_ZONE			10
 
 /* inode index zone */
 #define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	1
@@ -371,6 +463,11 @@ struct scoutfs_bloom_block {
 
 /* lock zone, only ever found in lock ranges, never in persistent items */
 #define SCOUTFS_RENAME_TYPE			1
+
+/* srch zone, only in server btrees */
+#define SCOUTFS_SRCH_LOG_TYPE		1
+#define SCOUTFS_SRCH_BLOCKS_TYPE	2
+#define SCOUTFS_SRCH_BUSY_TYPE		3
 
 /*
  * The extents that map blocks in a fixed-size logical region of a file
@@ -496,6 +593,7 @@ struct scoutfs_super_block {
 	struct scoutfs_btree_root lock_clients;
 	struct scoutfs_btree_root trans_seqs;
 	struct scoutfs_btree_root mounted_clients;
+	struct scoutfs_btree_root srch_root;
 } __packed;
 
 #define SCOUTFS_ROOT_INO 1
@@ -688,6 +786,8 @@ enum {
 	SCOUTFS_NET_CMD_STATFS,
 	SCOUTFS_NET_CMD_LOCK,
 	SCOUTFS_NET_CMD_LOCK_RECOVER,
+	SCOUTFS_NET_CMD_SRCH_GET_COMPACT,
+	SCOUTFS_NET_CMD_SRCH_COMMIT_COMPACT,
 	SCOUTFS_NET_CMD_FAREWELL,
 	SCOUTFS_NET_CMD_UNKNOWN,
 };
@@ -734,6 +834,7 @@ struct scoutfs_net_statfs {
 struct scoutfs_net_roots {
 	struct scoutfs_btree_root fs_root;
 	struct scoutfs_btree_root logs_root;
+	struct scoutfs_btree_root srch_root;
 } __packed;
 
 struct scoutfs_net_lock {

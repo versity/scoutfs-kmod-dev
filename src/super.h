@@ -25,6 +25,7 @@ struct options_sb_info;
 struct net_info;
 struct block_info;
 struct forest_info;
+struct srch_info;
 
 struct scoutfs_sb_info {
 	struct super_block *sb;
@@ -44,6 +45,7 @@ struct scoutfs_sb_info {
 	struct quorum_info *quorum_info;
 	struct block_info *block_info;
 	struct forest_info *forest_info;
+	struct srch_info *srch_info;
 
 	wait_queue_head_t trans_hold_wq;
 	struct task_struct *trans_task;

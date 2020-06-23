@@ -96,11 +96,11 @@ static int unknown_prefix(const char *name)
 
 struct prefix_tags {
 	unsigned long hide:1,
-		      indx:1;
+		      srch:1;
 };
 
 #define HIDE_TAG	"hide."
-#define INDX_TAG	"indx."
+#define SRCH_TAG	"srch."
 #define TAG_LEN		(sizeof(HIDE_TAG) - 1)
 
 static int parse_tags(const char *name, unsigned int name_len,
@@ -120,8 +120,8 @@ static int parse_tags(const char *name, unsigned int name_len,
 		if (!strncmp(name, HIDE_TAG, TAG_LEN)) {
 			if (++tgs->hide == 0)
 				return -EINVAL;
-		} else if (!strncmp(name, INDX_TAG, TAG_LEN)) {
-			if (++tgs->indx == 0)
+		} else if (!strncmp(name, SRCH_TAG, TAG_LEN)) {
+			if (++tgs->srch == 0)
 				return -EINVAL;
 		} else {
 			/* only reason to use scoutfs. is tags */
@@ -412,19 +412,17 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct super_block *sb = inode->i_sb;
 	const u64 ino = scoutfs_ino(inode);
 	struct scoutfs_xattr *xat = NULL;
-	struct scoutfs_lock *indx_lock = NULL;
 	struct scoutfs_lock *lck = NULL;
 	size_t name_len = strlen(name);
-	struct scoutfs_key indx_key;
 	struct scoutfs_key key;
 	struct prefix_tags tgs;
-	bool undo_indx = false;
+	bool undo_srch = false;
 	LIST_HEAD(ind_locks);
 	LIST_HEAD(saved);
 	u8 found_parts;
 	unsigned int bytes;
 	u64 ind_seq;
-	u64 hash;
+	u64 hash = 0;
 	u64 id = 0;
 	int ret;
 	int err;
@@ -447,7 +445,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	if (parse_tags(name, name_len, &tgs) != 0)
 		return -EINVAL;
 
-	if ((tgs.hide || tgs.indx) && !capable(CAP_SYS_ADMIN))
+	if ((tgs.hide || tgs.srch) && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 	bytes = sizeof(struct scoutfs_xattr) + name_len + size;
@@ -498,14 +496,6 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		memcpy(&xat->name[xat->name_len], value, size);
 	}
 
-	if (tgs.indx && !(found_parts && value)) {
-		hash = scoutfs_hash64(name, name_len);
-		ret = scoutfs_lock_xattr_index(sb, SCOUTFS_LOCK_WRITE_ONLY, 0,
-					       hash, &indx_lock);
-		if (ret < 0)
-			goto unlock;
-	}
-
 retry:
 	ret = scoutfs_inode_index_start(sb, &ind_seq) ?:
 	      scoutfs_inode_index_prepare(sb, &ind_locks, inode, false) ?:
@@ -513,7 +503,7 @@ retry:
 						SIC_XATTR_SET(found_parts,
 							      value != NULL,
 							      name_len, size,
-							      tgs.indx));
+							      tgs.srch));
 	if (ret > 0)
 		goto retry;
 	if (ret)
@@ -523,20 +513,14 @@ retry:
 	if (ret < 0)
 		goto release;
 
-	if (tgs.indx && !(found_parts && value)) {
+	if (tgs.srch && !(found_parts && value)) {
 		if (found_parts)
 			id = le64_to_cpu(key.skx_id);
 		hash = scoutfs_hash64(name, name_len);
-		scoutfs_xattr_index_key(&indx_key, hash, ino, id);
-		if (value)
-			ret = scoutfs_forest_create_force(sb, &indx_key, NULL,
-							  indx_lock);
-		else
-			ret = scoutfs_forest_delete_force(sb, &indx_key,
-							  indx_lock);
+		ret = scoutfs_forest_srch_add(sb, hash, ino, id);
 		if (ret < 0)
 			goto release;
-		undo_indx = true;
+		undo_srch = true;
 	}
 
 	ret = 0;
@@ -559,13 +543,8 @@ retry:
 	ret = 0;
 
 release:
-	if (ret < 0 && undo_indx) {
-		if (value)
-			err = scoutfs_forest_delete_force(sb, &indx_key,
-							  indx_lock);
-		else
-			err = scoutfs_forest_create_force(sb, &indx_key, NULL,
-							  indx_lock);
+	if (ret < 0 && undo_srch) {
+		err = scoutfs_forest_srch_add(sb, hash, ino, id);
 		BUG_ON(err);
 	}
 
@@ -573,7 +552,6 @@ release:
 	scoutfs_inode_index_unlock(sb, &ind_locks);
 unlock:
 	up_write(&si->xattr_rwsem);
-	scoutfs_unlock(sb, indx_lock, SCOUTFS_LOCK_WRITE_ONLY);
 	scoutfs_unlock(sb, lck, SCOUTFS_LOCK_WRITE);
 out:
 	kfree(xat);
@@ -693,9 +671,7 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		       struct scoutfs_lock *lock)
 {
-	struct scoutfs_lock *indx_lock = NULL;
 	struct scoutfs_xattr *xat = NULL;
-	struct scoutfs_key indx_key;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
 	struct prefix_tags tgs;
@@ -729,17 +705,6 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		    parse_tags(xat->name, xat->name_len, &tgs) != 0)
 			memset(&tgs, 0, sizeof(tgs));
 
-		if (tgs.indx) {
-			hash = scoutfs_hash64(xat->name, xat->name_len);
-			scoutfs_xattr_index_key(&indx_key, hash, ino,
-						le64_to_cpu(key.skx_id));
-			ret = scoutfs_lock_xattr_index(sb,
-						      SCOUTFS_LOCK_WRITE_ONLY,
-						      0, hash, &indx_lock);
-			if (ret < 0)
-				break;
-		}
-
 		ret = scoutfs_hold_trans(sb, SIC_EXACT(2, 0));
 		if (ret < 0)
 			break;
@@ -749,9 +714,10 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		if (ret < 0)
 			break;
 
-		if (tgs.indx) {
-		       ret = scoutfs_forest_delete_force(sb, &indx_key,
-							 indx_lock);
+		if (tgs.srch) {
+			hash = scoutfs_hash64(xat->name, xat->name_len);
+			ret = scoutfs_forest_srch_add(sb, hash, ino,
+						      le64_to_cpu(key.skx_id));
 		       if (ret < 0)
 			       break;
 		}
@@ -759,15 +725,11 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		scoutfs_release_trans(sb);
 		release = false;
 
-		scoutfs_unlock(sb, indx_lock, SCOUTFS_LOCK_WRITE_ONLY);
-		indx_lock = NULL;
-
 		/* don't need to inc, next won't see deleted item */
 	}
 
 	if (release)
 		scoutfs_release_trans(sb);
-	scoutfs_unlock(sb, indx_lock, SCOUTFS_LOCK_WRITE_ONLY);
 	kfree(xat);
 out:
 	return ret;

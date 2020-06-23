@@ -34,6 +34,7 @@
 #include "trans.h"
 #include "xattr.h"
 #include "hash.h"
+#include "srch.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -759,18 +760,18 @@ out:
  * but we don't check that the callers xattr name contains the tag and
  * search for it regardless.
  */
-static long scoutfs_ioc_find_xattrs(struct file *file, unsigned long arg)
+static long scoutfs_ioc_search_xattrs(struct file *file, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
-	struct scoutfs_ioctl_find_xattrs __user *ufx = (void __user *)arg;
-	struct scoutfs_ioctl_find_xattrs fx;
-	struct scoutfs_lock *lock = NULL;
-	struct scoutfs_key last;
-	struct scoutfs_key key;
+	struct scoutfs_ioctl_search_xattrs __user *usx = (void __user *)arg;
+	struct scoutfs_ioctl_search_xattrs sx;
+	struct scoutfs_srch_rb_root sroot;
+	struct scoutfs_srch_rb_node *snode;
+	u64 __user *uinos;
+	struct rb_node *node;
 	char *name = NULL;
-	int total = 0;
-	u64 hash;
-	u64 ino;
+	bool done = false;
+	u64 total = 0;
 	int ret;
 
 	if (!(file->f_mode & FMODE_READ)) {
@@ -783,67 +784,59 @@ static long scoutfs_ioc_find_xattrs(struct file *file, unsigned long arg)
 		goto out;
 	}
 
-	if (copy_from_user(&fx, ufx, sizeof(fx))) {
+	if (copy_from_user(&sx, usx, sizeof(sx))) {
 		ret = -EFAULT;
 		goto out;
 	}
+	uinos = (u64 __user *)sx.inodes_ptr;
 
-	if (fx.name_bytes > SCOUTFS_XATTR_MAX_NAME_LEN) {
+	if (sx.name_bytes > SCOUTFS_XATTR_MAX_NAME_LEN) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	name = kmalloc(fx.name_bytes, GFP_KERNEL);
+	if (sx.nr_inodes == 0 || sx.last_ino < sx.next_ino) {
+		ret = 0;
+		goto out;
+	}
+
+	name = kmalloc(sx.name_bytes, GFP_KERNEL);
 	if (!name) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	if (copy_from_user(name, (void __user *)fx.name_ptr, fx.name_bytes)) {
+	if (copy_from_user(name, (void __user *)sx.name_ptr, sx.name_bytes)) {
 		ret = -EFAULT;
 		goto out;
 	}
 
-	hash = scoutfs_hash64(name, fx.name_bytes);
-	scoutfs_xattr_index_key(&key, hash, fx.next_ino, 0);
-	scoutfs_xattr_index_key(&last, hash, U64_MAX, U64_MAX);
-	ino = 0;
-
-	ret = scoutfs_lock_xattr_index(sb, SCOUTFS_LOCK_READ, 0, hash, &lock);
+	ret = scoutfs_srch_search_xattrs(sb, &sroot,
+					 scoutfs_hash64(name, sx.name_bytes),
+					 sx.next_ino, sx.last_ino, &done);
 	if (ret < 0)
 		goto out;
 
-	while (fx.nr_inodes) {
-
-		ret = scoutfs_forest_next(sb, &key, &last, NULL, lock);
-		if (ret < 0) {
-			if (ret == -ENOENT)
-				ret = 0;
+	scoutfs_srch_foreach_rb_node(snode, node, &sroot) {
+		if (put_user(snode->ino, uinos + total)) {
+			ret = -EFAULT;
 			break;
 		}
-
-		/* xattrs hashes can collide and add multiple entries */
-		if (le64_to_cpu(key.skxi_ino) != ino) {
-			ino = le64_to_cpu(key.skxi_ino);
-			if (put_user(ino, (u64 __user *)fx.inodes_ptr)) {
-				ret = -EFAULT;
-				break;
-			}
-
-			fx.inodes_ptr += sizeof(u64);
-			fx.nr_inodes--;
-			total++;
-			ret = 0;
-		}
-
-		scoutfs_key_inc(&key);
+		if (++total == sx.nr_inodes)
+			break;
 	}
 
-	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
+	sx.output_flags = 0;
+	if (done && total == sroot.nr)
+		sx.output_flags |= SCOUTFS_SEARCH_XATTRS_OFLAG_END;
 
+	if (put_user(sx.output_flags, &usx->output_flags))
+		ret = -EFAULT;
+	else
+		ret = 0;
 out:
+	scoutfs_srch_destroy_rb_root(&sroot);
 	kfree(name);
-
 	return ret ?: total;
 }
 
@@ -887,8 +880,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_setattr_more(file, arg);
 	case SCOUTFS_IOC_LISTXATTR_HIDDEN:
 		return scoutfs_ioc_listxattr_hidden(file, arg);
-	case SCOUTFS_IOC_FIND_XATTRS:
-		return scoutfs_ioc_find_xattrs(file, arg);
+	case SCOUTFS_IOC_SEARCH_XATTRS:
+		return scoutfs_ioc_search_xattrs(file, arg);
 	case SCOUTFS_IOC_STATFS_MORE:
 		return scoutfs_ioc_statfs_more(file, arg);
 	case SCOUTFS_IOC_DATA_WAIT_ERR:

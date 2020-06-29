@@ -213,7 +213,7 @@ struct scoutfs_avl_node {
 } __packed;
 
 /* when we split we want to have multiple items on each side */
-#define SCOUTFS_BTREE_MAX_VAL_LEN 512
+#define SCOUTFS_BTREE_MAX_VAL_LEN 896
 
 /* each value ends with an offset which lets compaction iterate over values */
 #define SCOUTFS_BTREE_VAL_OWNER_BYTES	sizeof(__le16)

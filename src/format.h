@@ -682,7 +682,7 @@ enum {
 	SCOUTFS_NET_CMD_ALLOC_INODES,
 	SCOUTFS_NET_CMD_GET_LOG_TREES,
 	SCOUTFS_NET_CMD_COMMIT_LOG_TREES,
-	SCOUTFS_NET_CMD_GET_FS_ROOTS,
+	SCOUTFS_NET_CMD_GET_ROOTS,
 	SCOUTFS_NET_CMD_ADVANCE_SEQ,
 	SCOUTFS_NET_CMD_GET_LAST_SEQ,
 	SCOUTFS_NET_CMD_STATFS,
@@ -731,7 +731,7 @@ struct scoutfs_net_statfs {
 	__u8 uuid[SCOUTFS_UUID_BYTES];	/* logical volume uuid */
 } __packed;
 
-struct scoutfs_net_fs_roots {
+struct scoutfs_net_roots {
 	struct scoutfs_btree_root fs_root;
 	struct scoutfs_btree_root logs_root;
 } __packed;
@@ -745,7 +745,7 @@ struct scoutfs_net_lock {
 
 struct scoutfs_net_lock_grant_response {
 	struct scoutfs_net_lock nl;
-	struct scoutfs_net_fs_roots nfr;
+	struct scoutfs_net_roots roots;
 } __packed;
 
 struct scoutfs_net_lock_recover {

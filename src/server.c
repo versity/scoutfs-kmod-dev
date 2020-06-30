@@ -86,9 +86,8 @@ struct server_info {
 	struct mutex logs_mutex;
 
 	/* stable versions stored from commits, given in locks and rpcs */
-	seqcount_t fs_roots_seqcount;
-	struct scoutfs_btree_root fs_root;
-	struct scoutfs_btree_root logs_root;
+	seqcount_t roots_seqcount;
+	struct scoutfs_net_roots roots;
 };
 
 #define DECLARE_SERVER_INFO(sb, name) \
@@ -225,29 +224,27 @@ static void update_free_blocks(__le64 *blocks, struct scoutfs_radix_root *prev,
 			     le64_to_cpu(prev->ref.sm_total));
 }
 
-void scoutfs_server_get_fs_roots(struct super_block *sb,
-				 struct scoutfs_btree_root *fs_root,
-				 struct scoutfs_btree_root *logs_root)
+void scoutfs_server_get_roots(struct super_block *sb,
+			      struct scoutfs_net_roots *roots)
 {
 	DECLARE_SERVER_INFO(sb, server);
 	unsigned int seq;
 
 	do {
-		seq = read_seqcount_begin(&server->fs_roots_seqcount);
-		*fs_root = server->fs_root;
-		*logs_root = server->logs_root;
-	} while (read_seqcount_retry(&server->fs_roots_seqcount, seq));
+		seq = read_seqcount_begin(&server->roots_seqcount);
+		*roots = server->roots;
+	} while (read_seqcount_retry(&server->roots_seqcount, seq));
 }
 
-static void set_fs_roots(struct server_info *server,
-			 struct scoutfs_btree_root *fs_root,
-			 struct scoutfs_btree_root *logs_root)
+static void set_roots(struct server_info *server,
+		      struct scoutfs_btree_root *fs_root,
+		      struct scoutfs_btree_root *logs_root)
 {
 	preempt_disable();
-	write_seqcount_begin(&server->fs_roots_seqcount);
-	server->fs_root = *fs_root;
-	server->logs_root = *logs_root;
-	write_seqcount_end(&server->fs_roots_seqcount);
+	write_seqcount_begin(&server->roots_seqcount);
+	server->roots.fs_root = *fs_root;
+	server->roots.logs_root = *logs_root;
+	write_seqcount_end(&server->roots_seqcount);
 	preempt_enable();
 }
 
@@ -307,7 +304,7 @@ static void scoutfs_server_commit_func(struct work_struct *work)
 	}
 
 	server->prepared_commit = false;
-	set_fs_roots(server, &super->fs_root, &super->logs_root);
+	set_roots(server, &super->fs_root, &super->logs_root);
 	ret = 0;
 out:
 	node = llist_del_all(&server->commit_waiters);
@@ -577,22 +574,23 @@ out:
  * visible in persistent storage.  We don't want to accidentally give
  * them our in-memory dirty version.  This can be racing with commits.
  */
-static int server_get_fs_roots(struct super_block *sb,
-			       struct scoutfs_net_connection *conn,
-			       u8 cmd, u64 id, void *arg, u16 arg_len)
+static int server_get_roots(struct super_block *sb,
+			    struct scoutfs_net_connection *conn,
+			    u8 cmd, u64 id, void *arg, u16 arg_len)
 {
-	struct scoutfs_net_fs_roots nfr;
+	struct scoutfs_net_roots roots;
 	int ret;
 
 	if (arg_len != 0) {
-		memset(&nfr, 0, sizeof(nfr));
+		memset(&roots, 0, sizeof(roots));
 		ret = -EINVAL;
 	}  else {
-		scoutfs_server_get_fs_roots(sb, &nfr.fs_root, &nfr.logs_root);
+		scoutfs_server_get_roots(sb, &roots);
 		ret = 0;
 	}
 
-	return scoutfs_net_response(sb, conn, cmd, id, 0, &nfr, sizeof(nfr));
+	return scoutfs_net_response(sb, conn, cmd, id, 0,
+				    &roots, sizeof(roots));
 }
 
 /*
@@ -1394,7 +1392,7 @@ static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_ALLOC_INODES]		= server_alloc_inodes,
 	[SCOUTFS_NET_CMD_GET_LOG_TREES]		= server_get_log_trees,
 	[SCOUTFS_NET_CMD_COMMIT_LOG_TREES]	= server_commit_log_trees,
-	[SCOUTFS_NET_CMD_GET_FS_ROOTS]		= server_get_fs_roots,
+	[SCOUTFS_NET_CMD_GET_ROOTS]		= server_get_roots,
 	[SCOUTFS_NET_CMD_ADVANCE_SEQ]		= server_advance_seq,
 	[SCOUTFS_NET_CMD_GET_LAST_SEQ]		= server_get_last_seq,
 	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
@@ -1485,7 +1483,7 @@ static void scoutfs_server_worker(struct work_struct *work)
 	if (ret < 0)
 		goto shutdown;
 
-	set_fs_roots(server, &super->fs_root, &super->logs_root);
+	set_roots(server, &super->fs_root, &super->logs_root);
 	scoutfs_radix_init_alloc(&server->alloc, &super->core_meta_avail,
 				 &super->core_meta_freed);
 	scoutfs_block_writer_init(sb, &server->wri);
@@ -1625,7 +1623,7 @@ int scoutfs_server_setup(struct super_block *sb)
 	INIT_LIST_HEAD(&server->farewell_requests);
 	INIT_WORK(&server->farewell_work, farewell_worker);
 	mutex_init(&server->logs_mutex);
-	seqcount_init(&server->fs_roots_seqcount);
+	seqcount_init(&server->roots_seqcount);
 
 	server->wq = alloc_workqueue("scoutfs_server",
 				     WQ_UNBOUND | WQ_NON_REENTRANT, 0);

@@ -305,8 +305,7 @@ static int refresh_bloom_roots(struct super_block *sb,
 {
 	DECLARE_FOREST_INFO(sb, finf);
 	struct forest_lock_private *lpriv = ACCESS_ONCE(lock->forest_private);
-	struct scoutfs_btree_root fs_root;
-	struct scoutfs_btree_root logs_root;
+	struct scoutfs_net_roots roots;
 	struct scoutfs_log_trees_val ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct forest_bloom_nrs bloom;
@@ -327,26 +326,25 @@ static int refresh_bloom_roots(struct super_block *sb,
 	/* first use the lock's constant roots, then sample newer roots */
 	if (!lpriv->used_lock_roots) {
 		lpriv->used_lock_roots = 1;
-		fs_root = lock->fs_root;
-		logs_root = lock->logs_root;
+		roots = lock->roots;
 		scoutfs_inc_counter(sb, forest_roots_lock);
 	} else {
-		ret = scoutfs_client_get_fs_roots(sb, &fs_root, &logs_root);
+		ret = scoutfs_client_get_roots(sb, &roots);
 		if (ret)
 			goto out;
 		scoutfs_inc_counter(sb, forest_roots_server);
 	}
 
-	trace_scoutfs_forest_using_roots(sb, &fs_root, &logs_root);
-	refs->fs_ref = fs_root.ref;
-	refs->logs_ref = logs_root.ref;
+	trace_scoutfs_forest_using_roots(sb, &roots.fs_root, &roots.logs_root);
+	refs->fs_ref = roots.fs_root.ref;
+	refs->logs_ref = roots.logs_root.ref;
 
 	calc_bloom_nrs(&bloom, &lock->start);
 
 	scoutfs_key_init_log_trees(&key, 0, 0);
 	for (;; scoutfs_key_inc(&key)) {
 
-		ret = scoutfs_btree_next(sb, &logs_root, &key, &iref);
+		ret = scoutfs_btree_next(sb, &roots.logs_root, &key, &iref);
 		if (ret == -ENOENT) {
 			ret = 0;
 			break;
@@ -423,7 +421,7 @@ static int refresh_bloom_roots(struct super_block *sb,
 
 	/* always add the fs root at the tail */
 	fr = &lpriv->fs_root;
-	fr->item_root = fs_root;
+	fr->item_root = roots.fs_root;
 	fr->rid = 0;
 	fr->nr = 0;
 	list_add_tail(&fr->entry, &lpriv->roots);
@@ -1028,8 +1026,7 @@ int scoutfs_forest_next_hint(struct super_block *sb, struct scoutfs_key *key,
 			     struct scoutfs_key *next)
 {
 	DECLARE_STALE_TRACKING_SUPER_REFS(prev_refs, refs);
-	struct scoutfs_btree_root fs_root;
-	struct scoutfs_btree_root logs_root;
+	struct scoutfs_net_roots roots;
 	struct scoutfs_btree_root item_root;
 	struct scoutfs_log_trees_val *ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
@@ -1041,13 +1038,13 @@ int scoutfs_forest_next_hint(struct super_block *sb, struct scoutfs_key *key,
 
 retry:
 	scoutfs_inc_counter(sb, forest_roots_next_hint);
-	ret = scoutfs_client_get_fs_roots(sb, &fs_root, &logs_root);
+	ret = scoutfs_client_get_roots(sb, &roots);
 	if (ret)
 		goto out;
 
-	trace_scoutfs_forest_using_roots(sb, &fs_root, &logs_root);
-	refs.fs_ref = fs_root.ref;
-	refs.logs_ref = logs_root.ref;
+	trace_scoutfs_forest_using_roots(sb, &roots.fs_root, &roots.logs_root);
+	refs.fs_ref = roots.fs_root.ref;
+	refs.logs_ref = roots.logs_root.ref;
 
 	scoutfs_key_init_log_trees(&ltk, 0, 0);
 	checked_fs = false;
@@ -1056,9 +1053,10 @@ retry:
 	for (;;) {
 		if (!checked_fs) {
 			checked_fs = true;
-			item_root = fs_root;
+			item_root = roots.fs_root;
 		} else {
-			ret = scoutfs_btree_next(sb, &logs_root, &ltk, &iref);
+			ret = scoutfs_btree_next(sb, &roots.logs_root, &ltk,
+						 &iref);
 			if (ret == -ENOENT) {
 				if (have_next)
 					ret = 0;

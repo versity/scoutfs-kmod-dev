@@ -22,8 +22,7 @@ struct scoutfs_lock {
 	struct rb_node range_node;
 	u64 refresh_gen;
 	u64 write_version;
-	struct scoutfs_btree_root fs_root;
-	struct scoutfs_btree_root logs_root;
+	struct scoutfs_net_roots roots;
 	struct list_head lru_head;
 	wait_queue_head_t waitq;
 	struct work_struct shrink_work;

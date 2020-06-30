@@ -554,8 +554,7 @@ static int process_waiting_requests(struct super_block *sb,
 		}
 
 		gres.nl = nl;
-		scoutfs_server_get_fs_roots(sb, &gres.nfr.fs_root,
-					    &gres.nfr.logs_root);
+		scoutfs_server_get_roots(sb, &gres.roots);
 
 		ret = scoutfs_server_lock_response(sb, req->rid,
 						   req->net_id, &gres);

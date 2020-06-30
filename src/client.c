@@ -108,22 +108,14 @@ int scoutfs_client_commit_log_trees(struct super_block *sb,
 					lt, sizeof(*lt), NULL, 0);
 }
 
-int scoutfs_client_get_fs_roots(struct super_block *sb,
-				struct scoutfs_btree_root *fs_root,
-				struct scoutfs_btree_root *logs_root)
+int scoutfs_client_get_roots(struct super_block *sb,
+			     struct scoutfs_net_roots *roots)
 {
 	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-	struct scoutfs_net_fs_roots nfr;
-	int ret;
 
-	ret = scoutfs_net_sync_request(sb, client->conn,
-					SCOUTFS_NET_CMD_GET_FS_ROOTS,
-					NULL, 0, &nfr, sizeof(nfr));
-	if (ret == 0) {
-		*fs_root = nfr.fs_root;
-		*logs_root = nfr.logs_root;
-	}
-	return 0;
+	return scoutfs_net_sync_request(sb, client->conn,
+					SCOUTFS_NET_CMD_GET_ROOTS,
+					NULL, 0, roots, sizeof(*roots));
 }
 
 int scoutfs_client_advance_seq(struct super_block *sb, u64 *seq)

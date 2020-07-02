@@ -13,7 +13,6 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
-#include <linux/crc32c.h>
 #include <linux/uio.h>
 #include <linux/xattr.h>
 #include <linux/namei.h>
@@ -31,6 +30,7 @@
 #include "kvec.h"
 #include "forest.h"
 #include "lock.h"
+#include "hash.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
 
@@ -249,7 +249,7 @@ static u32 dirent_name_fingerprint(const char *name, unsigned int name_len)
 
 static u64 dirent_name_hash(const char *name, unsigned int name_len)
 {
-       return crc32c(~0, name, name_len) |
+       return scoutfs_hash32(name, name_len) |
               ((u64)dirent_name_fingerprint(name, name_len) << 32);
 }
 

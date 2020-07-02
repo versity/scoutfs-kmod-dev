@@ -14,7 +14,6 @@
 #include <linux/slab.h>
 #include <linux/rwsem.h>
 #include <linux/random.h>
-#include <linux/crc32c.h>
 
 #include "super.h"
 #include "format.h"
@@ -24,6 +23,7 @@
 #include "radix.h"
 #include "block.h"
 #include "forest.h"
+#include "hash.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
 
@@ -240,18 +240,20 @@ static void read_unlock_forest_root(struct forest_info *finf,
 	}
 }
 
-/*
- * XXX need something better.
- */
 static void calc_bloom_nrs(struct forest_bloom_nrs *bloom,
 			    struct scoutfs_key *key)
 {
-	u32 crc = ~0;
+	u64 hash;
 	int i;
 
+	BUILD_BUG_ON((SCOUTFS_FOREST_BLOOM_FUNC_BITS *
+		      SCOUTFS_FOREST_BLOOM_NRS) > 64);
+
+	hash = scoutfs_hash64(key, sizeof(struct scoutfs_key));
+
 	for (i = 0; i < ARRAY_SIZE(bloom->nrs); i++) {
-		crc = crc32c(crc, key, sizeof(struct scoutfs_key));
-		bloom->nrs[i] = crc % SCOUTFS_FOREST_BLOOM_BITS;
+		bloom->nrs[i] = (u32)hash % SCOUTFS_FOREST_BLOOM_BITS;
+		hash >>= SCOUTFS_FOREST_BLOOM_FUNC_BITS;
 	}
 }
 

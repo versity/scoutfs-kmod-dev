@@ -14,7 +14,6 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <linux/crc32c.h>
 #include <linux/sort.h>
 #include <linux/random.h>
 
@@ -29,6 +28,7 @@
 #include "block.h"
 #include "radix.h"
 #include "avl.h"
+#include "hash.h"
 
 #include "scoutfs_trace.h"
 
@@ -210,7 +210,7 @@ static int cmp_key_item(void *arg, struct scoutfs_avl_node *node)
  */
 static int leaf_item_hash_ind(struct scoutfs_key *key)
 {
-	return crc32c(~0, key, sizeof(struct scoutfs_key)) %
+	return scoutfs_hash32(key, sizeof(struct scoutfs_key)) %
 	       SCOUTFS_BTREE_LEAF_ITEM_HASH_NR;
 }
 

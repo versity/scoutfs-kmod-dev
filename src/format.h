@@ -328,11 +328,12 @@ struct scoutfs_bloom_block {
  * before the bloom filters fill up and start returning excessive false
  * positives.
  */
-#define SCOUTFS_FOREST_BLOOM_NRS		7
+#define SCOUTFS_FOREST_BLOOM_NRS		3
 #define SCOUTFS_FOREST_BLOOM_BITS \
 	(((SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_bloom_block)) /  \
 	 member_sizeof(struct scoutfs_bloom_block, bits[0])) *		  \
-	 member_sizeof(struct scoutfs_bloom_block, bits[0]) * 8)	  \
+	 member_sizeof(struct scoutfs_bloom_block, bits[0]) * 8)
+#define SCOUTFS_FOREST_BLOOM_FUNC_BITS		(SCOUTFS_BLOCK_LG_SHIFT + 3)
 
 /*
  * Keys are first sorted by major key zones.

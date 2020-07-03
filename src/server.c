@@ -849,6 +849,11 @@ out:
 				    &last_seq, sizeof(last_seq));
 }
 
+static inline __le64 le64_lg_to_sm(__le64 lg)
+{
+	return cpu_to_le64(le64_to_cpu(lg) << SCOUTFS_BLOCK_SM_LG_SHIFT);
+}
+
 /*
  * Sample the super stats that the client wants for statfs by serializing
  * with each component.
@@ -872,10 +877,10 @@ static int server_statfs(struct super_block *sb,
 		spin_unlock(&sbi->next_ino_lock);
 
 		down_read(&server->alloc_rwsem);
-		nstatfs.total_blocks = super->total_meta_blocks;
+		nstatfs.total_blocks = le64_lg_to_sm(super->total_meta_blocks);
 		le64_add_cpu(&nstatfs.total_blocks,
 			     le64_to_cpu(super->total_data_blocks));
-		nstatfs.bfree = super->free_meta_blocks;
+		nstatfs.bfree = le64_lg_to_sm(super->free_meta_blocks);
 		le64_add_cpu(&nstatfs.bfree,
 			     le64_to_cpu(super->free_data_blocks));
 		up_read(&server->alloc_rwsem);

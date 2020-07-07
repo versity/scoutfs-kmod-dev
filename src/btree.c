@@ -233,13 +233,16 @@ static inline int leaf_item_hash_next_bucket(int i)
 	     i = leaf_item_hash_next_bucket(i))
 
 static struct scoutfs_btree_item *
-leaf_item_hash_search(struct scoutfs_btree_block *bt, struct scoutfs_key *key)
+leaf_item_hash_search(struct super_block *sb, struct scoutfs_btree_block *bt,
+		      struct scoutfs_key *key)
 {
 	__le16 *buckets = leaf_item_hash_buckets(bt);
 	struct scoutfs_btree_item *item;
 	__le16 off;
 	int nr;
 	int i;
+
+	scoutfs_inc_counter(sb, btree_leaf_item_hash_search);
 
 	if (WARN_ON_ONCE(bt->level > 0))
 		return NULL;
@@ -388,7 +391,8 @@ static void set_val_owner(struct scoutfs_btree_block *bt, unsigned int val_off,
  * more operations.  The split heuristic requires a generous amount of
  * fragmented free space that will avoid a split.
  */
-static void compact_values(struct scoutfs_btree_block *bt)
+static void compact_values(struct super_block *sb,
+			   struct scoutfs_btree_block *bt)
 {
 	struct scoutfs_btree_item *item;
 	unsigned int free_off;
@@ -398,6 +402,8 @@ static void compact_values(struct scoutfs_btree_block *bt)
 	unsigned int vb;
 	void *from;
 	void *to;
+
+	scoutfs_inc_counter(sb, btree_compact_values);
 
 	if (bt->last_free_off == 0)
 		return;
@@ -871,9 +877,11 @@ static int try_split(struct super_block *sb,
 		return 0;
 
 	if (item_full_pct(right) < 80) {
-		compact_values(right);
+		compact_values(sb, right);
 		return 0;
 	}
+
+	scoutfs_inc_counter(sb, btree_split);
 
 	/* alloc split neighbour first to avoid unwinding tree growth */
 	ret = get_ref_block(sb, alloc, wri, BTW_ALLOC, NULL, &left_bl);
@@ -941,6 +949,8 @@ static int try_join(struct super_block *sb,
 	if (le16_to_cpu(bt->total_item_bytes) >= join_low_watermark())
 		return 0;
 
+	scoutfs_inc_counter(sb, btree_join);
+
 	/* move items right into our block if we have a left sibling */
 	sib_par_item = prev_item(parent, par_item);
 	if (sib_par_item) {
@@ -963,7 +973,7 @@ static int try_join(struct super_block *sb,
 		to_move = sib_tot - join_low_watermark();
 
 	if (le16_to_cpu(bt->mid_free_len) < to_move)
-		compact_values(bt);
+		compact_values(sb, bt);
 	move_items(bt, sib, move_right, to_move);
 
 	/* update our parent's item */
@@ -1025,7 +1035,8 @@ static bool bad_avl_node_off(__le16 node_off, int nr)
  *  - last_free_offset is in fact last free region
  *  - call after leaf modification
  */
-static void verify_btree_block(struct scoutfs_btree_block *bt, int level,
+static void verify_btree_block(struct super_block *sb,
+			       struct scoutfs_btree_block *bt, int level,
 			       struct scoutfs_key *start,
 			       struct scoutfs_key *end)
 {
@@ -1081,7 +1092,7 @@ static void verify_btree_block(struct scoutfs_btree_block *bt, int level,
 		}
 
 		if (level == 0 &&
-		    leaf_item_hash_search(bt, &item->key) != item) {
+		    leaf_item_hash_search(sb, bt, &item->key) != item) {
 			reason = "item not found in hash";
 			goto out;
 		}
@@ -1221,6 +1232,8 @@ static int btree_walk(struct super_block *sb,
 	    WARN_ON_ONCE((flags & BTW_DIRTY) && (!alloc || !wri)))
 		return -EINVAL;
 
+	scoutfs_inc_counter(sb, btree_walk);
+
 restart:
 	scoutfs_block_put(sb, par_bl);
 	par_bl = NULL;
@@ -1261,7 +1274,7 @@ restart:
 		bt = bl->data;
 
 		if (0)
-			verify_btree_block(bt, level, &start, &end);
+			verify_btree_block(sb, bt, level, &start, &end);
 
 		/* XXX more aggressive block verification, before ref updates? */
 		if (bt->level != level) {
@@ -1292,8 +1305,10 @@ restart:
 		if (ret == 0 && (flags & BTW_DELETE) && parent)
 			ret = try_join(sb, alloc, wri, root, parent, par_item,
 				       bt);
-		if (ret > 0)
+		if (ret > 0) {
+			scoutfs_inc_counter(sb, btree_walk_restart);
 			goto restart;
+		}
 		else if (ret < 0)
 			break;
 
@@ -1399,6 +1414,8 @@ int scoutfs_btree_lookup(struct super_block *sb,
 	struct scoutfs_block *bl;
 	int ret;
 
+	scoutfs_inc_counter(sb, btree_lookup);
+
 	if (WARN_ON_ONCE(iref->key))
 		return -EINVAL;
 
@@ -1406,7 +1423,7 @@ int scoutfs_btree_lookup(struct super_block *sb,
 	if (ret == 0) {
 		bt = bl->data;
 
-		item = leaf_item_hash_search(bt, key);
+		item = leaf_item_hash_search(sb, bt, key);
 		if (item) {
 			init_item_ref(iref, sb, bl, item);
 			ret = 0;
@@ -1448,6 +1465,8 @@ int scoutfs_btree_insert(struct super_block *sb,
 	int cmp;
 	int ret;
 
+	scoutfs_inc_counter(sb, btree_insert);
+
 	if (invalid_item(val_len))
 		return -EINVAL;
 
@@ -1456,7 +1475,7 @@ int scoutfs_btree_insert(struct super_block *sb,
 	if (ret == 0) {
 		bt = bl->data;
 
-		item = leaf_item_hash_search(bt, key);
+		item = leaf_item_hash_search(sb, bt, key);
 		if (item) {
 			ret = -EEXIST;
 		} else {
@@ -1510,6 +1529,8 @@ int scoutfs_btree_update(struct super_block *sb,
 	struct scoutfs_block *bl;
 	int ret;
 
+	scoutfs_inc_counter(sb, btree_update);
+
 	if (invalid_item(val_len))
 		return -EINVAL;
 
@@ -1518,7 +1539,7 @@ int scoutfs_btree_update(struct super_block *sb,
 	if (ret == 0) {
 		bt = bl->data;
 
-		item = leaf_item_hash_search(bt, key);
+		item = leaf_item_hash_search(sb, bt, key);
 		if (item) {
 			update_item_value(bt, item, val, val_len);
 			ret = 0;
@@ -1550,6 +1571,8 @@ int scoutfs_btree_force(struct super_block *sb,
 	int cmp;
 	int ret;
 
+	scoutfs_inc_counter(sb, btree_force);
+
 	if (invalid_item(val_len))
 		return -EINVAL;
 
@@ -1558,7 +1581,7 @@ int scoutfs_btree_force(struct super_block *sb,
 	if (ret == 0) {
 		bt = bl->data;
 
-		item = leaf_item_hash_search(bt, key);
+		item = leaf_item_hash_search(sb, bt, key);
 		if (item) {
 			update_item_value(bt, item, val, val_len);
 		} else {
@@ -1589,12 +1612,14 @@ int scoutfs_btree_delete(struct super_block *sb,
 	struct scoutfs_block *bl;
 	int ret;
 
+	scoutfs_inc_counter(sb, btree_delete);
+
 	ret = btree_walk(sb, alloc, wri, root, BTW_DELETE | BTW_DIRTY, key,
 			 0, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
 
-		item = leaf_item_hash_search(bt, key);
+		item = leaf_item_hash_search(sb, bt, key);
 		if (item) {
 			if (le16_to_cpu(bt->nr_items) == 1) {
 				/* remove final empty block */
@@ -1692,6 +1717,8 @@ int scoutfs_btree_next(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *key,
 		       struct scoutfs_btree_item_ref *iref)
 {
+	scoutfs_inc_counter(sb, btree_next);
+
 	return btree_iter(sb, root, BTW_NEXT, key, iref);
 }
 
@@ -1699,6 +1726,8 @@ int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
 		       struct scoutfs_key *key,
 		       struct scoutfs_btree_item_ref *iref)
 {
+	scoutfs_inc_counter(sb, btree_prev);
+
 	return btree_iter(sb, root, BTW_PREV, key, iref);
 }
 
@@ -1720,11 +1749,13 @@ int scoutfs_btree_dirty(struct super_block *sb,
 	struct scoutfs_block *bl;
 	int ret;
 
+	scoutfs_inc_counter(sb, btree_dirty);
+
 	ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY, key, 0, &bl, NULL);
 	if (ret == 0) {
 		bt = bl->data;
 
-		item = leaf_item_hash_search(bt, key);
+		item = leaf_item_hash_search(sb, bt, key);
 		if (item)
 			ret = 0;
 		else

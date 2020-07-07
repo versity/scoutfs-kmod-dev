@@ -22,8 +22,22 @@
 	EXPAND_COUNTER(block_cache_invalidate)			\
 	EXPAND_COUNTER(block_cache_lru_move)			\
 	EXPAND_COUNTER(block_cache_shrink)			\
+	EXPAND_COUNTER(btree_compact_values)			\
+	EXPAND_COUNTER(btree_delete)				\
+	EXPAND_COUNTER(btree_dirty)				\
+	EXPAND_COUNTER(btree_force)				\
+	EXPAND_COUNTER(btree_join)				\
+	EXPAND_COUNTER(btree_insert)				\
+	EXPAND_COUNTER(btree_leaf_item_hash_search)		\
+	EXPAND_COUNTER(btree_lookup)				\
+	EXPAND_COUNTER(btree_next)				\
+	EXPAND_COUNTER(btree_prev)				\
 	EXPAND_COUNTER(btree_read_error)			\
+	EXPAND_COUNTER(btree_split)				\
 	EXPAND_COUNTER(btree_stale_read)			\
+	EXPAND_COUNTER(btree_update)				\
+	EXPAND_COUNTER(btree_walk)				\
+	EXPAND_COUNTER(btree_walk_restart)			\
 	EXPAND_COUNTER(client_farewell_error)			\
 	EXPAND_COUNTER(corrupt_btree_block_level)		\
 	EXPAND_COUNTER(corrupt_btree_no_child_ref)		\

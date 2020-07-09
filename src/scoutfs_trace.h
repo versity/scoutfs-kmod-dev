@@ -2129,6 +2129,127 @@ TRACE_EVENT(scoutfs_forest_add_root,
 		  __entry->b_rid, __entry->nr, __entry->blkno, __entry->seq)
 );
 
+TRACE_EVENT(scoutfs_forest_set_dirtied,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, u64 rid,
+		 u64 nr, u64 cseq),
+	TP_ARGS(sb, key, rid, nr, cseq),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		sk_trace_define(key)
+		__field(__u64, b_rid)
+		__field(__u64, nr)
+		__field(__u64, cseq)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		sk_trace_assign(key, key);
+		__entry->b_rid = rid;
+		__entry->nr = nr;
+		__entry->cseq = cseq;
+	),
+	TP_printk(SCSBF" key "SK_FMT" rid %016llx nr %llu cseq %llu",
+		  SCSB_TRACE_ARGS, sk_trace_args(key),
+		  __entry->b_rid, __entry->nr, __entry->cseq)
+);
+
+TRACE_EVENT(scoutfs_forest_trigger_refresh,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key,
+		 bool empty_roots, u64 refresh_gen, u64 last_refreshed,
+		 u64 dirtied_cseq, u64 refreshed_dirtied,
+		 u64 commit_seq, u64 refreshed_cseq),
+	TP_ARGS(sb, key, empty_roots, refresh_gen, last_refreshed,
+		dirtied_cseq, refreshed_dirtied, commit_seq, refreshed_cseq),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		sk_trace_define(key)
+		__field(int, empty_roots)
+		__field(__u64, refresh_gen)
+		__field(__u64, last_refreshed)
+		__field(__u64, dirtied_cseq)
+		__field(__u64, refreshed_dirtied)
+		__field(__u64, commit_seq)
+		__field(__u64, refreshed_cseq)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		sk_trace_assign(key, key);
+		__entry->empty_roots = !!empty_roots;
+		__entry->refresh_gen = refresh_gen;
+		__entry->last_refreshed = last_refreshed;
+		__entry->dirtied_cseq = dirtied_cseq;
+		__entry->refreshed_dirtied = refreshed_dirtied;
+		__entry->commit_seq = commit_seq;
+		__entry->refreshed_cseq = refreshed_cseq;
+	),
+	TP_printk(SCSBF" key "SK_FMT" empty %u refg %llu last_refg %llu dirt %llu refdir %llu cseq %llu refcseq %llu",
+		  SCSB_TRACE_ARGS, sk_trace_args(key),
+		  __entry->empty_roots,
+		  __entry->refresh_gen,
+		  __entry->last_refreshed,
+		  __entry->dirtied_cseq,
+		  __entry->refreshed_dirtied,
+		  __entry->commit_seq,
+		  __entry->refreshed_cseq)
+);
+
+TRACE_EVENT(scoutfs_forest_refresh_seqs,
+	TP_PROTO(struct super_block *sb, struct scoutfs_key *key, u64 rid,
+		 u64 nr, u64 dirtied_cseq, u64 refreshed_dirtied,
+		 u64 commit_seq, u64 refreshed_cseq),
+	TP_ARGS(sb, key, rid, nr, dirtied_cseq, refreshed_dirtied, commit_seq,
+		refreshed_cseq),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		sk_trace_define(key)
+		__field(__u64, b_rid)
+		__field(__u64, nr)
+		__field(__u64, dirtied_cseq)
+		__field(__u64, refreshed_dirtied)
+		__field(__u64, commit_seq)
+		__field(__u64, refreshed_cseq)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		sk_trace_assign(key, key);
+		__entry->b_rid = rid;
+		__entry->nr = nr;
+		__entry->dirtied_cseq = dirtied_cseq;
+		__entry->refreshed_dirtied = refreshed_dirtied;
+		__entry->commit_seq = commit_seq;
+		__entry->refreshed_cseq = refreshed_cseq;
+	),
+	TP_printk(SCSBF" key "SK_FMT" rid %016llx nr %llu dirt %llu refdir %llu cseq %llu refcseq %llu",
+		  SCSB_TRACE_ARGS, sk_trace_args(key), __entry->b_rid,
+		  __entry->nr, __entry->dirtied_cseq,
+		  __entry->refreshed_dirtied, __entry->commit_seq,
+		  __entry->refreshed_cseq)
+);
+
+TRACE_EVENT(scoutfs_forest_init_our_log,
+	TP_PROTO(struct super_block *sb, u64 rid, u64 nr, u64 blkno, u64 seq,
+		 u64 cseq),
+	TP_ARGS(sb, rid, nr, blkno, seq, cseq),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, b_rid)
+		__field(__u64, nr)
+		__field(__u64, blkno)
+		__field(__u64, seq)
+		__field(__u64, cseq)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->b_rid = rid;
+		__entry->nr = nr;
+		__entry->blkno = blkno;
+		__entry->seq = seq;
+		__entry->cseq = cseq;
+	),
+	TP_printk(SCSBF" rid %016llx nr %llu blkno %llu seq %llx cseq %llu",
+		  SCSB_TRACE_ARGS, __entry->b_rid, __entry->nr,
+		  __entry->blkno, __entry->seq, __entry->cseq)
+);
+
 TRACE_EVENT(scoutfs_forest_iter_search,
 	TP_PROTO(struct super_block *sb, u64 rid, u64 nr, u64 vers,
 		 u8 flags, struct scoutfs_key *key),

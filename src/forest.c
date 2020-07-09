@@ -51,13 +51,20 @@
  * readers to read every log btree looking for an item.  Each log btree
  * contains a bloom filter keyed on the starting key of locks.  This
  * lets lock holders quickly eliminate log trees that cannot contain
- * keys protected by their lock and it caches the btrees to search in
- * the lock for the duration of its use. 
+ * keys protected by their lock.  Since reads have to be done under
+ * locks, we cache the list of trees that could contain items in the
+ * lock.
+ *
+ * The list of roots in the locks can get out of date.  Item
+ * modification in the current transactoin requires that the list
+ * contain the dirty log tree.  Transaction commits mean that we can
+ * read from the stale log tree instead of the dirty one.  And getting
+ * stale block reads from any of the trees means we need to rebuild the
+ * list from scratch.
  */
 
 /*
  * todo:
- * - when we adopt a new bloom root we'd need to reset bloom bits in locks
  * - add a bunch of counters so we can see bloom/tree ops/etc
  */
 
@@ -66,6 +73,7 @@ struct forest_info {
 	struct scoutfs_radix_allocator *alloc;
 	struct scoutfs_block_writer *wri;
 	struct scoutfs_log_trees our_log;
+	atomic64_t commit_seq;
 
 	struct mutex srch_mutex;
 	struct scoutfs_srch_file srch_file;
@@ -80,6 +88,7 @@ struct forest_root {
 	struct scoutfs_btree_root item_root;
 	u64 rid;
 	u64 nr;
+	u8 our_dirty:1;
 };
 
 struct forest_refs {
@@ -91,45 +100,16 @@ struct forest_bloom_nrs {
 	unsigned int nrs[SCOUTFS_FOREST_BLOOM_NRS];
 };
 
-/*
- * We have static forest_root entries for the fs and our log btrees so
- * that we can iterate over them along with all the discovered and
- * allocated log btrees.
- */
 struct forest_lock_private {
 	u64 last_refreshed;
 	struct rw_semaphore rwsem;
 	unsigned int used_lock_roots:1;
 	struct list_head roots;
-	struct forest_root fs_root;
-	struct forest_root our_log_root;
-	unsigned long flags;
+	u64 set_bloom_nr;
+	atomic64_t dirtied_cseq;
+	u64 refreshed_cseq;
+	u64 refreshed_dirtied;
 };
-
-enum {
-	LPRIV_FLAG_ALL_BLOOM_BITS = 0,
-};
-
-static inline void set_lpriv_flag(struct forest_lock_private *lpriv, int flag)
-{
-	set_bit(flag, &lpriv->flags);
-}
-static inline int test_lpriv_flag(struct forest_lock_private *lpriv, int flag)
-{
-	return test_bit(flag, &lpriv->flags);
-}
-
-static bool is_fs_root(struct forest_lock_private *lpriv,
-		       struct forest_root *fr)
-{
-	return fr == &lpriv->fs_root;
-}
-
-static bool is_our_log_root(struct forest_lock_private *lpriv,
-			    struct forest_root *fr)
-{
-	return fr == &lpriv->our_log_root;
-}
 
 static struct forest_lock_private *get_lock_private(struct scoutfs_lock *lock)
 {
@@ -140,8 +120,7 @@ static struct forest_lock_private *get_lock_private(struct scoutfs_lock *lock)
 		if (lpriv) {
 			init_rwsem(&lpriv->rwsem);
 			INIT_LIST_HEAD(&lpriv->roots);
-			INIT_LIST_HEAD(&lpriv->fs_root.entry);
-			INIT_LIST_HEAD(&lpriv->our_log_root.entry);
+			atomic64_set(&lpriv->dirtied_cseq, 0);
 
 			if (cmpxchg(&lock->forest_private, NULL, lpriv) != NULL)
 				kfree(lpriv);
@@ -152,51 +131,87 @@ static struct forest_lock_private *get_lock_private(struct scoutfs_lock *lock)
 	return lpriv;
 }
 
-/*
- * We can tell if an item is currently dirty in our transaction's log
- * root if its lock is held for writing and the item's version matches
- * the lock's write version.
- */
-static bool is_our_dirty_item(struct scoutfs_lock *lock,
-			      struct forest_root *fr, u64 vers)
+static bool is_fs_root(struct forest_root *fr)
 {
-	struct forest_lock_private *lpriv = get_lock_private(lock);
+	return fr->rid == 0 && fr->nr == 0;
+}
 
-	return is_our_log_root(lpriv, fr) &&
-	       lock->mode == SCOUTFS_LOCK_WRITE &&
+/*
+ * We can be sure that we have the most recent version of an item if we
+ * have it write locked with the version of the lock.  There can be no
+ * greater versions of the item in the system.
+ */
+static bool is_write_locked_version(struct scoutfs_lock *lock, u64 vers)
+{
+	return lock->mode == SCOUTFS_LOCK_WRITE &&
 	       vers == lock->write_version;
 }
 
-static void clear_roots(struct forest_lock_private *lpriv)
+static void free_roots(struct forest_lock_private *lpriv)
 {
 	struct forest_root *fr;
 	struct forest_root *tmp;
 
 	list_for_each_entry_safe(fr, tmp, &lpriv->roots, entry) {
 		list_del_init(&fr->entry);
-		if (!is_fs_root(lpriv, fr) && !is_our_log_root(lpriv, fr))
-			kfree(fr);
+		kfree(fr);
 	}
 }
 
 /*
- * Make sure that our log btree will be at the head of the list of
- * btrees to read.  We update the forest_root to refer to the most
- * recent version of our log root before we try and use it instead of
- * updating every instance of the forest_roots on locks as commits give
- * us new versions of the same log tree.
+ * Add a *copy* of the root to the list of roots to read.  If our_dirty
+ * is set then later readers will acquire the lock to serialize writers
+ * and update the root from the current dirty version.
  */
-static void add_our_log_root(struct forest_info *finf,
-			     struct forest_lock_private *lpriv)
+static int add_root(struct super_block *sb, struct scoutfs_lock *lock,
+		    struct forest_lock_private *lpriv,
+		    struct scoutfs_btree_root *item_root, u64 rid, u64 nr,
+		    bool our_dirty)
 {
-	struct forest_root *fr = &lpriv->our_log_root;
+	struct forest_root *fr;
 
 	BUG_ON(!rwsem_is_locked(&lpriv->rwsem));
 
-	if (list_empty(&fr->entry)) {
-		fr->rid = le64_to_cpu(finf->our_log.rid);
-		fr->nr = le64_to_cpu(finf->our_log.nr);
-		list_add(&fr->entry, &lpriv->roots);
+	fr = kmalloc(sizeof(struct forest_root), GFP_NOFS);
+	if (!fr)
+		return -ENOMEM;
+
+	fr->item_root = *item_root;
+	fr->rid = rid;
+	fr->nr = nr;
+	fr->our_dirty = !!our_dirty;
+	list_add_tail(&fr->entry, &lpriv->roots);
+
+	trace_scoutfs_forest_add_root(sb, &lock->start, fr->rid, fr->nr,
+				      le64_to_cpu(fr->item_root.ref.blkno),
+				      le64_to_cpu(fr->item_root.ref.seq));
+
+	return 0;
+}
+
+/*
+ * The caller has dirtied the current log tree and still holds the
+ * transaction.  We need to make sure that future reads know to check
+ * this dirty tree in particular.  The tree can be committed (and
+ * rotated out!) before the next refresh so we use a commit sequence
+ * which will identify that it can find this tree either still dirty or
+ * can trust that it will find an item for it.
+ */
+static void set_dirtied_cseq(struct super_block *sb, struct forest_info *finf,
+			     struct scoutfs_lock *lock,
+			     struct forest_lock_private *lpriv)
+{
+	u64 cseq = atomic64_read(&finf->commit_seq);
+
+	BUG_ON(!rwsem_is_locked(&finf->rwsem));
+
+	if (atomic64_read(&lpriv->dirtied_cseq) != cseq) {
+		atomic64_set(&lpriv->dirtied_cseq, cseq);
+
+		trace_scoutfs_forest_set_dirtied(sb, &lock->start,
+						 le64_to_cpu(finf->our_log.rid),
+						 le64_to_cpu(finf->our_log.nr),
+						 cseq);
 	}
 }
 
@@ -210,39 +225,48 @@ void scoutfs_forest_clear_lock(struct super_block *sb,
 	struct forest_lock_private *lpriv = ACCESS_ONCE(lock->forest_private);
 
 	if (lpriv) {
-		clear_roots(lpriv);
+		free_roots(lpriv);
 		kfree(lpriv);
+		lock->forest_private = NULL;
 	}
 }
 
 /*
- * All the btrees we read are stable and read-only except for our log
- * btree which is being actively modified in memory by locked writers.
- * Once we lock it we need to get the current version of the root.
- *
- * The finf rwsem protects updates of the finf root fields, the first
- * caller here will change the fr fields and the rest will overwrite
- * them with the same values.
+ * Usually we're reading from persistent btrees that won't be changing.
+ * But refresh can add a root that references the current dirty log root
+ * so that readers can see items which haven't yet been committed.  Once
+ * we get the lock we make sure to give the forest root the current
+ * version of the tree which could have changed since it was added.
+ * Acquiring the lock also serializes commit responses updating the log
+ * and we can see if a commit has rotated in a new tree and we need to
+ * refresh the list.
  */
-static void read_lock_forest_root(struct forest_info *finf,
-				  struct forest_lock_private *lpriv,
-				  struct forest_root *fr)
+static int read_lock_forest_root(struct forest_info *finf,
+				 struct forest_lock_private *lpriv,
+				 struct forest_root *fr)
 {
-	if (is_our_log_root(lpriv, fr)) {
+	int ret = 0;
+
+	BUG_ON(!rwsem_is_locked(&lpriv->rwsem));
+
+	if (fr->our_dirty) {
 		down_read(&finf->rwsem);
-		fr->item_root = finf->our_log.item_root;
-		fr->rid = le64_to_cpu(finf->our_log.rid);
-		fr->nr = le64_to_cpu(finf->our_log.nr);
+		if (fr->nr == le64_to_cpu(finf->our_log.nr)) {
+			fr->item_root = finf->our_log.item_root;
+		} else {
+			up_read(&finf->rwsem);
+			ret = -EUCLEAN;
+		}
 	}
+
+	return ret;
 }
 
 static void read_unlock_forest_root(struct forest_info *finf,
-				    struct forest_lock_private *lpriv,
 				    struct forest_root *fr)
 {
-	if (is_our_log_root(lpriv, fr)) {
+	if (fr->our_dirty)
 		up_read(&finf->rwsem);
-	}
 }
 
 static void calc_bloom_nrs(struct forest_bloom_nrs *bloom,
@@ -299,10 +323,9 @@ static struct scoutfs_block *read_bloom_ref(struct super_block *sb,
  * Because we're starting all the reads from stable refs from the
  * server, this will not see any dirty blocks we have in memory.  We
  * don't have to lock any of the btree reads.  It also won't find the
- * currently dirty version of our log btree.  Writers mark our static
- * log btree in lpriv to indicate that we should include our dirty log
- * btree in reads.  We'll also naturally add it if we see a persistent
- * version on disk with all of the bloom bits set.
+ * currently dirty version of our log btree.  Writers record the version
+ * of the current dirty log tree that must be added if it's still dirty
+ * when we refresh.
  */
 static int refresh_bloom_roots(struct super_block *sb,
 			       struct scoutfs_lock *lock,
@@ -312,12 +335,16 @@ static int refresh_bloom_roots(struct super_block *sb,
 	struct forest_lock_private *lpriv = ACCESS_ONCE(lock->forest_private);
 	struct scoutfs_net_roots roots;
 	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_log_trees *lt;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct forest_bloom_nrs bloom;
-	struct forest_root *fr = NULL;
 	struct scoutfs_bloom_block *bb;
 	struct scoutfs_block *bl;
 	struct scoutfs_key key;
+	u64 our_rid = 0;
+	u64 our_nr = 0;
+	u64 dirtied;
+	u64 cseq;
 	int ret;
 	int i;
 
@@ -326,7 +353,36 @@ static int refresh_bloom_roots(struct super_block *sb,
 	down_write(&lpriv->rwsem);
 
 	/* empty the list so no one iterates until someone's added */
-	clear_roots(lpriv);
+	free_roots(lpriv);
+
+	/* make sure readers see writer's in-memory dirty items */
+	cseq = atomic64_read(&finf->commit_seq);
+	dirtied = atomic64_read(&lpriv->dirtied_cseq);
+
+	if (dirtied == cseq) {
+		down_read(&finf->rwsem);
+		cseq = atomic64_read(&finf->commit_seq);
+		dirtied = atomic64_read(&lpriv->dirtied_cseq);
+		if (dirtied == cseq) {
+			lt = &finf->our_log;
+			our_rid = le64_to_cpu(lt->rid);
+			our_nr = le64_to_cpu(lt->nr);
+			/* root be updated before reads, but nice to trace */
+			ret = add_root(sb, lock, lpriv, &lt->item_root,
+				       our_rid, our_nr, true);
+		} else {
+			ret = 0;
+			/* must get roots from network to see committed */
+			lpriv->used_lock_roots = 1;
+		}
+		up_read(&finf->rwsem);
+		if (ret < 0)
+			goto out;
+	}
+
+	trace_scoutfs_forest_refresh_seqs(sb, &lock->start, our_rid, our_nr,
+					  dirtied, lpriv->refreshed_dirtied,
+					  cseq, lpriv->refreshed_cseq);
 
 	/* first use the lock's constant roots, then sample newer roots */
 	if (!lpriv->used_lock_roots) {
@@ -350,22 +406,22 @@ static int refresh_bloom_roots(struct super_block *sb,
 	for (;; scoutfs_key_inc(&key)) {
 
 		ret = scoutfs_btree_next(sb, &roots.logs_root, &key, &iref);
-		if (ret == -ENOENT) {
-			ret = 0;
-			break;
+		if (ret == 0) {
+			if (iref.val_len == sizeof(ltv)) {
+				key = *iref.key;
+				memcpy(&ltv, iref.val, iref.val_len);
+			} else {
+				ret = -EIO;
+			}
+			scoutfs_btree_put_iref(&iref);
 		}
-		if (ret < 0)
+		if (ret < 0) {
+			if (ret == -ENOENT) {
+				ret = 0;
+				break;
+			}
 			goto out;
-
-		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
-			key = *iref.key;
-			memcpy(&ltv, iref.val, iref.val_len);
-		} else {
-			ret = -EIO;
 		}
-		scoutfs_btree_put_iref(&iref);
-		if (ret < 0)
-			goto out;
 
 		if (ltv.bloom_ref.blkno == 0)
 			continue;
@@ -395,49 +451,32 @@ static int refresh_bloom_roots(struct super_block *sb,
 		if (i != ARRAY_SIZE(bloom.nrs))
 			continue;
 
-		/* use our dirty log instead of the old committed version */
-		if (key.sklt_rid == finf->our_log.rid &&
-		    key.sklt_nr == finf->our_log.nr) {
-			add_our_log_root(finf, lpriv);
+		/* we've added our dirty log, skip old committed versions */
+		if (le64_to_cpu(key.sklt_rid) == our_rid &&
+		    le64_to_cpu(key.sklt_nr) == our_nr)
 			continue;
-		}
 
-		/* all bloom bits set, add to the list */
-		fr = kzalloc(sizeof(struct forest_root), GFP_NOFS);
-		if (fr == NULL) {
-			ret = -ENOMEM;
+		ret = add_root(sb, lock, lpriv, &ltv.item_root,
+			       le64_to_cpu(key.sklt_rid),
+			       le64_to_cpu(key.sklt_nr), false);
+		if (ret < 0)
 			goto out;
-		}
-
-		fr->item_root = ltv.item_root;
-		fr->rid = le64_to_cpu(key.sklt_rid);
-		fr->nr = le64_to_cpu(key.sklt_nr);
-
-		list_add_tail(&fr->entry, &lpriv->roots);
-
-		trace_scoutfs_forest_add_root(sb, &lock->start, fr->rid,
-				fr->nr, le64_to_cpu(fr->item_root.ref.blkno),
-				le64_to_cpu(fr->item_root.ref.seq));
 	}
 
-	/* make sure readers search our dirty log after writers set bloom */
-	if (test_lpriv_flag(lpriv, LPRIV_FLAG_ALL_BLOOM_BITS))
-		add_our_log_root(finf, lpriv);
+	/* always add final fs tree last */
+	ret = add_root(sb, lock, lpriv, &roots.fs_root, 0, 0, false);
+	if (ret < 0)
+		goto out;
 
-	/* always add the fs root at the tail */
-	fr = &lpriv->fs_root;
-	fr->item_root = roots.fs_root;
-	fr->rid = 0;
-	fr->nr = 0;
-	list_add_tail(&fr->entry, &lpriv->roots);
-
+	lpriv->refreshed_cseq = cseq;
+	lpriv->refreshed_dirtied = dirtied;
 	lpriv->last_refreshed = lock->refresh_gen;
 
 	ret = 0;
 
 out:
 	if (ret < 0)
-		clear_roots(lpriv);
+		free_roots(lpriv);
 
 	up_write(&lpriv->rwsem);
 	return ret;
@@ -449,27 +488,34 @@ out:
 	struct forest_refs b = {{cpu_to_le64(1),}}
 
 /*
- * The caller saw stale blocks.  If they're seeing the same root refs
- * and are still getting stale then it's consistent corruption and we
- * return an error.  Otherwise we refresh the bloom roots and try again.
- * If this returns 0 then the caller is going to retry.  If *we* saw
- * stale blocks trying to refresh the bloom then we return 0 to have the
- * caller remember the root refs and try again.
+ * If the caller got our magic errnos we refresh the roots and return
+ * -EAGAIN so they retry.  If we get -ESTALE from block reference
+ * inconsistency with the same root refs then it's consistent corruption
+ * and we return an error.  We pass through all other errnos that aren't
+ * our magic retry errnos.
  */
-static int refresh_check_stale(struct super_block *sb,
-			       struct scoutfs_lock *lock,
-			       struct forest_refs *prev_refs,
-			       struct forest_refs *refs)
+static int refresh_check(struct super_block *sb, struct scoutfs_lock *lock,
+			 struct forest_refs *prev_refs,
+			 struct forest_refs *refs, int err)
 {
 	int ret;
 
-	if (memcmp(prev_refs, refs, sizeof(*refs)) == 0)
-		return -EIO;
+	/* don't want to get in a loop passing eagain through, not expected */
+	if (WARN_ON_ONCE(err == -EAGAIN))
+		return -EINVAL;
+
+	if (!(err == -ESTALE || err == -EUCLEAN))
+		return err;
+
+	if (err == -ESTALE) {
+		if (memcmp(prev_refs, refs, sizeof(*refs)) == 0)
+			return -EIO;
+	}
 	*prev_refs = *refs;
 
 	ret = refresh_bloom_roots(sb, lock, refs);
-	if (ret == -ESTALE)
-		ret = 0;
+	if (ret == 0 || ret == -ESTALE)
+		ret = -EAGAIN;
 
 	return ret;
 }
@@ -477,20 +523,41 @@ static int refresh_check_stale(struct super_block *sb,
 /*
  * Iterate over all the roots that could contain items covered by the
  * caller's lock.  The caller starts iteration by passing in a NULL fr.
- * We return -ESTALE if the caller needs to refresh the bloom roots.  We
- * use the lock's refresh gen to find out when the lock was invalidated
- * and the contents of the trees could have changed.
+ * We return -EUCLEAN if the caller needs to refresh the bloom roots.
+ * We use the lock's refresh gen to find out when the lock was
+ * invalidated and the contents of the trees could have changed.
+ *
+ * The commit_seqs are keeping the list of roots in sync with our log
+ * root.  As writers modify it we make sure we have a root that will
+ * lock and check our in-memory dirty log tre.  Once that's committed we
+ * refresh again so we read the stable committed version without locks.
  */
-static int for_each_forest_root(struct scoutfs_lock *lock,
+static int for_each_forest_root(struct super_block *sb,
+				struct scoutfs_lock *lock,
+				struct forest_info *finf,
 				struct forest_lock_private *lpriv,
 				struct forest_root **fr)
 {
+	u64 cseq = atomic64_read(&finf->commit_seq);
+	u64 dirtied = atomic64_read(&lpriv->dirtied_cseq);
+
 	if (WARN_ON_ONCE(!rwsem_is_locked(&lpriv->rwsem)))
 		return -EIO;
 
 	if (list_empty(&lpriv->roots) ||
-	    lock->refresh_gen != lpriv->last_refreshed)
-		return -ESTALE;
+	    lock->refresh_gen != lpriv->last_refreshed ||
+	    dirtied > lpriv->refreshed_dirtied ||
+	    (dirtied == lpriv->refreshed_cseq &&
+	     cseq > lpriv->refreshed_cseq)) {
+		trace_scoutfs_forest_trigger_refresh(sb,
+					&lock->start,
+					!!list_empty(&lpriv->roots),
+					lock->refresh_gen,
+					lpriv->last_refreshed,
+					dirtied, lpriv->refreshed_dirtied,
+					cseq, lpriv->refreshed_cseq);
+		return -EUCLEAN;
+	}
 
 	if (*fr == NULL)
 		*fr = list_prepare_entry((*fr), &lpriv->roots, entry);
@@ -507,34 +574,31 @@ static int for_each_forest_root(struct scoutfs_lock *lock,
  * version is also 1, but we guarantee that we check the log trees first
  * so they'll always be found before the fs items.
  */
-static u64 item_vers(struct forest_lock_private *lpriv,
-		     struct forest_root *fr, void *val)
+static u64 item_vers(struct forest_root *fr, void *val)
 {
 	struct scoutfs_log_item_value *liv;
 
-	if (is_fs_root(lpriv, fr))
+	if (is_fs_root(fr))
 		return 1;
 
 	liv = val;
 	return le64_to_cpu(liv->vers);
 }
 
-static bool item_flags(struct forest_lock_private *lpriv,
-			     struct forest_root *fr, void *val)
+static bool item_flags(struct forest_root *fr, void *val)
 {
 	struct scoutfs_log_item_value *liv;
 
-	if (is_fs_root(lpriv, fr))
+	if (is_fs_root(fr))
 		return 0;
 
 	liv = val;
 	return liv->flags;
 }
 
-static bool item_is_deletion(struct forest_lock_private *lpriv,
-			     struct forest_root *fr, void *val)
+static bool item_is_deletion(struct forest_root *fr, void *val)
 {
-	return item_flags(lpriv, fr, val) & SCOUTFS_LOG_ITEM_FLAG_DELETION;
+	return item_flags(fr, val) & SCOUTFS_LOG_ITEM_FLAG_DELETION;
 }
 
 /* just a little helper to slim down all the call sites */
@@ -553,14 +617,14 @@ static int lock_safe(struct scoutfs_lock *lock, struct scoutfs_key *key,
  * A null val returns 0.  Items in log trees have a value header that
  * needs to be skipped.
  */
-static int copy_val(struct forest_lock_private *lpriv, struct forest_root *fr,
-		    struct kvec *val, void *item_val, int item_val_len)
+static int copy_val(struct forest_root *fr, struct kvec *val, void *item_val,
+		    int item_val_len)
 {
 	void *val_start = item_val;
 	unsigned int val_len = item_val_len;
 	int ret;
 
-	if (!is_fs_root(lpriv, fr)) {
+	if (!is_fs_root(fr)) {
 		val_start += sizeof(struct scoutfs_log_item_value);
 		val_len -= sizeof(struct scoutfs_log_item_value);
 	}
@@ -604,48 +668,48 @@ retry:
 	ret = -ENOENT;
 	fr = NULL;
 
-	while (!(err = for_each_forest_root(lock, lpriv, &fr)) && fr) {
+	while (!(err = for_each_forest_root(sb, lock, finf, lpriv, &fr)) && fr){
 
 		/* done if we found log items before fs root */
-		if (found_vers > 0 && is_fs_root(lpriv, fr))
+		if (found_vers > 0 && is_fs_root(fr))
 			break;
 
-		read_lock_forest_root(finf, lpriv, fr);
+		err = read_lock_forest_root(finf, lpriv, fr);
+		if (err < 0)
+			break;
 		err = scoutfs_btree_lookup(sb, &fr->item_root, key, &iref);
 		if (err < 0)
-			read_unlock_forest_root(finf, lpriv, fr);
+			read_unlock_forest_root(finf, fr);
 		if (err == -ENOENT)
 			continue;
 		if (err < 0)
 			break;
 
-		vers = item_vers(lpriv, fr, iref.val);
+		vers = item_vers(fr, iref.val);
 
 		if (vers > found_vers) {
 			found_vers = vers;
 
-			if (item_is_deletion(lpriv, fr, iref.val))
+			if (item_is_deletion(fr, iref.val))
 				ret = -ENOENT;
 			else
-				ret = copy_val(lpriv, fr, val,
-					       iref.val, iref.val_len);
+				ret = copy_val(fr, val, iref.val, iref.val_len);
 		}
 		scoutfs_btree_put_iref(&iref);
-		read_unlock_forest_root(finf, lpriv, fr);
+		read_unlock_forest_root(finf, fr);
 
 		/* done if we have the most recent locked dirty version */
-		if (is_our_dirty_item(lock, fr, vers))
+		if (is_write_locked_version(lock, vers))
 			break;
 	}
 
 	up_read(&lpriv->rwsem);
 
-	if (err == -ESTALE) {
-		err = refresh_check_stale(sb, lock, &prev_refs, &refs);
-		if (err == 0)
-			goto retry;
+	err = refresh_check(sb, lock, &prev_refs, &refs, err);
+	if (err == -EAGAIN)
+		goto retry;
+	if (err < 0)
 		ret = err;
-	}
 out:
 	return ret;
 }
@@ -878,7 +942,7 @@ retry:
 
 	/* initialize iter position for each tree */
 	fr = NULL;
-	while (!(ret = for_each_forest_root(lock, lpriv, &fr)) && fr) {
+	while (!(ret = for_each_forest_root(sb, lock, finf, lpriv, &fr)) && fr){
 		ip = kmalloc(sizeof(struct forest_iter_pos), GFP_NOFS);
 		if (!ip) {
 			ret = -ENOMEM;
@@ -905,11 +969,13 @@ retry:
 
 		/* search for the next item in the root */
 		if (ip->vers == 0) {
-			read_lock_forest_root(finf, lpriv, fr);
+			ret = read_lock_forest_root(finf, lpriv, fr);
+			if (ret < 0)
+				goto unlock;
 			ret = forest_iter_btree_search(sb, &fr->item_root,
 						       &ip->key, &iref, fwd);
 			if (ret < 0)
-				read_unlock_forest_root(finf, lpriv, fr);
+				read_unlock_forest_root(finf, fr);
 			if (ret == -ENOENT) {
 				destroy_iter_pos(ip, &iter_root);
 				continue;
@@ -918,12 +984,12 @@ retry:
 				goto unlock;
 
 			ip->key = *iref.key;
-			ip->vers = item_vers(lpriv, fr, iref.val);
-			ip->deletion = item_is_deletion(lpriv, fr, iref.val);
+			ip->vers = item_vers(fr, iref.val);
+			ip->deletion = item_is_deletion(fr, iref.val);
 
 			trace_scoutfs_forest_iter_search(sb, fr->rid, fr->nr,
 					ip->vers,
-					item_flags(lpriv, fr, iref.val),
+					item_flags(fr, iref.val),
 					&ip->key);
 
 			if (!forest_iter_key_within(&ip->key, end, fwd)) {
@@ -944,7 +1010,7 @@ retry:
 			}
 
 			scoutfs_btree_put_iref(&iref);
-			read_unlock_forest_root(finf, lpriv, fr);
+			read_unlock_forest_root(finf, fr);
 
 			if (ret < 0)
 				goto unlock;
@@ -964,7 +1030,7 @@ retry:
 		/* use the first non-deletion across all roots */
 		found_key = ip->key;
 		found_vers = ip->vers;
-		found_ret = copy_val(lpriv, ip->fr, val, ip->val, ip->val_len);
+		found_ret = copy_val(ip->fr, val, ip->val, ip->val_len);
 		break;
 	}
 
@@ -979,11 +1045,9 @@ unlock:
 		destroy_iter_pos(ip, &iter_root);
 	}
 
-	if (ret == -ESTALE) {
-		ret = refresh_check_stale(sb, lock, &prev_refs, &refs);
-		if (ret == 0)
-			goto retry;
-	}
+	ret = refresh_check(sb, lock, &prev_refs, &refs, ret);
+	if (ret == -EAGAIN)
+		goto retry;
 
 out:
 	trace_scoutfs_forest_iter_ret(sb, key, end, fwd, ret,
@@ -1116,24 +1180,18 @@ out:
 	return ret;
 }
 
-
 /*
- * Make sure that the bloom bits for the lock's start value are all set
- * in the bloom block.  We record the bits being set in the lock so that
- * we only dirty the bloom block once per lock acquisition per log
- * btree.
+ * Make sure that the bloom bits for the lock's start key are all set in
+ * the current log's bloom block.  We record the nr of our log tree in
+ * the lock so that we only try to cow and set the bits once per tree.
  *
- * If all the bloom bits weren't set then our log btree won't have been
- * found by the search for log btrees to read under the lock.  The
- * caller is about to insert an item into the log tree that future
- * readers must find so we make sure that the log root is added to the
- * lock's list of roots.
- *
- * This can be racing with itself and readers in any stages of checking
- * the forest trees and bloom blocks.
+ * The caller already gets the big finf write rwsem lock to modify the
+ * dirty log btree, might as well use it to protect the bloom ref and
+ * the lpriv field.  We'll need finer grained locking once the btrees
+ * get block locks.
  */
 static int set_lock_bloom_bits(struct super_block *sb,
-			       struct scoutfs_lock *lock)
+			       struct scoutfs_lock *lock, u64 nr)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_FOREST_INFO(sb, finf);
@@ -1149,20 +1207,21 @@ static int set_lock_bloom_bits(struct super_block *sb,
 	int err;
 	int i;
 
+	BUG_ON(!rwsem_is_locked(&finf->rwsem));
+
 	lpriv = get_lock_private(lock);
 	if (!lpriv) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	if (test_lpriv_flag(lpriv, LPRIV_FLAG_ALL_BLOOM_BITS)) {
+	/* our rid is constant */
+	if (lpriv->set_bloom_nr == nr) {
 		ret = 0;
 		goto out;
 	}
 
 	calc_bloom_nrs(&bloom, &lock->start);
-
-	down_write(&finf->rwsem);
 
 	ref = &finf->our_log.bloom_ref;
 
@@ -1170,7 +1229,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 		bl = read_bloom_ref(sb, ref);
 		if (IS_ERR(bl)) {
 			ret = PTR_ERR(bl);
-			goto unlock;
+			goto out;
 		}
 		bb = bl->data;
 	}
@@ -1179,7 +1238,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 
 		ret = scoutfs_radix_alloc(sb, finf->alloc, finf->wri, &blkno);
 		if (ret < 0)
-			goto unlock;
+			goto out;
 
 		new_bl = scoutfs_block_create(sb, blkno);
 		if (IS_ERR(new_bl)) {
@@ -1187,7 +1246,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 						 blkno);
 			BUG_ON(err); /* could have dirtied */
 			ret = PTR_ERR(new_bl);
-			goto unlock;
+			goto out;
 		}
 
 		if (bl) {
@@ -1228,17 +1287,8 @@ static int set_lock_bloom_bits(struct super_block *sb,
 				le64_to_cpu(finf->our_log.bloom_ref.seq),
 				nr_set);
 
+	lpriv->set_bloom_nr = nr;
 	ret = 0;
-unlock:
-	up_write(&finf->rwsem);
-
-	if (ret == 0) {
-		down_write(&lpriv->rwsem);
-		add_our_log_root(finf, lpriv);
-		up_write(&lpriv->rwsem);
-		set_lpriv_flag(lpriv, LPRIV_FLAG_ALL_BLOOM_BITS);
-	}
-
 out:
 	scoutfs_block_put(sb, bl);
 	return ret;
@@ -1282,11 +1332,18 @@ static struct kvec *alloc_log_item_value(struct kvec *val, __u8 flags,
  */
 static int forest_insert(struct super_block *sb, struct scoutfs_key *key,
 			 struct kvec *val, struct scoutfs_lock *lock,
-			 bool check_eexist, bool check_enoent)
+			 bool check_eexist, bool check_enoent, bool could_read)
 {
 	DECLARE_FOREST_INFO(sb, finf);
+	struct forest_lock_private *lpriv;
 	struct kvec *iv = NULL;
 	int ret;
+
+	lpriv = get_lock_private(lock);
+	if (!lpriv) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	if (check_eexist || check_enoent) {
 		ret = scoutfs_forest_lookup(sb, key, NULL, lock);
@@ -1301,11 +1358,8 @@ static int forest_insert(struct super_block *sb, struct scoutfs_key *key,
 		}
 		if (ret < 0)
 			goto out;
-	}
 
-	ret = set_lock_bloom_bits(sb, lock);
-	if (ret < 0)
-		goto out;
+	}
 
 	iv = alloc_log_item_value(val, 0, lock);
 	if (iv == NULL) {
@@ -1314,11 +1368,20 @@ static int forest_insert(struct super_block *sb, struct scoutfs_key *key,
 	}
 
 	down_write(&finf->rwsem);
+
+	ret = set_lock_bloom_bits(sb, lock, le64_to_cpu(finf->our_log.nr));
+	if (ret < 0)
+		goto unlock;
+
 	ret = scoutfs_btree_force(sb, finf->alloc, finf->wri,
 				  &finf->our_log.item_root, key,
 				  iv->iov_base, iv->iov_len);
+	if (ret == 0 && could_read)
+		set_dirtied_cseq(sb, finf, lock, lpriv);
+unlock:
 	up_write(&finf->rwsem);
 	kfree(iv);
+
 out:
 	return ret;
 }
@@ -1334,7 +1397,7 @@ int scoutfs_forest_create(struct super_block *sb, struct scoutfs_key *key,
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_WRITE)) < 0)
 		return ret;
 
-	return forest_insert(sb, key, val, lock, true, false);
+	return forest_insert(sb, key, val, lock, true, false, true);
 }
 
 /*
@@ -1349,7 +1412,7 @@ int scoutfs_forest_create_force(struct super_block *sb,
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_WRITE_ONLY)) < 0)
 		return ret;
 
-	return forest_insert(sb, key, val, lock, false, false);
+	return forest_insert(sb, key, val, lock, false, false, false);
 }
 
 /*
@@ -1364,7 +1427,7 @@ int scoutfs_forest_update(struct super_block *sb, struct scoutfs_key *key,
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_WRITE)) < 0)
 		return ret;
 
-	return forest_insert(sb, key, val, lock, false, true);
+	return forest_insert(sb, key, val, lock, false, true, true);
 }
 
 /* XXX not yet supported, idea is btree op that only uses dirty blocks */
@@ -1376,11 +1439,19 @@ int scoutfs_forest_delete_dirty(struct super_block *sb,
 }
 
 static int forest_delete(struct super_block *sb, struct scoutfs_key *key,
-			 struct scoutfs_lock *lock, bool check_enoent)
+			 struct scoutfs_lock *lock, bool check_enoent,
+			 bool could_read)
 {
 	DECLARE_FOREST_INFO(sb, finf);
+	struct forest_lock_private *lpriv;
 	struct scoutfs_log_item_value liv;
 	int ret;
+
+	lpriv = get_lock_private(lock);
+	if (!lpriv) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	if (check_enoent) {
 		ret = scoutfs_forest_lookup(sb, key, NULL, lock);
@@ -1388,17 +1459,21 @@ static int forest_delete(struct super_block *sb, struct scoutfs_key *key,
 			goto out;
 	}
 
-	ret = set_lock_bloom_bits(sb, lock);
-	if (ret < 0)
-		goto out;
-
 	liv.vers = cpu_to_le64(lock->write_version);
 	liv.flags = SCOUTFS_LOG_ITEM_FLAG_DELETION;
 
 	down_write(&finf->rwsem);
+
+	ret = set_lock_bloom_bits(sb, lock, le64_to_cpu(finf->our_log.nr));
+	if (ret < 0)
+		goto unlock;
+
 	ret = scoutfs_btree_force(sb, finf->alloc, finf->wri,
-				  &finf->our_log.item_root, key, &liv,
-				  sizeof(liv));
+				  &finf->our_log.item_root,
+				  key, &liv, sizeof(liv));
+	if (ret == 0 && could_read)
+		set_dirtied_cseq(sb, finf, lock, lpriv);
+unlock:
 	up_write(&finf->rwsem);
 out:
 	return ret;
@@ -1419,7 +1494,7 @@ int scoutfs_forest_delete(struct super_block *sb, struct scoutfs_key *key,
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_WRITE)) < 0)
 		return ret;
 
-	return forest_delete(sb, key, lock, true);
+	return forest_delete(sb, key, lock, true, true);
 }
 
 /*
@@ -1435,7 +1510,7 @@ int scoutfs_forest_delete_force(struct super_block *sb,
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_WRITE_ONLY)) < 0)
 		return ret;
 
-	return forest_delete(sb, key, lock, false);
+	return forest_delete(sb, key, lock, false, false);
 }
 
 /* XXX not supported, just for initial demo */
@@ -1506,9 +1581,16 @@ void scoutfs_forest_init_btrees(struct super_block *sb,
 	finf->our_log.bloom_ref = lt->bloom_ref;
 	finf->our_log.rid = lt->rid;
 	finf->our_log.nr = lt->nr;
+	atomic64_inc(&finf->commit_seq);
 	finf->srch_file = lt->srch_file;
 	WARN_ON_ONCE(finf->srch_bl); /* commiting should have put the block */
 	finf->srch_bl = NULL;
+
+	trace_scoutfs_forest_init_our_log(sb, le64_to_cpu(lt->rid),
+					  le64_to_cpu(lt->nr),
+					  le64_to_cpu(lt->item_root.ref.blkno),
+					  le64_to_cpu(lt->item_root.ref.seq),
+					  atomic64_read(&finf->commit_seq));
 
 	up_write(&finf->rwsem);
 }
@@ -1550,6 +1632,7 @@ int scoutfs_forest_setup(struct super_block *sb)
 	/* the finf fields will be setup as we open a transaction */
 	init_rwsem(&finf->rwsem);
 	mutex_init(&finf->srch_mutex);
+	atomic64_set(&finf->commit_seq, 0);
 
 	sbi->forest_info = finf;
 	ret = 0;

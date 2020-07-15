@@ -27,6 +27,7 @@
 #include "inode.h"
 #include "radix.h"
 #include "block.h"
+#include "msg.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -126,6 +127,7 @@ bool scoutfs_trans_has_dirty(struct super_block *sb)
 
 	return scoutfs_block_writer_has_dirty(sb, &tri->wri);
 }
+
 /*
  * This work func is responsible for writing out all the dirty blocks
  * that make up the current dirty transaction.  It prevents writers from
@@ -156,6 +158,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 						   trans_write_work.work);
 	struct super_block *sb = sbi->sb;
 	DECLARE_TRANS_INFO(sb, tri);
+	char *s = NULL;
 	int ret = 0;
 
 	sbi->trans_task = current;
@@ -165,35 +168,39 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	trace_scoutfs_trans_write_func(sb,
 			scoutfs_block_writer_dirty_bytes(sb, &tri->wri));
 
-	if (scoutfs_block_writer_has_dirty(sb, &tri->wri)) {
-		if (sbi->trans_deadline_expired)
-			scoutfs_inc_counter(sb, trans_commit_timer);
-
-		scoutfs_inc_counter(sb, trans_commit_written);
-
-		ret = scoutfs_inode_walk_writeback(sb, true) ?:
-		      scoutfs_block_writer_write(sb, &tri->wri) ?:
-		      scoutfs_inode_walk_writeback(sb, false) ?:
-		      commit_btrees(sb) ?:
-		      scoutfs_client_advance_seq(sb, &sbi->trans_seq) ?:
-		      scoutfs_trans_get_log_trees(sb);
-		if (ret)
-			goto out;
-
-	} else if (sbi->trans_deadline_expired) {
-		/*
-		 * If we're not writing data then we only advance the
-		 * seq at the sync deadline interval.  This keeps idle
-		 * mounts from pinning a seq and stopping readers of the
-		 * seq indices but doesn't send a message for every sync
-		 * syscall.
-		 */
-		ret = scoutfs_client_advance_seq(sb, &sbi->trans_seq);
+	if (!scoutfs_block_writer_has_dirty(sb, &tri->wri)) {
+		if (sbi->trans_deadline_expired) {
+			/*
+			 * If we're not writing data then we only advance the
+			 * seq at the sync deadline interval.  This keeps idle
+			 * mounts from pinning a seq and stopping readers of the
+			 * seq indices but doesn't send a message for every sync
+			 * syscall.
+			 */
+			ret = scoutfs_client_advance_seq(sb, &sbi->trans_seq);
+			if (ret < 0)
+			      s = "clean advance seq";
+		}
+		goto out;
 	}
 
-out:
+	if (sbi->trans_deadline_expired)
+		scoutfs_inc_counter(sb, trans_commit_timer);
+
+	scoutfs_inc_counter(sb, trans_commit_written);
+
 	/* XXX this all needs serious work for dealing with errors */
-	WARN_ON_ONCE(ret);
+	ret = (s = "data submit", scoutfs_inode_walk_writeback(sb, true)) ?:
+	      (s = "meta write", scoutfs_block_writer_write(sb, &tri->wri))  ?:
+	      (s = "data wait", scoutfs_inode_walk_writeback(sb, false)) ?:
+	      (s = "commit log trees", commit_btrees(sb)) ?:
+	      (s = "advance seq", scoutfs_client_advance_seq(sb,
+							     &sbi->trans_seq))?:
+	      (s = "get log trees", scoutfs_trans_get_log_trees(sb));
+out:
+	if (ret < 0)
+		scoutfs_err(sb, "critical transaction commit failure: %s, %d",
+			    s, ret);
 
 	spin_lock(&sbi->trans_write_lock);
 	sbi->trans_write_count++;

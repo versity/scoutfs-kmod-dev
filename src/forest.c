@@ -63,11 +63,6 @@
  * list from scratch.
  */
 
-/*
- * todo:
- * - add a bunch of counters so we can see bloom/tree ops/etc
- */
-
 struct forest_info {
 	struct rw_semaphore rwsem;
 	struct scoutfs_radix_allocator *alloc;
@@ -182,6 +177,7 @@ static int add_root(struct super_block *sb, struct scoutfs_lock *lock,
 	fr->our_dirty = !!our_dirty;
 	list_add_tail(&fr->entry, &lpriv->roots);
 
+	scoutfs_inc_counter(sb, forest_add_root);
 	trace_scoutfs_forest_add_root(sb, &lock->start, fr->rid, fr->nr,
 				      le64_to_cpu(fr->item_root.ref.blkno),
 				      le64_to_cpu(fr->item_root.ref.seq));
@@ -207,6 +203,7 @@ static void set_dirtied_cseq(struct super_block *sb, struct forest_info *finf,
 
 	if (atomic64_read(&lpriv->dirtied_cseq) != cseq) {
 		atomic64_set(&lpriv->dirtied_cseq, cseq);
+		scoutfs_inc_counter(sb, forest_set_dirtied);
 
 		trace_scoutfs_forest_set_dirtied(sb, &lock->start,
 						 le64_to_cpu(finf->our_log.rid),
@@ -225,6 +222,7 @@ void scoutfs_forest_clear_lock(struct super_block *sb,
 	struct forest_lock_private *lpriv = ACCESS_ONCE(lock->forest_private);
 
 	if (lpriv) {
+		scoutfs_inc_counter(sb, forest_clear_lock);
 		free_roots(lpriv);
 		kfree(lpriv);
 		lock->forest_private = NULL;
@@ -241,7 +239,8 @@ void scoutfs_forest_clear_lock(struct super_block *sb,
  * and we can see if a commit has rotated in a new tree and we need to
  * refresh the list.
  */
-static int read_lock_forest_root(struct forest_info *finf,
+static int read_lock_forest_root(struct super_block *sb,
+				 struct forest_info *finf,
 				 struct forest_lock_private *lpriv,
 				 struct forest_root *fr)
 {
@@ -252,8 +251,10 @@ static int read_lock_forest_root(struct forest_info *finf,
 	if (fr->our_dirty) {
 		down_read(&finf->rwsem);
 		if (fr->nr == le64_to_cpu(finf->our_log.nr)) {
+			scoutfs_inc_counter(sb, forest_read_lock_log);
 			fr->item_root = finf->our_log.item_root;
 		} else {
+			scoutfs_inc_counter(sb, forest_read_lock_rotated);
 			up_read(&finf->rwsem);
 			ret = -EUCLEAN;
 		}
@@ -348,6 +349,8 @@ static int refresh_bloom_roots(struct super_block *sb,
 	int ret;
 	int i;
 
+	scoutfs_inc_counter(sb, forest_refresh_bloom_roots);
+
 	memset(refs, 0, sizeof(*refs));
 
 	down_write(&lpriv->rwsem);
@@ -364,6 +367,7 @@ static int refresh_bloom_roots(struct super_block *sb,
 		cseq = atomic64_read(&finf->commit_seq);
 		dirtied = atomic64_read(&lpriv->dirtied_cseq);
 		if (dirtied == cseq) {
+			scoutfs_inc_counter(sb, forest_refresh_dirty_log);
 			lt = &finf->our_log;
 			our_rid = le64_to_cpu(lt->rid);
 			our_nr = le64_to_cpu(lt->nr);
@@ -448,13 +452,19 @@ static int refresh_bloom_roots(struct super_block *sb,
 					i);
 
 		/* one of the bloom bits wasn't set */
-		if (i != ARRAY_SIZE(bloom.nrs))
+		if (i != ARRAY_SIZE(bloom.nrs)) {
+			scoutfs_inc_counter(sb, forest_bloom_fail);
 			continue;
+		}
+
+		scoutfs_inc_counter(sb, forest_bloom_pass);
 
 		/* we've added our dirty log, skip old committed versions */
 		if (le64_to_cpu(key.sklt_rid) == our_rid &&
-		    le64_to_cpu(key.sklt_nr) == our_nr)
+		    le64_to_cpu(key.sklt_nr) == our_nr) {
+			scoutfs_inc_counter(sb, forest_refresh_skip_log);
 			continue;
+		}
 
 		ret = add_root(sb, lock, lpriv, &ltv.item_root,
 			       le64_to_cpu(key.sklt_rid),
@@ -508,6 +518,7 @@ static int refresh_check(struct super_block *sb, struct scoutfs_lock *lock,
 		return err;
 
 	if (err == -ESTALE) {
+		scoutfs_inc_counter(sb, forest_saw_stale);
 		if (memcmp(prev_refs, refs, sizeof(*refs)) == 0)
 			return -EIO;
 	}
@@ -549,6 +560,7 @@ static int for_each_forest_root(struct super_block *sb,
 	    dirtied > lpriv->refreshed_dirtied ||
 	    (dirtied == lpriv->refreshed_cseq &&
 	     cseq > lpriv->refreshed_cseq)) {
+		scoutfs_inc_counter(sb, forest_trigger_refresh);
 		trace_scoutfs_forest_trigger_refresh(sb,
 					&lock->start,
 					!!list_empty(&lpriv->roots),
@@ -652,6 +664,8 @@ int scoutfs_forest_lookup(struct super_block *sb, struct scoutfs_key *key,
 	int ret;
 	int err;
 
+	scoutfs_inc_counter(sb, forest_lookup);
+
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_READ)) < 0)
 		goto out;
 
@@ -674,7 +688,7 @@ retry:
 		if (found_vers > 0 && is_fs_root(fr))
 			break;
 
-		err = read_lock_forest_root(finf, lpriv, fr);
+		err = read_lock_forest_root(sb, finf, lpriv, fr);
 		if (err < 0)
 			break;
 		err = scoutfs_btree_lookup(sb, &fr->item_root, key, &iref);
@@ -916,6 +930,7 @@ static int forest_iter(struct super_block *sb, struct scoutfs_key *key,
 	int found_ret = 0;
 	int ret;
 
+	scoutfs_inc_counter(sb, forest_iter);
 	scoutfs_key_set_zeros(&found_key);
 
 	if ((ret = lock_safe(lock, key, SCOUTFS_LOCK_READ)) < 0)
@@ -969,7 +984,7 @@ retry:
 
 		/* search for the next item in the root */
 		if (ip->vers == 0) {
-			ret = read_lock_forest_root(finf, lpriv, fr);
+			ret = read_lock_forest_root(sb, finf, lpriv, fr);
 			if (ret < 0)
 				goto unlock;
 			ret = forest_iter_btree_search(sb, &fr->item_root,
@@ -1221,6 +1236,7 @@ static int set_lock_bloom_bits(struct super_block *sb,
 		goto out;
 	}
 
+	scoutfs_inc_counter(sb, forest_set_bloom_bits);
 	calc_bloom_nrs(&bloom, &lock->start);
 
 	ref = &finf->our_log.bloom_ref;
@@ -1339,6 +1355,8 @@ static int forest_insert(struct super_block *sb, struct scoutfs_key *key,
 	struct kvec *iv = NULL;
 	int ret;
 
+	scoutfs_inc_counter(sb, forest_insert);
+
 	lpriv = get_lock_private(lock);
 	if (!lpriv) {
 		ret = -ENOMEM;
@@ -1446,6 +1464,8 @@ static int forest_delete(struct super_block *sb, struct scoutfs_key *key,
 	struct forest_lock_private *lpriv;
 	struct scoutfs_log_item_value liv;
 	int ret;
+
+	scoutfs_inc_counter(sb, forest_delete);
 
 	lpriv = get_lock_private(lock);
 	if (!lpriv) {

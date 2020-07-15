@@ -56,9 +56,26 @@
 	EXPAND_COUNTER(dentry_revalidate_root)			\
 	EXPAND_COUNTER(dentry_revalidate_valid)			\
 	EXPAND_COUNTER(dir_backref_excessive_retries)		\
+	EXPAND_COUNTER(forest_add_root)				\
+	EXPAND_COUNTER(forest_bloom_fail)			\
+	EXPAND_COUNTER(forest_bloom_pass)			\
+	EXPAND_COUNTER(forest_clear_lock)			\
+	EXPAND_COUNTER(forest_delete)				\
+	EXPAND_COUNTER(forest_insert)				\
+	EXPAND_COUNTER(forest_iter)				\
+	EXPAND_COUNTER(forest_lookup)				\
+	EXPAND_COUNTER(forest_read_lock_log)			\
+	EXPAND_COUNTER(forest_read_lock_rotated)		\
+	EXPAND_COUNTER(forest_refresh_bloom_roots)		\
+	EXPAND_COUNTER(forest_refresh_dirty_log)		\
+	EXPAND_COUNTER(forest_refresh_skip_log)			\
 	EXPAND_COUNTER(forest_roots_next_hint)			\
 	EXPAND_COUNTER(forest_roots_lock)			\
 	EXPAND_COUNTER(forest_roots_server)			\
+	EXPAND_COUNTER(forest_saw_stale)			\
+	EXPAND_COUNTER(forest_set_bloom_bits)			\
+	EXPAND_COUNTER(forest_set_dirtied)			\
+	EXPAND_COUNTER(forest_trigger_refresh)			\
 	EXPAND_COUNTER(lock_alloc)				\
 	EXPAND_COUNTER(lock_free)				\
 	EXPAND_COUNTER(lock_grace_elapsed)			\

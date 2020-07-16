@@ -358,12 +358,17 @@ struct scoutfs_ioctl_search_xattrs {
  * field is set if all of its bytes are within the valid_bytes that the
  * kernel set on return.
  *
+ * @committed_seq: All seqs up to and including this seq have been
+ * committed.  Can be compared with meta_seq and data_seq from inodes in
+ * stat_more to discover if changes have been committed to disk.
+ *
  * New fields are only added to the end of the struct.
  */
 struct scoutfs_ioctl_statfs_more {
 	__u64 valid_bytes;
 	__u64 fsid;
 	__u64 rid;
+	__u64 committed_seq;
 } __packed;
 
 #define SCOUTFS_IOC_STATFS_MORE _IOR(SCOUTFS_IOCTL_MAGIC, 10, \

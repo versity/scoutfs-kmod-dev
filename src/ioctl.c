@@ -846,6 +846,7 @@ static long scoutfs_ioc_statfs_more(struct file *file, unsigned long arg)
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
 	struct scoutfs_ioctl_statfs_more sfm;
+	int ret;
 
 	if (get_user(sfm.valid_bytes, (__u64 __user *)arg))
 		return -EFAULT;
@@ -854,6 +855,10 @@ static long scoutfs_ioc_statfs_more(struct file *file, unsigned long arg)
 				sizeof(struct scoutfs_ioctl_statfs_more));
 	sfm.fsid = le64_to_cpu(super->hdr.fsid);
 	sfm.rid = sbi->rid;
+
+	ret = scoutfs_client_get_last_seq(sb, &sfm.committed_seq);
+	if (ret)
+		return ret;
 
 	if (copy_to_user((void __user *)arg, &sfm, sfm.valid_bytes))
 		return -EFAULT;

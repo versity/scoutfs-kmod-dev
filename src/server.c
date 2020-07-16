@@ -747,7 +747,7 @@ static int server_advance_seq(struct super_block *sb,
 		ret = scoutfs_btree_delete(sb, &server->alloc, &server->wri,
 					   &super->trans_seqs, &key);
 		if (ret < 0 && ret != -ENOENT)
-			goto out;
+			goto unlock;
 	}
 
 	next_seq = super->next_trans_seq;
@@ -759,10 +759,11 @@ static int server_advance_seq(struct super_block *sb,
 	init_trans_seq_key(&key, le64_to_cpu(next_seq), rid);
 	ret = scoutfs_btree_insert(sb, &server->alloc, &server->wri,
 				   &super->trans_seqs, &key, NULL, 0);
-out:
+unlock:
 	up_write(&server->seq_rwsem);
 	ret = scoutfs_server_apply_commit(sb, ret);
 
+out:
 	return scoutfs_net_response(sb, conn, cmd, id, ret,
 				    &next_seq, sizeof(next_seq));
 }

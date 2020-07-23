@@ -80,6 +80,12 @@ struct lock_info {
 	struct list_head lru_list;
 	unsigned long long lru_nr;
 	struct workqueue_struct *workq;
+	struct work_struct grant_work;
+	struct list_head grant_list;
+	struct delayed_work inv_dwork;
+	struct list_head inv_list;
+	struct work_struct shrink_work;
+	struct list_head shrink_list;
 	atomic64_t next_refresh_gen;
 	struct dentry *tseq_dentry;
 	struct scoutfs_tseq_tree tseq_tree;
@@ -87,8 +93,6 @@ struct lock_info {
 
 #define DECLARE_LOCK_INFO(sb, name) \
 	struct lock_info *name = SCOUTFS_SB(sb)->lock_info
-
-static void scoutfs_lock_shrink_worker(struct work_struct *work);
 
 static bool lock_mode_invalid(int mode)
 {
@@ -220,6 +224,9 @@ static void lock_free(struct lock_info *linfo, struct scoutfs_lock *lock)
 	BUG_ON(!RB_EMPTY_NODE(&lock->node));
 	BUG_ON(!RB_EMPTY_NODE(&lock->range_node));
 	BUG_ON(!list_empty(&lock->lru_head));
+	BUG_ON(!list_empty(&lock->grant_head));
+	BUG_ON(!list_empty(&lock->inv_head));
+	BUG_ON(!list_empty(&lock->shrink_head));
 	BUG_ON(!list_empty(&lock->cov_list));
 
 	scoutfs_forest_clear_lock(sb, lock);
@@ -245,7 +252,9 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 	RB_CLEAR_NODE(&lock->node);
 	RB_CLEAR_NODE(&lock->range_node);
 	INIT_LIST_HEAD(&lock->lru_head);
-
+	INIT_LIST_HEAD(&lock->grant_head);
+	INIT_LIST_HEAD(&lock->inv_head);
+	INIT_LIST_HEAD(&lock->shrink_head);
 	spin_lock_init(&lock->cov_list_lock);
 	INIT_LIST_HEAD(&lock->cov_list);
 
@@ -253,7 +262,6 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 	lock->end = *end;
 	lock->sb = sb;
 	init_waitqueue_head(&lock->waitq);
-	INIT_WORK(&lock->shrink_work, scoutfs_lock_shrink_worker);
 	lock->mode = SCOUTFS_LOCK_NULL;
 
 	trace_scoutfs_lock_alloc(sb, lock);
@@ -540,11 +548,36 @@ static void extend_grace(struct super_block *sb, struct scoutfs_lock *lock)
 	lock->grace_deadline = ktime_add(now, GRACE_PERIOD_KT);
 }
 
+static void queue_grant_work(struct lock_info *linfo)
+{
+	assert_spin_locked(&linfo->lock);
+
+	if (!list_empty(&linfo->grant_list) && !linfo->shutdown)
+		queue_work(linfo->workq, &linfo->grant_work);
+}
+
 /*
- * The client is receiving a lock response message from the server.
- * This can be reordered with incoming invlidation requests from the
- * server so we have to be careful to only set the new mode once the old
- * mode matches.
+ * We immediately queue work on the assumption that the caller might
+ * have made a change (set a lock mode) which can let one of the
+ * invalidating locks make forward progress, even if other locks are
+ * waiting for their grace period to elapse.  It's a trade-off between
+ * invalidation latency and burning cpu repeatedly finding that locks
+ * are still in their grace period.
+ */
+static void queue_inv_work(struct lock_info *linfo)
+{
+	assert_spin_locked(&linfo->lock);
+
+	if (!list_empty(&linfo->inv_list) && !linfo->shutdown)
+		mod_delayed_work(linfo->workq, &linfo->inv_dwork, 0);
+}
+
+/*
+ * Each lock has received a grant response message from the server.
+ *
+ * Grant responses can be reordered with incoming invalidation requests
+ * from the server so we have to be careful to only set the new mode
+ * once the old mode matches.
  *
  * We extend the grace period as we grant the lock if there is a waiting
  * locker who can use the lock.  This stops invalidation from pulling
@@ -554,6 +587,58 @@ static void extend_grace(struct super_block *sb, struct scoutfs_lock *lock)
  * also very similar to waking up the locker and having it win the race
  * against the invalidation.  In that case they'd extend the grace
  * period anyway as they unlock.
+ */
+static void lock_grant_worker(struct work_struct *work)
+{
+	struct lock_info *linfo = container_of(work, struct lock_info,
+					       grant_work);
+	struct super_block *sb = linfo->sb;
+	struct scoutfs_net_lock_grant_response *gr;
+	struct scoutfs_net_lock *nl;
+	struct scoutfs_lock *lock;
+	struct scoutfs_lock *tmp;
+
+	scoutfs_inc_counter(sb, lock_grant_work);
+
+	spin_lock(&linfo->lock);
+
+	list_for_each_entry_safe(lock, tmp, &linfo->grant_list, grant_head) {
+		gr = &lock->grant_resp;
+		nl = &lock->grant_resp.nl;
+
+		/* wait for reordered invalidation to finish */
+		if (lock->mode != nl->old_mode)
+			continue;
+
+		if (!lock_mode_can_read(nl->old_mode) &&
+		    lock_mode_can_read(nl->new_mode)) {
+			lock->refresh_gen =
+				atomic64_inc_return(&linfo->next_refresh_gen);
+		}
+
+		lock->request_pending = 0;
+		lock->mode = nl->new_mode;
+		lock->write_version = le64_to_cpu(nl->write_version);
+		lock->roots = gr->roots;
+
+		if (lock_count_match_exists(nl->new_mode, lock->waiters))
+			extend_grace(sb, lock);
+
+		trace_scoutfs_lock_granted(sb, lock);
+		list_del_init(&lock->grant_head);
+		wake_up(&lock->waitq);
+		put_lock(linfo, lock);
+	}
+
+	/* invalidations might be waiting for our reordered grant */
+	queue_inv_work(linfo);
+	spin_unlock(&linfo->lock);
+}
+
+/*
+ * The client is receiving a grant response message from the server.  We
+ * find the lock, record the response, and add it to the list for grant
+ * work to process.
  */
 int scoutfs_lock_grant_response(struct super_block *sb,
 				struct scoutfs_net_lock_grant_response *gr)
@@ -569,35 +654,12 @@ int scoutfs_lock_grant_response(struct super_block *sb,
 	/* lock must already be busy with request_pending */
 	lock = lock_lookup(sb, &nl->key, NULL);
 	BUG_ON(!lock);
+	trace_scoutfs_lock_grant_response(sb, lock);
 	BUG_ON(!lock->request_pending);
 
-	trace_scoutfs_lock_grant_response(sb, lock);
-
-	/* resolve unlikely work reordering with invalidation request */
-	while (lock->mode != nl->old_mode) {
-		spin_unlock(&linfo->lock);
-		/* implicit read barrier from waitq locks */
-		wait_event(lock->waitq, lock->mode == nl->old_mode);
-		spin_lock(&linfo->lock);
-	}
-
-	if (!lock_mode_can_read(nl->old_mode) &&
-	    lock_mode_can_read(nl->new_mode)) {
-		lock->refresh_gen =
-			atomic64_inc_return(&linfo->next_refresh_gen);
-	}
-
-	lock->request_pending = 0;
-	lock->mode = nl->new_mode;
-	lock->write_version = le64_to_cpu(nl->write_version);
-	lock->roots = gr->roots;
-
-	if (lock_count_match_exists(nl->new_mode, lock->waiters))
-		extend_grace(sb, lock);
-
-	trace_scoutfs_lock_granted(sb, lock);
-	wake_up(&lock->waitq);
-	put_lock(linfo, lock);
+	lock->grant_resp = *gr;
+	list_add_tail(&lock->grant_head, &linfo->grant_list);
+	queue_grant_work(linfo);
 
 	spin_unlock(&linfo->lock);
 
@@ -605,34 +667,9 @@ int scoutfs_lock_grant_response(struct super_block *sb,
 }
 
 /*
- * Invalidation waits until the old mode indicates that we've resolved
- * unlikely races with reordered grant responses from the server and
- * until the new mode satisfies active users.
- *
- * Once it's safe to proceed we set the lock mode here under the lock to
- * prevent additional users of the old mode while we're invalidating.
- */
-static bool lock_invalidate_safe(struct lock_info *linfo,
-				 struct scoutfs_lock *lock,
-				 int old_mode, int new_mode)
-{
-	bool safe;
-
-	spin_lock(&linfo->lock);
-	safe = (lock->mode == old_mode) &&
-	       lock_counts_match(new_mode, lock->users);
-	if (safe)
-		lock->mode = new_mode;
-	spin_unlock(&linfo->lock);
-
-	return safe;
-}
-
-/*
- * The client is receiving a lock invalidation request from the server
+ * Each lock has received a lock invalidation request from the server
  * which specifies a new mode for the lock.  The server will only send
- * one invalidation request at a time.  This is executing in a blocking
- * net receive work context.
+ * one invalidation request at a time for each lock.
  *
  * This is an unsolicited request from the server so it can arrive at
  * any time after we make the server aware of the lock by initially
@@ -649,70 +686,135 @@ static bool lock_invalidate_safe(struct lock_info *linfo,
  * invalidate once the lock mode matches what the server told us to
  * invalidate.
  *
- * We delay invalidation processing until a grace period has elapsed since
- * the last unlock.  The intent is to let users do a reasonable batch of
- * work before dropping the lock.  Continuous unlocking can continuously
- * extend the deadline.
+ * We delay invalidation processing until a grace period has elapsed
+ * since the last unlock.  The intent is to let users do a reasonable
+ * batch of work before dropping the lock.  Continuous unlocking can
+ * continuously extend the deadline.
+ *
+ * Before we start invalidating the lock we set the lock to the new
+ * mode, preventing further incompatible users of the old mode from
+ * using the lock while we're invalidating.
+ *
+ * This does a lot of serialized inode invalidation in one context and
+ * performs a lot of repeated calls to sync.  It would be nice to get
+ * some concurrent inode invalidation and to more carefully only call
+ * sync when needed.
+ */
+static void lock_invalidate_worker(struct work_struct *work)
+{
+	struct lock_info *linfo = container_of(work, struct lock_info,
+					       inv_dwork.work);
+	struct super_block *sb = linfo->sb;
+	struct scoutfs_net_lock *nl;
+	struct scoutfs_lock *lock;
+	struct scoutfs_lock *tmp;
+	unsigned long delay = MAX_JIFFY_OFFSET;
+	ktime_t now = ktime_get();
+	ktime_t deadline;
+	LIST_HEAD(ready);
+	u64 net_id;
+	int ret;
+
+	scoutfs_inc_counter(sb, lock_invalidate_work);
+
+	spin_lock(&linfo->lock);
+
+	list_for_each_entry_safe(lock, tmp, &linfo->inv_list, inv_head) {
+		nl = &lock->inv_nl;
+
+		/* skip if grace hasn't elapsed, record earliest */
+		deadline = lock->grace_deadline;
+		if (ktime_before(now, deadline)) {
+			delay = min(delay,
+				    nsecs_to_jiffies(ktime_to_ns(
+						ktime_sub(deadline, now))));
+			scoutfs_inc_counter(linfo->sb, lock_grace_wait);
+			continue;
+		}
+
+		/* wait for reordered grant to finish */
+		if (lock->mode != nl->old_mode)
+			continue;
+
+		/* wait until incompatible holders unlock */
+		if (!lock_counts_match(nl->new_mode, lock->users))
+			continue;
+
+		/* set the new mode, no incompatible users during inval */
+		lock->mode = nl->new_mode;
+
+		/* move everyone that's ready to our private list */
+		list_move_tail(&lock->inv_head, &ready);
+	}
+
+	spin_unlock(&linfo->lock);
+
+	if (list_empty(&ready))
+		goto out;
+
+	/* invalidate once the lock is read */
+	list_for_each_entry(lock, &ready, inv_head) {
+		nl = &lock->inv_nl;
+		net_id = lock->inv_net_id;
+
+		ret = lock_invalidate(sb, lock, nl->old_mode, nl->new_mode);
+		BUG_ON(ret);
+
+		/* respond with the key and modes from the request */
+		ret = scoutfs_client_lock_response(sb, net_id, nl);
+		BUG_ON(ret);
+
+		scoutfs_inc_counter(sb, lock_invalidate_response);
+	}
+
+	/* and finish all the invalidated locks */
+	spin_lock(&linfo->lock);
+
+	list_for_each_entry_safe(lock, tmp, &ready, inv_head) {
+		list_del_init(&lock->inv_head);
+
+		lock->invalidate_pending = 0;
+		trace_scoutfs_lock_invalidated(sb, lock);
+		wake_up(&lock->waitq);
+		put_lock(linfo, lock);
+	}
+
+	/* grant might have been waiting for invalidate request */
+	queue_grant_work(linfo);
+	spin_unlock(&linfo->lock);
+
+out:
+	/* queue delayed work if invalidations waiting on grace deadline */
+	if (delay != MAX_JIFFY_OFFSET)
+		queue_delayed_work(linfo->workq, &linfo->inv_dwork, delay);
+}
+
+/*
+ * Record an incoming invalidate request from the server and add its lock
+ * to the list for processing.
+ *
+ * This is trusting the server and will crash if it's sent bad requests :/
  */
 int scoutfs_lock_invalidate_request(struct super_block *sb, u64 net_id,
 				    struct scoutfs_net_lock *nl)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
-	ktime_t deadline;
-	bool grace_waited = false;
-	int ret;
 
 	scoutfs_inc_counter(sb, lock_invalidate_request);
 
 	spin_lock(&linfo->lock);
 	lock = get_lock(sb, &nl->key);
-	if (lock) {
-		BUG_ON(lock->invalidate_pending); /* XXX trusting server :/ */
-		lock->invalidate_pending = 1;
-		deadline = lock->grace_deadline;
-		trace_scoutfs_lock_invalidate_request(sb, lock);
-	}
-	spin_unlock(&linfo->lock);
-
 	BUG_ON(!lock);
-
-	/* wait for a grace period after the most recent unlock */
-	while (ktime_before(ktime_get(), deadline)) {
-		grace_waited = true;
-		scoutfs_inc_counter(linfo->sb, lock_grace_wait);
-		set_current_state(TASK_UNINTERRUPTIBLE);
-                schedule_hrtimeout(&deadline, HRTIMER_MODE_ABS);
-
-		spin_lock(&linfo->lock);
-		deadline = lock->grace_deadline;
-		spin_unlock(&linfo->lock);
+	if (lock) {
+		BUG_ON(lock->invalidate_pending);
+		lock->invalidate_pending = 1;
+		lock->inv_nl = *nl;
+		lock->inv_net_id = net_id;
+		list_add_tail(&lock->inv_head, &linfo->inv_list);
+		trace_scoutfs_lock_invalidate_request(sb, lock);
+		queue_inv_work(linfo);
 	}
-
-	if (grace_waited)
-		scoutfs_inc_counter(linfo->sb, lock_grace_elapsed);
-
-	/* sets the lock mode to prevent use of old mode during invalidate */
-	wait_event(lock->waitq, lock_invalidate_safe(linfo, lock, nl->old_mode,
-						     nl->new_mode));
-
-	ret = lock_invalidate(sb, lock, nl->old_mode, nl->new_mode);
-	BUG_ON(ret);
-
-	/* respond with the key and modes from the request */
-	ret = scoutfs_client_lock_response(sb, net_id, nl);
-	BUG_ON(ret);
-
-	scoutfs_inc_counter(sb, lock_invalidate_response);
-
-	spin_lock(&linfo->lock);
-
-	lock->invalidate_pending = 0;
-
-	trace_scoutfs_lock_invalidated(sb, lock);
-	wake_up(&lock->waitq);
-	put_lock(linfo, lock);
-
 	spin_unlock(&linfo->lock);
 
 	return 0;
@@ -1174,6 +1276,7 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock, int mode)
 
 	trace_scoutfs_lock_unlock(sb, lock);
 	wake_up(&lock->waitq);
+	queue_inv_work(linfo);
 	put_lock(linfo, lock);
 
 	spin_unlock(&linfo->lock);
@@ -1258,38 +1361,50 @@ bool scoutfs_lock_protected(struct scoutfs_lock *lock, struct scoutfs_key *key,
 }
 
 /*
- * The shrink callback got the lock, marked it request_pending, and
- * handed it off to us.  We kick off a null request and the lock will
- * be freed by the response once all users drain.  If this races with
+ * The shrink callback got the lock, marked it request_pending, and put
+ * it on the shrink list.  We send a null request and the lock will be
+ * freed by the response once all users drain.  If this races with
  * invalidation then the server will only send the grant response once
  * the invalidation is finished.
  */
-static void scoutfs_lock_shrink_worker(struct work_struct *work)
+static void lock_shrink_worker(struct work_struct *work)
 {
-	struct scoutfs_lock *lock = container_of(work, struct scoutfs_lock,
-						 shrink_work);
-	struct super_block *sb = lock->sb;
-	DECLARE_LOCK_INFO(sb, linfo);
+	struct lock_info *linfo = container_of(work, struct lock_info,
+					       shrink_work);
+	struct super_block *sb = linfo->sb;
 	struct scoutfs_net_lock nl;
+	struct scoutfs_lock *lock;
+	struct scoutfs_lock *tmp;
+	LIST_HEAD(list);
 	int ret;
 
-	/* unlocked lock access, but should be stable since we queued */
-	nl.key = lock->start;
-	nl.old_mode = lock->mode;
-	nl.new_mode = SCOUTFS_LOCK_NULL;
+	scoutfs_inc_counter(sb, lock_shrink_work);
 
-	ret = scoutfs_client_lock_request(sb, &nl);
-	if (ret) {
-		/* oh well, not freeing */
-		scoutfs_inc_counter(sb, lock_shrink_request_aborted);
+	spin_lock(&linfo->lock);
+	list_splice_init(&linfo->shrink_list, &list);
+	spin_unlock(&linfo->lock);
 
-		spin_lock(&linfo->lock);
+	list_for_each_entry_safe(lock, tmp, &list, shrink_head) {
+		list_del_init(&lock->shrink_head);
 
-		lock->request_pending = 0;
-		wake_up(&lock->waitq);
-		put_lock(linfo, lock);
+		/* unlocked lock access, but should be stable since we queued */
+		nl.key = lock->start;
+		nl.old_mode = lock->mode;
+		nl.new_mode = SCOUTFS_LOCK_NULL;
 
-		spin_unlock(&linfo->lock);
+		ret = scoutfs_client_lock_request(sb, &nl);
+		if (ret) {
+			/* oh well, not freeing */
+			scoutfs_inc_counter(sb, lock_shrink_aborted);
+
+			spin_lock(&linfo->lock);
+
+			lock->request_pending = 0;
+			wake_up(&lock->waitq);
+			put_lock(linfo, lock);
+
+			spin_unlock(&linfo->lock);
+		}
 	}
 }
 
@@ -1314,6 +1429,7 @@ static int scoutfs_lock_shrink(struct shrinker *shrink,
 	struct scoutfs_lock *lock;
 	struct scoutfs_lock *tmp;
 	unsigned long nr;
+	bool added = false;
 	int ret;
 
 	nr = sc->nr_to_scan;
@@ -1327,15 +1443,17 @@ restart:
 
 		BUG_ON(!lock_idle(lock));
 		BUG_ON(lock->mode == SCOUTFS_LOCK_NULL);
+		BUG_ON(!list_empty(&lock->shrink_head));
 
-		if (nr-- == 0)
+		if (linfo->shutdown || nr-- == 0)
 			break;
 
 		__lock_del_lru(linfo, lock);
 		lock->request_pending = 1;
-		queue_work(linfo->workq, &lock->shrink_work);
+		list_add_tail(&lock->shrink_head, &linfo->shrink_list);
+		added = true;
 
-		scoutfs_inc_counter(sb, lock_shrink_queued);
+		scoutfs_inc_counter(sb, lock_shrink_attempted);
 		trace_scoutfs_lock_shrink(sb, lock);
 
 		/* could have bazillions of idle locks */
@@ -1344,6 +1462,9 @@ restart:
 	}
 
 	spin_unlock(&linfo->lock);
+
+	if (added)
+		queue_work(linfo->workq, &linfo->shrink_work);
 
 out:
 	ret = min_t(unsigned long, linfo->lru_nr, INT_MAX);
@@ -1379,10 +1500,15 @@ static void lock_tseq_show(struct seq_file *m, struct scoutfs_tseq_entry *ent)
 }
 
 /*
- * We're going to be destroying the locks soon.  We shouldn't have any
- * normal task holders that would have prevented unmount.  We can have
- * internal threads blocked in locks.  We force all currently blocked
- * and future lock calls to return -ESHUTDOWN.
+ * The caller is going to be calling _destroy soon and, critically, is
+ * about to shutdown networking before calling us so that we don't get
+ * any callbacks while we're destroying.  We have to ensure that we
+ * won't call networking after this returns.
+ *
+ * Internal fs threads can be using locking, and locking can have async
+ * work pending.  We use ->shutdown to force callers to return
+ * -ESHUTDOWN and to prevent the future queueing of work that could call
+ * networking.  Locks whose work is stopped will be torn down by _destroy.
  */
 void scoutfs_lock_shutdown(struct super_block *sb)
 {
@@ -1404,6 +1530,10 @@ void scoutfs_lock_shutdown(struct super_block *sb)
 	}
 
 	spin_unlock(&linfo->lock);
+
+	flush_work(&linfo->grant_work);
+	flush_delayed_work(&linfo->inv_dwork);
+	flush_work(&linfo->shrink_work);
 }
 
 /*
@@ -1476,6 +1606,12 @@ void scoutfs_lock_destroy(struct super_block *sb)
 		lock->request_pending = 0;
 		if (!list_empty(&lock->lru_head))
 			__lock_del_lru(linfo, lock);
+		if (!list_empty(&lock->grant_head))
+			list_del_init(&lock->grant_head);
+		if (!list_empty(&lock->inv_head))
+			list_del_init(&lock->inv_head);
+		if (!list_empty(&lock->shrink_head))
+			list_del_init(&lock->shrink_head);
 		lock_remove(linfo, lock);
 		lock_free(linfo, lock);
 	}
@@ -1503,6 +1639,12 @@ int scoutfs_lock_setup(struct super_block *sb)
 	linfo->shrinker.seeks = DEFAULT_SEEKS;
 	register_shrinker(&linfo->shrinker);
 	INIT_LIST_HEAD(&linfo->lru_list);
+	INIT_WORK(&linfo->grant_work, lock_grant_worker);
+	INIT_LIST_HEAD(&linfo->grant_list);
+	INIT_DELAYED_WORK(&linfo->inv_dwork, lock_invalidate_worker);
+	INIT_LIST_HEAD(&linfo->inv_list);
+	INIT_WORK(&linfo->shrink_work, lock_shrink_worker);
+	INIT_LIST_HEAD(&linfo->shrink_list);
 	atomic64_set(&linfo->next_refresh_gen, 0);
 	scoutfs_tseq_tree_init(&linfo->tseq_tree, lock_tseq_show);
 

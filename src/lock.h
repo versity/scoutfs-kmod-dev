@@ -25,10 +25,16 @@ struct scoutfs_lock {
 	struct scoutfs_net_roots roots;
 	struct list_head lru_head;
 	wait_queue_head_t waitq;
-	struct work_struct shrink_work;
 	ktime_t grace_deadline;
 	unsigned long request_pending:1,
 		      invalidate_pending:1;
+
+	struct list_head grant_head;
+	struct scoutfs_net_lock_grant_response grant_resp;
+	struct list_head inv_head;
+	struct scoutfs_net_lock inv_nl;
+	u64 inv_net_id;
+	struct list_head shrink_head;
 
 	spinlock_t cov_list_lock;
 	struct list_head cov_list;

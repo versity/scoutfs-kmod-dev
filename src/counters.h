@@ -78,23 +78,25 @@
 	EXPAND_COUNTER(forest_trigger_refresh)			\
 	EXPAND_COUNTER(lock_alloc)				\
 	EXPAND_COUNTER(lock_free)				\
-	EXPAND_COUNTER(lock_grace_elapsed)			\
 	EXPAND_COUNTER(lock_grace_extended)			\
 	EXPAND_COUNTER(lock_grace_set)				\
 	EXPAND_COUNTER(lock_grace_wait)				\
 	EXPAND_COUNTER(lock_grant_request)			\
 	EXPAND_COUNTER(lock_grant_response)			\
+	EXPAND_COUNTER(lock_grant_work)				\
 	EXPAND_COUNTER(lock_invalidate_commit)			\
 	EXPAND_COUNTER(lock_invalidate_coverage)		\
 	EXPAND_COUNTER(lock_invalidate_inode)			\
 	EXPAND_COUNTER(lock_invalidate_request)			\
 	EXPAND_COUNTER(lock_invalidate_response)		\
+	EXPAND_COUNTER(lock_invalidate_work)			\
 	EXPAND_COUNTER(lock_lock)				\
 	EXPAND_COUNTER(lock_lock_error)				\
 	EXPAND_COUNTER(lock_nonblock_eagain)			\
 	EXPAND_COUNTER(lock_recover_request)			\
-	EXPAND_COUNTER(lock_shrink_queued)			\
-	EXPAND_COUNTER(lock_shrink_request_aborted)		\
+	EXPAND_COUNTER(lock_shrink_attempted)			\
+	EXPAND_COUNTER(lock_shrink_aborted)			\
+	EXPAND_COUNTER(lock_shrink_work)			\
 	EXPAND_COUNTER(lock_unlock)				\
 	EXPAND_COUNTER(lock_wait)				\
 	EXPAND_COUNTER(net_dropped_response)			\

@@ -18,6 +18,7 @@ int scoutfs_hold_trans(struct super_block *sb,
 		       const struct scoutfs_item_count cnt);
 bool scoutfs_trans_held(void);
 void scoutfs_release_trans(struct super_block *sb);
+u64 scoutfs_trans_sample_seq(struct super_block *sb);
 void scoutfs_trans_track_item(struct super_block *sb, signed items,
 			      signed vals);
 

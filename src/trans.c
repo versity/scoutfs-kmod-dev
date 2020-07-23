@@ -158,6 +158,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 						   trans_write_work.work);
 	struct super_block *sb = sbi->sb;
 	DECLARE_TRANS_INFO(sb, tri);
+	u64 trans_seq = sbi->trans_seq;
 	char *s = NULL;
 	int ret = 0;
 
@@ -177,7 +178,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 			 * seq indices but doesn't send a message for every sync
 			 * syscall.
 			 */
-			ret = scoutfs_client_advance_seq(sb, &sbi->trans_seq);
+			ret = scoutfs_client_advance_seq(sb, &trans_seq);
 			if (ret < 0)
 			      s = "clean advance seq";
 		}
@@ -194,8 +195,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	      (s = "meta write", scoutfs_block_writer_write(sb, &tri->wri))  ?:
 	      (s = "data wait", scoutfs_inode_walk_writeback(sb, false)) ?:
 	      (s = "commit log trees", commit_btrees(sb)) ?:
-	      (s = "advance seq", scoutfs_client_advance_seq(sb,
-							     &sbi->trans_seq))?:
+	      (s = "advance seq", scoutfs_client_advance_seq(sb, &trans_seq)) ?:
 	      (s = "get log trees", scoutfs_trans_get_log_trees(sb));
 out:
 	if (ret < 0)
@@ -205,6 +205,7 @@ out:
 	spin_lock(&sbi->trans_write_lock);
 	sbi->trans_write_count++;
 	sbi->trans_write_ret = ret;
+	sbi->trans_seq = trans_seq;
 	spin_unlock(&sbi->trans_write_lock);
 	wake_up(&sbi->trans_write_wq);
 
@@ -520,6 +521,23 @@ void scoutfs_release_trans(struct super_block *sb)
 
 	if (wake)
 		wake_up(&sbi->trans_hold_wq);
+}
+
+/*
+ * Return the current transaction sequence.  Whether this is racing with
+ * the transaction write thread is entirely dependent on the caller's
+ * context.
+ */
+u64 scoutfs_trans_sample_seq(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	u64 ret;
+
+	spin_lock(&sbi->trans_write_lock);
+	ret = sbi->trans_seq;
+	spin_unlock(&sbi->trans_write_lock);
+
+	return ret;
 }
 
 int scoutfs_setup_trans(struct super_block *sb)

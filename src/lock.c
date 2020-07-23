@@ -160,15 +160,13 @@ static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
 	BUG_ON(!(prev == SCOUTFS_LOCK_WRITE && mode == SCOUTFS_LOCK_READ) &&
 	         mode != SCOUTFS_LOCK_NULL);
 
-	/* any transition from a mode allowed to dirty items has to write */
-	if (lock_mode_can_write(prev) && scoutfs_trans_has_dirty(sb)) {
+	/* sync when a write lock could have dirtied the current transaction */
+	if (lock_mode_can_write(prev) &&
+	    (lock->dirty_trans_seq == scoutfs_trans_sample_seq(sb))) {
+		scoutfs_inc_counter(sb, lock_invalidate_sync);
 		ret = scoutfs_trans_sync(sb, 1);
 		if (ret < 0)
 			return ret;
-		if (ret > 0) {
-			scoutfs_add_counter(sb, lock_invalidate_commit, ret);
-			ret = 0;
-		}
 	}
 
 	/* have to invalidate if we're not in the only usable case */
@@ -1273,6 +1271,8 @@ void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock, int mode)
 
 	lock_dec_count(lock->users, mode);
 	extend_grace(sb, lock);
+	if (lock_mode_can_write(mode))
+		lock->dirty_trans_seq = scoutfs_trans_sample_seq(sb);
 
 	trace_scoutfs_lock_unlock(sb, lock);
 	wake_up(&lock->waitq);

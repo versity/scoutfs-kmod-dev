@@ -84,11 +84,11 @@
 	EXPAND_COUNTER(lock_grant_request)			\
 	EXPAND_COUNTER(lock_grant_response)			\
 	EXPAND_COUNTER(lock_grant_work)				\
-	EXPAND_COUNTER(lock_invalidate_commit)			\
 	EXPAND_COUNTER(lock_invalidate_coverage)		\
 	EXPAND_COUNTER(lock_invalidate_inode)			\
 	EXPAND_COUNTER(lock_invalidate_request)			\
 	EXPAND_COUNTER(lock_invalidate_response)		\
+	EXPAND_COUNTER(lock_invalidate_sync)			\
 	EXPAND_COUNTER(lock_invalidate_work)			\
 	EXPAND_COUNTER(lock_lock)				\
 	EXPAND_COUNTER(lock_lock_error)				\

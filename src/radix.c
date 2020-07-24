@@ -465,6 +465,7 @@ static void set_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
 	struct scoutfs_radix_block *rdx = bl->data;
 	int lg_nbits;
 
+	trace_scoutfs_radix_set_bits(sb, bl->blkno, ind, nbits);
 	bug_on_bad_bits(ind, nbits);
 
 	/* must never double-free bits */
@@ -473,7 +474,6 @@ static void set_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
 	lg_nbits = count_lg_bits(rdx->bits, ind, nbits);
 
 	fixup_parent_refs(sb, bl, nbits, lg_nbits);
-	trace_scoutfs_radix_set_bits(sb, bl->blkno, ind, nbits);
 }
 
 static void clear_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
@@ -482,6 +482,7 @@ static void clear_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
 	struct scoutfs_radix_block *rdx = bl->data;
 	int lg_nbits;
 
+	trace_scoutfs_radix_clear_bits(sb, bl->blkno, ind, nbits);
 	bug_on_bad_bits(ind, nbits);
 
 	/* must never alloc in-use bits */
@@ -490,7 +491,6 @@ static void clear_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
 	bitmap_clear_le(rdx->bits, ind, nbits);
 
 	fixup_parent_refs(sb, bl, -nbits, -lg_nbits);
-	trace_scoutfs_radix_clear_bits(sb, bl->blkno, ind, nbits);
 }
 
 /*

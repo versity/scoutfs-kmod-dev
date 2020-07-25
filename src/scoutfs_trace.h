@@ -2463,6 +2463,38 @@ DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_set_bits,
 );
 
 TRACE_EVENT(scoutfs_radix_merge,
+	TP_PROTO(struct super_block *sb, u64 dst_blkno, u64 dst_sm_tot,
+		 u64 src_blkno, u64 src_sm_tot, u64 inp_blkno, u64 inp_sm_tot,
+		 u64 count),
+	TP_ARGS(sb, dst_blkno, dst_sm_tot, src_blkno, src_sm_tot, inp_blkno,
+		inp_sm_tot, count),
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, dst_blkno)
+		__field(__u64, dst_sm_tot)
+		__field(__u64, src_blkno)
+		__field(__u64, src_sm_tot)
+		__field(__u64, inp_blkno)
+		__field(__u64, inp_sm_tot)
+		__field(__u64, count)
+	),
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->dst_blkno = dst_blkno;
+		__entry->dst_sm_tot = dst_sm_tot;
+		__entry->src_blkno = src_blkno;
+		__entry->src_sm_tot = src_sm_tot;
+		__entry->inp_blkno = inp_blkno;
+		__entry->inp_sm_tot = inp_sm_tot;
+		__entry->count = count;
+	),
+	TP_printk(SCSBF" d_blkno %llu d_sm_tot %llu s_blkno %llu s_sm_tot %llu i_blkno %llu i_sm_tot %llu count %llu",
+		  SCSB_TRACE_ARGS, __entry->dst_blkno, __entry->dst_sm_tot,
+		  __entry->src_blkno, __entry->src_sm_tot, __entry->inp_blkno,
+		  __entry->inp_sm_tot, __entry->count)
+);
+
+TRACE_EVENT(scoutfs_radix_merged_blocks,
 	TP_PROTO(struct super_block *sb,
 		 struct scoutfs_radix_root *inp, u64 inp_blkno,
 		 struct scoutfs_radix_root *src, u64 src_blkno,

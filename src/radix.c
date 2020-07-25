@@ -1341,6 +1341,12 @@ int scoutfs_radix_merge(struct super_block *sb,
 	int ind;
 	int ret;
 
+	trace_scoutfs_radix_merge(sb, le64_to_cpu(dst->ref.blkno),
+				  le64_to_cpu(dst->ref.sm_total),
+				  le64_to_cpu(src->ref.blkno),
+				  le64_to_cpu(src->ref.sm_total),
+				  le64_to_cpu(inp->ref.blkno),
+				  le64_to_cpu(inp->ref.sm_total), count);
 	scoutfs_inc_counter(sb, radix_merge);
 
 	mutex_lock(&alloc->mutex);
@@ -1426,10 +1432,11 @@ wrapped:
 		fixup_parent_refs(sb, src_bl, -merged, -src_lg_delta);
 		fixup_parent_refs(sb, dst_bl, merged, dst_lg_delta);
 
-		trace_scoutfs_radix_merge(sb, inp, inp_bl->blkno, src,
-					  src_bl->blkno, dst, dst_bl->blkno,
-					  count, bit, ind, merged,
-					  src_lg_delta, dst_lg_delta);
+		trace_scoutfs_radix_merged_blocks(sb, inp, inp_bl->blkno, src,
+						  src_bl->blkno, dst,
+						  dst_bl->blkno, count, bit,
+						  ind, merged, src_lg_delta,
+						  dst_lg_delta);
 
 		complete_change(sb, wri, &chg, 0);
 

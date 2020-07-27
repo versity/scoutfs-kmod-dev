@@ -119,6 +119,8 @@ struct radix_block_private {
 	struct scoutfs_block *old_blkno_bl;
 	int blkno_ind;
 	int old_blkno_ind;
+	u64 blkno_leaf_bit;
+	u64 old_blkno_leaf_bit;
 };
 
 static bool was_dirtied(struct radix_block_private *priv)
@@ -460,12 +462,12 @@ static void bug_on_bad_bits(int ind, int nbits)
 }
 
 static void set_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
-			  int ind, int nbits)
+			  u64 leaf_bit, int ind, int nbits)
 {
 	struct scoutfs_radix_block *rdx = bl->data;
 	int lg_nbits;
 
-	trace_scoutfs_radix_set_bits(sb, bl->blkno, ind, nbits);
+	trace_scoutfs_radix_set_bits(sb, bl->blkno, leaf_bit, ind, nbits);
 	bug_on_bad_bits(ind, nbits);
 
 	/* must never double-free bits */
@@ -477,12 +479,12 @@ static void set_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
 }
 
 static void clear_leaf_bits(struct super_block *sb, struct scoutfs_block *bl,
-			    int ind, int nbits)
+			    u64 leaf_bit, int ind, int nbits)
 {
 	struct scoutfs_radix_block *rdx = bl->data;
 	int lg_nbits;
 
-	trace_scoutfs_radix_clear_bits(sb, bl->blkno, ind, nbits);
+	trace_scoutfs_radix_clear_bits(sb, bl->blkno, leaf_bit, ind, nbits);
 	bug_on_bad_bits(ind, nbits);
 
 	/* must never alloc in-use bits */
@@ -854,6 +856,7 @@ static int get_leaf(struct super_block *sb,
 					    &bl);
 			if (ret < 0)
 				break;
+			priv->old_blkno_leaf_bit = leaf_bit;
 			priv->old_blkno_ind = old_blkno - leaf_bit;
 			priv->old_blkno_bl = bl;
 		}
@@ -864,6 +867,7 @@ static int get_leaf(struct super_block *sb,
 		if (ret < 0)
 			break;
 
+		priv->blkno_leaf_bit = leaf_bit;
 		priv->blkno_ind = priv->bl->blkno - leaf_bit;
 		priv->blkno_bl = bl;
 
@@ -989,9 +993,12 @@ static void apply_change_bits(struct super_block *sb, struct radix_change *chg)
 			/* can't try to write to synth blknos */
 			BUG_ON(is_synth(bl->blkno));
 
-			clear_leaf_bits(sb, priv->blkno_bl, priv->blkno_ind, 1);
+			clear_leaf_bits(sb, priv->blkno_bl, 
+					priv->blkno_leaf_bit,
+					priv->blkno_ind, 1);
 			if (priv->old_blkno_bl) {
 				set_leaf_bits(sb, priv->old_blkno_bl,
+					      priv->old_blkno_leaf_bit,
 					      priv->old_blkno_ind, 1);
 			}
 			scoutfs_inc_counter(sb, radix_complete_dirty_block);
@@ -1152,7 +1159,7 @@ static int radix_free(struct super_block *sb,
 		goto out;
 
 	ind = bit - leaf_bit;
-	set_leaf_bits(sb, bl, ind, nbits);
+	set_leaf_bits(sb, bl, leaf_bit, ind, nbits);
 out:
 	complete_change(sb, wri, &chg, ret);
 	mutex_unlock(&alloc->mutex);
@@ -1190,7 +1197,7 @@ int scoutfs_radix_alloc(struct super_block *sb,
 		goto out;
 
 	ind = bit - leaf_bit;
-	clear_leaf_bits(sb, bl, ind, 1);
+	clear_leaf_bits(sb, bl, leaf_bit, ind, 1);
 	*blkno = bit;
 	ret = 0;
 out:
@@ -1248,7 +1255,7 @@ int scoutfs_radix_alloc_data(struct super_block *sb,
 		goto out;
 
 	ind = bit - leaf_bit;
-	clear_leaf_bits(sb, bl, ind, nbits);
+	clear_leaf_bits(sb, bl, leaf_bit, ind, nbits);
 	*blkno_ret = bit;
 	*count_ret = nbits;
 	store_next_find_bit(sb, false, root, bit + nbits);

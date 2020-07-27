@@ -2435,31 +2435,36 @@ TRACE_EVENT(scoutfs_radix_walk,
 );
 
 DECLARE_EVENT_CLASS(scoutfs_radix_bitop,
-	TP_PROTO(struct super_block *sb, u64 blkno, int ind, int nbits),
-	TP_ARGS(sb, blkno, ind, nbits),
+	TP_PROTO(struct super_block *sb, u64 blkno, u64 leaf_bit, int ind,
+		 int nbits),
+	TP_ARGS(sb, blkno, leaf_bit, ind, nbits),
 	TP_STRUCT__entry(
 		SCSB_TRACE_FIELDS
 		__field(__u64, blkno)
+		__field(__u64, leaf_bit)
 		__field(int, ind)
 		__field(int, nbits)
 	),
 	TP_fast_assign(
 		SCSB_TRACE_ASSIGN(sb);
 		__entry->blkno = blkno;
+		__entry->leaf_bit = leaf_bit;
 		__entry->ind = ind;
 		__entry->nbits = nbits;
 	),
-	TP_printk(SCSBF" blkno %llu ind %d nbits %d",
-		  SCSB_TRACE_ARGS, __entry->blkno, __entry->ind,
-		  __entry->nbits)
+	TP_printk(SCSBF" blkno %llu leaf_bit %llu ind %d nbits %d",
+		  SCSB_TRACE_ARGS, __entry->blkno, __entry->leaf_bit,
+		  __entry->ind, __entry->nbits)
 );
 DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_clear_bits,
-	TP_PROTO(struct super_block *sb, u64 blkno, int ind, int nbits),
-	TP_ARGS(sb, blkno, ind, nbits)
+	TP_PROTO(struct super_block *sb, u64 blkno, u64 leaf_bit, int ind,
+		 int nbits),
+	TP_ARGS(sb, blkno, leaf_bit, ind, nbits)
 );
 DEFINE_EVENT(scoutfs_radix_bitop, scoutfs_radix_set_bits,
-	TP_PROTO(struct super_block *sb, u64 blkno, int ind, int nbits),
-	TP_ARGS(sb, blkno, ind, nbits)
+	TP_PROTO(struct super_block *sb, u64 blkno, u64 leaf_bit, int ind,
+		 int nbits),
+	TP_ARGS(sb, blkno, leaf_bit, ind, nbits)
 );
 
 TRACE_EVENT(scoutfs_radix_merge,

@@ -66,6 +66,7 @@ static void scoutfs_inode_ctor(void *obj)
 {
 	struct scoutfs_inode_info *ci = obj;
 
+	mutex_init(&ci->s_i_mutex);
 	mutex_init(&ci->item_mutex);
 	seqcount_init(&ci->seqcount);
 	ci->staging = false;

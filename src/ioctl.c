@@ -268,6 +268,7 @@ out:
 static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 {
 	struct inode *inode = file_inode(file);
+	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_ioctl_release args;
 	struct scoutfs_lock *lock = NULL;
@@ -294,6 +295,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 		return ret;
 
 	mutex_lock(&inode->i_mutex);
+	mutex_lock(&si->s_i_mutex);
 
 	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_WRITE,
 				 SCOUTFS_LKF_REFRESH_INODE, inode, &lock);
@@ -341,6 +343,7 @@ static long scoutfs_ioc_release(struct file *file, unsigned long arg)
 
 out:
 	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_WRITE);
+	mutex_unlock(&si->s_i_mutex);
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(file);
 

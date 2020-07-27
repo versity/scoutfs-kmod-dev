@@ -28,6 +28,12 @@ struct scoutfs_inode_info {
 	u64 offline_blocks;
 	u32 flags;
 
+	/* We can't use inode->i_mutex to protect i_dio_count due to lock
+	 * ordering in the kernel between i_mutex and mmap_sem.  Use this
+	 * as an inner lock.
+	 */
+	struct mutex s_i_mutex;
+
 	/*
 	 * The in-memory item info caches the current index item values
 	 * so that we can decide to update them with comparisons instead

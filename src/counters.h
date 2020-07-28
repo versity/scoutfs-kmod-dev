@@ -135,6 +135,7 @@
 	EXPAND_COUNTER(radix_inconsistent_eio)			\
 	EXPAND_COUNTER(radix_inconsistent_ref)			\
 	EXPAND_COUNTER(radix_merge)				\
+	EXPAND_COUNTER(radix_merge_bad_clean_input)		\
 	EXPAND_COUNTER(radix_merge_empty)			\
 	EXPAND_COUNTER(radix_undo_ref)				\
 	EXPAND_COUNTER(radix_walk)				\

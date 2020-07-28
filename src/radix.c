@@ -1392,6 +1392,21 @@ wrapped:
 			goto out;
 		src_rdx = src_bl->data;
 
+		/*
+		 * If we're searching the avail allocator tree then we
+		 * must be sure that we copy leaves after change
+		 * allocations have been applied.  If we had a read-only
+		 * copy of the allocator leaf before it was cowed we
+		 * could merge bits that were used for dirty block
+		 * allocations by the change.  By not resetting the
+		 * change the repeated lookup will find the current
+		 * dirty leaf block.
+		 */
+		if (src == inp && inp_bl != src_bl) {
+			scoutfs_inc_counter(sb, radix_merge_bad_clean_input);
+			goto wrapped;
+		}
+
 		ret = get_leaf(sb, alloc, wri, &chg, dst, GLF_DIRTY, bit,
 			       &leaf_bit, &dst_bl);
 		if (ret < 0)

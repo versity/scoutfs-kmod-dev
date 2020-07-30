@@ -14,7 +14,4 @@ ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		       struct scoutfs_lock *lock);
 
-void scoutfs_xattr_index_key(struct scoutfs_key *key,
-			     u64 hash, u64 ino, u64 id);
-
 #endif

@@ -121,11 +121,6 @@ struct scoutfs_key {
 #define skii_major	_sk_second
 #define skii_ino	_sk_third
 
-/* xattr index */
-#define skxi_hash	_sk_first
-#define skxi_ino	_sk_second
-#define skxi_id		_sk_third
-
 /* node orphan inode */
 #define sko_rid		_sk_first
 #define sko_ino		_sk_second
@@ -430,10 +425,9 @@ struct scoutfs_bloom_block {
  * Keys are first sorted by major key zones.
  */
 #define SCOUTFS_INODE_INDEX_ZONE		1
-#define SCOUTFS_XATTR_INDEX_ZONE		2
-#define SCOUTFS_RID_ZONE			3
-#define SCOUTFS_FS_ZONE				4
-#define SCOUTFS_LOCK_ZONE			5
+#define SCOUTFS_RID_ZONE			2
+#define SCOUTFS_FS_ZONE				3
+#define SCOUTFS_LOCK_ZONE			4
 /* Items only stored in server btrees */
 #define SCOUTFS_LOG_TREES_ZONE			6
 #define SCOUTFS_LOCK_CLIENTS_ZONE		7
@@ -445,9 +439,6 @@ struct scoutfs_bloom_block {
 #define SCOUTFS_INODE_INDEX_META_SEQ_TYPE	1
 #define SCOUTFS_INODE_INDEX_DATA_SEQ_TYPE	2
 #define SCOUTFS_INODE_INDEX_NR			3 /* don't forget to update */
-
-/* xattr index zone */
-#define SCOUTFS_XATTR_INDEX_NAME_TYPE		1
 
 /* rid zone (also used in server alloc btree) */
 #define SCOUTFS_ORPHAN_TYPE			1

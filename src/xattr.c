@@ -136,17 +136,6 @@ static int parse_tags(const char *name, unsigned int name_len,
 	return 0;
 }
 
-void scoutfs_xattr_index_key(struct scoutfs_key *key,
-			     u64 hash, u64 ino, u64 id)
-{
-	scoutfs_key_set_zeros(key);
-	key->sk_zone = SCOUTFS_XATTR_INDEX_ZONE;
-	key->skxi_hash = cpu_to_le64(hash);
-	key->sk_type = SCOUTFS_XATTR_INDEX_NAME_TYPE;
-	key->skxi_ino = cpu_to_le64(ino);
-	key->skxi_id = cpu_to_le64(id);
-}
-
 /*
  * Find the next xattr and copy the key, xattr header, and as much of
  * the name and value into the callers buffer as we can.  Returns the
@@ -502,8 +491,7 @@ retry:
 	      scoutfs_inode_index_try_lock_hold(sb, &ind_locks, ind_seq,
 						SIC_XATTR_SET(found_parts,
 							      value != NULL,
-							      name_len, size,
-							      tgs.srch));
+							      name_len, size));
 	if (ret > 0)
 		goto retry;
 	if (ret)

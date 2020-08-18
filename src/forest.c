@@ -1195,6 +1195,155 @@ out:
 	return ret;
 }
 
+struct forest_read_items_data {
+	bool is_fs;
+	scoutfs_forest_item_cb cb;
+	void *cb_arg;
+};
+
+static int forest_read_items(struct super_block *sb, struct scoutfs_key *key,
+			     void *val, int val_len, void *arg)
+{
+	struct forest_read_items_data *rid = arg;
+	struct scoutfs_log_item_value _liv = {0,};
+	struct scoutfs_log_item_value *liv = &_liv;
+
+	if (!rid->is_fs) {
+		liv = val;
+		val += sizeof(struct scoutfs_log_item_value);
+		val_len -= sizeof(struct scoutfs_log_item_value);
+	}
+
+	return rid->cb(sb, key, liv, val, val_len, rid->cb_arg);
+}
+
+/*
+ * For each forest btree whose bloom block indicates that the lock might
+ * have items stored, call the caller's callback for every item in the
+ * leaf block in each tree which contains the key.
+ *
+ * The btree iter calls clamp the caller's range to the tightest range
+ * that covers all the blocks.  Any keys outside of this range can't be
+ * trusted because we didn't visit all the trees to check their items.
+ *
+ * If we hit stale blocks and retry we can call the callback for
+ * duplicate items.  This is harmless because the items are stable while
+ * the caller holds their cluster lock and the caller has to filter out
+ * item versions anyway.
+ */
+int scoutfs_forest_read_items(struct super_block *sb,
+			      struct scoutfs_lock *lock,
+			      struct scoutfs_key *key,
+			      struct scoutfs_key *start,
+			      struct scoutfs_key *end,
+			      scoutfs_forest_item_cb cb, void *arg)
+{
+	DECLARE_STALE_TRACKING_SUPER_REFS(prev_refs, refs);
+	struct forest_read_items_data rid = {
+		.cb = cb,
+		.cb_arg = arg,
+	};
+	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_net_roots roots;
+	struct scoutfs_bloom_block *bb;
+	struct forest_bloom_nrs bloom;
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct scoutfs_block *bl;
+	struct scoutfs_key ltk;
+	int ret;
+	int i;
+
+	calc_bloom_nrs(&bloom, &lock->start);
+
+	roots = lock->roots;
+retry:
+	scoutfs_inc_counter(sb, forest_read_items);
+	ret = scoutfs_client_get_roots(sb, &roots);
+	if (ret)
+		goto out;
+
+	trace_scoutfs_forest_using_roots(sb, &roots.fs_root, &roots.logs_root);
+	refs.fs_ref = roots.fs_root.ref;
+	refs.logs_ref = roots.logs_root.ref;
+
+	*start = lock->start;
+	*end = lock->end;
+
+	/* start with fs root items */
+	rid.is_fs = true;
+	ret = scoutfs_btree_read_items(sb, &roots.fs_root, key, start, end,
+				       forest_read_items, &rid);
+	if (ret < 0)
+		goto out;
+	rid.is_fs = false;
+
+	scoutfs_key_init_log_trees(&ltk, 0, 0);
+	for (;; scoutfs_key_inc(&ltk)) {
+		ret = scoutfs_btree_next(sb, &roots.logs_root, &ltk, &iref);
+		if (ret == 0) {
+			if (iref.val_len == sizeof(ltv)) {
+				ltk = *iref.key;
+				memcpy(&ltv, iref.val, sizeof(ltv));
+			} else {
+				ret = -EIO;
+			}
+			scoutfs_btree_put_iref(&iref);
+		}
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				break;
+			goto out; /* including stale */
+		}
+
+		if (ltv.bloom_ref.blkno == 0)
+			continue;
+
+		bl = read_bloom_ref(sb, &ltv.bloom_ref);
+		if (IS_ERR(bl)) {
+			ret = PTR_ERR(bl);
+			goto out;
+		}
+		bb = bl->data;
+
+		for (i = 0; i < ARRAY_SIZE(bloom.nrs); i++) {
+			if (!test_bit_le(bloom.nrs[i], bb->bits))
+				break;
+		}
+
+		scoutfs_block_put(sb, bl);
+
+		/* one of the bloom bits wasn't set */
+		if (i != ARRAY_SIZE(bloom.nrs)) {
+			scoutfs_inc_counter(sb, forest_bloom_fail);
+			continue;
+		}
+
+		scoutfs_inc_counter(sb, forest_bloom_pass);
+
+		ret = scoutfs_btree_read_items(sb, &ltv.item_root, key, start,
+					       end, forest_read_items, &rid);
+		if (ret < 0)
+			goto out;
+	}
+
+	ret = 0;
+out:
+	if (ret == -ESTALE) {
+		if (memcmp(&prev_refs, &refs, sizeof(refs)) == 0) {
+			ret = -EIO;
+			goto out;
+		}
+		prev_refs = refs;
+
+		ret = scoutfs_client_get_roots(sb, &roots);
+		if (ret)
+			goto out;
+		goto retry;
+	}
+
+	return ret;
+}
+
 /*
  * Make sure that the bloom bits for the lock's start key are all set in
  * the current log's bloom block.  We record the nr of our log tree in
@@ -1308,6 +1457,23 @@ static int set_lock_bloom_bits(struct super_block *sb,
 out:
 	scoutfs_block_put(sb, bl);
 	return ret;
+}
+
+int scoutfs_forest_set_bloom_bits(struct super_block *sb,
+				  struct scoutfs_lock *lock)
+{
+	DECLARE_FOREST_INFO(sb, finf);
+
+	return set_lock_bloom_bits(sb, lock, le64_to_cpu(finf->our_log.nr));
+}
+
+int scoutfs_forest_insert_list(struct super_block *sb,
+			       struct scoutfs_btree_item_list *lst)
+{
+	DECLARE_FOREST_INFO(sb, finf);
+
+	return scoutfs_btree_insert_list(sb, finf->alloc, finf->wri,
+					 &finf->our_log.item_root, lst);
 }
 
 /*

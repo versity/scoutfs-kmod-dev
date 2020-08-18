@@ -69,6 +69,7 @@
 	EXPAND_COUNTER(forest_refresh_bloom_roots)		\
 	EXPAND_COUNTER(forest_refresh_dirty_log)		\
 	EXPAND_COUNTER(forest_refresh_skip_log)			\
+	EXPAND_COUNTER(forest_read_items)			\
 	EXPAND_COUNTER(forest_roots_next_hint)			\
 	EXPAND_COUNTER(forest_roots_lock)			\
 	EXPAND_COUNTER(forest_roots_server)			\

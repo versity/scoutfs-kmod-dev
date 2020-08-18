@@ -1780,3 +1780,107 @@ int scoutfs_btree_dirty(struct super_block *sb,
 
 	return ret;
 }
+
+/*
+ * Call the users callback on all the items in the leaf that we find.
+ * We also set the caller's keys for the first and last possible keys
+ * that could exist in the leaf block.
+ */
+int scoutfs_btree_read_items(struct super_block *sb,
+			     struct scoutfs_btree_root *root,
+			     struct scoutfs_key *key,
+			     struct scoutfs_key *start,
+			     struct scoutfs_key *end,
+			     scoutfs_btree_item_cb cb, void *arg)
+{
+	struct scoutfs_btree_item *item;
+	struct scoutfs_btree_block *bt;
+	struct scoutfs_avl_node *next_node;
+	struct scoutfs_avl_node *node;
+	struct btree_walk_key_range kr;
+	struct scoutfs_block *bl;
+	int ret;
+
+	ret = btree_walk(sb, NULL, NULL, root, 0, key, 0, &bl, &kr);
+	if (ret < 0)
+		goto out;
+	bt = bl->data;
+
+	if (scoutfs_key_compare(&kr.start, start) > 0)
+		*start = kr.start;
+	if (scoutfs_key_compare(&kr.end, end) < 0)
+		*end = kr.end;
+
+	node = scoutfs_avl_search(&bt->item_root, cmp_key_item, start, NULL,
+				  NULL, &next_node, NULL) ?: next_node;
+	while (node) {
+		item = node_item(node);
+		if (scoutfs_key_compare(&item->key, end) > 0)
+			break;
+
+		ret = cb(sb, item_key(item), item_val(bt, item),
+			 item_val_len(item), arg);
+		if (ret < 0)
+			break;
+
+		node = scoutfs_avl_next(&bt->item_root, node);
+	}
+
+	scoutfs_block_put(sb, bl);
+out:
+	return ret;
+}
+
+/*
+ * The caller has a sorted list of items to insert.  We find the leaf
+ * block that contains each item and either overwrite or insert the
+ * caller's item.  This has no mechanism for deleting items.
+ *
+ * This can make partial progress before returning an error, leaving
+ * dirty btree blocks with only some of the caller's items.  It's up to
+ * the caller to resolve this.
+ */
+int scoutfs_btree_insert_list(struct super_block *sb,
+			      struct scoutfs_radix_allocator *alloc,
+			      struct scoutfs_block_writer *wri,
+			      struct scoutfs_btree_root *root,
+			      struct scoutfs_btree_item_list *lst)
+{
+	struct scoutfs_btree_item *item;
+	struct btree_walk_key_range kr;
+	struct scoutfs_btree_block *bt;
+	struct scoutfs_avl_node *par;
+	struct scoutfs_block *bl;
+	int cmp;
+	int ret = 0;
+
+	while (lst) {
+		ret = btree_walk(sb, alloc, wri, root, BTW_DIRTY | BTW_INSERT,
+				 &lst->key, lst->val_len, &bl, &kr);
+		if (ret < 0)
+			goto out;
+		bt = bl->data;
+
+		do {
+			item = leaf_item_hash_search(sb, bt, &lst->key);
+			if (item) {
+				update_item_value(bt, item, lst->val,
+						  lst->val_len);
+			} else {
+				scoutfs_avl_search(&bt->item_root,
+						   cmp_key_item, &lst->key,
+						   &cmp, &par, NULL, NULL);
+				create_item(bt, &lst->key, lst->val,
+					    lst->val_len, par, cmp);
+			}
+
+			lst = lst->next;
+		} while (lst && scoutfs_key_compare(&lst->key, &kr.end) <= 0 &&
+			 mid_free_item_room(bt, lst->val_len));
+
+		scoutfs_block_put(sb, bl);
+	}
+
+out:
+	return ret;
+}

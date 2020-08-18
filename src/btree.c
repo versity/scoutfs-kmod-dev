@@ -1194,6 +1194,14 @@ out:
 	BUG();
 }
 
+struct btree_walk_key_range {
+	struct scoutfs_key start;
+	struct scoutfs_key end;
+	/* zero if no remaining blocks outside our walk in that direction */
+	struct scoutfs_key iter_prev;
+	struct scoutfs_key iter_next;
+};
+
 /*
  * Return the leaf block that should contain the given key.  The caller
  * is responsible for searching the leaf block and performing their
@@ -1217,7 +1225,7 @@ static int btree_walk(struct super_block *sb,
 		      int flags, struct scoutfs_key *key,
 		      unsigned int val_len,
 		      struct scoutfs_block **bl_ret,
-		      struct scoutfs_key *iter_key)
+		      struct btree_walk_key_range *kr)
 {
 	struct scoutfs_block *par_bl = NULL;
 	struct scoutfs_block *bl = NULL;
@@ -1229,14 +1237,11 @@ static int btree_walk(struct super_block *sb,
 	struct scoutfs_avl_node *next_node;
 	struct scoutfs_avl_node *node;
 	struct scoutfs_btree_ref *ref;
-	struct scoutfs_key start;
-	struct scoutfs_key end;
 	unsigned int level;
 	unsigned int nr;
 	int ret;
 
-	if (WARN_ON_ONCE((flags & (BTW_NEXT|BTW_PREV)) && iter_key == NULL) ||
-	    WARN_ON_ONCE((flags & BTW_DIRTY) && (!alloc || !wri)))
+	if (WARN_ON_ONCE((flags & BTW_DIRTY) && (!alloc || !wri)))
 		return -EINVAL;
 
 	scoutfs_inc_counter(sb, btree_walk);
@@ -1249,8 +1254,12 @@ restart:
 	scoutfs_block_put(sb, bl);
 	bl = NULL;
 	bt = NULL;
-	scoutfs_key_set_zeros(&start);
-	scoutfs_key_set_ones(&end);
+	if (kr) {
+		scoutfs_key_set_zeros(&kr->start);
+		scoutfs_key_set_ones(&kr->end);
+		scoutfs_key_set_zeros(&kr->iter_prev);
+		scoutfs_key_set_zeros(&kr->iter_next);
+	}
 	level = root->height;
 	ret = 0;
 
@@ -1280,8 +1289,8 @@ restart:
 			break;
 		bt = bl->data;
 
-		if (0)
-			verify_btree_block(sb, bt, level, &start, &end);
+		if (0 && kr)
+			verify_btree_block(sb, bt, level, &kr->start, &kr->end);
 
 		/* XXX more aggressive block verification, before ref updates? */
 		if (bt->level != level) {
@@ -1342,22 +1351,19 @@ restart:
 			break;
 		}
 
-		/* give the caller the next key to iterate towards */
-		if (iter_key && (flags & BTW_NEXT) && next_item(bt, item)) {
-			*iter_key = *item_key(item);
-			scoutfs_key_inc(iter_key);
-
-		} else if (iter_key && (flags & BTW_PREV) &&
-			   (prev = prev_item(bt, item))) {
-			*iter_key = *item_key(prev);
+		if (kr) {
+			/* update keys for walk bounds and next iteration */
+			if ((prev = prev_item(bt, item))) {
+				kr->start = *item_key(prev);
+				scoutfs_key_inc(&kr->start);
+				kr->iter_prev = *item_key(prev);
+			}
+			kr->end = *item_key(item);
+			if (next_item(bt, item)) {
+				kr->iter_next = *item_key(item);
+				scoutfs_key_inc(&kr->iter_next);
+			}
 		}
-
-		/* possible range of keys in referenced child block */
-		if ((prev = prev_item(bt, item))) {
-			start = *item_key(prev);
-			scoutfs_key_inc(&start);
-		}
-		end = *item_key(item);
 
 		scoutfs_block_put(sb, par_bl);
 		par_bl = bl;
@@ -1672,8 +1678,9 @@ static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
 	struct scoutfs_avl_node *prev;
 	struct scoutfs_btree_item *item;
 	struct scoutfs_btree_block *bt;
-	struct scoutfs_key iter_key;
+	struct btree_walk_key_range kr;
 	struct scoutfs_key walk_key;
+	struct scoutfs_key *iter_key;
 	struct scoutfs_block *bl;
 	int ret;
 
@@ -1684,9 +1691,8 @@ static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
 	walk_key = *key;
 
 	for (;;) {
-		scoutfs_key_set_zeros(&iter_key);
 		ret = btree_walk(sb, NULL, NULL, root, flags, &walk_key,
-				 0, &bl, &iter_key);
+				 0, &bl, &kr);
 		if (ret < 0)
 			break;
 		bt = bl->data;
@@ -1708,8 +1714,9 @@ static int btree_iter(struct super_block *sb,struct scoutfs_btree_root *root,
 		scoutfs_block_put(sb, bl);
 
 		/* nothing in this leaf, walk gave us a key */
-		if (!scoutfs_key_is_zeros(&iter_key)) {
-			walk_key = iter_key;
+		iter_key = (flags & BTW_NEXT) ? &kr.iter_next : &kr.iter_prev;
+		if (!scoutfs_key_is_zeros(iter_key)) {
+			walk_key = *iter_key;
 			continue;
 		}
 

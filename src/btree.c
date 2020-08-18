@@ -153,6 +153,13 @@ static inline unsigned int mid_free_off(struct scoutfs_btree_block *bt)
 	return le16_to_cpu(ptr_off(bt, &bt->items[le16_to_cpu(bt->nr_items)]));
 }
 
+/* true if the mid free region has room for an item struct and its value */
+static inline bool mid_free_item_room(struct scoutfs_btree_block *bt,
+				      int val_len)
+{
+	return le16_to_cpu(bt->mid_free_len) >= item_len_bytes(val_len);
+}
+
 static inline struct scoutfs_key *item_key(struct scoutfs_btree_item *item)
 {
 	return &item->key;
@@ -873,7 +880,7 @@ static int try_split(struct super_block *sb,
 		val_len = sizeof(struct scoutfs_btree_ref);
 
 	/* don't need to split if there's enough space for the item */
-	if (le16_to_cpu(right->mid_free_len) >= item_len_bytes(val_len))
+	if (mid_free_item_room(right, val_len))
 		return 0;
 
 	if (item_full_pct(right) < 80) {

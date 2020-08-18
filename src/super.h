@@ -46,6 +46,7 @@ struct scoutfs_sb_info {
 	struct block_info *block_info;
 	struct forest_info *forest_info;
 	struct srch_info *srch_info;
+	struct item_cache_info *item_cache_info;
 
 	wait_queue_head_t trans_hold_wq;
 	struct task_struct *trans_task;

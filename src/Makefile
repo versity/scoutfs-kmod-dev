@@ -21,6 +21,7 @@ scoutfs-y +=			\
 	forest.o		\
 	inode.o			\
 	ioctl.o			\
+	item.o			\
 	lock.o			\
 	lock_server.o		\
 	msg.o			\

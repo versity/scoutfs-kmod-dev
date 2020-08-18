@@ -42,6 +42,7 @@
 #include "quorum.h"
 #include "forest.h"
 #include "srch.h"
+#include "item.h"
 #include "scoutfs_trace.h"
 
 static struct dentry *scoutfs_debugfs_root;
@@ -187,6 +188,7 @@ static void scoutfs_put_super(struct super_block *sb)
 	scoutfs_shutdown_trans(sb);
 	scoutfs_client_destroy(sb);
 	scoutfs_inode_destroy(sb);
+	scoutfs_item_destroy(sb);
 	scoutfs_forest_destroy(sb);
 
 	/* the server locks the listen address and compacts */
@@ -444,6 +446,7 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 	      scoutfs_setup_triggers(sb) ?:
 	      scoutfs_block_setup(sb) ?:
 	      scoutfs_forest_setup(sb) ?:
+	      scoutfs_item_setup(sb) ?:
 	      scoutfs_inode_setup(sb) ?:
 	      scoutfs_data_setup(sb) ?:
 	      scoutfs_setup_trans(sb) ?:

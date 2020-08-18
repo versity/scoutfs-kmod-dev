@@ -77,6 +77,35 @@
 	EXPAND_COUNTER(forest_set_bloom_bits)			\
 	EXPAND_COUNTER(forest_set_dirtied)			\
 	EXPAND_COUNTER(forest_trigger_refresh)			\
+	EXPAND_COUNTER(item_clear_dirty)			\
+	EXPAND_COUNTER(item_create)				\
+	EXPAND_COUNTER(item_delete)				\
+	EXPAND_COUNTER(item_dirty)				\
+	EXPAND_COUNTER(item_invalidate)				\
+	EXPAND_COUNTER(item_invalidate_page)			\
+	EXPAND_COUNTER(item_lookup)				\
+	EXPAND_COUNTER(item_mark_dirty)				\
+	EXPAND_COUNTER(item_next)				\
+	EXPAND_COUNTER(item_page_accessed)			\
+	EXPAND_COUNTER(item_page_alloc)				\
+	EXPAND_COUNTER(item_page_clear_dirty)			\
+	EXPAND_COUNTER(item_page_free)				\
+	EXPAND_COUNTER(item_page_lru_add)			\
+	EXPAND_COUNTER(item_page_lru_remove)			\
+	EXPAND_COUNTER(item_page_mark_dirty)			\
+	EXPAND_COUNTER(item_page_rbtree_walk)			\
+	EXPAND_COUNTER(item_page_split)				\
+	EXPAND_COUNTER(item_pcpu_add_replaced)			\
+	EXPAND_COUNTER(item_pcpu_page_hit)			\
+	EXPAND_COUNTER(item_pcpu_page_miss)			\
+	EXPAND_COUNTER(item_pcpu_page_miss_keys)		\
+	EXPAND_COUNTER(item_read_pages_split)			\
+	EXPAND_COUNTER(item_shrink_page)			\
+	EXPAND_COUNTER(item_shrink_page_dirty)			\
+	EXPAND_COUNTER(item_shrink_page_reader)			\
+	EXPAND_COUNTER(item_shrink_page_trylock)		\
+	EXPAND_COUNTER(item_update)				\
+	EXPAND_COUNTER(item_write_dirty)			\
 	EXPAND_COUNTER(lock_alloc)				\
 	EXPAND_COUNTER(lock_free)				\
 	EXPAND_COUNTER(lock_grace_extended)			\

@@ -34,6 +34,7 @@
 #include "client.h"
 #include "data.h"
 #include "xattr.h"
+#include "item.h"
 
 /*
  * scoutfs uses a lock service to manage item cache consistency between
@@ -195,6 +196,8 @@ retry:
 				ino++;
 			}
 		}
+
+		scoutfs_item_invalidate(sb, &lock->start, &lock->end);
 	}
 
 	return ret;
@@ -571,6 +574,50 @@ static void queue_inv_work(struct lock_info *linfo)
 }
 
 /*
+ * The given lock is processing a received a grant response.  Trigger a
+ * bug if the cache is inconsistent.
+ *
+ * We only have two modes that can create dirty items.  We can't have
+ * dirty items when transitioning from write_only to write because the
+ * writer can't trust the cached items in the cache for reading.  And we
+ * don't currently transition directly from write to write_only, we
+ * first go through null.  So if we have dirty items as we're granted a
+ * mode it's always incorrect.
+ *
+ * And we can't have cached items that we're going to use for reading if
+ * the previous mode didn't allow reading.
+ *
+ * Inconsistencies have come from all sorts of bugs: invalidation missed
+ * items, the cache was populated outside of locking coverage, lock
+ * holders performed the wrong item operations under their lock,
+ * overlapping locks, out of order granting or invalidating, etc.
+ */
+static void bug_on_inconsistent_grant_cache(struct super_block *sb,
+					    struct scoutfs_lock *lock,
+					    int old_mode, int new_mode)
+{
+	bool cached;
+	bool dirty;
+
+	cached = scoutfs_item_range_cached(sb, &lock->start, &lock->end,
+					   &dirty);
+	if (dirty ||
+	    (cached && (!lock_mode_can_read(old_mode) ||
+			!lock_mode_can_read(new_mode)))) {
+		scoutfs_err(sb, "granted lock item cache inconsistency, cached %u dirty %u old_mode %d new_mode %d: start "SK_FMT" end "SK_FMT" refresh_gen %llu mode %u waiters: rd %u wr %u wo %u users: rd %u wr %u wo %u",
+			   cached, dirty, old_mode, new_mode, SK_ARG(&lock->start),
+			   SK_ARG(&lock->end), lock->refresh_gen, lock->mode,
+			   lock->waiters[SCOUTFS_LOCK_READ],
+			   lock->waiters[SCOUTFS_LOCK_WRITE],
+			   lock->waiters[SCOUTFS_LOCK_WRITE_ONLY],
+			   lock->users[SCOUTFS_LOCK_READ],
+			   lock->users[SCOUTFS_LOCK_WRITE],
+			   lock->users[SCOUTFS_LOCK_WRITE_ONLY]);
+		BUG();
+	}
+}
+
+/*
  * Each lock has received a grant response message from the server.
  *
  * Grant responses can be reordered with incoming invalidation requests
@@ -607,6 +654,9 @@ static void lock_grant_worker(struct work_struct *work)
 		/* wait for reordered invalidation to finish */
 		if (lock->mode != nl->old_mode)
 			continue;
+
+		bug_on_inconsistent_grant_cache(sb, lock, nl->old_mode,
+						nl->new_mode);
 
 		if (!lock_mode_can_read(nl->old_mode) &&
 		    lock_mode_can_read(nl->new_mode)) {

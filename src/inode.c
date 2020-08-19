@@ -30,8 +30,7 @@
 #include "xattr.h"
 #include "trans.h"
 #include "msg.h"
-#include "kvec.h"
-#include "forest.h"
+#include "item.h"
 #include "client.h"
 #include "cmp.h"
 
@@ -283,7 +282,6 @@ int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
 	struct scoutfs_inode sinode;
-	struct kvec val;
 	const u64 refresh_gen = lock->refresh_gen;
 	int ret;
 
@@ -299,11 +297,11 @@ int scoutfs_inode_refresh(struct inode *inode, struct scoutfs_lock *lock,
 		return 0;
 
 	init_inode_key(&key, scoutfs_ino(inode));
-	kvec_init(&val, &sinode, sizeof(sinode));
 
 	mutex_lock(&si->item_mutex);
 	if (atomic64_read(&si->last_refreshed) < refresh_gen) {
-		ret = scoutfs_forest_lookup_exact(sb, &key, &val, lock);
+		ret = scoutfs_item_lookup_exact(sb, &key, &sinode,
+						sizeof(sinode), lock);
 		if (ret == 0) {
 			load_inode(inode, &sinode);
 			atomic64_set(&si->last_refreshed, refresh_gen);
@@ -759,15 +757,13 @@ int scoutfs_dirty_inode_item(struct inode *inode, struct scoutfs_lock *lock)
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_inode sinode;
 	struct scoutfs_key key;
-	struct kvec val;
 	int ret;
 
 	store_inode(&sinode, inode);
-	kvec_init(&val, &sinode, sizeof(sinode));
 
 	init_inode_key(&key, scoutfs_ino(inode));
 
-	ret = scoutfs_forest_update(sb, &key, &val, lock);
+	ret = scoutfs_item_update(sb, &key, &sinode, sizeof(sinode), lock);
 	if (!ret)
 		trace_scoutfs_dirty_inode(inode);
 	return ret;
@@ -899,7 +895,7 @@ static int update_index_items(struct super_block *sb,
 	scoutfs_inode_init_index_key(&ins, type, major, minor, ino);
 
 	ins_lock = find_index_lock(lock_list, type, major, minor, ino);
-	ret = scoutfs_forest_create_force(sb, &ins, NULL, ins_lock);
+	ret = scoutfs_item_create_force(sb, &ins, NULL, 0, ins_lock);
 	if (ret || !will_del_index(si, type, major, minor))
 		return ret;
 
@@ -911,9 +907,9 @@ static int update_index_items(struct super_block *sb,
 
 	del_lock = find_index_lock(lock_list, type, si->item_majors[type],
 				   si->item_minors[type], ino);
-	ret = scoutfs_forest_delete_force(sb, &del, del_lock);
+	ret = scoutfs_item_delete_force(sb, &del, del_lock);
 	if (ret) {
-		err = scoutfs_forest_delete(sb, &ins, ins_lock);
+		err = scoutfs_item_delete(sb, &ins, ins_lock);
 		BUG_ON(err);
 	}
 
@@ -972,7 +968,6 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
 	const u64 ino = scoutfs_ino(inode);
 	struct scoutfs_key key;
 	struct scoutfs_inode sinode;
-	struct kvec val;
 	int ret;
 	int err;
 
@@ -988,9 +983,8 @@ void scoutfs_update_inode_item(struct inode *inode, struct scoutfs_lock *lock,
 	BUG_ON(ret);
 
 	init_inode_key(&key, ino);
-	kvec_init(&val, &sinode, sizeof(sinode));
 
-	err = scoutfs_forest_update(sb, &key, &val, lock);
+	err = scoutfs_item_update(sb, &key, &sinode, sizeof(sinode), lock);
 	if (err) {
 		scoutfs_err(sb, "inode %llu update err %d", ino, err);
 		BUG_ON(err);
@@ -1265,7 +1259,7 @@ static int remove_index(struct super_block *sb, u64 ino, u8 type, u64 major,
 	scoutfs_inode_init_index_key(&key, type, major, minor, ino);
 
 	lock = find_index_lock(ind_locks, type, major, minor, ino);
-	ret = scoutfs_forest_delete_force(sb, &key, lock);
+	ret = scoutfs_item_delete_force(sb, &key, lock);
 	if (ret == -ENOENT)
 		ret = 0;
 	return ret;
@@ -1375,7 +1369,6 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 	struct scoutfs_key key;
 	struct scoutfs_inode sinode;
 	struct inode *inode;
-	struct kvec val;
 	int ret;
 
 	inode = new_inode(sb);
@@ -1405,9 +1398,8 @@ struct inode *scoutfs_new_inode(struct super_block *sb, struct inode *dir,
 
 	store_inode(&sinode, inode);
 	init_inode_key(&key, scoutfs_ino(inode));
-	kvec_init(&val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_forest_create(sb, &key, &val, lock);
+	ret = scoutfs_item_create(sb, &key, &sinode, sizeof(sinode), lock);
 	if (ret) {
 		iput(inode);
 		return ERR_PTR(ret);
@@ -1435,7 +1427,7 @@ static int remove_orphan_item(struct super_block *sb, u64 ino)
 
 	init_orphan_key(&key, sbi->rid, ino);
 
-	ret = scoutfs_forest_delete(sb, &key, lock);
+	ret = scoutfs_item_delete(sb, &key, lock);
 	if (ret == -ENOENT)
 		ret = 0;
 
@@ -1457,7 +1449,6 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 	struct scoutfs_key key;
 	LIST_HEAD(ind_locks);
 	bool release = false;
-	struct kvec val;
 	umode_t mode;
 	u64 ind_seq;
 	u64 size;
@@ -1468,9 +1459,9 @@ static int delete_inode_items(struct super_block *sb, u64 ino)
 		return ret;
 
 	init_inode_key(&key, ino);
-	kvec_init(&val, &sinode, sizeof(sinode));
 
-	ret = scoutfs_forest_lookup_exact(sb, &key, &val, lock);
+	ret = scoutfs_item_lookup_exact(sb, &key, &sinode, sizeof(sinode),
+					lock);
 	if (ret < 0) {
 		if (ret == -ENOENT)
 			ret = 0;
@@ -1523,7 +1514,7 @@ retry:
 			goto out;
 	}
 
-	ret = scoutfs_forest_delete(sb, &key, lock);
+	ret = scoutfs_item_delete(sb, &key, lock);
 	if (ret)
 		goto out;
 
@@ -1592,7 +1583,7 @@ int scoutfs_scan_orphans(struct super_block *sb)
 	init_orphan_key(&last, sbi->rid, ~0ULL);
 
 	while (1) {
-		ret = scoutfs_forest_next(sb, &key, &last, NULL, lock);
+		ret = scoutfs_item_next(sb, &key, &last, NULL, 0, lock);
 		if (ret == -ENOENT) /* No more orphan items */
 			break;
 		if (ret < 0)
@@ -1626,7 +1617,7 @@ int scoutfs_orphan_inode(struct inode *inode)
 
 	init_orphan_key(&key, sbi->rid, scoutfs_ino(inode));
 
-	ret = scoutfs_forest_create(sb, &key, NULL, lock);
+	ret = scoutfs_item_create(sb, &key, NULL, 0, lock);
 
 	return ret;
 }

@@ -27,6 +27,7 @@
 #include "ioctl.h"
 #include "super.h"
 #include "inode.h"
+#include "item.h"
 #include "forest.h"
 #include "data.h"
 #include "client.h"
@@ -110,7 +111,7 @@ static long scoutfs_ioc_walk_inodes(struct file *file, unsigned long arg)
 
 	for (nr = 0; nr < walk.nr_entries; ) {
 
-		ret = scoutfs_forest_next(sb, &key, &last_key, NULL, lock);
+		ret = scoutfs_item_next(sb, &key, &last_key, NULL, 0, lock);
 		if (ret < 0 && ret != -ENOENT)
 			break;
 

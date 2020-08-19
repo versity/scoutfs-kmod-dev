@@ -20,7 +20,7 @@
 #include "inode.h"
 #include "key.h"
 #include "super.h"
-#include "kvec.h"
+#include "item.h"
 #include "forest.h"
 #include "trans.h"
 #include "xattr.h"
@@ -160,7 +160,6 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_key *key,
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key last;
-	struct kvec val;
 	u8 last_part;
 	int total;
 	u8 part;
@@ -183,8 +182,9 @@ static int get_next_xattr(struct inode *inode, struct scoutfs_key *key,
 
 	for (;;) {
 		key->skx_part = part;
-		kvec_init(&val, (void *)xat + total, bytes - total);
-		ret = scoutfs_forest_next(sb, key, &last, &val, lock);
+		ret = scoutfs_item_next(sb, key, &last,
+					(void *)xat + total, bytes - total,
+					lock);
 		if (ret < 0) {
 			/* XXX corruption, ran out of parts */
 			if (ret == -ENOENT && part > 0)
@@ -260,7 +260,6 @@ static int create_xattr_items(struct inode *inode, u64 id,
 	struct scoutfs_key key;
 	unsigned int part_bytes;
 	unsigned int total;
-	struct kvec val;
 	int ret;
 
 	init_xattr_key(&key, scoutfs_ino(inode),
@@ -271,12 +270,13 @@ static int create_xattr_items(struct inode *inode, u64 id,
 	while (total < bytes) {
 		part_bytes = min_t(unsigned int, bytes - total,
 				   SCOUTFS_XATTR_MAX_PART_SIZE);
-		kvec_init(&val, (void *)xat + total, part_bytes);
 
-		ret = scoutfs_forest_create(sb, &key, &val, lock);
+		ret = scoutfs_item_create(sb, &key,
+					  (void *)xat + total, part_bytes,
+					  lock);
 		if (ret) {
 			while (key.skx_part-- > 0)
-				scoutfs_forest_delete_dirty(sb, &key);
+				scoutfs_item_delete(sb, &key, lock);
 			break;
 		}
 
@@ -288,24 +288,114 @@ static int create_xattr_items(struct inode *inode, u64 id,
 }
 
 /*
- * Delete and save the items that make up the given xattr.  If this
- * returns an error then the deleted and saved items are left on the
- * list for the caller to restore.
+ * Delete the items that make up the given xattr.  If this returns an
+ * error then no items have been deleted.
  */
 static int delete_xattr_items(struct inode *inode, u32 name_hash, u64 id,
-			      u8 nr_parts, struct list_head *list,
-			      struct scoutfs_lock *lock)
+			      u8 nr_parts, struct scoutfs_lock *lock)
 {
 	struct super_block *sb = inode->i_sb;
 	struct scoutfs_key key;
-	int ret;
+	int ret = 0;
+	int i;
 
 	init_xattr_key(&key, scoutfs_ino(inode), name_hash, id);
 
-	do {
-		ret = scoutfs_forest_delete_save(sb, &key, list, lock);
-	} while (ret == 0 && ++key.skx_part < nr_parts);
+	/* dirty additional existing old items */
+	for (i = 1; i < nr_parts; i++) {
+		key.skx_part = i;
+		ret = scoutfs_item_dirty(sb, &key, lock);
+		if (ret)
+			goto out;
+	}
 
+	for (i = 0; i < nr_parts; i++) {
+		key.skx_part = i;
+		ret = scoutfs_item_delete(sb, &key, lock);
+		if (ret)
+			break;
+	}
+out:
+	return ret;
+}
+
+/*
+ * The caller needs to overwrite existing old xattr items with new
+ * items.  We carefully stage the changes so that we can always unwind
+ * to the original items if we return an error.  Both items have at
+ * least one part.  Either the old or new can have more parts.  We dirty
+ * and create first because we can always unwind those.  We delete last
+ * after dirtying so that it can't fail and we don't have to restore the
+ * deleted items.
+ */
+static int change_xattr_items(struct inode *inode, u64 id,
+			      struct scoutfs_xattr *new_xat,
+			      unsigned int new_bytes, u8 new_parts,
+			      u8 old_parts, struct scoutfs_lock *lock)
+{
+	struct super_block *sb = inode->i_sb;
+	struct scoutfs_key key;
+	int last_created = -1;
+	int bytes;
+	int off;
+	int i;
+	int ret;
+
+	init_xattr_key(&key, scoutfs_ino(inode),
+		       xattr_name_hash(new_xat->name, new_xat->name_len), id);
+
+	/* dirty existing old items */
+	for (i = 0; i < old_parts; i++) {
+		key.skx_part = i;
+		ret = scoutfs_item_dirty(sb, &key, lock);
+		if (ret)
+			goto out;
+	}
+
+	/* create any new items past the old */
+	for (i = old_parts; i < new_parts; i++) {
+		off = i * SCOUTFS_XATTR_MAX_PART_SIZE;
+		bytes = min_t(unsigned int, new_bytes - off,
+			      SCOUTFS_XATTR_MAX_PART_SIZE);
+
+		key.skx_part = i;
+		ret = scoutfs_item_create(sb, &key, (void *)new_xat + off,
+					  bytes, lock);
+		if (ret)
+			goto out;
+
+		last_created = i;
+	}
+
+	/* update dirtied overlapping existing items, last partial first */
+	for (i = old_parts - 1; i >= 0; i--) {
+		off = i * SCOUTFS_XATTR_MAX_PART_SIZE;
+		bytes = min_t(unsigned int, new_bytes - off,
+			      SCOUTFS_XATTR_MAX_PART_SIZE);
+
+		key.skx_part = i;
+		ret = scoutfs_item_update(sb, &key, (void *)new_xat + off,
+					  bytes, lock);
+		/* only last partial can fail, then we unwind created */
+		if (ret < 0)
+			goto out;
+	}
+
+	/* delete any dirtied old items past new */
+	for (i = new_parts; i < old_parts; i++) {
+		key.skx_part = i;
+		scoutfs_item_delete(sb, &key, lock);
+	}
+
+	ret = 0;
+out:
+	if (ret < 0) {
+		/* delete any newly created items */
+		for (i = old_parts; i <= last_created; i++) {
+			key.skx_part = i;
+			scoutfs_item_delete(sb, &key, lock);
+		}
+	}
 	return ret;
 }
 
@@ -407,7 +497,6 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct prefix_tags tgs;
 	bool undo_srch = false;
 	LIST_HEAD(ind_locks);
-	LIST_HEAD(saved);
 	u8 found_parts;
 	unsigned int bytes;
 	u64 ind_seq;
@@ -478,7 +567,10 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 
 	/* prepare our xattr */
 	if (value) {
-		id = si->next_xattr_id++;
+		if (found_parts)
+			id = le64_to_cpu(key.skx_id);
+		else
+			id = si->next_xattr_id++;
 		xat->name_len = name_len;
 		xat->val_len = cpu_to_le16(size);
 		memcpy(xat->name, name, name_len);
@@ -511,18 +603,17 @@ retry:
 		undo_srch = true;
 	}
 
-	ret = 0;
-	if (found_parts)
+	if (found_parts && value)
+		ret = change_xattr_items(inode, id, xat, bytes,
+					 xattr_nr_parts(xat), found_parts, lck);
+	else if (found_parts)
 		ret = delete_xattr_items(inode, le64_to_cpu(key.skx_name_hash),
 					 le64_to_cpu(key.skx_id), found_parts,
-					 &saved, lck);
-	if (value && ret == 0)
+					 lck);
+	else
 		ret = create_xattr_items(inode, id, xat, bytes, lck);
-	if (ret < 0) {
-		scoutfs_forest_restore(sb, &saved, lck);
+	if (ret < 0)
 		goto release;
-	}
-	scoutfs_forest_free_batch(sb, &saved);
 
 	/* XXX do these want i_mutex or anything? */
 	inode_inc_iversion(inode);
@@ -665,7 +756,6 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 	struct prefix_tags tgs;
 	bool release = false;
 	unsigned int bytes;
-	struct kvec val;
 	u64 hash;
 	int ret;
 
@@ -681,8 +771,8 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 	init_xattr_key(&last, ino, U32_MAX, U64_MAX);
 
 	for (;;) {
-		kvec_init(&val, (void *)xat, bytes);
-		ret = scoutfs_forest_next(sb, &key, &last, &val, lock);
+		ret = scoutfs_item_next(sb, &key, &last, (void *)xat, bytes,
+					lock);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -698,7 +788,7 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 			break;
 		release = true;
 
-		ret = scoutfs_forest_delete(sb, &key, lock);
+		ret = scoutfs_item_delete(sb, &key, lock);
 		if (ret < 0)
 			break;
 

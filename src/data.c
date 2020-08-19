@@ -27,11 +27,10 @@
 #include "inode.h"
 #include "key.h"
 #include "data.h"
-#include "kvec.h"
 #include "trans.h"
 #include "counters.h"
 #include "scoutfs_trace.h"
-#include "forest.h"
+#include "item.h"
 #include "ioctl.h"
 #include "btree.h"
 #include "lock.h"
@@ -323,7 +322,6 @@ static int load_unpacked_extents(struct super_block *sb, u64 ino,
 	struct rb_node *parent;
 	struct rb_node **node;
 	void *buf = NULL;
-	struct kvec val;
 	u64 prev_blkno;
 	bool saw_final;
 	int size;
@@ -359,13 +357,16 @@ static int load_unpacked_extents(struct super_block *sb, u64 ino,
 
 	for (p = 0; !saw_final; p++) {
 		init_packed_extent_key(&key, ino, iblock, p);
-		kvec_init(&val, buf, SCOUTFS_PACKEXT_MAX_BYTES);
 
 		/* maybe search for next initial item, lookup more parts */
 		if (p == 0 && last > iblock)
-			ret = scoutfs_forest_next(sb, &key, &end, &val, lock);
+			ret = scoutfs_item_next(sb, &key, &end, buf,
+						SCOUTFS_PACKEXT_MAX_BYTES,
+						lock);
 		else
-			ret = scoutfs_forest_lookup(sb, &key, &val, lock);
+			ret = scoutfs_item_lookup(sb, &key, buf,
+						  SCOUTFS_PACKEXT_MAX_BYTES,
+						  lock);
 		if (ret < 0) {
 			if (p == 0 && ret == -ENOENT && empty_enoent)
 				ret = 0;
@@ -475,7 +476,6 @@ static int store_packed_extents(struct super_block *sb, u64 ino,
 	struct unpacked_extent *final;
 	struct unpacked_extent *ext;
 	struct scoutfs_key key;
-	struct kvec val;
 	void *buf = NULL;
 	u64 prev_blkno;
 	u64 iblock;
@@ -491,7 +491,7 @@ static int store_packed_extents(struct super_block *sb, u64 ino,
 	if (RB_EMPTY_ROOT(&unpe->extents)) {
 		for (p = 0; p < unpe->existing_parts; p++) {
 			init_packed_extent_key(&key, ino, unpe->iblock, p);
-			ret = scoutfs_forest_delete(sb, &key, lock);
+			ret = scoutfs_item_delete(sb, &key, lock);
 			BUG_ON(ret); /* XXX inconsistent between parts */
 		}
 		unpe->existing_parts = 0;
@@ -544,11 +544,10 @@ static int store_packed_extents(struct super_block *sb, u64 ino,
 
 		/* store full item or after packing final extent */
 		init_packed_extent_key(&key, ino, unpe->iblock, p);
-		kvec_init(&val, buf, size);
 		if (p < unpe->existing_parts)
-			ret = scoutfs_forest_update(sb, &key, &val, lock);
+			ret = scoutfs_item_update(sb, &key, buf, size, lock);
 		else
-			ret = scoutfs_forest_create(sb, &key, &val, lock);
+			ret = scoutfs_item_create(sb, &key, buf, size, lock);
 		BUG_ON(ret); /* XXX inconsistent between parts */
 
 		pe = buf;
@@ -560,7 +559,7 @@ static int store_packed_extents(struct super_block *sb, u64 ino,
 	/* delete any remaining previous part items */
 	for (i = p; i < unpe->existing_parts; i++) {
 		init_packed_extent_key(&key, ino, unpe->iblock, i);
-		ret = scoutfs_forest_delete(sb, &key, lock);
+		ret = scoutfs_item_delete(sb, &key, lock);
 		BUG_ON(ret); /* XXX inconsistent between parts */
 	}
 

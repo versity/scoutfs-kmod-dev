@@ -28,6 +28,7 @@
 #include "radix.h"
 #include "block.h"
 #include "msg.h"
+#include "item.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -169,7 +170,8 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	trace_scoutfs_trans_write_func(sb,
 			scoutfs_block_writer_dirty_bytes(sb, &tri->wri));
 
-	if (!scoutfs_block_writer_has_dirty(sb, &tri->wri)) {
+	if (!scoutfs_block_writer_has_dirty(sb, &tri->wri) &&
+	    !scoutfs_item_dirty_bytes(sb)) {
 		if (sbi->trans_deadline_expired) {
 			/*
 			 * If we're not writing data then we only advance the
@@ -192,9 +194,11 @@ void scoutfs_trans_write_func(struct work_struct *work)
 
 	/* XXX this all needs serious work for dealing with errors */
 	ret = (s = "data submit", scoutfs_inode_walk_writeback(sb, true)) ?:
+	      (s = "item dirty", scoutfs_item_write_dirty(sb))  ?:
 	      (s = "meta write", scoutfs_block_writer_write(sb, &tri->wri))  ?:
 	      (s = "data wait", scoutfs_inode_walk_writeback(sb, false)) ?:
 	      (s = "commit log trees", commit_btrees(sb)) ?:
+	      scoutfs_item_write_done(sb) ?:
 	      (s = "advance seq", scoutfs_client_advance_seq(sb, &trans_seq)) ?:
 	      (s = "get log trees", scoutfs_trans_get_log_trees(sb));
 out:
@@ -364,8 +368,7 @@ static bool acquired_hold(struct super_block *sb,
 	vals = tri->reserved_vals + cnt->vals;
 
 	/* XXX arbitrarily limit to 8 meg transactions */
-	if (scoutfs_block_writer_dirty_bytes(sb, &tri->wri) >=
-			(8 * 1024 * 1024)) {
+	if (scoutfs_item_dirty_bytes(sb) >= (8 * 1024 * 1024)) {
 		scoutfs_inc_counter(sb, trans_commit_full);
 		queue_trans_work(sbi);
 		goto out;

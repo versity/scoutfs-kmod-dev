@@ -21,7 +21,6 @@
 
 #include "super.h"
 #include "lock.h"
-#include "forest.h"
 #include "scoutfs_trace.h"
 #include "msg.h"
 #include "cmp.h"
@@ -230,7 +229,6 @@ static void lock_free(struct lock_info *linfo, struct scoutfs_lock *lock)
 	BUG_ON(!list_empty(&lock->shrink_head));
 	BUG_ON(!list_empty(&lock->cov_list));
 
-	scoutfs_forest_clear_lock(sb, lock);
 	kfree(lock);
 }
 
@@ -264,6 +262,8 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 	lock->sb = sb;
 	init_waitqueue_head(&lock->waitq);
 	lock->mode = SCOUTFS_LOCK_NULL;
+
+	atomic64_set(&lock->forest_bloom_nr, 0);
 
 	trace_scoutfs_lock_alloc(sb, lock);
 

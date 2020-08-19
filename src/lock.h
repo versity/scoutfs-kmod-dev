@@ -46,8 +46,8 @@ struct scoutfs_lock {
 
 	struct scoutfs_tseq_entry tseq_entry;
 
-	/* the forest btree code stores data per lock */
-	struct forest_lock_private *forest_private;
+	/* the forest tracks which log tree last saw bloom bit updates */
+	atomic64_t forest_bloom_nr;
 };
 
 struct scoutfs_lock_coverage {

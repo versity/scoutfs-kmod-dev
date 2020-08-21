@@ -201,11 +201,21 @@ struct scoutfs_counters {
 	     pcpu <= &SCOUTFS_SB(sb)->counters->LAST_COUNTER;	\
 	     pcpu++)
 
-#define scoutfs_inc_counter(sb, which) \
-	percpu_counter_inc(&SCOUTFS_SB(sb)->counters->which)
+/*
+ * We always read with _sum, we have no use for the shared count and
+ * certainly don't want to pay the cost of a shared lock to update it.
+ * The default batch of 32 make counter increments show up significantly
+ * in profiles.
+ */
+#define SCOUTFS_PCPU_COUNTER_BATCH (1 << 30)
 
-#define scoutfs_add_counter(sb, which, cnt) \
-	percpu_counter_add(&SCOUTFS_SB(sb)->counters->which, cnt)
+#define scoutfs_inc_counter(sb, which)					\
+	__percpu_counter_add(&SCOUTFS_SB(sb)->counters->which, 1,	\
+			     SCOUTFS_PCPU_COUNTER_BATCH)
+
+#define scoutfs_add_counter(sb, which, cnt)				\
+	__percpu_counter_add(&SCOUTFS_SB(sb)->counters->which, cnt,	\
+			     SCOUTFS_PCPU_COUNTER_BATCH)
 
 void __init scoutfs_init_counters(void);
 int scoutfs_setup_counters(struct super_block *sb);

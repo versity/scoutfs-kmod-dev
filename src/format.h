@@ -8,7 +8,6 @@
 #define SCOUTFS_BLOCK_MAGIC_SUPER	0x103c428b
 #define SCOUTFS_BLOCK_MAGIC_BTREE	0xe597f96d
 #define SCOUTFS_BLOCK_MAGIC_BLOOM	0x31995604
-#define SCOUTFS_BLOCK_MAGIC_RADIX	0xebeb5e65
 #define SCOUTFS_BLOCK_MAGIC_SRCH_BLOCK	0x897e4a7d
 #define SCOUTFS_BLOCK_MAGIC_SRCH_PARENT	0xb23a2a05
 #define SCOUTFS_BLOCK_MAGIC_ALLOC_LIST	0x8a93ac83
@@ -182,29 +181,6 @@ struct scoutfs_radix_block {
 		__le64 bits[0];
 	} __packed;
 } __packed;
-
-struct scoutfs_radix_root {
-	__u8 height;
-	__le64 next_find_bit;
-	struct scoutfs_radix_ref ref;
-} __packed;
-
-#define SCOUTFS_RADIX_REFS					\
-	((SCOUTFS_BLOCK_LG_SIZE -				\
-	  offsetof(struct scoutfs_radix_block, refs[0])) /	\
-		sizeof(struct scoutfs_radix_ref))
-
-/* 8 meg regions with 4k data blocks */
-#define SCOUTFS_RADIX_LG_SHIFT	11
-#define SCOUTFS_RADIX_LG_BITS	(1 << SCOUTFS_RADIX_LG_SHIFT)
-#define SCOUTFS_RADIX_LG_MASK	(SCOUTFS_RADIX_LG_BITS - 1)
-
-/* round block bits down to a multiple of large ranges */
-#define SCOUTFS_RADIX_BITS						\
-	(((SCOUTFS_BLOCK_LG_SIZE -					\
-	   offsetof(struct scoutfs_radix_block, bits[0])) * 8) &	\
-	 ~(__u64)SCOUTFS_RADIX_LG_MASK)
-#define SCOUTFS_RADIX_BITS_BYTES (SCOUTFS_RADIX_BITS / 8)
 
 struct scoutfs_avl_root {
 	__le16 node;

@@ -147,24 +147,6 @@
 	EXPAND_COUNTER(quorum_write_block)			\
 	EXPAND_COUNTER(quorum_write_block_error)		\
 	EXPAND_COUNTER(quorum_fenced)				\
-	EXPAND_COUNTER(radix_alloc)				\
-	EXPAND_COUNTER(radix_alloc_data)			\
-	EXPAND_COUNTER(radix_block_cow)				\
-	EXPAND_COUNTER(radix_block_read)			\
-	EXPAND_COUNTER(radix_complete_dirty_block)		\
-	EXPAND_COUNTER(radix_create_synth)			\
-	EXPAND_COUNTER(radix_free)				\
-	EXPAND_COUNTER(radix_free_data)				\
-	EXPAND_COUNTER(radix_enospc_data)			\
-	EXPAND_COUNTER(radix_enospc_meta)			\
-	EXPAND_COUNTER(radix_enospc_synth)			\
-	EXPAND_COUNTER(radix_inconsistent_eio)			\
-	EXPAND_COUNTER(radix_inconsistent_ref)			\
-	EXPAND_COUNTER(radix_merge)				\
-	EXPAND_COUNTER(radix_merge_bad_clean_input)		\
-	EXPAND_COUNTER(radix_merge_empty)			\
-	EXPAND_COUNTER(radix_undo_ref)				\
-	EXPAND_COUNTER(radix_walk)				\
 	EXPAND_COUNTER(server_commit_hold)			\
 	EXPAND_COUNTER(server_commit_queue)			\
 	EXPAND_COUNTER(server_commit_worker)			\

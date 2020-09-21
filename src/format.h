@@ -11,6 +11,7 @@
 #define SCOUTFS_BLOCK_MAGIC_RADIX	0xebeb5e65
 #define SCOUTFS_BLOCK_MAGIC_SRCH_BLOCK	0x897e4a7d
 #define SCOUTFS_BLOCK_MAGIC_SRCH_PARENT	0xb23a2a05
+#define SCOUTFS_BLOCK_MAGIC_ALLOC_LIST	0x8a93ac83
 
 /*
  * The super block, quorum block, and file data allocation granularity
@@ -265,6 +266,53 @@ struct scoutfs_btree_block {
 	 (sizeof(struct scoutfs_btree_item) + (sizeof(__le16))) * 100 / 75)
 #define SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES \
 	(SCOUTFS_BTREE_LEAF_ITEM_HASH_NR * sizeof(__le16))
+
+struct scoutfs_alloc_list_ref {
+	__le64 blkno;
+	__le64 seq;
+}__packed;
+
+/*
+ * first_nr tracks the nr of the first block in the list and is used for
+ * allocation sizing. total_nr is the sum of the nr of all the blocks in
+ * the list and is used for calculating total free block counts.
+ */
+struct scoutfs_alloc_list_head {
+	struct scoutfs_alloc_list_ref ref;
+	__le64 total_nr;
+	__le32 first_nr;
+}__packed;
+
+/*
+ * While the main allocator uses extent items in btree blocks, metadata
+ * allocations for a single transaction are recorded in arrays in
+ * blocks.  This limits the number of allocations and frees needed to
+ * cow and modify the structure.  The blocks can be stored in a list
+ * which lets us create a persistent log of pending frees that are
+ * generated as we cow btree blocks to insert freed extents.
+ *
+ * The array floats in the block so that both adding and removing blknos
+ * only modifies an index.
+ */
+struct scoutfs_alloc_list_block {
+	struct scoutfs_block_header hdr;
+	struct scoutfs_alloc_list_ref next;
+	__le32 start;
+	__le32 nr;
+	__le64 blknos[0]; /* naturally aligned for sorting */
+}__packed;
+
+#define SCOUTFS_ALLOC_LIST_MAX_BLOCKS					      \
+	((SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_alloc_list_block)) /  \
+	 (member_sizeof(struct scoutfs_alloc_list_block, blknos[0])))
+
+/*
+ * These can safely be initialized to all-zeros.
+ */
+struct scoutfs_alloc_root {
+	__le64 total_len;
+	struct scoutfs_btree_root root;
+}__packed;
 
 struct scoutfs_mounted_client_btree_val {
 	__u8 flags;

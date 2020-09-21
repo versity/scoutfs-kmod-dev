@@ -12,6 +12,15 @@
  * other places by this macro.  Don't forget to update LAST_COUNTER.
  */
 #define EXPAND_EACH_COUNTER					\
+	EXPAND_COUNTER(alloc_alloc_data)			\
+	EXPAND_COUNTER(alloc_alloc_meta)			\
+	EXPAND_COUNTER(alloc_free_data)				\
+	EXPAND_COUNTER(alloc_free_meta)				\
+	EXPAND_COUNTER(alloc_list_avail_lo)			\
+	EXPAND_COUNTER(alloc_list_freed_hi)			\
+	EXPAND_COUNTER(alloc_move)				\
+	EXPAND_COUNTER(alloc_moved_extent)			\
+	EXPAND_COUNTER(alloc_stale_cached_list_block)		\
 	EXPAND_COUNTER(block_cache_access)			\
 	EXPAND_COUNTER(block_cache_alloc_failure)		\
 	EXPAND_COUNTER(block_cache_alloc_page_order)		\
@@ -185,7 +194,7 @@
 	EXPAND_COUNTER(trans_commit_timer)			\
 	EXPAND_COUNTER(trans_commit_written)
 
-#define FIRST_COUNTER	block_cache_access
+#define FIRST_COUNTER	alloc_alloc_data
 #define LAST_COUNTER	trans_commit_written
 
 #undef EXPAND_COUNTER

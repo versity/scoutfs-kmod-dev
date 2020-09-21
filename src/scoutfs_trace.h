@@ -2490,6 +2490,123 @@ TRACE_EVENT(scoutfs_ext_alloc,
 		  STE_ENTRY_ARGS(ext), __entry->ret)
 );
 
+TRACE_EVENT(scoutfs_alloc_alloc_meta,
+	TP_PROTO(struct super_block *sb, u64 blkno, int ret),
+
+	TP_ARGS(sb, blkno, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, blkno)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->blkno = blkno;
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" blkno %llu ret %d",
+		  SCSB_TRACE_ARGS, __entry->blkno, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_alloc_free_meta,
+	TP_PROTO(struct super_block *sb, u64 blkno, int ret),
+
+	TP_ARGS(sb, blkno, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, blkno)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->blkno = blkno;
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" blkno %llu ret %d",
+		  SCSB_TRACE_ARGS, __entry->blkno, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_alloc_alloc_data,
+	TP_PROTO(struct super_block *sb, u64 req, u64 blkno, u64 count,
+		 int ret),
+
+	TP_ARGS(sb, req, blkno, count, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, req)
+		__field(__u64, blkno)
+		__field(__u64, count)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->req = req;
+		__entry->blkno = blkno;
+		__entry->count = count;
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" req %llu blkno %llu count %llu ret %d",
+		  SCSB_TRACE_ARGS, __entry->req, __entry->blkno,
+		  __entry->count, __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_alloc_free_data,
+	TP_PROTO(struct super_block *sb, u64 blkno, u64 count, int ret),
+
+	TP_ARGS(sb, blkno, count, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, blkno)
+		__field(__u64, count)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->blkno = blkno;
+		__entry->count = count;
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" blkno %llu count %llu ret %d",
+		  SCSB_TRACE_ARGS, __entry->blkno, __entry->count,
+		  __entry->ret)
+);
+
+TRACE_EVENT(scoutfs_alloc_move,
+	TP_PROTO(struct super_block *sb, u64 total, u64 moved, int ret),
+
+	TP_ARGS(sb, total, moved, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, total)
+		__field(__u64, moved)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->total = total;
+		__entry->moved = moved;
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" total %llu moved %llu ret %d",
+		  SCSB_TRACE_ARGS, __entry->total, __entry->moved,
+		  __entry->ret)
+);
+
 #endif /* _TRACE_SCOUTFS_H */
 
 /* This part must be outside protection */

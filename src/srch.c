@@ -23,7 +23,7 @@
 #include "format.h"
 #include "counters.h"
 #include "block.h"
-#include "radix.h"
+#include "alloc.h"
 #include "srch.h"
 #include "btree.h"
 #include "spbm.h"
@@ -309,7 +309,7 @@ enum {
 	GFB_DIRTY = (1 << 1),
 };
 static int get_file_block(struct super_block *sb,
-			  struct scoutfs_radix_allocator *alloc,
+			  struct scoutfs_alloc *alloc,
 			  struct scoutfs_block_writer *wri,
 			  struct scoutfs_srch_file *sfl,
 			  int gfb, u64 blk, struct scoutfs_block **bl_ret)
@@ -335,7 +335,7 @@ static int get_file_block(struct super_block *sb,
 			goto out;
 		}
 
-		ret = scoutfs_radix_alloc(sb, alloc, wri, &blkno);
+		ret = scoutfs_alloc_meta(sb, alloc, wri, &blkno);
 		if (ret < 0)
 			goto out;
 
@@ -383,7 +383,7 @@ static int get_file_block(struct super_block *sb,
 		/* allocate a new block if we need it */
 		if (!ref->blkno || ((gfb & GFB_DIRTY) &&
 				    !scoutfs_block_writer_is_dirty(sb, bl))) {
-			ret = scoutfs_radix_alloc(sb, alloc, wri, &blkno);
+			ret = scoutfs_alloc_meta(sb, alloc, wri, &blkno);
 			if (ret < 0)
 				goto out;
 
@@ -395,8 +395,8 @@ static int get_file_block(struct super_block *sb,
 
 			if (bl) {
 				/* cow old block if we have one */
-				ret = scoutfs_radix_free(sb, alloc, wri,
-							 bl->blkno);
+				ret = scoutfs_free_meta(sb, alloc, wri,
+							bl->blkno);
 				if (ret)
 					goto out;
 
@@ -442,7 +442,7 @@ out:
 
 	/* return allocated blkno on error */
 	if (blkno > 0) {
-		err = scoutfs_radix_free(sb, alloc, wri, blkno);
+		err = scoutfs_free_meta(sb, alloc, wri, blkno);
 		BUG_ON(err); /* radix should have been dirty */
 	}
 
@@ -460,7 +460,7 @@ out:
 }
 
 int scoutfs_srch_add(struct super_block *sb,
-		     struct scoutfs_radix_allocator *alloc,
+		     struct scoutfs_alloc *alloc,
 		     struct scoutfs_block_writer *wri,
 		     struct scoutfs_srch_file *sfl,
 		     struct scoutfs_block **bl_ret,
@@ -988,7 +988,7 @@ out:
  * it's large enough.
  */
 int scoutfs_srch_rotate_log(struct super_block *sb,
-			    struct scoutfs_radix_allocator *alloc,
+			    struct scoutfs_alloc *alloc,
 			    struct scoutfs_block_writer *wri,
 			    struct scoutfs_btree_root *root,
 			    struct scoutfs_srch_file *sfl)
@@ -1018,13 +1018,13 @@ int scoutfs_srch_rotate_log(struct super_block *sb,
  * items.
  */
 int scoutfs_srch_get_compact(struct super_block *sb,
-			     struct scoutfs_radix_allocator *alloc,
+			     struct scoutfs_alloc *alloc,
 			     struct scoutfs_block_writer *wri,
 			     struct scoutfs_btree_root *root,
 			     u64 rid,
 			     struct scoutfs_srch_compact_input *scin)
 {
-	struct scoutfs_srch_compact_input busy_scin = {{0,}};
+	struct scoutfs_srch_compact_input busy_scin = {{{0,}}};
 	struct scoutfs_srch_file sfl;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_spbm busy;
@@ -1147,7 +1147,7 @@ out:
  * copy.
  */
 int scoutfs_srch_update_compact(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
 				struct scoutfs_srch_compact_input *scin)
@@ -1160,7 +1160,7 @@ int scoutfs_srch_update_compact(struct super_block *sb,
 }
 
 static int mod_srch_items(struct super_block *sb,
-			  struct scoutfs_radix_allocator *alloc,
+			  struct scoutfs_alloc *alloc,
 			  struct scoutfs_block_writer *wri,
 			  struct scoutfs_btree_root *root, u8 scom_flags,
 			  bool ins, struct scoutfs_srch_file *sfls, int nr)
@@ -1213,12 +1213,12 @@ static int mod_srch_items(struct super_block *sb,
  * We give the caller the allocator trees to merge if we return success.
  */
 int scoutfs_srch_commit_compact(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
 				struct scoutfs_srch_compact_result *scres,
-				struct scoutfs_radix_root *av,
-				struct scoutfs_radix_root *fr)
+				struct scoutfs_alloc_list_head *av,
+				struct scoutfs_alloc_list_head *fr)
 {
 	struct scoutfs_srch_compact_input scin;
 	SCOUTFS_BTREE_ITEM_REF(iref);
@@ -1268,11 +1268,11 @@ out:
  * allocators.  Returns -ENOENT when there are no more items.
  */
 int scoutfs_srch_cancel_compact(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
-				struct scoutfs_radix_root *av,
-				struct scoutfs_radix_root *fr)
+				struct scoutfs_alloc_list_head *av,
+				struct scoutfs_alloc_list_head *fr)
 {
 	struct scoutfs_srch_compact_input scin;
 	SCOUTFS_BTREE_ITEM_REF(iref);
@@ -1331,7 +1331,7 @@ typedef int (*kway_next_func_t)(struct super_block *sb,
 				struct scoutfs_srch_entry *sre_ret, void *arg);
 
 static int kway_merge(struct super_block *sb,
-		      struct scoutfs_radix_allocator *alloc,
+		      struct scoutfs_alloc *alloc,
 		      struct scoutfs_block_writer *wri,
 		      struct scoutfs_srch_file *sfl,
 		      kway_next_func_t kway_next, void **args, int nr)
@@ -1526,7 +1526,7 @@ static void swap_page_sre(void *A, void *B, int size)
  * typically, ~10x worst case).
  */
 static int compact_logs(struct super_block *sb,
-			struct scoutfs_radix_allocator *alloc,
+			struct scoutfs_alloc *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_srch_file *sfl_out,
 			struct scoutfs_srch_file *sfls, int nr_sfls)
@@ -1715,7 +1715,7 @@ out:
  * which reads blocks and decodes entries.
  */
 static int compact_sorted(struct super_block *sb,
-			  struct scoutfs_radix_allocator *alloc,
+			  struct scoutfs_alloc *alloc,
 			  struct scoutfs_block_writer *wri,
 			  struct scoutfs_srch_file *sfl_out,
 			  struct scoutfs_srch_file *sfls, int nr)
@@ -1760,7 +1760,7 @@ out:
  * up our entire operation, partial state doesn't matter.
  */
 static int free_file(struct super_block *sb,
-		     struct scoutfs_radix_allocator *alloc,
+		     struct scoutfs_alloc *alloc,
 		     struct scoutfs_block_writer *wri,
 		     struct scoutfs_srch_file *sfl)
 {
@@ -1818,7 +1818,7 @@ static int free_file(struct super_block *sb,
 			if (blkno == 0)
 				continue;
 
-			ret = scoutfs_radix_free(sb, alloc, wri, blkno);
+			ret = scoutfs_free_meta(sb, alloc, wri, blkno);
 			if (ret < 0)
 				goto out;
 			scoutfs_inc_counter(sb, srch_compact_free_block);
@@ -1830,7 +1830,7 @@ static int free_file(struct super_block *sb,
 	}
 
 free_root:
-	ret = scoutfs_radix_free(sb, alloc, wri, le64_to_cpu(sfl->ref.blkno));
+	ret = scoutfs_free_meta(sb, alloc, wri, le64_to_cpu(sfl->ref.blkno));
 	if (ret < 0)
 		goto out;
 
@@ -1868,7 +1868,7 @@ static void scoutfs_srch_compact_worker(struct work_struct *work)
 	struct srch_info *srinf = container_of(work, struct srch_info,
 					       compact_dwork.work);
 	struct super_block *sb = srinf->sb;
-	struct scoutfs_radix_allocator alloc;
+	struct scoutfs_alloc alloc;
 	struct scoutfs_srch_compact_result scres;
 	struct scoutfs_srch_compact_input scin;
 	struct scoutfs_block_writer wri;
@@ -1883,7 +1883,7 @@ static void scoutfs_srch_compact_worker(struct work_struct *work)
 	if (ret < 0 || scin.nr == 0)
 		goto out;
 
-	scoutfs_radix_init_alloc(&alloc, &scin.meta_avail, &scin.meta_freed);
+	scoutfs_alloc_init(&alloc, &scin.meta_avail, &scin.meta_freed);
 
 	if (scin.flags & SCOUTFS_SRCH_COMPACT_FLAG_LOG)
 		ret = compact_logs(sb, &alloc, &wri, &scres.sfl,

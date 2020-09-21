@@ -47,7 +47,7 @@ struct scoutfs_traced_extent {
 
 extern const struct address_space_operations scoutfs_file_aops;
 extern const struct file_operations scoutfs_file_fops;
-struct scoutfs_radix_allocator;
+struct scoutfs_alloc;
 struct scoutfs_block_writer;
 
 int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
@@ -77,11 +77,12 @@ int scoutfs_data_waiting(struct super_block *sb, u64 ino, u64 iblock,
 			 unsigned int nr);
 
 void scoutfs_data_init_btrees(struct super_block *sb,
-			      struct scoutfs_radix_allocator *alloc,
+			      struct scoutfs_alloc *alloc,
 			      struct scoutfs_block_writer *wri,
 			      struct scoutfs_log_trees *lt);
 void scoutfs_data_get_btrees(struct super_block *sb,
 			     struct scoutfs_log_trees *lt);
+int scoutfs_data_prepare_commit(struct super_block *sb);
 u64 scoutfs_data_alloc_free_bytes(struct super_block *sb);
 
 int scoutfs_data_setup(struct super_block *sb);

@@ -53,9 +53,10 @@
 
 /*
  * Each of the server meta_alloc roots will try to keep a minimum amount
- * of free blocks.  The server will use the next root once its current
- * root gets this low.  It must have room for all the largest allocation
- * attempted in a transaction on the server.
+ * of free blocks.  The server will swap roots when its current avail
+ * falls below the threshold while the freed root is still above it.  It
+ * must have room for all the largest allocation attempted in a
+ * transaction on the server.
  */
 #define SCOUTFS_SERVER_META_ALLOC_MIN \
 	(SCOUTFS_SERVER_META_FILL_TARGET * 2)

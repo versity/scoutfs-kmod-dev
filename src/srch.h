@@ -22,7 +22,7 @@ struct scoutfs_srch_rb_node {
 	     node = rb_next(node))
 
 int scoutfs_srch_add(struct super_block *sb,
-		     struct scoutfs_radix_allocator *alloc,
+		     struct scoutfs_alloc *alloc,
 		     struct scoutfs_block_writer *wri,
 		     struct scoutfs_srch_file *sfl,
 		     struct scoutfs_block **bl_ret,
@@ -34,34 +34,34 @@ int scoutfs_srch_search_xattrs(struct super_block *sb,
 			       u64 hash, u64 ino, u64 last_ino, bool *done);
 
 int scoutfs_srch_rotate_log(struct super_block *sb,
-			    struct scoutfs_radix_allocator *alloc,
+			    struct scoutfs_alloc *alloc,
 			    struct scoutfs_block_writer *wri,
 			    struct scoutfs_btree_root *root,
 			    struct scoutfs_srch_file *sfl);
 int scoutfs_srch_get_compact(struct super_block *sb,
-			     struct scoutfs_radix_allocator *alloc,
+			     struct scoutfs_alloc *alloc,
 			     struct scoutfs_block_writer *wri,
 			     struct scoutfs_btree_root *root,
 			     u64 rid,
 			     struct scoutfs_srch_compact_input *scin_ret);
 int scoutfs_srch_update_compact(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
 				struct scoutfs_srch_compact_input *scin);
 int scoutfs_srch_commit_compact(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
 				struct scoutfs_srch_compact_result *scres,
-				struct scoutfs_radix_root *av,
-				struct scoutfs_radix_root *fr);
+				struct scoutfs_alloc_list_head *av,
+				struct scoutfs_alloc_list_head *fr);
 int scoutfs_srch_cancel_compact(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
-				struct scoutfs_radix_root *av,
-				struct scoutfs_radix_root *fr);
+				struct scoutfs_alloc_list_head *av,
+				struct scoutfs_alloc_list_head *fr);
 
 void scoutfs_srch_destroy(struct super_block *sb);
 int scoutfs_srch_setup(struct super_block *sb);

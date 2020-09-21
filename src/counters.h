@@ -166,7 +166,6 @@
 	EXPAND_COUNTER(radix_undo_ref)				\
 	EXPAND_COUNTER(radix_walk)				\
 	EXPAND_COUNTER(server_commit_hold)			\
-	EXPAND_COUNTER(server_commit_prepare)			\
 	EXPAND_COUNTER(server_commit_queue)			\
 	EXPAND_COUNTER(server_commit_worker)			\
 	EXPAND_COUNTER(srch_add_entry)				\
@@ -188,8 +187,9 @@
 	EXPAND_COUNTER(srch_search_xattrs)			\
 	EXPAND_COUNTER(srch_read_stale)				\
 	EXPAND_COUNTER(trans_commit_data_alloc_low)		\
+	EXPAND_COUNTER(trans_commit_dirty_meta_full)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\
-	EXPAND_COUNTER(trans_commit_full)			\
+	EXPAND_COUNTER(trans_commit_meta_alloc_low)		\
 	EXPAND_COUNTER(trans_commit_sync_fs)			\
 	EXPAND_COUNTER(trans_commit_timer)			\
 	EXPAND_COUNTER(trans_commit_written)

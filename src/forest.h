@@ -1,7 +1,7 @@
 #ifndef _SCOUTFS_FOREST_H_
 #define _SCOUTFS_FOREST_H_
 
-struct scoutfs_radix_allocator;
+struct scoutfs_alloc;
 struct scoutfs_block_writer;
 struct scoutfs_block;
 
@@ -28,7 +28,7 @@ int scoutfs_forest_insert_list(struct super_block *sb,
 int scoutfs_forest_srch_add(struct super_block *sb, u64 hash, u64 ino, u64 id);
 
 void scoutfs_forest_init_btrees(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_log_trees *lt);
 void scoutfs_forest_get_btrees(struct super_block *sb,

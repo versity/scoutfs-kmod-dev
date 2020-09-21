@@ -25,7 +25,7 @@
 #include "counters.h"
 #include "client.h"
 #include "inode.h"
-#include "radix.h"
+#include "alloc.h"
 #include "block.h"
 #include "msg.h"
 #include "item.h"
@@ -66,7 +66,7 @@ struct trans_info {
 	bool writing;
 
 	struct scoutfs_log_trees lt;
-	struct scoutfs_radix_allocator alloc;
+	struct scoutfs_alloc alloc;
 	struct scoutfs_block_writer wri;
 };
 
@@ -112,8 +112,7 @@ int scoutfs_trans_get_log_trees(struct super_block *sb)
 	ret = scoutfs_client_get_log_trees(sb, &lt);
 	if (ret == 0) {
 		tri->lt = lt;
-		scoutfs_radix_init_alloc(&tri->alloc, &lt.meta_avail,
-					 &lt.meta_freed);
+		scoutfs_alloc_init(&tri->alloc, &lt.meta_avail, &lt.meta_freed);
 		scoutfs_block_writer_init(sb, &tri->wri);
 
 		scoutfs_forest_init_btrees(sb, &tri->alloc, &tri->wri, &lt);
@@ -195,6 +194,9 @@ void scoutfs_trans_write_func(struct work_struct *work)
 	/* XXX this all needs serious work for dealing with errors */
 	ret = (s = "data submit", scoutfs_inode_walk_writeback(sb, true)) ?:
 	      (s = "item dirty", scoutfs_item_write_dirty(sb))  ?:
+	      (s = "data prepare", scoutfs_data_prepare_commit(sb))  ?:
+	      (s = "alloc prepare", scoutfs_alloc_prepare_commit(sb,
+						&tri->alloc, &tri->wri))  ?:
 	      (s = "meta write", scoutfs_block_writer_write(sb, &tri->wri))  ?:
 	      (s = "data wait", scoutfs_inode_walk_writeback(sb, false)) ?:
 	      (s = "commit log trees", commit_btrees(sb)) ?:
@@ -369,7 +371,13 @@ static bool acquired_hold(struct super_block *sb,
 
 	/* XXX arbitrarily limit to 8 meg transactions */
 	if (scoutfs_item_dirty_bytes(sb) >= (8 * 1024 * 1024)) {
-		scoutfs_inc_counter(sb, trans_commit_full);
+		scoutfs_inc_counter(sb, trans_commit_dirty_meta_full);
+		queue_trans_work(sbi);
+		goto out;
+	}
+
+	if (scoutfs_alloc_meta_lo_thresh(sb, &tri->alloc)) {
+		scoutfs_inc_counter(sb, trans_commit_meta_alloc_low);
 		queue_trans_work(sbi);
 		goto out;
 	}

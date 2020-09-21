@@ -37,25 +37,26 @@
 #include "server.h"
 #include "net.h"
 #include "data.h"
+#include "ext.h"
 
 struct lock_info;
 
 #define STE_FMT "[%llu %llu %llu 0x%x]"
-#define STE_ARGS(te) (te)->iblock, (te)->count, (te)->blkno, (te)->flags
+#define STE_ARGS(te) (te)->start, (te)->len, (te)->map, (te)->flags
 #define STE_FIELDS(pref)			\
-	__field(__u64, pref##_iblock)		\
-	__field(__u64, pref##_count)		\
-	__field(__u64, pref##_blkno)		\
+	__field(__u64, pref##_start)		\
+	__field(__u64, pref##_len)		\
+	__field(__u64, pref##_map)		\
 	__field(__u8, pref##_flags)
 #define STE_ASSIGN(pref, te)			\
-	__entry->pref##_iblock = (te)->iblock;	\
-	__entry->pref##_count = (te)->count;	\
-	__entry->pref##_blkno = (te)->blkno;	\
+	__entry->pref##_start = (te)->start;	\
+	__entry->pref##_len = (te)->len;	\
+	__entry->pref##_map = (te)->map;	\
 	__entry->pref##_flags = (te)->flags;
 #define STE_ENTRY_ARGS(pref)			\
-	__entry->pref##_iblock,			\
-	__entry->pref##_count,			\
-	__entry->pref##_blkno,			\
+	__entry->pref##_start,			\
+	__entry->pref##_len,			\
+	__entry->pref##_map,			\
 	__entry->pref##_flags
 
 #define DECLARE_TRACED_EXTENT(name) \
@@ -2365,6 +2366,128 @@ TRACE_EVENT(scoutfs_radix_merged_blocks,
 		  __entry->count, __entry->leaf_bit, __entry->ind,
 		  __entry->sm_delta, __entry->src_lg_delta,
 		  __entry->dst_lg_delta)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_ext_next_class,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len,
+		 struct scoutfs_extent *ext, int ret),
+
+	TP_ARGS(sb, start, len, ext, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, start)
+		__field(__u64, len)
+		STE_FIELDS(ext)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->start = start;
+		__entry->len = len;
+		STE_ASSIGN(ext, ext)
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" start %llu len %llu ext "STE_FMT" ret %d",
+		  SCSB_TRACE_ARGS, __entry->start, __entry->len,
+		  STE_ENTRY_ARGS(ext), __entry->ret)
+);
+
+DEFINE_EVENT(scoutfs_ext_next_class, scoutfs_ext_op_next,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len,
+		 struct scoutfs_extent *ext, int ret),
+	TP_ARGS(sb, start, len, ext, ret)
+);
+DEFINE_EVENT(scoutfs_ext_next_class, scoutfs_ext_next,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len,
+		 struct scoutfs_extent *ext, int ret),
+	TP_ARGS(sb, start, len, ext, ret)
+);
+
+DECLARE_EVENT_CLASS(scoutfs_ext_typical_class,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len, u64 map, u8 flags,
+		 int ret),
+
+	TP_ARGS(sb, start, len, map, flags, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, start)
+		__field(__u64, len)
+		__field(__u64, map)
+		__field(__u8, flags)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->start = start;
+		__entry->len = len;
+		__entry->map = map;
+		__entry->flags = flags;
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" start %llu len %llu map %llu flags %u ret %d",
+		  SCSB_TRACE_ARGS, __entry->start, __entry->len, __entry->map,
+		  __entry->flags, __entry->ret)
+);
+
+DEFINE_EVENT(scoutfs_ext_typical_class, scoutfs_ext_op_insert,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len, u64 map, u8 flags,
+		 int ret),
+	TP_ARGS(sb, start, len, map, flags, ret)
+);
+DEFINE_EVENT(scoutfs_ext_typical_class, scoutfs_ext_insert,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len, u64 map, u8 flags,
+		 int ret),
+	TP_ARGS(sb, start, len, map, flags, ret)
+);
+DEFINE_EVENT(scoutfs_ext_typical_class, scoutfs_ext_op_remove,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len, u64 map, u8 flags,
+		 int ret),
+	TP_ARGS(sb, start, len, map, flags, ret)
+);
+DEFINE_EVENT(scoutfs_ext_typical_class, scoutfs_ext_remove,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len, u64 map, u8 flags,
+		 int ret),
+	TP_ARGS(sb, start, len, map, flags, ret)
+);
+DEFINE_EVENT(scoutfs_ext_typical_class, scoutfs_ext_set,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len, u64 map, u8 flags,
+		 int ret),
+	TP_ARGS(sb, start, len, map, flags, ret)
+);
+
+TRACE_EVENT(scoutfs_ext_alloc,
+	TP_PROTO(struct super_block *sb, u64 start, u64 len, u64 count,
+		 struct scoutfs_extent *ext, int ret),
+
+	TP_ARGS(sb, start, len, count, ext, ret),
+
+	TP_STRUCT__entry(
+		SCSB_TRACE_FIELDS
+		__field(__u64, start)
+		__field(__u64, len)
+		__field(__u64, count)
+		STE_FIELDS(ext)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		SCSB_TRACE_ASSIGN(sb);
+		__entry->start = start;
+		__entry->len = len;
+		__entry->count = count;
+		STE_ASSIGN(ext, ext)
+		__entry->ret = ret;
+	),
+
+	TP_printk(SCSBF" start %llu len %llu count %llu ext "STE_FMT" ret %d",
+		  SCSB_TRACE_ARGS, __entry->start, __entry->len, __entry->count,
+		  STE_ENTRY_ARGS(ext), __entry->ret)
 );
 
 #endif /* _TRACE_SCOUTFS_H */

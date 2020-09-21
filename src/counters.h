@@ -56,6 +56,9 @@
 	EXPAND_COUNTER(dentry_revalidate_root)			\
 	EXPAND_COUNTER(dentry_revalidate_valid)			\
 	EXPAND_COUNTER(dir_backref_excessive_retries)		\
+	EXPAND_COUNTER(ext_op_insert)				\
+	EXPAND_COUNTER(ext_op_next)				\
+	EXPAND_COUNTER(ext_op_remove)				\
 	EXPAND_COUNTER(forest_bloom_fail)			\
 	EXPAND_COUNTER(forest_bloom_pass)			\
 	EXPAND_COUNTER(forest_read_items)			\

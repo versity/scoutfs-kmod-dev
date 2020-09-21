@@ -26,7 +26,7 @@
 #include "options.h"
 #include "msg.h"
 #include "block.h"
-#include "radix.h"
+#include "alloc.h"
 #include "avl.h"
 #include "hash.h"
 
@@ -674,7 +674,7 @@ static void move_items(struct scoutfs_btree_block *dst,
  * error.
  */
 static int get_ref_block(struct super_block *sb,
-			 struct scoutfs_radix_allocator *alloc,
+			 struct scoutfs_alloc *alloc,
 			 struct scoutfs_block_writer *wri, int flags,
 			 struct scoutfs_btree_ref *ref,
 			 struct scoutfs_block **bl_ret)
@@ -737,7 +737,7 @@ retry:
 		goto out;
 	}
 
-	ret = scoutfs_radix_alloc(sb, alloc, wri, &blkno);
+	ret = scoutfs_alloc_meta(sb, alloc, wri, &blkno);
 	if (ret < 0)
 		goto out;
 
@@ -745,8 +745,8 @@ retry:
 
 	new_bl = scoutfs_block_create(sb, blkno);
 	if (IS_ERR(new_bl)) {
-		ret = scoutfs_radix_free(sb, alloc, wri, blkno);
-		BUG_ON(ret); /* radix should have been dirty */
+		ret = scoutfs_free_meta(sb, alloc, wri, blkno);
+		BUG_ON(ret);
 		ret = PTR_ERR(new_bl);
 		goto out;
 	}
@@ -754,11 +754,11 @@ retry:
 
 	/* free old stable blkno we're about to overwrite */
 	if (ref && ref->blkno) {
-		ret = scoutfs_radix_free(sb, alloc, wri,
-					 le64_to_cpu(ref->blkno));
+		ret = scoutfs_free_meta(sb, alloc, wri,
+					le64_to_cpu(ref->blkno));
 		if (ret) {
-			ret = scoutfs_radix_free(sb, alloc, wri, blkno);
-			BUG_ON(ret); /* radix should have been dirty */
+			ret = scoutfs_free_meta(sb, alloc, wri, blkno);
+			BUG_ON(ret);
 			scoutfs_block_put(sb, new_bl);
 			new_bl = NULL;
 			goto out;
@@ -861,7 +861,7 @@ static void init_btree_block(struct scoutfs_btree_block *bt, int level)
  * Returns -errno, 0 if nothing done, or 1 if we split.
  */
 static int try_split(struct super_block *sb,
-		     struct scoutfs_radix_allocator *alloc,
+		     struct scoutfs_alloc *alloc,
 		     struct scoutfs_block_writer *wri,
 		     struct scoutfs_btree_root *root,
 		     struct scoutfs_key *key, unsigned val_len,
@@ -901,8 +901,8 @@ static int try_split(struct super_block *sb,
 	if (!parent) {
 		ret = get_ref_block(sb, alloc, wri, BTW_ALLOC, NULL, &par_bl);
 		if (ret) {
-			err = scoutfs_radix_free(sb, alloc, wri,
-						 le64_to_cpu(left->hdr.blkno));
+			err = scoutfs_free_meta(sb, alloc, wri,
+						le64_to_cpu(left->hdr.blkno));
 			BUG_ON(err); /* radix should have been dirty */
 			scoutfs_block_put(sb, left_bl);
 			return ret;
@@ -937,7 +937,7 @@ static int try_split(struct super_block *sb,
  * block.
  */
 static int try_join(struct super_block *sb,
-		    struct scoutfs_radix_allocator *alloc,
+		    struct scoutfs_alloc *alloc,
 		    struct scoutfs_block_writer *wri,
 		    struct scoutfs_btree_root *root,
 		    struct scoutfs_btree_block *parent,
@@ -990,9 +990,9 @@ static int try_join(struct super_block *sb,
 	/* update or delete sibling's parent item */
 	if (le16_to_cpu(sib->nr_items) == 0) {
 		delete_item(parent, sib_par_item, NULL);
-		ret = scoutfs_radix_free(sb, alloc, wri,
-					 le64_to_cpu(sib->hdr.blkno));
-		BUG_ON(ret); /* could have dirtied alloc to avoid error */
+		ret = scoutfs_free_meta(sb, alloc, wri,
+					le64_to_cpu(sib->hdr.blkno));
+		BUG_ON(ret);
 
 	} else if (move_right) {
 		update_parent_item(parent, sib_par_item, sib);
@@ -1003,9 +1003,9 @@ static int try_join(struct super_block *sb,
 		root->height--;
 		root->ref.blkno = bt->hdr.blkno;
 		root->ref.seq = bt->hdr.seq;
-		ret = scoutfs_radix_free(sb, alloc, wri,
-					 le64_to_cpu(parent->hdr.blkno));
-		BUG_ON(ret); /* could have dirtied alloc to avoid error */
+		ret = scoutfs_free_meta(sb, alloc, wri,
+					le64_to_cpu(parent->hdr.blkno));
+		BUG_ON(ret);
 	}
 
 	scoutfs_block_put(sb, sib_bl);
@@ -1219,7 +1219,7 @@ struct btree_walk_key_range {
  * blocks themselves.
  */
 static int btree_walk(struct super_block *sb,
-		      struct scoutfs_radix_allocator *alloc,
+		      struct scoutfs_alloc *alloc,
 		      struct scoutfs_block_writer *wri,
 		      struct scoutfs_btree_root *root,
 		      int flags, struct scoutfs_key *key,
@@ -1464,7 +1464,7 @@ static bool invalid_item(unsigned val_len)
  * length value.
  */
 int scoutfs_btree_insert(struct super_block *sb,
-			 struct scoutfs_radix_allocator *alloc,
+			 struct scoutfs_alloc *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 struct scoutfs_key *key,
@@ -1531,7 +1531,7 @@ static void update_item_value(struct scoutfs_btree_block *bt,
  * which doesn't fit.
  */
 int scoutfs_btree_update(struct super_block *sb,
-			 struct scoutfs_radix_allocator *alloc,
+			 struct scoutfs_alloc *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 struct scoutfs_key *key,
@@ -1571,7 +1571,7 @@ int scoutfs_btree_update(struct super_block *sb,
  * which will insert instead of returning -ENOENT.
  */
 int scoutfs_btree_force(struct super_block *sb,
-			struct scoutfs_radix_allocator *alloc,
+			struct scoutfs_alloc *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
 			struct scoutfs_key *key,
@@ -1615,7 +1615,7 @@ int scoutfs_btree_force(struct super_block *sb,
  * found.
  */
 int scoutfs_btree_delete(struct super_block *sb,
-			 struct scoutfs_radix_allocator *alloc,
+			 struct scoutfs_alloc *alloc,
 			 struct scoutfs_block_writer *wri,
 			 struct scoutfs_btree_root *root,
 			 struct scoutfs_key *key)
@@ -1636,8 +1636,8 @@ int scoutfs_btree_delete(struct super_block *sb,
 		if (item) {
 			if (le16_to_cpu(bt->nr_items) == 1) {
 				/* remove final empty block */
-				ret = scoutfs_radix_free(sb, alloc, wri,
-							 bl->blkno);
+				ret = scoutfs_free_meta(sb, alloc, wri,
+							bl->blkno);
 				if (ret == 0) {
 					root->height = 0;
 					root->ref.blkno = 0;
@@ -1753,7 +1753,7 @@ int scoutfs_btree_prev(struct super_block *sb, struct scoutfs_btree_root *root,
  * <0 is returned on error, including -ENOENT if the key isn't present.
  */
 int scoutfs_btree_dirty(struct super_block *sb,
-			struct scoutfs_radix_allocator *alloc,
+			struct scoutfs_alloc *alloc,
 			struct scoutfs_block_writer *wri,
 			struct scoutfs_btree_root *root,
 			struct scoutfs_key *key)
@@ -1841,7 +1841,7 @@ out:
  * the caller to resolve this.
  */
 int scoutfs_btree_insert_list(struct super_block *sb,
-			      struct scoutfs_radix_allocator *alloc,
+			      struct scoutfs_alloc *alloc,
 			      struct scoutfs_block_writer *wri,
 			      struct scoutfs_btree_root *root,
 			      struct scoutfs_btree_item_list *lst)

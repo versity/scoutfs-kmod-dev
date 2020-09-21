@@ -20,7 +20,7 @@
 #include "lock.h"
 #include "btree.h"
 #include "client.h"
-#include "radix.h"
+#include "alloc.h"
 #include "block.h"
 #include "forest.h"
 #include "hash.h"
@@ -53,7 +53,7 @@
 
 struct forest_info {
 	struct mutex mutex;
-	struct scoutfs_radix_allocator *alloc;
+	struct scoutfs_alloc *alloc;
 	struct scoutfs_block_writer *wri;
 	struct scoutfs_log_trees our_log;
 
@@ -421,22 +421,22 @@ int scoutfs_forest_set_bloom_bits(struct super_block *sb,
 
 	if (!ref->blkno || !scoutfs_block_writer_is_dirty(sb, bl)) {
 
-		ret = scoutfs_radix_alloc(sb, finf->alloc, finf->wri, &blkno);
+		ret = scoutfs_alloc_meta(sb, finf->alloc, finf->wri, &blkno);
 		if (ret < 0)
 			goto unlock;
 
 		new_bl = scoutfs_block_create(sb, blkno);
 		if (IS_ERR(new_bl)) {
-			err = scoutfs_radix_free(sb, finf->alloc, finf->wri,
-						 blkno);
+			err = scoutfs_free_meta(sb, finf->alloc, finf->wri,
+						blkno);
 			BUG_ON(err); /* could have dirtied */
 			ret = PTR_ERR(new_bl);
 			goto unlock;
 		}
 
 		if (bl) {
-			err = scoutfs_radix_free(sb, finf->alloc, finf->wri,
-						  le64_to_cpu(ref->blkno));
+			err = scoutfs_free_meta(sb, finf->alloc, finf->wri,
+						le64_to_cpu(ref->blkno));
 			BUG_ON(err); /* could have dirtied */
 			memcpy(new_bl->data, bl->data, SCOUTFS_BLOCK_LG_SIZE);
 		} else {
@@ -517,7 +517,7 @@ int scoutfs_forest_srch_add(struct super_block *sb, u64 hash, u64 ino, u64 id)
  * serialized with all writers.
  */
 void scoutfs_forest_init_btrees(struct super_block *sb,
-				struct scoutfs_radix_allocator *alloc,
+				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_log_trees *lt)
 {

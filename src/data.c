@@ -26,6 +26,7 @@
 #include "super.h"
 #include "inode.h"
 #include "key.h"
+#include "alloc.h"
 #include "data.h"
 #include "trans.h"
 #include "counters.h"
@@ -37,656 +38,134 @@
 #include "file.h"
 #include "msg.h"
 #include "count.h"
-#include "radix.h"
+#include "ext.h"
 
 /*
- * Logical file blocks are mapped to device blocks with extents stored
- * in items.  Each extent item maps a fixed size logical region and can
- * contain multiple extent records.  Each extent record is packed to
- * minimize the space it uses.  The logical starting block is implicit
- * so sparse extents are stored to skip unmapped blocks, and the mapped
- * blkno is encoded as the difference from the previous extent and only
- * its set bytes are stored.
- *
- * To operate on the extents we load their item and unpack them into an
- * rbtree of full extent records in memory.  Once the memory extents are
- * modified they can be packed back into the item.  Typically there are
- * very few extents that cover the region.
- *
- * The client is given a radix allocator with trees for allocating
- * blocks and recording frees at the start of each transaction.
+ * We want to amortize work done after dirtying the shared transaction
+ * accounting, but we don't want to blow out dirty allocator btree
+ * blocks.  Each allocation can dirty quite a few allocator btree blocks
+ * so we check in pretty often.
  */
+#define EXTENTS_PER_HOLD 8
 
 struct data_info {
 	struct super_block *sb;
-	struct rw_semaphore alloc_rwsem;
-	struct scoutfs_radix_allocator *alloc;
+	struct mutex mutex;
+	struct scoutfs_alloc *alloc;
 	struct scoutfs_block_writer *wri;
-	struct scoutfs_radix_root data_avail;
-	struct scoutfs_radix_root data_freed;
+	struct scoutfs_alloc_root data_avail;
+	struct scoutfs_alloc_root data_freed;
+	struct scoutfs_extent cached_ext;
 };
 
 #define DECLARE_DATA_INFO(sb, name) \
 	struct data_info *name = SCOUTFS_SB(sb)->data_info
 
-static void init_packed_extent_key(struct scoutfs_key *key, u64 ino,
-				   u64 iblock, u8 part)
+struct data_ext_args {
+	u64 ino;
+	struct inode *inode;
+	struct scoutfs_lock *lock;
+};
+
+static void item_from_extent(struct scoutfs_key *key,
+			     struct scoutfs_data_extent_val *dv, u64 ino,
+			     u64 start, u64 len, u64 map, u8 flags)
 {
 	*key = (struct scoutfs_key) {
 		.sk_zone = SCOUTFS_FS_ZONE,
-		.skpe_ino = cpu_to_le64(ino),
-		.sk_type = SCOUTFS_PACKED_EXTENT_TYPE,
-		.skpe_base = cpu_to_le64(iblock >> SCOUTFS_PACKEXT_BASE_SHIFT),
-		.skpe_part = part,
+		.skdx_ino = cpu_to_le64(ino),
+		.sk_type = SCOUTFS_DATA_EXTENT_TYPE,
+		.skdx_end = cpu_to_le64(start + len - 1),
+		.skdx_len = cpu_to_le64(len),
 	};
+	dv->blkno = cpu_to_le64(map);
+	dv->flags = flags;
 }
 
-/*
- * Packed extents are read from items and unpacked into this structure
- * in memory so they can be easily manipulated before being packed and
- * stored in items.
- */
-struct unpacked_extents {
-	u64 iblock;
-	struct rb_root extents;
-	__u8 existing_parts;
-	bool changed;
-};
-
-struct unpacked_extent {
-	struct rb_node node;
-	u64 iblock;
-	u64 count;
-	u64 blkno;
-	u8 flags;
-};
-
-static void init_traced_extent(struct scoutfs_traced_extent *te,
-			       u64 iblock, u64 count, u64 blkno, u8 flags)
+static void ext_from_item(struct scoutfs_extent *ext,
+			  struct scoutfs_key *key,
+			  struct scoutfs_data_extent_val *dv)
 {
-	te->iblock = iblock;
-	te->count = count;
-	te->blkno = blkno;
-	te->flags = flags;
+	ext->start = le64_to_cpu(key->skdx_end) -
+		     le64_to_cpu(key->skdx_len) + 1;
+	ext->len = le64_to_cpu(key->skdx_len);
+	ext->map = le64_to_cpu(dv->blkno);
+	ext->flags = dv->flags;
 }
 
-static void copy_traced_extent(struct scoutfs_traced_extent *te,
-			       struct unpacked_extent *ext)
+static int data_ext_next(struct super_block *sb, void *arg, u64 start, u64 len,
+			 struct scoutfs_extent *ext)
 {
-	te->iblock = ext->iblock;
-	te->count = ext->count;
-	te->blkno = ext->blkno;
-	te->flags = ext->flags;
-}
-
-static u64 ext_last(struct unpacked_extent *ext)
-{
-	return ext->iblock + ext->count - 1;
-}
-
-/* The first possible iblock in an item that contains the given iblock */
-static u64 first_iblock(u64 iblock)
-{
-	return iblock & SCOUTFS_PACKEXT_BASE_MASK;
-}
-
-/* The last possible iblock in an item that contains the given iblock */
-static u64 last_iblock(u64 iblock)
-{
-	return iblock | ~SCOUTFS_PACKEXT_BASE_MASK;
-}
-
-/*
- * Extents can merge if they're logically contiguous, have block
- * mappings or not which also must be contiguous, and have matching
- * flags.
- *
- * We also require that a given extent's allocation be from only one
- * radix bitmap leaf block because the radix freeing functions only
- * operate on one leaf block.
- */
-static bool extents_merge(struct unpacked_extent *left,
-			  struct unpacked_extent *right)
-{
-	return (left->iblock + left->count == right->iblock) &&
-	       ((!left->blkno && !right->blkno) ||
-	        (left->blkno + left->count == right->blkno)) &&
-	       (left->flags == right->flags) &&
-	       (scoutfs_radix_bit_leaf_nr(left->blkno) ==
-	        scoutfs_radix_bit_leaf_nr(right->blkno + right->count - 1));
-}
-
-static struct unpacked_extent *first_extent(struct unpacked_extents *unpe)
-{
-	return rb_entry_safe(rb_first(&unpe->extents),
-			     struct unpacked_extent, node);
-}
-
-static struct unpacked_extent *last_extent(struct unpacked_extents *unpe)
-{
-	return rb_entry_safe(rb_last(&unpe->extents),
-			     struct unpacked_extent, node);
-}
-
-static struct unpacked_extent *next_extent(struct unpacked_extent *ext)
-{
-	return rb_entry_safe(rb_next(&ext->node),
-			     struct unpacked_extent, node);
-}
-
-static struct unpacked_extent *prev_extent(struct unpacked_extent *ext)
-{
-	return rb_entry_safe(rb_prev(&ext->node),
-			     struct unpacked_extent, node);
-}
-
-/*
- * Find the first extent that intersects the requested range.  NULL is
- * returned if no extents intersect.
- */
-static struct unpacked_extent *find_extent(struct unpacked_extents *unpe,
-					   u64 iblock, u64 last)
-{
-
-	struct rb_node *node = unpe->extents.rb_node;
-	struct unpacked_extent *ret = NULL;
-	struct unpacked_extent *ext;
-
-	if (iblock > last)
-		return NULL;
-
-	while (node) {
-		ext = rb_entry(node, struct unpacked_extent, node);
-
-		if (last < ext->iblock) {
-			node = node->rb_left;
-		} else if (iblock > ext_last(ext)) {
-			node = node->rb_right;
-		} else {
-			ret = ext;
-			node = node->rb_left;
-		}
-	}
-
-	return ret;
-}
-
-static void track_blocks(struct unpacked_extent *ext, s64 delta,
-			 s64 *on, s64 *off)
-{
-	if (ext->blkno && !(ext->flags & SEF_UNWRITTEN))
-		*on += delta;
-	else if (ext->flags & SEF_OFFLINE)
-		*off += delta;
-}
-
-static void modify_and_track_count(struct unpacked_extent *ext, u64 count,
-				   s64 *on, s64 *off)
-{
-	track_blocks(ext, count - ext->count, on, off);
-	ext->count = count;
-}
-
-/*
- * Callers can temporarily insert extents with equal starting iblocks.
- * We're careful to insert those to the left so that caller's can find
- * these existing overlapping extents by iterating with next.
- */
-static void insert_extent(struct unpacked_extents *unpe,
-			  struct unpacked_extent *ins, s64 *on, s64 *off)
-{
-	struct rb_node **node = &unpe->extents.rb_node;
-	struct rb_node *parent = NULL;
-	struct unpacked_extent *ext;
-	int cmp;
-
-	while (*node) {
-		parent = *node;
-		ext = rb_entry(*node, struct unpacked_extent, node);
-
-		cmp = scoutfs_cmp_u64s(ins->iblock, ext->iblock);
-		if (cmp <= 0)
-			node = &(*node)->rb_left;
-		else
-			node = &(*node)->rb_right;
-	}
-
-	rb_link_node(&ins->node, parent, node);
-	rb_insert_color(&ins->node, &unpe->extents);
-
-	track_blocks(ins, ins->count, on, off);
-}
-
-static void remove_extent(struct unpacked_extents *unpe,
-			  struct unpacked_extent *ext, s64 *on, s64 *off)
-{
-	rb_erase(&ext->node, &unpe->extents);
-	track_blocks(ext, -ext->count, on, off);
-	kfree(ext);
-}
-
-static void free_unpacked_extents(struct unpacked_extents *unpe)
-{
-	struct unpacked_extent *ext;
-	struct unpacked_extent *tmp;
-
-	if (unpe) {
-		rbtree_postorder_for_each_entry_safe(ext, tmp, &unpe->extents,
-						     node) {
-			kfree(ext);
-		}
-		kfree(unpe);
-	}
-}
-
-static int unpack_extent(struct unpacked_extent *ext, u64 iblock,
-			 struct scoutfs_packed_extent *pe, int size,
-			 u64 prev_blkno)
-{
-	__le64 lediff;
-	u64 blkno;
-	u64 diff;
-
-	if (size < sizeof(struct scoutfs_packed_extent) ||
-	    size < (sizeof(struct scoutfs_packed_extent) + pe->diff_bytes))
-		return 0;
-
-	if (pe->diff_bytes) {
-		lediff = 0;
-		memcpy(&lediff, pe->le_blkno_diff, pe->diff_bytes);
-		diff = le64_to_cpu(lediff);
-		diff = (diff >> 1) ^ (-(diff & 1));
-		blkno = prev_blkno + diff;
-	} else {
-		blkno = 0;
-	}
-
-	ext->iblock = iblock;
-	ext->blkno = blkno;
-	ext->count = le16_to_cpu(pe->count);
-	ext->flags = pe->flags;
-
-	return sizeof(struct scoutfs_packed_extent) + pe->diff_bytes;
-}
-
-static int load_unpacked_extents(struct super_block *sb, u64 ino,
-				 u64 iblock, u64 last, bool empty_enoent,
-				 struct unpacked_extents **unpe_ret,
-				 struct scoutfs_lock *lock)
-{
-	struct unpacked_extents *unpe = NULL;
-	struct scoutfs_packed_extent *pe;
-	struct unpacked_extent *ext;
+	struct data_ext_args *args = arg;
+	struct scoutfs_data_extent_val dv;
 	struct scoutfs_key key;
-	struct scoutfs_key end;
-	struct rb_node *parent;
-	struct rb_node **node;
-	void *buf = NULL;
-	u64 prev_blkno;
-	bool saw_final;
-	int size;
+	struct scoutfs_key last;
 	int ret;
-	int p;
 
-	*unpe_ret = NULL;
+	item_from_extent(&last, &dv, args->ino, U64_MAX, 1, 0, 0);
+	item_from_extent(&key, &dv, args->ino, start, len, 0, 0);
 
-	unpe = kzalloc(sizeof(struct unpacked_extents), GFP_NOFS);
-	if (!unpe) {
-		ret = -ENOMEM;
-		goto out;
+	ret = scoutfs_item_next(sb, &key, &last, &dv, sizeof(dv), args->lock);
+	if (ret == sizeof(dv)) {
+		ext_from_item(ext, &key, &dv);
+		ret = 0;
+	} else if (ret >= 0) {
+		ret = -EIO;
 	}
 
-	unpe->extents = RB_ROOT;
-	unpe->changed = true;
-	/* updated later if _next gives us a greater key */
-	unpe->iblock = first_iblock(iblock);
-
-	buf = kmalloc(SCOUTFS_PACKEXT_MAX_BYTES, GFP_NOFS);
-	if (!buf) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	if (last > iblock)
-		init_packed_extent_key(&end, ino, last, 0);
-
-	parent = NULL;
-	node = &unpe->extents.rb_node;
-	prev_blkno = 0;
-	saw_final = false;
-
-	for (p = 0; !saw_final; p++) {
-		init_packed_extent_key(&key, ino, iblock, p);
-
-		/* maybe search for next initial item, lookup more parts */
-		if (p == 0 && last > iblock)
-			ret = scoutfs_item_next(sb, &key, &end, buf,
-						SCOUTFS_PACKEXT_MAX_BYTES,
-						lock);
-		else
-			ret = scoutfs_item_lookup(sb, &key, buf,
-						  SCOUTFS_PACKEXT_MAX_BYTES,
-						  lock);
-		if (ret < 0) {
-			if (p == 0 && ret == -ENOENT && empty_enoent)
-				ret = 0;
-			goto out;
-		}
-
-		if (key.skpe_part != p) {
-			ret = -EIO; /* corruption */
-			goto out;
-		}
-
-		if (p == 0) {
-			iblock = le64_to_cpu(key.skpe_base) <<
-					SCOUTFS_PACKEXT_BASE_SHIFT;
-			unpe->iblock = iblock;
-		}
-		pe = buf;
-		size = ret;
-
-		while (size > 0) {
-			ext = kmalloc(sizeof(struct unpacked_extent), GFP_NOFS);
-			if (!ext) {
-				ret = -ENOMEM;
-				goto out;
-			}
-
-			ret = unpack_extent(ext, iblock, pe, size, prev_blkno);
-			if (ret == 0) { /* XXX corruption? */
-				kfree(ext);
-				ret = -EIO;
-				goto out;
-			}
-
-			saw_final = pe->final;
-			pe = (void *)pe + ret;
-			size -= ret;
-
-			/* sparse packed extents advance iblock */
-			if (ext->flags == 0 && ext->blkno == 0) {
-				iblock += ext->count;
-				kfree(ext);
-				ext = NULL;
-				continue;
-			}
-
-			iblock += ext->count;
-			prev_blkno = ext->blkno + ext->count - 1;
-
-			/* building the rbtree from sorted nodes */
-			rb_link_node(&ext->node, parent, node);
-			rb_insert_color(&ext->node, &unpe->extents);
-			parent = &ext->node;
-			node = &ext->node.rb_right;
-
-			if (saw_final)
-				unpe->existing_parts = p + 1;
-		}
-	}
-
-	ret = 0;
-out:
-	kfree(buf);
 	if (ret < 0)
-		free_unpacked_extents(unpe);
-	else
-		*unpe_ret = unpe;
-
+		memset(ext, 0, sizeof(struct scoutfs_extent));
 	return ret;
 }
 
-static int pack_extent(struct scoutfs_packed_extent *pe, int size,
-		       struct unpacked_extent *ext,
-		       u64 prev_blkno, bool final)
+static void add_onoff(struct inode *inode, u64 map, u8 flags, s64 len)
 {
-	int diff_bytes;
-	__le64 lediff;
-	u64 diff;
-	int bytes;
-	int last;
-
-	diff = ext->blkno - prev_blkno;
-	diff = (diff << 1) ^ ((s64)diff >> 63); /* shift sign extend */
-	lediff = cpu_to_le64(diff);
-	last = fls64(diff);
-	diff_bytes = (last + 7) >> 3;
-
-	bytes = offsetof(struct scoutfs_packed_extent,
-			 le_blkno_diff[diff_bytes]);
-	if (size < bytes)
-		return 0;
-
-	pe->count = cpu_to_le16(ext->count);
-	pe->diff_bytes = diff_bytes;
-	pe->flags = ext->flags;
-	pe->final = !!final;
-	if (diff_bytes)
-		memcpy(pe->le_blkno_diff, &lediff, diff_bytes);
-
-	return bytes;
-}
-
-static int store_packed_extents(struct super_block *sb, u64 ino,
-				struct unpacked_extents *unpe,
-				struct scoutfs_lock *lock)
-{
-	struct scoutfs_packed_extent *pe;
-	struct unpacked_extent *final;
-	struct unpacked_extent *ext;
-	struct scoutfs_key key;
-	void *buf = NULL;
-	u64 prev_blkno;
-	u64 iblock;
-	int space;
-	int size;
-	int ret;
-	int p;
-	int i;
-
-	if (!unpe->changed)
-		return 0;
-
-	if (RB_EMPTY_ROOT(&unpe->extents)) {
-		for (p = 0; p < unpe->existing_parts; p++) {
-			init_packed_extent_key(&key, ino, unpe->iblock, p);
-			ret = scoutfs_item_delete(sb, &key, lock);
-			BUG_ON(ret); /* XXX inconsistent between parts */
-		}
-		unpe->existing_parts = 0;
-		unpe->changed = false;
-		return 0;
-	}
-
-	buf = kmalloc(SCOUTFS_PACKEXT_MAX_BYTES, GFP_NOFS);
-	if (!buf) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	final = last_extent(unpe);
-	prev_blkno = 0;
-
-	pe = buf;
-	space = SCOUTFS_PACKEXT_MAX_BYTES;
-	size = 0;
-	p = 0;
-	iblock = unpe->iblock;
-
-	ext = first_extent(unpe);
-	while (ext) {
-		/* encode sparse extent to advance iblock */
-		if (ext->iblock > iblock && space >= sizeof(*pe)) {
-			pe->count = cpu_to_le16(ext->iblock - iblock);
-			pe->diff_bytes = 0;
-			pe->flags = 0;
-			pe->final = 0;
-			pe++;
-			space -= sizeof(*pe);
-			size += sizeof(*pe);
-			iblock = ext->iblock;
-		}
-
-		/* encode actual extent */
-		if (ext->iblock == iblock &&
-		    (ret = pack_extent(pe, space, ext, prev_blkno,
-				       ext == final)) > 0) {
-			pe = (void *)pe + ret;
-			space -= ret;
-			size += ret;
-			iblock += ext->count;
-			prev_blkno = ext->blkno + ext->count - 1;
-			ext = next_extent(ext);
-			if (ext)
-				continue;
-		}
-
-		/* store full item or after packing final extent */
-		init_packed_extent_key(&key, ino, unpe->iblock, p);
-		if (p < unpe->existing_parts)
-			ret = scoutfs_item_update(sb, &key, buf, size, lock);
-		else
-			ret = scoutfs_item_create(sb, &key, buf, size, lock);
-		BUG_ON(ret); /* XXX inconsistent between parts */
-
-		pe = buf;
-		space = SCOUTFS_PACKEXT_MAX_BYTES;
-		size = 0;
-		p++;
-	}
-
-	/* delete any remaining previous part items */
-	for (i = p; i < unpe->existing_parts; i++) {
-		init_packed_extent_key(&key, ino, unpe->iblock, i);
-		ret = scoutfs_item_delete(sb, &key, lock);
-		BUG_ON(ret); /* XXX inconsistent between parts */
-	}
-
-	/* the next store has to know our stored parts */
-	unpe->existing_parts = p;
-	unpe->changed = false;
-	ret = 0;
-out:
-	kfree(buf);
-
-	return ret;
-}
-
-/*
- * Set a logical extent mapping in the unpacked extents for a region of
- * a file.  The caller's extent is authoritative, any existing
- * overlapping extents are trimmed or removed.  The new extent can be
- * merged with remaining adjacent and compatible extents.
- *
- * If the caller provides an inode struct then we'll keep the inode
- * block counts in sync with flagged extents because updating the inode
- * counts won't fail.  The caller is expected to keep all other state
- * consistent with the extents (i_size, i_blocks, allocator bitmaps).
- */
-static int set_extent(struct super_block *sb, struct inode *inode,
-		      u64 ino, struct unpacked_extents *unpe,
-		      u64 iblock, u64 blkno, u64 count, u8 flags)
-{
-	struct unpacked_extent *split;
-	struct unpacked_extent *next;
-	struct unpacked_extent *prev;
-	struct unpacked_extent *ext;
-	u64 offset;
 	s64 on = 0;
 	s64 off = 0;
 
-	/* make sure the given extent fits entirely within one item */
-	if (WARN_ON_ONCE(first_iblock(iblock) !=
-			 first_iblock(iblock + count - 1)))
-		return -EINVAL;
+	if (map && !(flags & SEF_UNWRITTEN))
+		on += len;
+	else if (flags & SEF_OFFLINE)
+		off += len;
 
-	ext = kmalloc(sizeof(struct unpacked_extent), GFP_NOFS);
-	split = kmalloc(sizeof(struct unpacked_extent), GFP_NOFS);
-	if (!ext || !split) {
-		kfree(ext);
-		kfree(split);
-		return -ENOMEM;
-	}
-
-	unpe->changed = true;
-
-	ext->iblock = iblock;
-	ext->blkno = blkno;
-	ext->count = count;
-	ext->flags = flags;
-
-	insert_extent(unpe, ext, &on, &off);
-
-	prev = prev_extent(ext);
-
-	/* splitting an existing extent? */
-	if (prev && ext_last(prev) > ext_last(ext)) {
-		split->iblock = ext_last(ext) + 1;
-		split->count = ext_last(prev) - split->iblock + 1;
-		split->blkno = prev->blkno ?
-			       prev->blkno + prev->count - split->count : 0;
-		split->flags = prev->flags;
-
-		modify_and_track_count(prev, ext->iblock - prev->iblock,
-				       &on, &off);
-
-		insert_extent(unpe, split, &on, &off);
-		next = split;
-		split = NULL;
-	} else {
-		next = NULL;
-	}
-
-	/* trimming a prev extent? */
-	if (prev && ext_last(prev) >= ext->iblock) {
-		modify_and_track_count(prev, ext->iblock - prev->iblock,
-				       &on, &off);
-	}
-
-	/* merging with a prev extent? */
-	if (prev && extents_merge(prev, ext)) {
-		ext->iblock = prev->iblock;
-		ext->blkno = prev->blkno;
-		modify_and_track_count(ext, ext->count + prev->count,
-				       &on, &off);
-		remove_extent(unpe, prev, &on, &off);
-	}
-
-	/* if didn't split find next, removing any totally within ours */
-	if (!next) {
-		while ((next = next_extent(ext)) &&
-		       ext_last(next) <= ext_last(ext)) {
-			remove_extent(unpe, next, &on, &off);
-		}
-	}
-
-	/* trimming a next extent? */
-	if (next && next->iblock <= ext_last(ext)) {
-		offset = (ext_last(ext) + 1) - next->iblock;
-		next->iblock += offset;
-		next->blkno = next->blkno ?  next->blkno + offset : 0;
-		modify_and_track_count(next, next->count - offset,
-				       &on, &off);
-	}
-
-	/* merging with a next extent? */
-	if (next && extents_merge(ext, next)) {
-		modify_and_track_count(ext, ext->count + next->count,
-				       &on, &off);
-		remove_extent(unpe, next, &on, &off);
-	}
-
-	/* and finally remove our extent if it was only removing others */
-	if (ext->blkno == 0 && ext->flags == 0)
-		remove_extent(unpe, ext, &on, &off);
-
-	if (inode)
-		scoutfs_inode_add_onoff(inode, on, off);
-
-	kfree(split);
-	return 0;
+	scoutfs_inode_add_onoff(inode, on, off);
 }
+
+static int data_ext_insert(struct super_block *sb, void *arg, u64 start,
+			   u64 len, u64 map, u8 flags)
+{
+	struct data_ext_args *args = arg;
+	struct scoutfs_data_extent_val dv;
+	struct scoutfs_key key;
+	int ret;
+
+	item_from_extent(&key, &dv, args->ino, start, len, map, flags);
+	ret = scoutfs_item_create(sb, &key, &dv, sizeof(dv), args->lock);
+	if (ret == 0 && args->inode)
+		add_onoff(args->inode, map, flags, len);
+	return ret;
+}
+
+static int data_ext_remove(struct super_block *sb, void *arg, u64 start,
+			   u64 len, u64 map, u8 flags)
+{
+	struct data_ext_args *args = arg;
+	struct scoutfs_data_extent_val dv;
+	struct scoutfs_key key;
+	int ret;
+
+	item_from_extent(&key, &dv, args->ino, start, len, map, flags);
+	ret = scoutfs_item_delete(sb, &key, args->lock);
+	if (ret == 0 && args->inode)
+		add_onoff(args->inode, map, flags, -len);
+	return ret;
+}
+
+static struct scoutfs_ext_ops data_ext_ops = {
+	.next = data_ext_next,
+	.insert = data_ext_insert,
+	.remove = data_ext_remove,
+};
 
 /*
  * Find and remove or mark offline the block mappings that intersect
@@ -703,74 +182,75 @@ static s64 truncate_extents(struct super_block *sb, struct inode *inode,
 			    struct scoutfs_lock *lock)
 {
 	DECLARE_DATA_INFO(sb, datinf);
-	struct unpacked_extents *unpe = NULL;
-	struct unpacked_extent *ext;
-	struct scoutfs_traced_extent te;
+	struct data_ext_args args = {
+		.ino = ino,
+		.inode = inode,
+		.lock = lock,
+	};
+	struct scoutfs_extent ext;
+	struct scoutfs_extent tr;
 	u64 offset;
-	u64 blkno;
-	u64 count;
-	u8 flags;
 	s64 ret;
-	int err;
-
-	ret = load_unpacked_extents(sb, ino, iblock, last, false, &unpe, lock);
-	if (ret < 0) {
-		if (ret == -ENOENT)
-			ret = 0;
-		goto out;
-	}
+	u8 flags;
+	int i;
 
 	flags = offline ? SEF_OFFLINE : 0;
-
 	ret = 0;
-	ext = find_extent(unpe, iblock, last);
-	while (ext && ext->iblock <= last) {
+
+	for (i = 0; iblock <= last; i++) {
+		if (i == EXTENTS_PER_HOLD) {
+			ret = iblock;
+			break;
+		}
+
+		ret = scoutfs_ext_next(sb, &data_ext_ops, &args,
+				       iblock, 1, &ext);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				ret = 0;
+			break;
+		}
+
+		/* done if we went past the region */
+		if (ext.start > last) {
+			ret = 0;
+			break;
+		}
 
 		/* nothing to do when already offline and unmapped */
-		if ((offline && (ext->flags & SEF_OFFLINE)) && !ext->blkno) {
-			ext = next_extent(ext);
+		if ((offline && (ext.flags & SEF_OFFLINE)) && !ext.map) {
+			iblock = ext.start + ext.len;
 			continue;
 		}
 
-		iblock = max(ext->iblock, iblock);
-		offset = iblock - ext->iblock;
-		blkno = ext->blkno + offset;
-		count = min(ext->count - offset, last - iblock + 1);
+		iblock = max(ext.start, iblock);
+		offset = iblock - ext.start;
 
-		if (ext->blkno) {
-			down_write(&datinf->alloc_rwsem);
-			err = scoutfs_radix_free_data(sb, datinf->alloc,
-						      datinf->wri,
-						      &datinf->data_freed,
-						      blkno, count);
-			up_write(&datinf->alloc_rwsem);
-			if (err < 0) {
-				ret = err;
+		tr.start = iblock;
+		tr.map = ext.map ? ext.map + offset : 0;
+		tr.len = min(ext.len - offset, last - iblock + 1);
+		tr.flags = ext.flags;
+
+		if (tr.map) {
+			mutex_lock(&datinf->mutex);
+			ret = scoutfs_free_data(sb, datinf->alloc,
+						datinf->wri,
+						&datinf->data_freed,
+						tr.map, tr.len);
+			mutex_unlock(&datinf->mutex);
+			if (ret < 0)
 				break;
-			}
 		}
 
-		init_traced_extent(&te, iblock, count, 0, flags);
-		trace_scoutfs_data_extent_truncated(sb, ino, &te);
+		trace_scoutfs_data_extent_truncated(sb, ino, &tr);
 
-		err = set_extent(sb, inode, ino, unpe, iblock, 0, count, flags);
-		BUG_ON(err);  /* inconsistent alloc and extents */
+		ret = scoutfs_ext_set(sb, &data_ext_ops, &args,
+				      tr.start, tr.len, 0, flags);
+		BUG_ON(ret);  /* inconsistent, could prealloc items */
 
-		/* modifying could have merged and deleted ext, search again */
-		iblock += count;
-		if (iblock > last)
-			break;
-		ext = find_extent(unpe, iblock, last);
+		iblock += tr.len;
 	}
 
-	err = store_packed_extents(sb, ino, unpe, lock);
-	BUG_ON(err);  /* inconsistent alloc and extents */
-
-	/* continue after the packed extent item if we exhausted extents */
-	if (ret == 0)
-		ret = unpe->iblock + SCOUTFS_PACKEXT_BLOCKS;
-out:
-	free_unpacked_extents(unpe);
 	return ret;
 }
 
@@ -844,6 +324,11 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
 	return ret;
 }
 
+static inline u64 ext_last(struct scoutfs_extent *ext)
+{
+	return ext->start + ext->len - 1;
+}
+
 /*
  * The caller is writing to a logical iblock that doesn't have an
  * allocated extent.
@@ -861,141 +346,111 @@ int scoutfs_data_truncate_items(struct super_block *sb, struct inode *inode,
  * block.  It doesn't work for concurrent stages, releasing behind
  * staging, sparse files, multi-node writes, etc.  fallocate() is always
  * a better tool to use.
- *
- * We can mangle the extents so the caller is going to search for the
- * intersecting extent again if we succeed.
  */
 static int alloc_block(struct super_block *sb, struct inode *inode,
-		       struct unpacked_extents *unpe,
-		       struct unpacked_extent *ext, u64 iblock,
+		       struct scoutfs_extent *ext, u64 iblock,
 		       struct scoutfs_lock *lock)
 {
 	DECLARE_DATA_INFO(sb, datinf);
 	const u64 ino = scoutfs_ino(inode);
-	struct scoutfs_traced_extent te;
+	struct data_ext_args args = {
+		.ino = ino,
+		.inode = inode,
+		.lock = lock,
+	};
+	struct scoutfs_extent found;
+	struct scoutfs_extent pre;
 	u64 blkno = 0;
 	u64 online;
 	u64 offline;
-	u64 last;
 	u8 flags;
-	int count;
+	u64 count;
 	int ret;
 	int err;
 
+	trace_scoutfs_data_alloc_block_enter(sb, ino, iblock, ext);
+
 	/* can only allocate over existing unallocated offline extent */
-	if (WARN_ON_ONCE(ext &&
-			 !(iblock >= ext->iblock && iblock <= ext_last(ext) &&
-			  ext->blkno == 0 && (ext->flags & SEF_OFFLINE))))
+	if (WARN_ON_ONCE(ext->len &&
+			 !(iblock >= ext->start && iblock <= ext_last(ext) &&
+			  ext->map == 0 && (ext->flags & SEF_OFFLINE))))
 		return -EINVAL;
 
-	down_write(&datinf->alloc_rwsem);
+	mutex_lock(&datinf->mutex);
 
 	scoutfs_inode_get_onoff(inode, &online, &offline);
 
-	if (ext) {
+	if (ext->len) {
 		/* limit preallocation to remaining existing (offline) extent */
-		count = ext->count - (iblock - ext->iblock);
+		count = ext->len - (iblock - ext->start);
 		flags = ext->flags;
 	} else {
-		/* otherwise alloc to next extent or end of packed item */
-		last = last_iblock(iblock);
-		ext = find_extent(unpe, iblock, last);
-		if (ext)
-			count = ext->iblock - iblock;
+		/* otherwise alloc to next extent */
+		ret = scoutfs_ext_next(sb, &data_ext_ops, &args,
+				       iblock, 1, &found);
+		if (ret < 0 && ret != -ENOENT)
+			goto out;
+		if (found.len && found.start > iblock)
+			count = found.start - iblock;
 		else
-			count = last - iblock + 1;
+			count = SCOUTFS_DATA_EXTEND_PREALLOC_LIMIT;
 		flags = 0;
 	}
 
+	/* overall prealloc limit */
+	count = min_t(u64, count, SCOUTFS_DATA_EXTEND_PREALLOC_LIMIT);
+
 	/* only strictly contiguous extending writes will try to preallocate */
 	if (iblock > 1 && iblock == online)
-		count = min_t(u64, iblock, count);
+		count = min(iblock, count);
 	else
 		count = 1;
 
-	ret = scoutfs_radix_alloc_data(sb, datinf->alloc, datinf->wri,
-				       &datinf->data_avail, count, &blkno,
-				       &count);
+	ret = scoutfs_alloc_data(sb, datinf->alloc, datinf->wri,
+				 &datinf->data_avail, &datinf->cached_ext,
+				 count, &blkno, &count);
 	if (ret < 0)
 		goto out;
 
-	ret = set_extent(sb, inode, ino, unpe, iblock, blkno, 1, 0);
+	ret = scoutfs_ext_set(sb, &data_ext_ops, &args, iblock, 1, blkno, 0);
 	if (ret < 0)
 		goto out;
-
-	init_traced_extent(&te, iblock, blkno, 1, 0);
-	trace_scoutfs_data_alloc_block(sb, ino, &te);
 
 	if (count > 1) {
-		ret = set_extent(sb, inode, ino, unpe, iblock + 1,
-				 blkno + 1, count - 1, flags | SEF_UNWRITTEN);
+		pre.start = iblock + 1;
+		pre.len = count - 1;
+		pre.map = blkno + 1;
+		pre.flags = flags | SEF_UNWRITTEN;
+		ret = scoutfs_ext_set(sb, &data_ext_ops, &args, pre.start,
+				      pre.len, pre.map, pre.flags);
 		if (ret < 0) {
-			err = set_extent(sb, inode, ino, unpe, iblock, 0, 1,
-					 flags);
+			err = scoutfs_ext_set(sb, &data_ext_ops, &args, iblock,
+					      1, 0, flags);
 			BUG_ON(err); /* couldn't restore original */
+			goto out;
 		}
-
-		init_traced_extent(&te, iblock + 1, blkno + 1, count - 1,
-				   flags | SEF_UNWRITTEN);
-		trace_scoutfs_data_prealloc_unwritten(sb, ino, &te);
 	}
 
-	ret = store_packed_extents(sb, ino, unpe, lock);
-	BUG_ON(ret); /* inconsistent previous extent state */
-
+	/* tell the caller we have a single block, could check next? */
+	ext->start = iblock;
+	ext->len = 1;
+	ext->map = blkno;
+	ext->flags = 0;
+	ret = 0;
 out:
 	if (ret < 0 && blkno > 0) {
-		err = scoutfs_radix_free_data(sb, datinf->alloc, datinf->wri,
-					      &datinf->data_freed,
-					      blkno, count);
+		err = scoutfs_free_data(sb, datinf->alloc, datinf->wri,
+				        &datinf->data_freed, blkno, count);
 		BUG_ON(err); /* leaked free blocks */
 	}
 
-	up_write(&datinf->alloc_rwsem);
-
-	return ret;
-}
-
-/*
- * A caller is writing into an unwritten block.  This can also be called
- * for staging writes so we clear both the unwritten and offline flags.
- *
- * We don't have to wait for dirty block IO to complete before clearing
- * the unwritten flag in metadata because we have strict synchronization
- * between data and metadata.  All dirty data in the current transaction
- * is written before the metadata in the transaction that references it
- * is committed.
- */
-static int convert_unwritten(struct super_block *sb, struct inode *inode,
-			     struct unpacked_extents *unpe,
-			     struct unpacked_extent *ext, u64 iblock,
-			     struct scoutfs_lock *lock)
-{
-	struct scoutfs_traced_extent te;
-	u64 blkno;
-	u8 ext_fl;
-	int err;
-	int ret;
-
-	blkno = ext->blkno + (iblock - ext->iblock);
-	ext_fl = ext->flags;
-
-	init_traced_extent(&te, iblock, 1, blkno, ext_fl);
-	trace_scoutfs_data_convert_unwritten(sb, scoutfs_ino(inode), &te);
-
-	ret = set_extent(sb, inode, scoutfs_ino(inode), unpe, iblock,
-			 blkno, 1, ext_fl & ~(SEF_OFFLINE|SEF_UNWRITTEN));
-	if (ret < 0)
-		goto out;
-
-	ret = store_packed_extents(sb, scoutfs_ino(inode), unpe, lock);
-	if (ret < 0) {
-		err = set_extent(sb, inode, scoutfs_ino(inode), unpe, iblock,
-				 blkno, 1, ext_fl);
-		BUG_ON(err); /* packed and unpacked inconsistent */
+	if (ret == 0) {
+		trace_scoutfs_data_alloc(sb, ino, ext);
+		trace_scoutfs_data_prealloc(sb, ino, &pre);
 	}
 
-out:
+	mutex_unlock(&datinf->mutex);
+
 	return ret;
 }
 
@@ -1005,10 +460,10 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	const u64 ino = scoutfs_ino(inode);
 	struct super_block *sb = inode->i_sb;
+	struct data_ext_args args;
 	struct scoutfs_lock *lock = NULL;
-	struct unpacked_extents *unpe = NULL;
-	struct unpacked_extent *ext = NULL;
-	DECLARE_TRACED_EXTENT(te);
+	struct scoutfs_extent ext = {0,};
+	struct scoutfs_extent un;
 	u64 offset;
 	int ret;
 
@@ -1021,53 +476,60 @@ static int scoutfs_get_block(struct inode *inode, sector_t iblock,
 		goto out;
 	}
 
-	ret = load_unpacked_extents(sb, ino, iblock, iblock, true, &unpe, lock);
-	if (ret < 0)
+	args.ino = ino;
+	args.inode = inode;
+	args.lock = lock;
+
+	ret = scoutfs_ext_next(sb, &data_ext_ops, &args, iblock, 1, &ext);
+	if (ret == -ENOENT || (ret == 0 && ext.start > iblock))
+		memset(&ext, 0, sizeof(ext));
+	else if (ret < 0)
 		goto out;
 
-	ext = find_extent(unpe, iblock, iblock);
+	if (ext.len)
+		trace_scoutfs_data_get_block_found(sb, ino, &ext);
 
 	/* non-staging callers should have waited on offline blocks */
-	if (WARN_ON_ONCE(ext && (ext->flags & SEF_OFFLINE) && !si->staging)) {
+	if (WARN_ON_ONCE(ext.map && (ext.flags & SEF_OFFLINE) && !si->staging)){
 		ret = -EIO;
 		goto out;
 	}
 
-	/* convert unwritten to written */
-	if (create && ext && (ext->flags & SEF_UNWRITTEN)) {
-		ret = convert_unwritten(sb, inode, unpe, ext, iblock, lock);
+	/* convert unwritten to written, could be staging */
+	if (create && ext.map && (ext.flags & SEF_UNWRITTEN)) {
+		un.start = iblock;
+		un.len = 1;
+		un.map = ext.map + (iblock - ext.start);
+		un.flags = ext.flags & ~(SEF_OFFLINE|SEF_UNWRITTEN);
+		ret = scoutfs_ext_set(sb, &data_ext_ops, &args,
+				      un.start, un.len, un.map, un.flags);
 		if (ret == 0) {
+			ext = un;
 			set_buffer_new(bh);
-			ext = find_extent(unpe, iblock, iblock);
 		}
 		goto out;
 	}
 
 	/* allocate and map blocks containing our logical block */
-	if (create && (!ext || !ext->blkno)) {
-		ret = alloc_block(sb, inode, unpe, ext, iblock, lock);
-		if (ret == 0) {
+	if (create && !ext.map) {
+		ret = alloc_block(sb, inode, &ext, iblock, lock);
+		if (ret == 0)
 			set_buffer_new(bh);
-			ext = find_extent(unpe, iblock, iblock);
-		}
 	} else {
 		ret = 0;
 	}
 out:
 	/* map usable extent, else leave bh unmapped for sparse reads */
-	if (ret == 0 && ext && ext->blkno && !(ext->flags & SEF_UNWRITTEN)) {
-		offset = iblock - ext->iblock;
-		map_bh(bh, inode->i_sb, ext->blkno + offset);
+	if (ret == 0 && ext.map && !(ext.flags & SEF_UNWRITTEN)) {
+		offset = iblock - ext.start;
+		map_bh(bh, inode->i_sb, ext.map + offset);
 		bh->b_size = min_t(u64, bh->b_size,
-			     (ext->count - offset) << SCOUTFS_BLOCK_SM_SHIFT);
+				(ext.len - offset) << SCOUTFS_BLOCK_SM_SHIFT);
+		trace_scoutfs_data_get_block_mapped(sb, ino, &ext);
 	}
 
-	if (ext)
-		copy_traced_extent(&te, ext);
-
 	trace_scoutfs_get_block(sb, scoutfs_ino(inode), iblock, create,
-				&te, ret, bh->b_blocknr, bh->b_size);
-	free_unpacked_extents(unpe);
+				&ext, ret, bh->b_blocknr, bh->b_size);
 	return ret;
 }
 
@@ -1330,74 +792,82 @@ static int scoutfs_write_end(struct file *file, struct address_space *mapping,
 
 /*
  * Try to allocate unwritten extents for any unallocated regions of the
- * logical block extent from the caller.  We work one packed extent item
- * at a time.
+ * logical block extent from the caller.  The caller manages locks and
+ * transactions.  We limit ourselves to a reasonable number of extents
+ * before returning to open another transaction.
  *
- * We return an error or the numbet of contiguous blocks starting at
- * iblock that were successfully processed.
+ * We return an error or the number of blocks starting at iblock that
+ * were successfully processed.  The caller will continue after those
+ * blocks until they reach last.
  */
-static int fallocate_extents(struct super_block *sb, struct inode *inode,
+static s64 fallocate_extents(struct super_block *sb, struct inode *inode,
 			     u64 iblock, u64 last, struct scoutfs_lock *lock)
 {
 	DECLARE_DATA_INFO(sb, datinf);
-	const u64 ino = scoutfs_ino(inode);
-	struct unpacked_extents *unpe = NULL;
-	struct unpacked_extent *ext;
+	struct data_ext_args args = {
+		.ino = scoutfs_ino(inode),
+		.inode = inode,
+		.lock = lock,
+	};
+	struct scoutfs_extent ext;
 	u8 ext_fl;
 	u64 blkno;
-	int count;
-	int done;
-	int ret;
+	u64 count;
+	s64 done = 0;
+	int ret = 0;
 	int err;
+	int i;
 
-	/* work with the extents in one item at a time */
-	last = min(last, last_iblock(iblock));
-	done = 0;
+	for (i = 0; iblock <= last && i < EXTENTS_PER_HOLD; i++) {
 
-	ret = load_unpacked_extents(sb, ino, iblock, iblock, true, &unpe, lock);
-	if (ret < 0)
-		goto out;
-
-	ext = find_extent(unpe, iblock, last);
-	while (iblock <= last) {
+		ret = scoutfs_ext_next(sb, &data_ext_ops, &args,
+				       iblock, 1, &ext);
+		if (ret == -ENOENT)
+			ret = 0;
+		else if (ret < 0)
+			break;
 
 		/* default to allocate to end of region */
 		count = last - iblock + 1;
 		ext_fl = 0;
 
-		if (!ext) {
+		if (!ext.len) {
 			/* no extent, default alloc from above */
 
-		} else if (ext->iblock <= iblock && ext->blkno) {
+		} else if (ext.start <= iblock && ext.map) {
 			/* skip portion of allocated extent */
 			count = min_t(u64, count,
-				      ext->count - (iblock - ext->iblock));
+				      ext.len - (iblock - ext.start));
 			iblock += count;
 			done += count;
-			ext = next_extent(ext);
 			continue;
 
-		} else if (ext->iblock <= iblock && !ext->blkno) {
+		} else if (ext.start <= iblock && !ext.map) {
 			/* alloc portion of unallocated extent */
 			count = min_t(u64, count,
-				      ext->count - (iblock - ext->iblock));
-			ext_fl = ext->flags;
+				      ext.len - (iblock - ext.start));
+			ext_fl = ext.flags;
 
-		} else if (iblock < ext->iblock) {
+		} else if (iblock < ext.start) {
 			/* alloc hole until next extent */
-			count = min_t(u64, count, ext->iblock - iblock);
+			count = min_t(u64, count, ext.start - iblock);
 		}
 
-		down_write(&datinf->alloc_rwsem);
+		/* limit allocation attempts */
+		count = min_t(u64, count, SCOUTFS_FALLOCATE_ALLOC_LIMIT);
 
-		ret = scoutfs_radix_alloc_data(sb, datinf->alloc, datinf->wri,
-					       &datinf->data_avail, count,
-					       &blkno, &count);
+		mutex_lock(&datinf->mutex);
+
+		ret = scoutfs_alloc_data(sb, datinf->alloc, datinf->wri,
+					 &datinf->data_avail,
+					 &datinf->cached_ext,
+					 count, &blkno, &count);
 		if (ret == 0) {
-			ret = set_extent(sb, inode, ino, unpe, iblock, blkno,
-					 count, ext_fl | SEF_UNWRITTEN);
+			ret = scoutfs_ext_set(sb, &data_ext_ops, &args, iblock,
+					      count, blkno,
+					      ext_fl | SEF_UNWRITTEN);
 			if (ret < 0) {
-				err = scoutfs_radix_free_data(sb, datinf->alloc,
+				err = scoutfs_free_data(sb, datinf->alloc,
 							datinf->wri,
 							&datinf->data_avail,
 							blkno, count);
@@ -1405,24 +875,17 @@ static int fallocate_extents(struct super_block *sb, struct inode *inode,
 			}
 		}
 
-		up_write(&datinf->alloc_rwsem);
+		mutex_unlock(&datinf->mutex);
 
 		if (ret < 0)
 			break;
 
 		iblock += count;
 		done += count;
-		ext = find_extent(unpe, iblock, last);
 	}
-
-	ret = store_packed_extents(sb, ino, unpe, lock);
-	BUG_ON(ret); /* inconsistent with unpacked and alloc */
 
 	if (ret == 0)
 		ret = done;
-
-out:
-	free_unpacked_extents(unpe);
 
 	return ret;
 }
@@ -1447,7 +910,7 @@ long scoutfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	loff_t end;
 	u64 iblock;
 	u64 last;
-	int ret;
+	s64 ret;
 
 	mutex_lock(&inode->i_mutex);
 
@@ -1527,79 +990,56 @@ out:
  * on regular files with no data extents.  It's used to restore a file
  * with an offline extent which can then trigger staging.
  *
- * The caller has taken care of locking.  We're creating many packed
- * extent items which may have to be written in multiple transactions.
- * We create exetnts from the front of the file and use the offline
- * block count to figure out where to continue from.
+ * The caller has taken care of locking the inode.  We're updating the
+ * inode offline count as we create the offline extent so we take care
+ * of the index locking, updating, and transaction.
  */
 int scoutfs_data_init_offline_extent(struct inode *inode, u64 size,
 				     struct scoutfs_lock *lock)
 
 {
 	struct super_block *sb = inode->i_sb;
-	struct unpacked_extents *unpe = NULL;
-	u64 ino = scoutfs_ino(inode);
+	struct data_ext_args args = {
+		.ino = scoutfs_ino(inode),
+		.inode = inode,
+		.lock = lock,
+	};
+	const u64 count = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SM_SIZE);
 	LIST_HEAD(ind_locks);
-	bool held = false;
-	u64 blocks;
-	u64 iblock;
-	u64 count;
 	u64 on;
 	u64 off;
 	int ret;
 
-	blocks = DIV_ROUND_UP(size, SCOUTFS_BLOCK_SM_SIZE);
-
 	scoutfs_inode_get_onoff(inode, &on, &off);
-	iblock = off;
 
-	while (iblock < blocks) {
-		/* we're updating meta_seq with offline block count */
-		ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, false,
-						    SIC_SETATTR_MORE());
-		if (ret < 0)
-			goto out;
-		held = true;
-
-		ret = scoutfs_dirty_inode_item(inode, lock);
-		if (ret < 0)
-			goto out;
-
-		ret = load_unpacked_extents(sb, ino, iblock, iblock, true,
-					    &unpe, lock);
-		if (ret < 0)
-			goto out;
-
-		count = min(blocks - iblock, last_iblock(iblock) - iblock + 1);
-
-		ret = set_extent(sb, inode, ino, unpe, iblock, 0, count,
-				 SEF_OFFLINE);
-		if (ret < 0)
-			goto out;
-
-		ret = store_packed_extents(sb, ino, unpe, lock);
-		if (ret < 0)
-			goto out;
-
-		free_unpacked_extents(unpe);
-		unpe = NULL;
-
-		scoutfs_update_inode_item(inode, lock, &ind_locks);
-
-		scoutfs_release_trans(sb);
-		scoutfs_inode_index_unlock(sb, &ind_locks);
-		held = false;
-
-		iblock += count;
+	/* caller should have checked */
+	if (on > 0 || off > 0) {
+		ret = -EINVAL;
+		goto out;
 	}
 
+	/* we're updating meta_seq with offline block count */
+	ret = scoutfs_inode_index_lock_hold(inode, &ind_locks, false,
+					    SIC_SETATTR_MORE());
+	if (ret < 0)
+		goto out;
+
+	ret = scoutfs_dirty_inode_item(inode, lock);
+	if (ret < 0)
+		goto unlock;
+
+	ret = scoutfs_ext_insert(sb, &data_ext_ops, &args,
+				 0, count, 0, SEF_OFFLINE);
+	if (ret < 0)
+		goto unlock;
+
+	scoutfs_update_inode_item(inode, lock, &ind_locks);
+
+unlock:
+	scoutfs_release_trans(sb);
+	scoutfs_inode_index_unlock(sb, &ind_locks);
 	ret = 0;
 out:
-	if (held) {
-		scoutfs_release_trans(sb);
-		scoutfs_inode_index_unlock(sb, &ind_locks);
-	}
-	free_unpacked_extents(unpe);
 	return ret;
 }
 
@@ -1607,11 +1047,11 @@ out:
  * This copies to userspace :/
  */
 static int fill_extent(struct fiemap_extent_info *fieinfo,
-		       struct unpacked_extent *ext, u32 fiemap_flags)
+		       struct scoutfs_extent *ext, u32 fiemap_flags)
 {
 	u32 flags;
 
-	if (ext->count == 0)
+	if (ext->len == 0)
 		return 0;
 
 	flags = fiemap_flags;
@@ -1621,9 +1061,9 @@ static int fill_extent(struct fiemap_extent_info *fieinfo,
 		flags |= FIEMAP_EXTENT_UNWRITTEN;
 
 	return fiemap_fill_next_extent(fieinfo,
-				       ext->iblock << SCOUTFS_BLOCK_SM_SHIFT,
-				       ext->blkno << SCOUTFS_BLOCK_SM_SHIFT,
-				       ext->count << SCOUTFS_BLOCK_SM_SHIFT,
+				       ext->start << SCOUTFS_BLOCK_SM_SHIFT,
+				       ext->map << SCOUTFS_BLOCK_SM_SHIFT,
+				       ext->len << SCOUTFS_BLOCK_SM_SHIFT,
 				       flags);
 }
 
@@ -1638,28 +1078,33 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	struct super_block *sb = inode->i_sb;
 	const u64 ino = scoutfs_ino(inode);
 	struct scoutfs_lock *lock = NULL;
-	struct unpacked_extents *unpe = NULL;
-	struct unpacked_extent *ext;
-	struct unpacked_extent cur;
-	struct scoutfs_traced_extent te;
+	struct scoutfs_extent ext;
+	struct scoutfs_extent cur;
+	struct data_ext_args args;
 	u32 last_flags;
 	u64 iblock;
 	u64 last;
 	int ret;
 
-	if (len == 0)
-		return 0;
+	if (len == 0) {
+		ret = 0;
+		goto out;
+	}
 
 	ret = fiemap_check_flags(fieinfo, FIEMAP_FLAG_SYNC);
 	if (ret)
-		return ret;
+		goto out;
 
 	/* XXX overkill? */
 	mutex_lock(&inode->i_mutex);
 
 	ret = scoutfs_lock_inode(sb, SCOUTFS_LOCK_READ, 0, inode, &lock);
 	if (ret)
-		goto out;
+		goto unlock;
+
+	args.ino = ino;
+	args.inode = inode;
+	args.lock = lock;
 
 	/* use a dummy extent to track */
 	memset(&cur, 0, sizeof(cur));
@@ -1668,9 +1113,9 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	iblock = start >> SCOUTFS_BLOCK_SM_SHIFT;
 	last = (start + len - 1) >> SCOUTFS_BLOCK_SM_SHIFT;
 
-	for (;;) {
-		ret = load_unpacked_extents(sb, ino, iblock, last, false,
-					    &unpe, lock);
+	while (iblock <= last) {
+		ret = scoutfs_ext_next(sb, &data_ext_ops, &args,
+				       iblock, 1, &ext);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
@@ -1678,44 +1123,38 @@ int scoutfs_data_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 			break;
 		}
 
-		for (ext = find_extent(unpe, iblock, last); ext;
-		     ext = next_extent(ext)) {
+		trace_scoutfs_data_fiemap_extent(sb, ino, &ext);
 
-			copy_traced_extent(&te, ext);
-			trace_scoutfs_data_fiemap_extent(sb, ino, &te);
-
-			if (ext->iblock > last) {
-				/* not setting _LAST, it's for end of file */
-				ret = 0;
-				break;
-			}
-
-			if (extents_merge(&cur, ext)) {
-				cur.count += ext->count;
-				continue;
-			}
-
-			ret = fill_extent(fieinfo, &cur, 0);
-			if (ret != 0)
-				goto out;
-			cur = *ext;
+		if (ext.start > last) {
+			/* not setting _LAST, it's for end of file */
+			ret = 0;
+			break;
 		}
 
-		iblock = unpe->iblock + SCOUTFS_PACKEXT_BLOCKS;
-		free_unpacked_extents(unpe);
-		unpe = NULL;
+		if (scoutfs_ext_can_merge(&cur, &ext)) {
+			/* merged extents could be greater than input len */
+			cur.len += ext.len;
+		} else {
+			ret = fill_extent(fieinfo, &cur, 0);
+			if (ret != 0)
+				goto unlock;
+			cur = ext;
+		}
+
+		iblock = ext.start + ext.len;
 	}
 
-	if (cur.count)
+	if (cur.len)
 		ret = fill_extent(fieinfo, &cur, last_flags);
-out:
+unlock:
 	scoutfs_unlock(sb, lock, SCOUTFS_LOCK_READ);
 	mutex_unlock(&inode->i_mutex);
 
-	free_unpacked_extents(unpe);
-
+out:
 	if (ret == 1)
 		ret = 0;
+
+	trace_scoutfs_data_fiemap(sb, start, len, ret);
 
 	return ret;
 }
@@ -1803,11 +1242,14 @@ int scoutfs_data_wait_check(struct inode *inode, loff_t pos, loff_t len,
 {
 	struct super_block *sb = inode->i_sb;
 	const u64 ino = scoutfs_ino(inode);
+	struct data_ext_args args = {
+		.ino = ino,
+		.inode = inode,
+		.lock = lock,
+	};
 	DECLARE_DATA_WAIT_ROOT(sb, rt);
 	DECLARE_DATA_WAITQ(inode, wq);
-	struct unpacked_extents *unpe = NULL;
-	struct unpacked_extent *ext;
-	DECLARE_TRACED_EXTENT(te);
+	struct scoutfs_extent ext = {0,};
 	u64 iblock;
 	u64 last_block;
 	u64 on;
@@ -1834,50 +1276,40 @@ int scoutfs_data_wait_check(struct inode *inode, loff_t pos, loff_t len,
 	last_block = (pos + len - 1) >> SCOUTFS_BLOCK_SM_SHIFT;
 
 	while(iblock <= last_block) {
-
-		free_unpacked_extents(unpe);
-		ret = load_unpacked_extents(sb, ino, iblock, last_block, false,
-					    &unpe, lock);
+		ret = scoutfs_ext_next(sb, &data_ext_ops, &args,
+				       iblock, 1, &ext);
 		if (ret < 0) {
 			if (ret == -ENOENT)
 				ret = 0;
-			goto out;
+			break;
 		}
 
-		for (ext = find_extent(unpe, iblock, last_block); ext;
-		     ext = next_extent(ext)) {
-
-			if (ext->iblock > last_block) {
-				ret = 0;
-				goto out;
-			}
-
-			if (sef & ext->flags) {
-				if (dw) {
-					dw->chg = atomic64_read(&wq->changed);
-					dw->ino = ino;
-					dw->iblock = max(iblock, ext->iblock);
-					dw->op = op;
-
-					spin_lock(&rt->lock);
-					insert_offline_waiting(&rt->root, dw);
-					spin_unlock(&rt->lock);
-				}
-
-				copy_traced_extent(&te, ext);
-				ret = 1;
-				goto out;
-			}
-
+		if (ext.start > last_block) {
+			ret = 0;
+			break;
 		}
 
-		iblock = unpe->iblock + SCOUTFS_PACKEXT_BLOCKS;
+		if (sef & ext.flags) {
+			if (dw) {
+				dw->chg = atomic64_read(&wq->changed);
+				dw->ino = ino;
+				dw->iblock = max(iblock, ext.start);
+				dw->op = op;
+
+				spin_lock(&rt->lock);
+				insert_offline_waiting(&rt->root, dw);
+				spin_unlock(&rt->lock);
+			}
+
+			ret = 1;
+			break;
+		}
+
+		iblock = ext.start + ext.len;
 	}
 
 out:
-	trace_scoutfs_data_wait_check(sb, ino, pos, len, sef, op, &te, ret);
-
-	free_unpacked_extents(unpe);
+	trace_scoutfs_data_wait_check(sb, ino, pos, len, sef, op, &ext, ret);
 
 	return ret;
 }
@@ -2019,20 +1451,20 @@ const struct file_operations scoutfs_file_fops = {
 };
 
 void scoutfs_data_init_btrees(struct super_block *sb,
-			      struct scoutfs_radix_allocator *alloc,
+			      struct scoutfs_alloc *alloc,
 			      struct scoutfs_block_writer *wri,
 			      struct scoutfs_log_trees *lt)
 {
 	DECLARE_DATA_INFO(sb, datinf);
 
-	down_write(&datinf->alloc_rwsem);
+	mutex_lock(&datinf->mutex);
 
 	datinf->alloc = alloc;
 	datinf->wri = wri;
 	datinf->data_avail = lt->data_avail;
 	datinf->data_freed = lt->data_freed;
 
-	up_write(&datinf->alloc_rwsem);
+	mutex_unlock(&datinf->mutex);
 }
 
 void scoutfs_data_get_btrees(struct super_block *sb,
@@ -2040,12 +1472,38 @@ void scoutfs_data_get_btrees(struct super_block *sb,
 {
 	DECLARE_DATA_INFO(sb, datinf);
 
-	down_read(&datinf->alloc_rwsem);
+	mutex_lock(&datinf->mutex);
 
 	lt->data_avail = datinf->data_avail;
 	lt->data_freed = datinf->data_freed;
 
-	up_read(&datinf->alloc_rwsem);
+	mutex_unlock(&datinf->mutex);
+}
+
+/*
+ * This should be called before preparing the allocators for the commit
+ * because it can allocate and free btree blocks in the data allocator.
+ */
+int scoutfs_data_prepare_commit(struct super_block *sb)
+{
+	DECLARE_DATA_INFO(sb, datinf);
+	int ret;
+
+	mutex_lock(&datinf->mutex);
+	if (datinf->cached_ext.len) {
+		ret = scoutfs_free_data(sb, datinf->alloc, datinf->wri,
+					&datinf->data_avail,
+					datinf->cached_ext.start,
+					datinf->cached_ext.len);
+		if (ret == 0)
+			memset(&datinf->cached_ext, 0,
+			       sizeof(datinf->cached_ext));
+	} else {
+		ret = 0;
+	}
+	mutex_unlock(&datinf->mutex);
+
+	return ret;
 }
 
 /*
@@ -2055,8 +1513,8 @@ u64 scoutfs_data_alloc_free_bytes(struct super_block *sb)
 {
 	DECLARE_DATA_INFO(sb, datinf);
 
-	return scoutfs_radix_root_free_blocks(sb, &datinf->data_avail) <<
-		SCOUTFS_BLOCK_SM_SHIFT;
+	return le64_to_cpu(datinf->data_avail.total_len) <<
+			SCOUTFS_BLOCK_SM_SHIFT;
 }
 
 int scoutfs_data_setup(struct super_block *sb)
@@ -2069,7 +1527,7 @@ int scoutfs_data_setup(struct super_block *sb)
 		return -ENOMEM;
 
 	datinf->sb = sb;
-	init_rwsem(&datinf->alloc_rwsem);
+	mutex_init(&datinf->mutex);
 
 	sbi->data_info = datinf;
 	return 0;

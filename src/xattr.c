@@ -425,7 +425,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 
 	/* only need enough for caller's name and value sizes */
 	bytes = sizeof(struct scoutfs_xattr) + name_len + size;
-	xat = kmalloc(bytes, GFP_NOFS);
+	xat = __vmalloc(bytes, GFP_NOFS, PAGE_KERNEL);
 	if (!xat)
 		return -ENOMEM;
 
@@ -468,7 +468,7 @@ ssize_t scoutfs_getxattr(struct dentry *dentry, const char *name, void *buffer,
 	ret = le16_to_cpu(xat->val_len);
 	memcpy(buffer, &xat->name[xat->name_len], ret);
 out:
-	kfree(xat);
+	vfree(xat);
 	return ret;
 }
 
@@ -527,7 +527,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 		return -EPERM;
 
 	bytes = sizeof(struct scoutfs_xattr) + name_len + size;
-	xat = kmalloc(bytes, GFP_NOFS);
+	xat = __vmalloc(bytes, GFP_NOFS, PAGE_KERNEL);
 	if (!xat) {
 		ret = -ENOMEM;
 		goto out;
@@ -633,7 +633,7 @@ unlock:
 	up_write(&si->xattr_rwsem);
 	scoutfs_unlock(sb, lck, SCOUTFS_LOCK_WRITE);
 out:
-	kfree(xat);
+	vfree(xat);
 
 	return ret;
 }

@@ -237,6 +237,94 @@ static void rbtree_replace_node(struct rb_node *victim, struct rb_node *new,
 }
 
 /*
+ * This is far too expensive to use regularly, but it's very helpful for
+ * discovering corruption after modifications to cached pages.
+ */
+static __attribute__((unused)) void verify_page_rbtree(struct rb_root *root)
+{
+	struct cached_item *item;
+	struct cached_page *par;
+	struct cached_page *pg;
+	struct cached_page *n;
+	char *reason = NULL;
+	struct rb_node *p;
+	int cmp;
+
+	rbtree_postorder_for_each_entry_safe(pg, n, root, node) {
+
+		item = NULL;
+		par = NULL;
+
+		if (scoutfs_key_compare(&pg->start, &pg->end) > 0) {
+			reason = "start > end";
+			break;
+		}
+
+		item = first_item(&pg->item_root);
+		if (item && scoutfs_key_compare(&item->key, &pg->start) < 0) {
+			reason = "first item < start";
+			break;
+		}
+
+		item = last_item(&pg->item_root);
+		if (item && scoutfs_key_compare(&item->key, &pg->end) > 0) {
+			reason = "last item > end";
+			break;
+		}
+
+		p = rb_parent(&pg->node);
+		if (!p)
+			continue;
+		par = rb_entry(p, struct cached_page, node);
+
+		cmp = scoutfs_key_compare_ranges(&pg->start, &pg->end,
+						 &par->start, &par->end);
+		if (cmp == 0) {
+			reason = "parent and child overlap";
+			break;
+		}
+
+		if (par->node.rb_right == &pg->node && cmp < 0) {
+			reason = "right child < parent";
+			break;
+		}
+
+		if (par->node.rb_left == &pg->node && cmp > 0) {
+			reason = "left child > parent";
+			break;
+		}
+	}
+
+	if (!reason)
+		return;
+
+	printk("bad item page rbtree: %s\n", reason);
+	printk("pg %p start "SK_FMT" end "SK_FMT"\n",
+		pg, SK_ARG(&pg->start), SK_ARG(&pg->end));
+	if (par)
+		printk("par %p start "SK_FMT" end "SK_FMT"\n",
+			par, SK_ARG(&par->start), SK_ARG(&par->end));
+	if (item)
+		printk("item %p key "SK_FMT"\n", item, SK_ARG(&item->key));
+
+	rbtree_postorder_for_each_entry_safe(pg, n, root, node) {
+		printk("  pg %p left %p right %p start "SK_FMT" end "SK_FMT"\n",
+		       pg,
+		       pg->node.rb_left ? rb_entry(pg->node.rb_left,
+						   struct cached_page, node) :
+					  NULL,
+		       pg->node.rb_right ? rb_entry(pg->node.rb_right,
+						   struct cached_page, node) :
+					   NULL,
+		       SK_ARG(&pg->start),
+		       SK_ARG(&pg->end));
+	}
+
+	BUG();
+}
+
+
+/*
  * This lets us lock newly allocated pages without having to add nesting
  * annotation.  The non-acquired path is never executed.
  */

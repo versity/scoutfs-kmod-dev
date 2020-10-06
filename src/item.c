@@ -129,6 +129,7 @@ struct cached_page {
 	struct list_head dirty_head;
 	struct page *page;
 	unsigned int page_off;
+	unsigned int erased_bytes;
 	atomic_t refcount;
 };
 
@@ -416,6 +417,13 @@ static struct cached_item *alloc_item(struct cached_page *pg,
 	return item;
 }
 
+static void erase_item(struct cached_page *pg, struct cached_item *item)
+{
+	rbtree_erase(&item->node, &pg->item_root);
+	pg->erased_bytes += round_up(item_val_bytes(item->val_len),
+				     CACHED_ITEM_ALIGN);
+}
+
 static void lru_add(struct super_block *sb, struct item_cache_info *cinf,
 		      struct cached_page *pg)
 {
@@ -649,7 +657,8 @@ static void erase_page_items(struct cached_page *pg,
 
 		if (scoutfs_key_compare(&item->key, end) > 0)
 			break;
-		rbtree_erase(&item->node, &pg->item_root);
+
+		erase_item(pg, item);
 	}
 }
 
@@ -702,7 +711,7 @@ static void move_page_items(struct super_block *sb,
 		to->persistent = from->persistent;
 		to->deletion = from->deletion;
 
-		rbtree_erase(&from->node, &left->item_root);
+		erase_item(left, from);
 	}
 }
 
@@ -773,6 +782,64 @@ static int trim_page_intersection(struct super_block *sb,
 	erase_page_items(pg, start, end);
 	move_page_items(sb, cinf, pg, right, &right->start, NULL);
 	return PGI_BISECT;
+}
+
+/*
+ * The caller wants to allocate an item in the page but there isn't room
+ * at the page_off.  If erasing items has left sufficient internal free
+ * space we can pack the existing items to the start of the page to make
+ * room for the insertion.
+ *
+ * The caller's empty pg is only used for its page struct, which we swap
+ * with our old empty page.  We don't touch its pg struct.
+ *
+ * This is a coarse bulk way of dealing with free space, as opposed to
+ * specifically tracking internal free regions and using them to satisfy
+ * item allocations.
+ */
+static void compact_page_items(struct super_block *sb,
+			       struct cached_page *pg,
+			       struct cached_page *empty)
+{
+	struct cached_item *from;
+	struct cached_item *to;
+	struct rb_root item_root = RB_ROOT;
+	struct rb_node *par = NULL;
+	struct rb_node **pnode = &item_root.rb_node;
+	unsigned int page_off = 0;
+	LIST_HEAD(dirty_list);
+
+	if (pg->erased_bytes < item_val_bytes(SCOUTFS_MAX_VAL_SIZE))
+		return;
+
+	if (WARN_ON_ONCE(empty->page_off != 0) ||
+	    WARN_ON_ONCE(!RB_EMPTY_ROOT(&empty->item_root)) ||
+	    WARN_ON_ONCE(!list_empty(&empty->dirty_list)))
+		return;
+
+	scoutfs_inc_counter(sb, item_page_compact);
+
+	for (from = first_item(&pg->item_root); from; from = next_item(from)) {
+		to = page_address(empty->page) + page_off;
+		page_off += round_up(item_val_bytes(from->val_len),
+				     CACHED_ITEM_ALIGN);
+
+		/* copy the entire item, struct members and all */
+		memcpy(to, from, item_val_bytes(from->val_len));
+
+		rbtree_insert(&to->node, par, pnode, &item_root);
+		par = &to->node;
+		pnode = &to->node.rb_right;
+
+		if (to->dirty)
+			list_add_tail(&to->dirty_head, &dirty_list);
+	}
+
+	pg->item_root = item_root;
+	list_replace(&dirty_list, &pg->dirty_list);
+	swap(pg->page, empty->page);
+	pg->page_off = page_off;
+	pg->erased_bytes = 0;
 }
 
 /*
@@ -1028,6 +1095,9 @@ static int try_split_page(struct super_block *sb, struct item_cache_info *cinf,
 
 	write_lock(&pg->rwlock);
 
+	if (!page_has_room(pg, val_len))
+		compact_page_items(sb, pg, left);
+
 	if (page_has_room(pg, val_len)) {
 		write_unlock(&cinf->rwlock);
 		write_unlock(&pg->rwlock);
@@ -1207,8 +1277,8 @@ static int read_page_item(struct super_block *sb, struct scoutfs_key *key,
 {
 	DECLARE_ITEM_CACHE_INFO(sb, cinf);
 	struct rb_root *root = arg;
-	struct cached_page *right;
-	struct cached_page *left;
+	struct cached_page *right = NULL;
+	struct cached_page *left = NULL;
 	struct cached_page *pg;
 	struct cached_item *found;
 	struct cached_item *item;
@@ -1222,10 +1292,19 @@ static int read_page_item(struct super_block *sb, struct scoutfs_key *key,
 	if (found && (le64_to_cpu(found->liv.vers) >= le64_to_cpu(liv->vers)))
 		return 0;
 
+	if (!page_has_room(pg, val_len)) {
+		left = alloc_pg(sb, 0);
+		/* split needs multiple items, sparse may not have enough */
+		if (!left)
+			return -ENOMEM;
+		compact_page_items(sb, pg, left);
+	}
+
 	item = alloc_item(pg, key, liv, val, val_len);
 	if (!item) {
 		/* simpler split of private pages, no locking/dirty/lru */
-		left = alloc_pg(sb, 0);
+		if (!left)
+			left = alloc_pg(sb, 0);
 		right = alloc_pg(sb, 0);
 		if (!left || !right) {
 			put_pg(sb, left);
@@ -1247,6 +1326,9 @@ static int read_page_item(struct super_block *sb, struct scoutfs_key *key,
 		item = alloc_item(pg, key, liv, val, val_len);
 		found = item_rbtree_walk(&pg->item_root, key, NULL, &par,
 					 &pnode);
+
+		left = NULL;
+		right = NULL;
 	}
 
 	/* if deleted a deletion item will be required */
@@ -1254,7 +1336,10 @@ static int read_page_item(struct super_block *sb, struct scoutfs_key *key,
 
 	rbtree_insert(&item->node, par, pnode, &pg->item_root);
 	if (found)
-		rbtree_erase(&found->node, &pg->item_root);
+		erase_item(pg, found);
+
+	put_pg(sb, left);
+	put_pg(sb, right);
 	return 0;
 }
 
@@ -1348,7 +1433,7 @@ static int read_pages(struct super_block *sb, struct item_cache_info *cinf,
 		/* drop deletion items, we don't need them in the cache */
 		for_each_item_safe(&pg->item_root, item, item_tmp) {
 			if (item->deletion)
-				rbtree_erase(&item->node, &pg->item_root);
+				erase_item(pg, item);
 		}
 	}
 
@@ -1740,7 +1825,7 @@ static int item_create(struct super_block *sb, struct scoutfs_key *key,
 	if (found) {
 		item->persistent = found->persistent;
 		clear_item_dirty(sb, cinf, pg, found);
-		rbtree_erase(&found->node, &pg->item_root);
+		erase_item(pg, found);
 	}
 
 	if (force)
@@ -1811,6 +1896,8 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key *key,
 	if (val_len <= found->val_len) {
 		if (val_len)
 			memcpy(found->val, val, val_len);
+		if (val_len < found->val_len)
+			pg->erased_bytes += found->val_len - val_len;
 		found->val_len = val_len;
 		found->liv.vers = liv.vers;
 		mark_item_dirty(sb, cinf, pg, NULL, found);
@@ -1821,7 +1908,7 @@ int scoutfs_item_update(struct super_block *sb, struct scoutfs_key *key,
 		mark_item_dirty(sb, cinf, pg, NULL, item);
 
 		clear_item_dirty(sb, cinf, pg, found);
-		rbtree_erase(&found->node, &pg->item_root);
+		erase_item(pg, found);
 	}
 
 	ret = 0;
@@ -1883,12 +1970,13 @@ static int item_delete(struct super_block *sb, struct scoutfs_key *key,
 	if (!item->persistent) {
 		/* can just forget items that aren't yet persistent */
 		clear_item_dirty(sb, cinf, pg, item);
-		rbtree_erase(&item->node, &pg->item_root);
+		erase_item(pg, item);
 	} else {
 		/* must emit deletion to clobber old persistent item */
 		item->liv.vers = cpu_to_le64(lock->write_version);
 		item->liv.flags |= SCOUTFS_LOG_ITEM_FLAG_DELETION;
 		item->deletion = 1;
+		pg->erased_bytes += item->val_len;
 		item->val_len = 0;
 		mark_item_dirty(sb, cinf, pg, NULL, item);
 	}
@@ -2115,7 +2203,7 @@ retry:
 
 			/* free deletion items */
 			if (item->deletion)
-				rbtree_erase(&item->node, &pg->item_root);
+				erase_item(pg, item);
 			else
 				item->persistent = 1;
 		}

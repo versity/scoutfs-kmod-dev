@@ -85,6 +85,7 @@
 	EXPAND_COUNTER(item_page_accessed)			\
 	EXPAND_COUNTER(item_page_alloc)				\
 	EXPAND_COUNTER(item_page_clear_dirty)			\
+	EXPAND_COUNTER(item_page_compact)			\
 	EXPAND_COUNTER(item_page_free)				\
 	EXPAND_COUNTER(item_page_lru_add)			\
 	EXPAND_COUNTER(item_page_lru_remove)			\

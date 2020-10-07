@@ -740,48 +740,79 @@ static int trim_page_intersection(struct super_block *sb,
 				  struct scoutfs_key *start,
 				  struct scoutfs_key *end)
 {
-	if (scoutfs_key_compare(&pg->start, end) > 0 ||
-	    scoutfs_key_compare(&pg->end, start) < 0) {
-		/* page and range don't intersect */
+	int ps_e = scoutfs_key_compare(&pg->start, end);
+	int pe_s = scoutfs_key_compare(&pg->end, start);
+	int ps_s;
+	int pe_e;
+
+	/*
+	 * page and range don't intersect
+	 *
+	 *                     ps |----------|  pe
+	 *  s |----------|  e
+	 * (or)
+	 * ps |----------|  pe
+	 *                      s |----------|  e
+	 */
+	if (ps_e > 0 || pe_s < 0)
 		return PGI_DISJOINT;
-	}
 
-	if (scoutfs_key_compare(&pg->start, start) >= 0 &&
-	    scoutfs_key_compare(&pg->end, end) <= 0) {
-		/* page entirely inside range */
+	ps_s = scoutfs_key_compare(&pg->start, start);
+	pe_e = scoutfs_key_compare(&pg->end, end);
+
+	/*
+	 * page entirely inside range
+	 *
+	 * ps |----------|  pe
+	 *  s |----------|  e
+	 */
+	if (ps_s >= 0 && pe_e <= 0)
 		return PGI_INSIDE;
+
+	/*
+	 * page surrounds range, and is bisected by it
+	 *
+	 * ps |----------|  pe
+	 *    s |------|  e
+	 */
+	if (ps_s < 0 && pe_e > 0) {
+		if (!right)
+			return PGI_BISECT_NEEDED;
+
+		right->start = *end;
+		scoutfs_key_inc(&right->start);
+		right->end = pg->end;
+		pg->end = *start;
+		scoutfs_key_dec(&pg->end);
+		erase_page_items(pg, start, end);
+		move_page_items(sb, cinf, pg, right, &right->start, NULL);
+		return PGI_BISECT;
 	}
 
-	if (scoutfs_key_compare(&pg->start, end) <= 0 &&
-	    scoutfs_key_compare(&pg->end, end) > 0) {
-		/* start of page intersects with range */
+	/*
+	 * start of page overlaps with range
+	 *
+	 *   ps |----------|  pe
+	 *  s |----------|  e
+	 */
+	if (pe_e > 0) {
+		/* start of page overlaps range */
 		pg->start = *end;
 		scoutfs_key_inc(&pg->start);
 		erase_page_items(pg, start, end);
 		return PGI_START_OLAP;
 	}
 
-	if (scoutfs_key_compare(&pg->end, start) >= 0 &&
-	    scoutfs_key_compare(&pg->start, start) < 0) {
-		/* end of page intersects with range */
-		pg->end = *start;
-		scoutfs_key_dec(&pg->end);
-		erase_page_items(pg, start, end);
-		return PGI_END_OLAP;
-	}
-
-	/* page surrounds range, and is bisected by it */
-	if (!right)
-		return PGI_BISECT_NEEDED;
-
-	right->start = *end;
-	scoutfs_key_inc(&right->start);
-	right->end = pg->end;
+	/*
+	 * end of page overlaps with range
+	 *
+	 * ps |----------|  pe
+	 *    s |----------|  e
+	 */
 	pg->end = *start;
 	scoutfs_key_dec(&pg->end);
 	erase_page_items(pg, start, end);
-	move_page_items(sb, cinf, pg, right, &right->start, NULL);
-	return PGI_BISECT;
+	return PGI_END_OLAP;
 }
 
 /*

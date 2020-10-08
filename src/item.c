@@ -1053,9 +1053,14 @@ static void drop_pcpu_pages(struct super_block *sb,
 }
 
 /*
- * We're about to move all the items between to a pair of new pages.
- * Find the item that balances the space consumed by items in either
- * page.  We move the mid (and possibly only) item to the right page.
+ * Set the keys of the destination pages of a split.  We try to find the
+ * key which balances the space consumed by items in the resulting split
+ * pages.  We move the split key to the right, setting the left end by
+ * decrementing that key.  We bias towards advancing the left item first
+ * so that we don't use it and possibly decrementing the starting page
+ * key.  We can't have a page that covers a single key.  Callers of
+ * split should have tried compacting which ensures that if we split we
+ * must have multiple items, even if they all have the max value length.
  */
 static void set_split_keys(struct cached_page *pg, struct cached_page *left,
 			   struct cached_page *right)
@@ -1066,8 +1071,14 @@ static void set_split_keys(struct cached_page *pg, struct cached_page *left,
 	int left_tot = 0;
 	int right_tot = 0;
 
+	BUILD_BUG_ON((PAGE_SIZE / SCOUTFS_MAX_VAL_SIZE) < 4);
+	BUG_ON(scoutfs_key_compare(&pg->start, &pg->end) > 0);
+	BUG_ON(left_item == NULL);
+	BUG_ON(right_item == NULL);
+	BUG_ON(left_item == right_item);
+
 	while (left_item && right_item && left_item != right_item) {
-		if (left_tot < right_tot) {
+		if (left_tot <= right_tot) {
 			left_tot += item_val_bytes(left_item->val_len);
 			left_item = next_item(left_item);
 		} else {

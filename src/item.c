@@ -145,11 +145,11 @@ struct cached_item {
 	char val[0];
 };
 
-#define CACHED_ITEM_ALIGN 16
+#define CACHED_ITEM_ALIGN 8
 
 static int item_val_bytes(int val_len)
 {
-	return offsetof(struct cached_item, val[val_len]);
+	return round_up(offsetof(struct cached_item, val[val_len]), CACHED_ITEM_ALIGN);
 }
 
 /*
@@ -400,7 +400,7 @@ static struct cached_item *alloc_item(struct cached_page *pg,
 		return NULL;
 
 	item = page_address(pg->page) + pg->page_off;
-	pg->page_off += round_up(item_val_bytes(val_len), CACHED_ITEM_ALIGN);
+	pg->page_off += item_val_bytes(val_len);
 
 	RB_CLEAR_NODE(&item->node);
 	INIT_LIST_HEAD(&item->dirty_head);

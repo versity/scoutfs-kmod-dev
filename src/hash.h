@@ -26,11 +26,11 @@ static inline u32 fnv1a32(const void *data, unsigned int len)
 
 static inline u64 fnv1a64(const void *data, unsigned int len)
 {
-	u64 hash = 0xcbf29ce484222325;
+	u64 hash = 0xcbf29ce484222325ULL;
 
 	while (len--) {
 		hash ^= *(u8 *)(data++);
-		hash *= 0x100000001b3;
+		hash *= 0x100000001b3ULL;
 	}
 
 	return hash;

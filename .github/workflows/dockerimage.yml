@@ -1,0 +1,40 @@
+name: Docker Image CI
+
+on: [pull_request]
+
+jobs:
+  build73:
+    name: centos 7.3
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Build the Docker image
+      run: docker build . --file docker-ci/Dockerfile-centos7.3
+  build74:
+    name: centos 7.4
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Build the Docker image
+      run: docker build . --file docker-ci/Dockerfile-centos7.4
+  build75:
+    name: centos 7.5
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Build the Docker image
+      run: docker build . --file docker-ci/Dockerfile-centos7.5
+  build76:
+    name: centos 7.6
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Build the Docker image
+      run: docker build . --file docker-ci/Dockerfile-centos7.6
+  build77:
+    name: centos 7.7
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Build the Docker image
+      run: docker build . --file docker-ci/Dockerfile-centos7.7

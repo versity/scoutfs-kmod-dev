@@ -1,0 +1,9 @@
+FROM centos:7.5.1804
+MAINTAINER support@versity.com
+
+ADD . / ./
+
+RUN yum -c ./docker-ci/yum-repos/CentOS-Vault-7.5.repo --disablerepo=base --disablerepo=updates -y install rpm-build redhat-rpm-config make gcc git vi tar unzip rpmlint kernel-devel && yum clean all
+
+RUN make dist
+RUN rpmbuild --define "kversion 3.10.0-862.el7.x86_64" -tb *.tar

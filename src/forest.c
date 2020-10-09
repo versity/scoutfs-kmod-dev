@@ -68,7 +68,7 @@ struct forest_info {
 struct forest_refs {
 	struct scoutfs_btree_ref fs_ref;
 	struct scoutfs_btree_ref logs_ref;
-} __packed;
+};
 
 /* initialize some refs that initially aren't equal */
 #define DECLARE_STALE_TRACKING_SUPER_REFS(a, b)		\

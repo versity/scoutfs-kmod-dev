@@ -69,18 +69,21 @@
 struct scoutfs_timespec {
 	__le64 sec;
 	__le32 nsec;
-} __packed;
+	__u8 __pad[4];
+};
 
 struct scoutfs_betimespec {
 	__be64 sec;
 	__be32 nsec;
-} __packed;
+	__u8 __pad[4];
+};
 
 /* XXX ipv6 */
 struct scoutfs_inet_addr {
 	__le32 addr;
 	__le16 port;
-} __packed;
+	__u8 __pad[2];
+};
 
 /*
  * This header is stored at the start of btree blocks and the super
@@ -93,7 +96,7 @@ struct scoutfs_block_header {
 	__le64 fsid;
 	__le64 seq;
 	__le64 blkno;
-} __packed;
+};
 
 /*
  * scoutfs identifies all file system metadata items by a small key
@@ -109,13 +112,14 @@ struct scoutfs_block_header {
  * increment them, subtract them from each other, etc.
  */
 struct scoutfs_key {
-	__u8	sk_zone;
 	__le64	_sk_first;
-	__u8	sk_type;
 	__le64	_sk_second;
 	__le64	_sk_third;
 	__u8	_sk_fourth;
-}__packed;
+	__u8	sk_zone;
+	__u8	sk_type;
+	__u8	__pad[5];
+};
 
 /* inode index */
 #define skii_major	_sk_second
@@ -177,21 +181,22 @@ struct scoutfs_radix_block {
 			__le64 seq;
 			__le64 sm_total;
 			__le64 lg_total;
-		} __packed refs[0];
+		} refs[0];
 		__le64 bits[0];
-	} __packed;
-} __packed;
+	};
+};
 
 struct scoutfs_avl_root {
 	__le16 node;
-} __packed;
+};
 
 struct scoutfs_avl_node {
 	__le16 parent;
 	__le16 left;
 	__le16 right;
 	__u8 height;
-} __packed;
+	__u8 __pad[1];
+};
 
 /* when we split we want to have multiple items on each side */
 #define SCOUTFS_BTREE_MAX_VAL_LEN 896
@@ -205,7 +210,7 @@ struct scoutfs_avl_node {
 struct scoutfs_btree_ref {
 	__le64 blkno;
 	__le64 seq;
-} __packed;
+};
 
 /*
  * A height of X means that the first block read will have level X-1 and
@@ -214,14 +219,16 @@ struct scoutfs_btree_ref {
 struct scoutfs_btree_root {
 	struct scoutfs_btree_ref ref;
 	__u8 height;
-} __packed;
+	__u8 __pad[7];
+};
 
 struct scoutfs_btree_item {
 	struct scoutfs_avl_node node;
 	struct scoutfs_key key;
 	__le16 val_off;
 	__le16 val_len;
-} __packed;
+	__u8 __pad[4];
+};
 
 struct scoutfs_btree_block {
 	struct scoutfs_block_header hdr;
@@ -230,9 +237,10 @@ struct scoutfs_btree_block {
 	__le16 total_item_bytes;
 	__le16 mid_free_len;
 	__u8 level;
+	__u8 __pad[7];
 	struct scoutfs_btree_item items[0];
 	/* leaf blocks have a fixed size item offset hash table at the end */
-} __packed;
+};
 
 #define SCOUTFS_BTREE_VALUE_ALIGN 8
 
@@ -253,7 +261,7 @@ struct scoutfs_btree_block {
 struct scoutfs_alloc_list_ref {
 	__le64 blkno;
 	__le64 seq;
-}__packed;
+};
 
 /*
  * first_nr tracks the nr of the first block in the list and is used for
@@ -264,7 +272,8 @@ struct scoutfs_alloc_list_head {
 	struct scoutfs_alloc_list_ref ref;
 	__le64 total_nr;
 	__le32 first_nr;
-}__packed;
+	__u8 __pad[4];
+};
 
 /*
  * While the main allocator uses extent items in btree blocks, metadata
@@ -283,7 +292,7 @@ struct scoutfs_alloc_list_block {
 	__le32 start;
 	__le32 nr;
 	__le64 blknos[0]; /* naturally aligned for sorting */
-}__packed;
+};
 
 #define SCOUTFS_ALLOC_LIST_MAX_BLOCKS					      \
 	((SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_alloc_list_block)) /  \
@@ -295,7 +304,7 @@ struct scoutfs_alloc_list_block {
 struct scoutfs_alloc_root {
 	__le64 total_len;
 	struct scoutfs_btree_root root;
-}__packed;
+};
 
 /* types of allocators, exposed to alloc_detail ioctl */
 #define SCOUTFS_ALLOC_OWNER_NONE	0
@@ -305,7 +314,7 @@ struct scoutfs_alloc_root {
 
 struct scoutfs_mounted_client_btree_val {
 	__u8 flags;
-} __packed;
+};
 
 #define SCOUTFS_MOUNTED_CLIENT_VOTER	(1 << 0)
 
@@ -321,28 +330,29 @@ struct scoutfs_srch_entry {
 	__le64 hash;
 	__le64 ino;
 	__le64 id;
-} __packed;
+};
 
 #define SCOUTFS_SRCH_ENTRY_MAX_BYTES	(2 + (sizeof(__u64) * 3))
 
 struct scoutfs_srch_ref {
 	__le64 blkno;
 	__le64 seq;
-} __packed;
+};
 
 struct scoutfs_srch_file {
 	struct scoutfs_srch_entry first;
 	struct scoutfs_srch_entry last;
+	struct scoutfs_srch_ref ref;
 	__le64 blocks;
 	__le64 entries;
-	struct scoutfs_srch_ref ref;
 	__u8 height;
-} __packed;
+	__u8 __pad[7];
+};
 
 struct scoutfs_srch_parent {
 	struct scoutfs_block_header hdr;
 	struct scoutfs_srch_ref refs[0];
-} __packed;
+};
 
 #define SCOUTFS_SRCH_PARENT_REFS				\
 	((SCOUTFS_BLOCK_LG_SIZE -				\
@@ -357,7 +367,7 @@ struct scoutfs_srch_block {
 	__le32 entry_nr;
 	__le32 entry_bytes;
 	__u8 entries[0];
-} __packed;
+};
 
 /*
  * Decoding loads final small deltas with full __u64 loads.  Rather than
@@ -389,13 +399,14 @@ struct scoutfs_srch_compact {
 	__le64 id;
 	__u8 nr;
 	__u8 flags;
+	__u8 __pad[6];
 	struct scoutfs_srch_file out;
 	struct scoutfs_srch_compact_input {
 		struct scoutfs_srch_file sfl;
 		__le64 blk;
 		__le64 pos;
-	} in[SCOUTFS_SRCH_COMPACT_NR] __packed;
-} __packed;
+	} in[SCOUTFS_SRCH_COMPACT_NR];
+};
 
 /* server -> client: combine input log file entries into output file */
 #define SCOUTFS_SRCH_COMPACT_FLAG_LOG		(1 << 0)
@@ -423,7 +434,7 @@ struct scoutfs_log_trees {
 	struct scoutfs_srch_file srch_file;
 	__le64 rid;
 	__le64 nr;
-} __packed;
+};
 
 struct scoutfs_log_trees_val {
 	struct scoutfs_alloc_list_head meta_avail;
@@ -433,13 +444,14 @@ struct scoutfs_log_trees_val {
 	struct scoutfs_alloc_root data_avail;
 	struct scoutfs_alloc_root data_freed;
 	struct scoutfs_srch_file srch_file;
-} __packed;
+};
 
 struct scoutfs_log_item_value {
 	__le64 vers;
 	__u8 flags;
+	__u8 __pad[7];
 	__u8 data[0];
-} __packed;
+};
 
 /*
  * FS items are limited by the max btree value length with the log item
@@ -454,7 +466,7 @@ struct scoutfs_bloom_block {
 	struct scoutfs_block_header hdr;
 	__le64 total_set;
 	__le64 bits[0];
-} __packed;
+};
 
 /*
  * Item log trees are accompanied by a block of bits that make up a
@@ -519,7 +531,8 @@ struct scoutfs_bloom_block {
 struct scoutfs_data_extent_val {
 	__le64 blkno;
 	__u8 flags;
-} __packed;
+	__u8 __pad[7];
+};
 
 #define SEF_OFFLINE	(1 << 0)
 #define SEF_UNWRITTEN	(1 << 1)
@@ -531,10 +544,11 @@ struct scoutfs_data_extent_val {
  * part item and overflow into the values of the rest of the part items.
  */
 struct scoutfs_xattr {
-	__u8 name_len;
 	__le16 val_len;
+	__u8 name_len;
+	__u8 __pad[5];
 	__u8 name[0];
-} __packed;
+};
 
 
 /* XXX does this exist upstream somewhere? */
@@ -574,12 +588,13 @@ struct scoutfs_quorum_block {
 	__le64 vote_for_rid;
 	__le32 crc;
 	__u8 log_nr;
+	__u8 __pad[3];
 	struct scoutfs_quorum_log {
 		__le64 term;
 		__le64 rid;
 		struct scoutfs_inet_addr addr;
-	} __packed log[0];
-} __packed;
+	} log[0];
+};
 
 #define SCOUTFS_QUORUM_LOG_MAX						  \
 	((SCOUTFS_BLOCK_SM_SIZE - sizeof(struct scoutfs_quorum_block)) /  \
@@ -602,6 +617,7 @@ struct scoutfs_super_block {
 	__le64 quorum_server_term;
 	__le64 unmount_barrier;
 	__u8 quorum_count;
+	__u8 __pad[7];
 	struct scoutfs_inet_addr server_addr;
 	struct scoutfs_alloc_root meta_alloc[2];
 	struct scoutfs_alloc_root data_alloc;
@@ -613,7 +629,7 @@ struct scoutfs_super_block {
 	struct scoutfs_btree_root trans_seqs;
 	struct scoutfs_btree_root mounted_clients;
 	struct scoutfs_btree_root srch_root;
-} __packed;
+};
 
 #define SCOUTFS_ROOT_INO 1
 
@@ -662,7 +678,7 @@ struct scoutfs_inode {
 	struct scoutfs_timespec atime;
 	struct scoutfs_timespec ctime;
 	struct scoutfs_timespec mtime;
-} __packed;
+};
 
 #define SCOUTFS_INO_FLAG_TRUNCATE 0x1
 
@@ -684,8 +700,9 @@ struct scoutfs_dirent {
 	__le64 hash;
 	__le64 pos;
 	__u8 type;
+	__u8 __pad[7];
 	__u8 name[0];
-} __packed;
+};
 
 #define SCOUTFS_NAME_LEN 255
 
@@ -753,7 +770,7 @@ struct scoutfs_net_greeting {
 	__le64 unmount_barrier;
 	__le64 rid;
 	__le64 flags;
-} __packed;
+};
 
 #define SCOUTFS_NET_GREETING_FLAG_FAREWELL	(1 << 0)
 #define SCOUTFS_NET_GREETING_FLAG_VOTER		(1 << 1)
@@ -788,8 +805,9 @@ struct scoutfs_net_header {
 	__u8 cmd;
 	__u8 flags;
 	__u8 error;
+	__u8 __pad[3];
 	__u8 data[0];
-} __packed;
+};
 
 #define SCOUTFS_NET_FLAG_RESPONSE	(1 << 0)
 #define SCOUTFS_NET_FLAGS_UNKNOWN	(U8_MAX << 1)
@@ -840,30 +858,32 @@ enum {
 struct scoutfs_net_inode_alloc {
 	__le64 ino;
 	__le64 nr;
-} __packed;
+};
 
 struct scoutfs_net_roots {
 	struct scoutfs_btree_root fs_root;
 	struct scoutfs_btree_root logs_root;
 	struct scoutfs_btree_root srch_root;
-} __packed;
+};
 
 struct scoutfs_net_lock {
 	struct scoutfs_key key;
 	__le64 write_version;
 	__u8 old_mode;
 	__u8 new_mode;
-} __packed;
+	__u8 __pad[6];
+};
 
 struct scoutfs_net_lock_grant_response {
 	struct scoutfs_net_lock nl;
 	struct scoutfs_net_roots roots;
-} __packed;
+};
 
 struct scoutfs_net_lock_recover {
 	__le16 nr;
+	__u8 __pad[6];
 	struct scoutfs_net_lock locks[0];
-} __packed;
+};
 
 #define SCOUTFS_NET_LOCK_MAX_RECOVER_NR					       \
 	((SCOUTFS_NET_MAX_DATA_LEN - sizeof(struct scoutfs_net_lock_recover)) /\
@@ -906,7 +926,7 @@ enum {
 struct scoutfs_fid {
 	__le64 ino;
 	__le64 parent_ino;
-} __packed;
+};
 
 #define FILEID_SCOUTFS			0x81
 #define FILEID_SCOUTFS_WITH_PARENT	0x82

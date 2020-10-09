@@ -55,5 +55,9 @@ $(src)/check_exported_types:
 		echo "no raw types in exported headers, preface with __";     \
 		exit 1;							      \
 	fi
+	@if egrep '\<__packed\>' $(src)/format.h $(src)/ioctl.h; then \
+		echo "no __packed allowed in exported headers";     \
+		exit 1;							      \
+	fi
 
 extra-y += check_exported_types

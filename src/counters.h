@@ -169,6 +169,7 @@
 	EXPAND_COUNTER(srch_search_stale_retry)			\
 	EXPAND_COUNTER(srch_search_xattrs)			\
 	EXPAND_COUNTER(srch_read_stale)				\
+	EXPAND_COUNTER(statfs)					\
 	EXPAND_COUNTER(trans_commit_data_alloc_low)		\
 	EXPAND_COUNTER(trans_commit_dirty_meta_full)		\
 	EXPAND_COUNTER(trans_commit_fsync)			\

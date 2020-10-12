@@ -838,50 +838,6 @@ out:
 				    &last_seq, sizeof(last_seq));
 }
 
-static inline __le64 le64_lg_to_sm(__le64 lg)
-{
-	return cpu_to_le64(le64_to_cpu(lg) << SCOUTFS_BLOCK_SM_LG_SHIFT);
-}
-
-/*
- * Sample the super stats that the client wants for statfs by serializing
- * with each component.
- */
-static int server_statfs(struct super_block *sb,
-			 struct scoutfs_net_connection *conn,
-			 u8 cmd, u64 id, void *arg, u16 arg_len)
-{
-	DECLARE_SERVER_INFO(sb, server);
-	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
-	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_net_statfs nstatfs;
-	int ret;
-
-	if (arg_len == 0) {
-		/* uuid and total_segs are constant, so far */
-		memcpy(nstatfs.uuid, super->uuid, sizeof(nstatfs.uuid));
-
-		spin_lock(&sbi->next_ino_lock);
-		nstatfs.next_ino = super->next_ino;
-		spin_unlock(&sbi->next_ino_lock);
-
-		mutex_lock(&server->alloc_mutex);
-		nstatfs.total_blocks = le64_lg_to_sm(super->total_meta_blocks);
-		le64_add_cpu(&nstatfs.total_blocks,
-			     le64_to_cpu(super->total_data_blocks));
-		nstatfs.bfree = le64_lg_to_sm(super->free_meta_blocks);
-		le64_add_cpu(&nstatfs.bfree,
-			     le64_to_cpu(super->free_data_blocks));
-		mutex_unlock(&server->alloc_mutex);
-		ret = 0;
-	} else {
-		ret = -EINVAL;
-	}
-
-	return scoutfs_net_response(sb, conn, cmd, id, ret,
-				    &nstatfs, sizeof(nstatfs));
-}
-
 static int server_lock(struct super_block *sb,
 		       struct scoutfs_net_connection *conn,
 		       u8 cmd, u64 id, void *arg, u16 arg_len)
@@ -1537,7 +1493,6 @@ static scoutfs_net_request_t server_req_funcs[] = {
 	[SCOUTFS_NET_CMD_GET_ROOTS]		= server_get_roots,
 	[SCOUTFS_NET_CMD_ADVANCE_SEQ]		= server_advance_seq,
 	[SCOUTFS_NET_CMD_GET_LAST_SEQ]		= server_get_last_seq,
-	[SCOUTFS_NET_CMD_STATFS]		= server_statfs,
 	[SCOUTFS_NET_CMD_LOCK]			= server_lock,
 	[SCOUTFS_NET_CMD_SRCH_GET_COMPACT]	= server_srch_get_compact,
 	[SCOUTFS_NET_CMD_SRCH_COMMIT_COMPACT]	= server_srch_commit_compact,

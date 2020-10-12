@@ -12,8 +12,6 @@ int scoutfs_client_get_roots(struct super_block *sb,
 u64 *scoutfs_client_bulk_alloc(struct super_block *sb);
 int scoutfs_client_advance_seq(struct super_block *sb, u64 *seq);
 int scoutfs_client_get_last_seq(struct super_block *sb, u64 *seq);
-int scoutfs_client_statfs(struct super_block *sb,
-			  struct scoutfs_net_statfs *nstatfs);
 int scoutfs_client_lock_request(struct super_block *sb,
 				struct scoutfs_net_lock *nl);
 int scoutfs_client_lock_response(struct super_block *sb, u64 net_id,

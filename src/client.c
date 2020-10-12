@@ -150,17 +150,6 @@ int scoutfs_client_get_last_seq(struct super_block *sb, u64 *seq)
 	return ret;
 }
 
-int scoutfs_client_statfs(struct super_block *sb,
-			  struct scoutfs_net_statfs *nstatfs)
-{
-	struct client_info *client = SCOUTFS_SB(sb)->client_info;
-
-	return scoutfs_net_sync_request(sb, client->conn,
-					SCOUTFS_NET_CMD_STATFS, NULL, 0,
-					nstatfs,
-					sizeof(struct scoutfs_net_statfs));
-}
-
 /* process an incoming grant response from the server */
 static int client_lock_response(struct super_block *sb,
 				struct scoutfs_net_connection *conn,

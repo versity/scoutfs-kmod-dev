@@ -822,7 +822,6 @@ enum {
 	SCOUTFS_NET_CMD_GET_ROOTS,
 	SCOUTFS_NET_CMD_ADVANCE_SEQ,
 	SCOUTFS_NET_CMD_GET_LAST_SEQ,
-	SCOUTFS_NET_CMD_STATFS,
 	SCOUTFS_NET_CMD_LOCK,
 	SCOUTFS_NET_CMD_LOCK_RECOVER,
 	SCOUTFS_NET_CMD_SRCH_GET_COMPACT,
@@ -861,13 +860,6 @@ enum {
 struct scoutfs_net_inode_alloc {
 	__le64 ino;
 	__le64 nr;
-} __packed;
-
-struct scoutfs_net_statfs {
-	__le64 total_blocks;		/* total blocks in device */
-	__le64 next_ino;		/* next unused inode number */
-	__le64 bfree;			/* free blocks */
-	__u8 uuid[SCOUTFS_UUID_BYTES];	/* logical volume uuid */
 } __packed;
 
 struct scoutfs_net_roots {

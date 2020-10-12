@@ -1110,3 +1110,140 @@ bool scoutfs_alloc_meta_lo_thresh(struct super_block *sb,
 
 	return lo;
 }
+
+/*
+ * Call the callers callback for every persistent allocator structure
+ * we can find.
+ */
+int scoutfs_alloc_foreach(struct super_block *sb,
+			  scoutfs_alloc_foreach_cb_t cb, void *arg)
+{
+	struct scoutfs_btree_ref stale_refs[2] = {{0,}};
+	struct scoutfs_btree_ref refs[2] = {{0,}};
+	struct scoutfs_super_block *super = NULL;
+	struct scoutfs_srch_compact_input *scin;
+	struct scoutfs_log_trees_val ltv;
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct scoutfs_key key;
+	int ret;
+
+	super = kmalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
+	scin = kmalloc(sizeof(struct scoutfs_srch_compact_input), GFP_NOFS);
+	if (!super || !scin) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+retry:
+	ret = scoutfs_read_super(sb, super);
+	if (ret < 0)
+		goto out;
+
+	refs[0] = super->logs_root.ref;
+	refs[1] = super->srch_root.ref;
+
+	/* all the server allocators */
+	ret = cb(sb, arg, SCOUTFS_ALLOC_OWNER_SERVER, 0, true, true,
+		 le64_to_cpu(super->meta_alloc[0].total_len)) ?:
+	      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SERVER, 0, true, true,
+		 le64_to_cpu(super->meta_alloc[1].total_len)) ?:
+	      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SERVER, 0, false, true,
+		 le64_to_cpu(super->data_alloc.total_len)) ?:
+	      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SERVER, 1, true, true,
+		 le64_to_cpu(super->server_meta_avail[0].total_nr)) ?:
+	      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SERVER, 1, true, true,
+		 le64_to_cpu(super->server_meta_avail[1].total_nr)) ?:
+	      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SERVER, 1, true, false,
+		 le64_to_cpu(super->server_meta_freed[0].total_nr)) ?:
+	      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SERVER, 1, true, false,
+		 le64_to_cpu(super->server_meta_freed[1].total_nr));
+	if (ret < 0)
+		goto out;
+
+	/* mount fs transaction allocators */
+	scoutfs_key_init_log_trees(&key, 0, 0);
+	for (;;) {
+		ret = scoutfs_btree_next(sb, &super->logs_root, &key, &iref);
+		if (ret == -ENOENT)
+			break;
+		if (ret < 0)
+			goto out;
+
+		if (iref.val_len == sizeof(ltv)) {
+			key = *iref.key;
+			memcpy(&ltv, iref.val, sizeof(ltv));
+		} else {
+			ret = -EIO;
+		}
+		scoutfs_btree_put_iref(&iref);
+		if (ret < 0)
+			goto out;
+
+		ret = cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
+			 le64_to_cpu(key.sklt_rid), true, true,
+			 le64_to_cpu(ltv.meta_avail.total_nr)) ?:
+		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
+			 le64_to_cpu(key.sklt_rid), true, false,
+			 le64_to_cpu(ltv.meta_freed.total_nr)) ?:
+		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
+			 le64_to_cpu(key.sklt_rid), false, true,
+			 le64_to_cpu(ltv.data_avail.total_len)) ?:
+		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
+			 le64_to_cpu(key.sklt_rid), false, false,
+			 le64_to_cpu(ltv.data_freed.total_len));
+		if (ret < 0)
+			goto out;
+
+		scoutfs_key_inc(&key);
+	}
+
+	/* srch compaction allocators */
+	memset(&key, 0, sizeof(key));
+	key.sk_zone = SCOUTFS_SRCH_ZONE;
+	key.sk_type = SCOUTFS_SRCH_BUSY_TYPE;
+
+	for (;;) {
+		/* _BUSY_ is last type, _next won't see other types */
+		ret = scoutfs_btree_next(sb, &super->srch_root, &key, &iref);
+		if (ret == -ENOENT)
+			break;
+		if (ret == 0) {
+			if (iref.val_len == sizeof(scin)) {
+				key = *iref.key;
+				memcpy(scin, iref.val, iref.val_len);
+			} else {
+				ret = -EIO;
+			}
+			scoutfs_btree_put_iref(&iref);
+		}
+		if (ret < 0)
+			goto out;
+
+		ret = cb(sb, arg, SCOUTFS_ALLOC_OWNER_SRCH,
+			 le64_to_cpu(scin->id), true, true,
+			 le64_to_cpu(scin->meta_avail.total_nr)) ?:
+		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SRCH,
+			 le64_to_cpu(scin->id), true, false,
+			 le64_to_cpu(scin->meta_freed.total_nr));
+		if (ret < 0)
+			goto out;
+
+		scoutfs_key_inc(&key);
+	}
+
+	ret = 0;
+out:
+	if (ret == -ESTALE) {
+		if (memcmp(&stale_refs, &refs, sizeof(refs)) == 0) {
+			ret = -EIO;
+		} else {
+			BUILD_BUG_ON(sizeof(stale_refs) != sizeof(refs));
+			memcpy(stale_refs, refs, sizeof(stale_refs));
+			goto retry;
+		}
+	}
+
+	kfree(super);
+	kfree(scin);
+	return ret;
+}

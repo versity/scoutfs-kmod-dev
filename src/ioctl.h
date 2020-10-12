@@ -392,4 +392,21 @@ struct scoutfs_ioctl_data_wait_err {
 #define SCOUTFS_IOC_DATA_WAIT_ERR _IOR(SCOUTFS_IOCTL_MAGIC, 11, \
 				       struct scoutfs_ioctl_data_wait_err)
 
+
+#define SCOUTFS_IOC_ALLOC_DETAIL _IOR(SCOUTFS_IOCTL_MAGIC, 12, \
+				     struct scoutfs_ioctl_alloc_detail)
+
+struct scoutfs_ioctl_alloc_detail {
+	__u64 entries_ptr;
+	__u64 entries_nr;
+};
+
+struct scoutfs_ioctl_alloc_detail_entry {
+	__u64 id;
+	__u64 blocks;
+	__u8 type;
+	__u8 meta:1,
+	     avail:1;
+};
+
 #endif

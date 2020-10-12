@@ -36,6 +36,7 @@
 #include "xattr.h"
 #include "hash.h"
 #include "srch.h"
+#include "alloc.h"
 #include "scoutfs_trace.h"
 
 /*
@@ -867,6 +868,53 @@ static long scoutfs_ioc_statfs_more(struct file *file, unsigned long arg)
 	return 0;
 }
 
+struct copy_alloc_detail_args {
+	struct scoutfs_ioctl_alloc_detail_entry __user *uade;
+	u64 nr;
+	u64 copied;
+};
+
+static int copy_alloc_detail_to_user(struct super_block *sb, void *arg,
+				     int owner, u64 id, bool meta, bool avail,
+				     u64 blocks)
+{
+	struct copy_alloc_detail_args *args = arg;
+	struct scoutfs_ioctl_alloc_detail_entry ade;
+
+	if (args->copied == args->nr)
+		return -EOVERFLOW;
+
+	ade.blocks = blocks;
+	ade.id = id;
+	ade.meta = !!meta;
+	ade.avail = !!avail;
+
+	if (copy_to_user(&args->uade[args->copied], &ade, sizeof(ade)))
+		return -EFAULT;
+
+	args->copied++;
+	return 0;
+}
+
+static long scoutfs_ioc_alloc_detail(struct file *file, unsigned long arg)
+{
+	struct super_block *sb = file_inode(file)->i_sb;
+	struct scoutfs_ioctl_alloc_detail __user *uad = (void __user *)arg;
+	struct scoutfs_ioctl_alloc_detail ad;
+	struct copy_alloc_detail_args args;
+
+	if (copy_from_user(&ad, uad, sizeof(ad)))
+		return -EFAULT;
+
+	args.uade = (struct scoutfs_ioctl_alloc_detail_entry __user *)
+			(uintptr_t)ad.entries_ptr;
+	args.nr = ad.entries_nr;
+	args.copied = 0;
+
+	return scoutfs_alloc_foreach(sb, copy_alloc_detail_to_user, &args) ?:
+	       args.copied;
+}
+
 long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -892,6 +940,8 @@ long scoutfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return scoutfs_ioc_statfs_more(file, arg);
 	case SCOUTFS_IOC_DATA_WAIT_ERR:
 		return scoutfs_ioc_data_wait_err(file, arg);
+	case SCOUTFS_IOC_ALLOC_DETAIL:
+		return scoutfs_ioc_alloc_detail(file, arg);
 	}
 
 	return -ENOTTY;

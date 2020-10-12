@@ -297,6 +297,12 @@ struct scoutfs_alloc_root {
 	struct scoutfs_btree_root root;
 }__packed;
 
+/* types of allocators, exposed to alloc_detail ioctl */
+#define SCOUTFS_ALLOC_OWNER_NONE	0
+#define SCOUTFS_ALLOC_OWNER_SERVER	1
+#define SCOUTFS_ALLOC_OWNER_MOUNT	2
+#define SCOUTFS_ALLOC_OWNER_SRCH	3
+
 struct scoutfs_mounted_client_btree_val {
 	__u8 flags;
 } __packed;

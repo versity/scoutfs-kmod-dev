@@ -122,4 +122,10 @@ int scoutfs_alloc_splice_list(struct super_block *sb,
 bool scoutfs_alloc_meta_lo_thresh(struct super_block *sb,
 				  struct scoutfs_alloc *alloc);
 
+typedef int (*scoutfs_alloc_foreach_cb_t)(struct super_block *sb, void *arg,
+					  int owner, u64 id,
+					  bool meta, bool avail, u64 blocks);
+int scoutfs_alloc_foreach(struct super_block *sb,
+			  scoutfs_alloc_foreach_cb_t cb, void *arg);
+
 #endif

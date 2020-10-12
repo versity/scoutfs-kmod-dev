@@ -43,6 +43,7 @@
 #include "forest.h"
 #include "srch.h"
 #include "item.h"
+#include "alloc.h"
 #include "scoutfs_trace.h"
 
 static struct dentry *scoutfs_debugfs_root;
@@ -78,11 +79,30 @@ retry:
 	return cpu_to_le64(ret);
 }
 
+struct statfs_free_blocks {
+	u64 meta;
+	u64 data;
+};
+
+static int count_free_blocks(struct super_block *sb, void *arg, int owner,
+			     u64 id, bool meta, bool avail, u64 blocks)
+{
+	struct statfs_free_blocks *sfb = arg;
+
+	if (meta)
+		sfb->meta += blocks;
+	else
+		sfb->data += blocks;
+
+	return 0;
+}
+
 /*
- * Ask the server for the current statfs fields.  The message is very
- * cheap so we're not worrying about spinning in statfs flooding the
- * server with requests.  We can add a cache and stale results if that
- * becomes a problem.
+ * Build the free block counts by having alloc read all the persistent
+ * blocks which contain allocators and calling us for each of them.
+ * Only the super block reads aren't cached so repeatedly calling statfs
+ * is like repeated O_DIRECT IO.  We can add a cache and stale results
+ * if that IO becomes a problem.
  *
  * We fake the number of free inodes value by assuming that we can fill
  * free blocks with a certain number of inodes.  We then the number of
@@ -95,30 +115,50 @@ retry:
 static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 {
 	struct super_block *sb = dentry->d_inode->i_sb;
-	struct scoutfs_net_statfs nstatfs;
+	struct scoutfs_super_block *super = NULL;
+	struct statfs_free_blocks sfb = {0,};
 	__le32 uuid[4];
 	int ret;
 
-	ret = scoutfs_client_statfs(sb, &nstatfs);
-	if (ret)
-		return ret;
+	scoutfs_inc_counter(sb, statfs);
 
-	kst->f_bfree = le64_to_cpu(nstatfs.bfree);
+	super = kzalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
+	if (!super) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = scoutfs_read_super(sb, super);
+	if (ret)
+		goto out;
+
+	ret = scoutfs_alloc_foreach(sb, count_free_blocks, &sfb);
+	if (ret < 0)
+		goto out;
+
+	kst->f_bfree = (sfb.meta << SCOUTFS_BLOCK_SM_LG_SHIFT) + sfb.data;
 	kst->f_type = SCOUTFS_SUPER_MAGIC;
 	kst->f_bsize = SCOUTFS_BLOCK_SM_SIZE;
-	kst->f_blocks = le64_to_cpu(nstatfs.total_blocks);
+	kst->f_blocks = (le64_to_cpu(super->total_meta_blocks) <<
+			 SCOUTFS_BLOCK_SM_LG_SHIFT) +
+			le64_to_cpu(super->total_data_blocks);
 	kst->f_bavail = kst->f_bfree;
 
-	kst->f_ffree = kst->f_bfree * 16;
-	kst->f_files = kst->f_ffree + le64_to_cpu(nstatfs.next_ino);
+	/* arbitrarily assume ~1K / empty file */
+	kst->f_ffree = sfb.meta * (SCOUTFS_BLOCK_LG_SIZE / 1024);
+	kst->f_files = kst->f_ffree + le64_to_cpu(super->next_ino);
 
-	BUILD_BUG_ON(sizeof(uuid) != sizeof(nstatfs.uuid));
-	memcpy(uuid, &nstatfs, sizeof(uuid));
+	BUILD_BUG_ON(sizeof(uuid) != sizeof(super->uuid));
+	memcpy(uuid, super->uuid, sizeof(uuid));
 	kst->f_fsid.val[0] = le32_to_cpu(uuid[0]) ^ le32_to_cpu(uuid[1]);
 	kst->f_fsid.val[1] = le32_to_cpu(uuid[2]) ^ le32_to_cpu(uuid[3]);
 	kst->f_namelen = SCOUTFS_NAME_LEN;
 	kst->f_frsize = SCOUTFS_BLOCK_SM_SIZE;
+
 	/* the vfs fills f_flags */
+	ret = 0;
+out:
+	kfree(super);
 
 	/*
 	 * We don't take cluster locks in statfs which makes it a very
@@ -128,7 +168,7 @@ static int scoutfs_statfs(struct dentry *dentry, struct kstatfs *kst)
 	if (scoutfs_trigger(sb, STATFS_LOCK_PURGE))
 		scoutfs_free_unused_locks(sb, -1UL);
 
-	return 0;
+	return ret;
 }
 
 static int scoutfs_show_options(struct seq_file *seq, struct dentry *root)

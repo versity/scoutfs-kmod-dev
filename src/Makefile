@@ -33,6 +33,7 @@ scoutfs-y +=			\
 	quorum.o		\
 	scoutfs_trace.o		\
 	server.o		\
+	sort_priv.o		\
 	spbm.o			\
 	srch.o			\
 	super.o			\

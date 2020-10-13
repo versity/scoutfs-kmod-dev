@@ -29,6 +29,7 @@
 #include "radix.h"
 #include "avl.h"
 #include "hash.h"
+#include "sort_priv.h"
 
 #include "scoutfs_trace.h"
 
@@ -53,12 +54,11 @@
  *
  * Values are allocated from the end of the block towards the front,
  * consuming the end of free space in the center of the block.  Deleted
- * values can be merged with this free space, but more likely they'll
- * create fragmented free space amongst other existing values.  All
- * values are stored with an offset at the end which contains either the
- * offset of their item or the offset of the start of their free space.
- * This lets an infrequent compaction process move items towards the
- * back of the block to reclaim free space.
+ * values create fragmented free space in other existing values.  Rather
+ * than tracking free space specifically, we compact values in bulk to
+ * defragment free space if there is enough of to be worth the cost of
+ * compaction.  When there's only a little bit of fragmented free space
+ * we split the block as usual.
  *
  * Exact item searches are only performed on leaf blocks.  Leaf blocks
  * have a hash table at the end of the block which is used to find items
@@ -88,7 +88,7 @@ enum {
 /* total length of the value payload */
 static inline unsigned int val_bytes(unsigned val_len)
 {
-	return val_len + (val_len ? SCOUTFS_BTREE_VAL_OWNER_BYTES : 0);
+	return val_len;
 }
 
 /* number of bytes in a block used by an item with the given value length */
@@ -351,98 +351,100 @@ static void leaf_item_hash_change(struct scoutfs_btree_block *bt,
 	}
 }
 
-/*
- * Given an offset to the start of a value, return info describing the
- * previous value in the block.  Each value ends with an owner offset
- * which points to either the value's item if it's in use or to the
- * start of the value if it's been freed.  Either the item is returned
- * or the length of the previous value is set.
- */
-static struct scoutfs_btree_item *
-get_prev_val_owner(struct scoutfs_btree_block *bt, unsigned int off,
-		   unsigned int *prev_val_bytes)
+static int cmp_sorted(void *priv, const void *A, const void *B)
 {
-	__le16 *owner = off_ptr(bt, off - sizeof(*owner));
-	unsigned int own = get_unaligned_le16(owner);
+	struct scoutfs_btree_block *bt = priv;
+	const unsigned short *a = A;
+	const unsigned short *b = B;
+	struct scoutfs_btree_item *item_a = &bt->items[*a];
+	struct scoutfs_btree_item *item_b = &bt->items[*b];
 
-	if (own >= mid_free_off(bt)) {
-		*prev_val_bytes = off - own;
-		return NULL;
-	} else {
-		*prev_val_bytes = 0;
-		return off_ptr(bt, own);
-	}
+	return scoutfs_cmp(le16_to_cpu(item_a->val_off),
+			   le16_to_cpu(item_b->val_off));
 }
 
-/*
- * Set the owner offset at the end of a full value, the given length includes
- * the offset.
- */
-static void set_val_owner(struct scoutfs_btree_block *bt, unsigned int val_off,
-			  unsigned int vb, __le16 item_off)
+static void swap_sorted(void *priv, void *A, void *B, int size)
 {
-	__le16 *owner = off_ptr(bt, val_off + vb - sizeof(*owner));
+	unsigned short *a = A;
+	unsigned short *b = B;
 
-	put_unaligned_le16(le16_to_cpu(item_off) ?: val_off, owner);
+	swap(*a, *b);
 }
 
 /*
  * As values are freed they can leave fragmented free space amongst
- * other values.  This is called when we can't insert because there
- * isn't enough free space but we know that there's sufficient free
- * space amongst the values for the new insertion.
+ * other values.  We compact the values by sorting an array of item
+ * indices by the offset of the item's values.  We can then walk values
+ * from the back of the block and pack them into contiguous space,
+ * bubbling any fragmented free space towards the middle.
  *
- * But we only want to do this when there is enough free space to
- * justify the cost of the compaction.  We don't want to bother
- * compacting if the block is almost full and we just be split in a few
- * more operations.  The split heuristic requires a generous amount of
+ * This is called when we can't insert because there isn't enough
+ * available free space in the middle of the block but we know that
+ * there's sufficient free fragmented space in the values.
+ *
+ * We only want to compact when there is enough free space to justify
+ * the cost of the compaction.  We don't want to bother compacting if
+ * the block is almost full and we just be split in a few more
+ * operations.  The split heuristic requires a generous amount of
  * fragmented free space that will avoid a split.
  */
-static void compact_values(struct super_block *sb,
-			   struct scoutfs_btree_block *bt)
+static int compact_values(struct super_block *sb,
+			  struct scoutfs_btree_block *bt)
 {
+	const int nr = le16_to_cpu(bt->nr_items);
 	struct scoutfs_btree_item *item;
-	unsigned int free_off;
-	unsigned int free_len;
+	unsigned short *sorted = NULL;
 	unsigned int to_off;
-	unsigned int end;
 	unsigned int vb;
 	void *from;
 	void *to;
+	int i;
 
 	scoutfs_inc_counter(sb, btree_compact_values);
 
-	if (bt->last_free_off == 0)
-		return;
+	BUILD_BUG_ON(sizeof(sorted[0]) != sizeof(bt->nr_items));
 
-	free_off = le16_to_cpu(bt->last_free_off);
-	free_len = le16_to_cpu(bt->last_free_len);
-	end = mid_free_off(bt) + le16_to_cpu(bt->mid_free_len);
-
-	while (free_off > end) {
-		item = get_prev_val_owner(bt, free_off, &vb);
-		if (item == NULL) {
-			free_off -= vb;
-			free_len += vb;
-			continue;
-		}
-
-		from = off_ptr(bt, le16_to_cpu(item->val_off));
-		vb = val_bytes(le16_to_cpu(item->val_len));
-		to_off = free_off + free_len - vb;
-		to = off_ptr(bt, to_off);
-		if (to >= from + vb)
-			memcpy(to, from, vb);
-		else
-			memmove(to, from, vb);
-
-		free_off = le16_to_cpu(item->val_off);
-		item->val_off = cpu_to_le16(to_off);
+	sorted = kmalloc_array(le16_to_cpu(bt->nr_items), sizeof(sorted[0]),
+			       GFP_NOFS);
+	if (!sorted) {
+		scoutfs_inc_counter(sb, btree_compact_values_enomem);
+		return -ENOMEM;
 	}
 
-	le16_add_cpu(&bt->mid_free_len, free_len);
-	bt->last_free_off = 0;
-	bt->last_free_len = 0;
+	/* sort the sorted array of item indices by their value offset */
+	for (i = 0; i < nr; i++)
+		sorted[i] = i;
+	sort_priv(bt, sorted, nr, sizeof(sorted[0]), cmp_sorted, swap_sorted);
+
+	to_off = SCOUTFS_BLOCK_LG_SIZE;
+	if (bt->level == 0)
+		to_off -= SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES;
+
+	/* move values towards the back of the block */
+	for (i = nr - 1; i >= 0; i--) {
+		item = &bt->items[sorted[i]];
+		if (item->val_len == 0)
+			continue;
+
+		vb = val_bytes(le16_to_cpu(item->val_len));
+		to_off -= vb;
+		from = off_ptr(bt, le16_to_cpu(item->val_off));
+		to = off_ptr(bt, to_off);
+
+		if (from != to) {
+			if (to >= from + vb)
+				memcpy(to, from, vb);
+			else
+				memmove(to, from, vb);
+
+			item->val_off = cpu_to_le16(to_off);
+		}
+	}
+
+	bt->mid_free_len = cpu_to_le16(to_off - mid_free_off(bt));
+
+	kfree(sorted);
+	return 0;
 }
 
 /*
@@ -467,60 +469,8 @@ static __le16 insert_value(struct scoutfs_btree_block *bt, __le16 item_off,
 	le16_add_cpu(&bt->mid_free_len, -vb);
 
 	memcpy(off_ptr(bt, val_off), val, val_len);
-	set_val_owner(bt, val_off, vb, item_off);
 
 	return cpu_to_le16(val_off);
-}
-
-/*
- * Delete an item's value from the block.  The caller has updated the
- * item.  We leave behind a free region whose owner offset indicates
- * that the value isn't in use.  It might merge with the central free
- * region or the final freed value, and might become the final freed
- * value.
- */
-static void delete_value(struct scoutfs_btree_block *bt,
-			 unsigned int val_off, unsigned int val_len)
-{
-	unsigned int free_off;
-	unsigned int free_len;
-	bool is_last;
-
-	if (val_len == 0)
-		return;
-
-	free_off = val_off;
-	free_len = val_bytes(val_len);
-	is_last = false;
-
-	/* see if we can merge with mid free region */
-	if (mid_free_off(bt) + le16_to_cpu(bt->mid_free_len) == free_off) {
-		le16_add_cpu(&bt->mid_free_len, free_len);
-		return;
-	}
-
-	if (free_off + free_len == le16_to_cpu(bt->last_free_off)) {
-		/* merge with front of last free */
-		free_len += le16_to_cpu(bt->last_free_len);
-		is_last = true;
-
-	} else if ((le16_to_cpu(bt->last_free_off) +
-		    le16_to_cpu(bt->last_free_len)) == free_off) {
-		/* merge with end of last free */
-		free_off = le16_to_cpu(bt->last_free_off);
-		free_len += le16_to_cpu(bt->last_free_len);
-		is_last = true;
-
-	} else if (free_off > le16_to_cpu(bt->last_free_off)) {
-		/* become new last */
-		is_last = true;
-	}
-
-	set_val_owner(bt, free_off, free_len, 0);
-	if (is_last) {
-		bt->last_free_off = cpu_to_le16(free_off);
-		bt->last_free_len = cpu_to_le16(free_len);
-	}
 }
 
 /*
@@ -589,18 +539,12 @@ static void delete_item(struct scoutfs_btree_block *bt,
 		item->key = last->key;
 		item->val_off = last->val_off;
 		item->val_len = last->val_len;
-		if (last->val_len)
-			set_val_owner(bt, le16_to_cpu(last->val_off),
-				      val_bytes(le16_to_cpu(last->val_len)),
-				      ptr_off(bt, item));
 		leaf_item_hash_change(bt, &last->key, ptr_off(bt, item),
 				      ptr_off(bt, last));
 		scoutfs_avl_relocate(&bt->item_root, &item->node,&last->node);
 		if (use_after && *use_after == last)
 			*use_after = item;
 	}
-
-	delete_value(bt, val_off, val_len);
 }
 
 /*
@@ -837,7 +781,7 @@ static void update_parent_item(struct scoutfs_btree_block *parent,
 	ref->seq = child->hdr.seq;
 }
 
-static void init_btree_block(struct scoutfs_btree_block *bt, int level)
+static __le16 init_mid_free_len(int level)
 {
 	int free;
 
@@ -845,8 +789,14 @@ static void init_btree_block(struct scoutfs_btree_block *bt, int level)
 	if (level == 0)
 		free -= SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES;
 
+	return cpu_to_le16(free);
+}
+
+static void init_btree_block(struct scoutfs_btree_block *bt, int level)
+{
+
 	bt->level = level;
-	bt->mid_free_len = cpu_to_le16(free);
+	bt->mid_free_len = init_mid_free_len(level);
 }
 
 /*
@@ -883,10 +833,8 @@ static int try_split(struct super_block *sb,
 	if (mid_free_item_room(right, val_len))
 		return 0;
 
-	if (item_full_pct(right) < 80) {
-		compact_values(sb, right);
-		return 0;
-	}
+	if (item_full_pct(right) < 80)
+		return compact_values(sb, right);
 
 	scoutfs_inc_counter(sb, btree_split);
 
@@ -979,8 +927,12 @@ static int try_join(struct super_block *sb,
 	else
 		to_move = sib_tot - join_low_watermark();
 
-	if (le16_to_cpu(bt->mid_free_len) < to_move)
-		compact_values(sb, bt);
+	if (le16_to_cpu(bt->mid_free_len) < to_move) {
+		ret = compact_values(sb, bt);
+		if (ret < 0)
+			scoutfs_block_put(sb, sib_bl);
+		return ret;
+	}
 	move_items(bt, sib, move_right, to_move);
 
 	/* update our parent's item */
@@ -1052,7 +1004,6 @@ static void verify_btree_block(struct super_block *sb,
 	char *reason = NULL;
 	int first_val = 0;
 	int hashed = 0;
-	__le16 *owner;
 	int end_off;
 	int tot = 0;
 	int i = 0;
@@ -1110,8 +1061,7 @@ static void verify_btree_block(struct super_block *sb,
 		}
 
 		if (((int)le16_to_cpu(item->val_off) +
-		     le16_to_cpu(item->val_len) +
-		     SCOUTFS_BTREE_VAL_OWNER_BYTES) > end_off) {
+		     le16_to_cpu(item->val_len)) > end_off) {
 			reason = "item value outside valid";
 			goto out;
 		}
@@ -1120,15 +1070,6 @@ static void verify_btree_block(struct super_block *sb,
 		       le16_to_cpu(item->val_len);
 
 		if (item->val_len != 0) {
-			owner = off_ptr(bt, le16_to_cpu(item->val_off) +
-					le16_to_cpu(item->val_len));
-			if (get_unaligned_le16(owner) !=
-			    offsetof(struct scoutfs_btree_block, items[i])) {
-				reason = "item value owner not item off";
-				goto out;
-			}
-
-			tot += SCOUTFS_BTREE_VAL_OWNER_BYTES;
 			first_val = min_t(int, first_val,
 					  le16_to_cpu(item->val_off));
 		}
@@ -1176,10 +1117,9 @@ out:
 		le64_to_cpu(bt->hdr.fsid), le64_to_cpu(bt->hdr.seq),
 		le64_to_cpu(bt->hdr.blkno));
 	printk("item_root: node %u\n", le16_to_cpu(bt->item_root.node));
-	printk("nr %u tib %u mfl %u lfo %u lfl %u lvl %u\n",
+	printk("nr %u tib %u mfl %u lvl %u\n",
 		le16_to_cpu(bt->nr_items), le16_to_cpu(bt->total_item_bytes),
-		le16_to_cpu(bt->mid_free_len), le16_to_cpu(bt->last_free_off),
-		le16_to_cpu(bt->last_free_len), bt->level);
+		le16_to_cpu(bt->mid_free_len), bt->level);
 
 	for (i = 0; i < le16_to_cpu(bt->nr_items); i++) {
 		item = &bt->items[i];
@@ -1514,8 +1454,6 @@ static void update_item_value(struct scoutfs_btree_block *bt,
 {
 	le16_add_cpu(&bt->total_item_bytes, val_bytes(val_len) -
 		     val_bytes(le16_to_cpu(item->val_len)));
-	delete_value(bt, le16_to_cpu(item->val_off),
-		     le16_to_cpu(item->val_len));
 	item->val_off = insert_value(bt, ptr_off(bt, item), val, val_len);
 	item->val_len = cpu_to_le16(val_len);
 }

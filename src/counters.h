@@ -23,6 +23,7 @@
 	EXPAND_COUNTER(block_cache_lru_move)			\
 	EXPAND_COUNTER(block_cache_shrink)			\
 	EXPAND_COUNTER(btree_compact_values)			\
+	EXPAND_COUNTER(btree_compact_values_enomem)		\
 	EXPAND_COUNTER(btree_delete)				\
 	EXPAND_COUNTER(btree_dirty)				\
 	EXPAND_COUNTER(btree_force)				\

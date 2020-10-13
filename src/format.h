@@ -212,9 +212,6 @@ struct scoutfs_avl_node {
 /* when we split we want to have multiple items on each side */
 #define SCOUTFS_BTREE_MAX_VAL_LEN 896
 
-/* each value ends with an offset which lets compaction iterate over values */
-#define SCOUTFS_BTREE_VAL_OWNER_BYTES	sizeof(__le16)
-
 /*
  * A 4EB test image measured a worst case height of 17.  This is plenty
  * generous.
@@ -248,8 +245,6 @@ struct scoutfs_btree_block {
 	__le16 nr_items;
 	__le16 total_item_bytes;
 	__le16 mid_free_len;
-	__le16 last_free_off;
-	__le16 last_free_len;
 	__u8 level;
 	struct scoutfs_btree_item items[0];
 	/* leaf blocks have a fixed size item offset hash table at the end */

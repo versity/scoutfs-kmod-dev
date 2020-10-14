@@ -374,27 +374,39 @@ struct scoutfs_srch_block {
 #define SCOUTFS_SRCH_COMPACT_ORDER	3
 #define SCOUTFS_SRCH_COMPACT_NR		(1 << SCOUTFS_SRCH_COMPACT_ORDER)
 
-struct scoutfs_srch_compact_input {
+/*
+ * A persistent record of a srch file compaction operation in progress.
+ *
+ * When compacting log files blk and pos aren't used.  When compacting
+ * sorted files blk is the logical block number and pos is the byte
+ * offset of the next entry.  When deleting files pos is the height of
+ * the level that we're deleting, and blk is the logical block offset of
+ * the next parent ref array index to descend through.
+ */
+struct scoutfs_srch_compact {
 	struct scoutfs_alloc_list_head meta_avail;
 	struct scoutfs_alloc_list_head meta_freed;
 	__le64 id;
 	__u8 nr;
 	__u8 flags;
-	struct scoutfs_srch_file sfl[SCOUTFS_SRCH_COMPACT_NR];
+	struct scoutfs_srch_file out;
+	struct scoutfs_srch_compact_input {
+		struct scoutfs_srch_file sfl;
+		__le64 blk;
+		__le64 pos;
+	} in[SCOUTFS_SRCH_COMPACT_NR] __packed;
 } __packed;
 
-struct scoutfs_srch_compact_result {
-	struct scoutfs_alloc_list_head meta_avail;
-	struct scoutfs_alloc_list_head meta_freed;
-	__le64 id;
-	__u8 flags;
-	struct scoutfs_srch_file sfl;
-} __packed;
-
-/* files are insorted logs */
-#define SCOUTFS_SRCH_COMPACT_FLAG_LOG (1 << 0)
-/* compaction failed, release inputs */
-#define SCOUTFS_SRCH_COMPACT_FLAG_ERROR (1 << 1)
+/* server -> client: combine input log file entries into output file */
+#define SCOUTFS_SRCH_COMPACT_FLAG_LOG		(1 << 0)
+/* server -> client: combine input sorted file entries into output file */
+#define SCOUTFS_SRCH_COMPACT_FLAG_SORTED	(1 << 1)
+/* server -> client: delete input files */
+#define SCOUTFS_SRCH_COMPACT_FLAG_DELETE	(1 << 2)
+/* client -> server: compaction phase (LOG,SORTED,DELETE) done */
+#define SCOUTFS_SRCH_COMPACT_FLAG_DONE		(1 << 4)
+/* client -> server: compaction failed */
+#define SCOUTFS_SRCH_COMPACT_FLAG_ERROR		(1 << 5)
 
 /*
  * XXX I imagine we should rename these now that they've evolved to track
@@ -496,7 +508,8 @@ struct scoutfs_bloom_block {
 /* srch zone, only in server btrees */
 #define SCOUTFS_SRCH_LOG_TYPE		1
 #define SCOUTFS_SRCH_BLOCKS_TYPE	2
-#define SCOUTFS_SRCH_BUSY_TYPE		3
+#define SCOUTFS_SRCH_PENDING_TYPE	3
+#define SCOUTFS_SRCH_BUSY_TYPE		4
 
 /* free extents in allocator btrees in client and server, by blkno or len */
 #define SCOUTFS_FREE_EXTENT_BLKNO_TYPE	1

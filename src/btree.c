@@ -88,7 +88,7 @@ enum {
 /* total length of the value payload */
 static inline unsigned int val_bytes(unsigned val_len)
 {
-	return val_len;
+	return round_up(val_len, SCOUTFS_BTREE_VALUE_ALIGN);
 }
 
 /* number of bytes in a block used by an item with the given value length */
@@ -1023,6 +1023,8 @@ static void verify_btree_block(struct super_block *sb,
 		reason = "unexpected level";
 		goto out;
 	}
+
+	BUILD_BUG_ON(SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES % SCOUTFS_BTREE_VALUE_ALIGN != 0);
 
 	end_off = SCOUTFS_BLOCK_LG_SIZE -
 		  (level ? 0 : SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES);

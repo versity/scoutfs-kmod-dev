@@ -234,14 +234,19 @@ struct scoutfs_btree_block {
 	/* leaf blocks have a fixed size item offset hash table at the end */
 } __packed;
 
+#define SCOUTFS_BTREE_VALUE_ALIGN 8
+
 /*
  * Try to aim for a 75% load in a leaf full of items with no value.
  * We'll almost never see this because most items have values and most
  * blocks aren't full.
  */
-#define SCOUTFS_BTREE_LEAF_ITEM_HASH_NR					  \
+#define SCOUTFS_BTREE_LEAF_ITEM_HASH_NR_UNALIGNED			  \
 	((SCOUTFS_BLOCK_LG_SIZE - sizeof(struct scoutfs_btree_block)) /	  \
 	 (sizeof(struct scoutfs_btree_item) + (sizeof(__le16))) * 100 / 75)
+#define SCOUTFS_BTREE_LEAF_ITEM_HASH_NR					  \
+	(round_up(SCOUTFS_BTREE_LEAF_ITEM_HASH_NR_UNALIGNED,		  \
+		  SCOUTFS_BTREE_VALUE_ALIGN))
 #define SCOUTFS_BTREE_LEAF_ITEM_HASH_BYTES \
 	(SCOUTFS_BTREE_LEAF_ITEM_HASH_NR * sizeof(__le16))
 

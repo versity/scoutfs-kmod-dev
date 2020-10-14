@@ -42,18 +42,17 @@ int scoutfs_srch_get_compact(struct super_block *sb,
 			     struct scoutfs_alloc *alloc,
 			     struct scoutfs_block_writer *wri,
 			     struct scoutfs_btree_root *root,
-			     u64 rid,
-			     struct scoutfs_srch_compact_input *scin_ret);
+			     u64 rid, struct scoutfs_srch_compact *sc);
 int scoutfs_srch_update_compact(struct super_block *sb,
 				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
-				struct scoutfs_srch_compact_input *scin);
+				struct scoutfs_srch_compact *sc);
 int scoutfs_srch_commit_compact(struct super_block *sb,
 				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
-				struct scoutfs_srch_compact_result *scres,
+				struct scoutfs_srch_compact *res,
 				struct scoutfs_alloc_list_head *av,
 				struct scoutfs_alloc_list_head *fr);
 int scoutfs_srch_cancel_compact(struct super_block *sb,

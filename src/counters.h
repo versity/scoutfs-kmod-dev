@@ -155,7 +155,6 @@
 	EXPAND_COUNTER(srch_compact_dirty_block)		\
 	EXPAND_COUNTER(srch_compact_entry)			\
 	EXPAND_COUNTER(srch_compact_flush)			\
-	EXPAND_COUNTER(srch_compact_free_block)			\
 	EXPAND_COUNTER(srch_compact_log_page)			\
 	EXPAND_COUNTER(srch_compact_removed_entry)		\
 	EXPAND_COUNTER(srch_inconsistent_ref)			\

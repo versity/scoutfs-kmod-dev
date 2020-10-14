@@ -299,6 +299,58 @@ retry:
 }
 
 /*
+ * Give the caller a read-only reference to the block along the path to
+ * the logical block at the given level.  This shouldn't be called on an
+ * empty root.
+ */
+static int read_path_block(struct super_block *sb,
+			   struct scoutfs_block_writer *wri,
+			   struct scoutfs_srch_file *sfl,
+			   u64 blk, int at_level,
+			   struct scoutfs_block **bl_ret)
+{
+	struct scoutfs_block *bl = NULL;
+	struct scoutfs_srch_parent *srp;
+	struct scoutfs_srch_ref ref;
+	int level;
+	int ind;
+	int ret;
+
+	if (WARN_ON_ONCE(at_level < 0 || at_level >= sfl->height))
+		return -EINVAL;
+
+	level = sfl->height;
+	ref = sfl->ref;
+	while (level--) {
+		if (ref.blkno == 0) {
+			ret = -ENOENT;
+			break;
+		}
+
+		ret = read_srch_block(sb, wri, level, &ref, &bl);
+		if (ret < 0)
+			break;
+
+		if (level == at_level) {
+			ret = 0;
+			break;
+		}
+
+		srp = bl->data;
+		ind = calc_ref_ind(blk, level);
+		ref = srp->refs[ind];
+		scoutfs_block_put(sb, bl);
+		bl = NULL;
+	}
+
+	if (ret < 0)
+		scoutfs_block_put(sb, bl);
+	else
+		*bl_ret = bl;
+	return ret;
+}
+
+/*
  * Walk radix blocks to find the logical file block and return the
  * reference to the caller.  Flags determine if we cow new dirty blocks,
  * allocate new blocks, or return errors for missing blocks (files are
@@ -1011,20 +1063,19 @@ int scoutfs_srch_rotate_log(struct super_block *sb,
 }
 
 /*
- * Running in the server, find candidates for a compaction operation.
- * We see if any tier has enough files waiting for a compaction.  We
- * first search log files and then each greater size tier.  We skip any
- * files which are currently referenced by existing compaction busy
- * items.
+ * Running in the server, get a compaction operation to send to the
+ * client.  We first see if there are any pending operations to continue
+ * working on.  If not, we see if any tier has enough files waiting for
+ * a compaction.  We first search log files and then each greater size
+ * tier.  We skip input files which are currently being read by busy
+ * compaction items.
  */
 int scoutfs_srch_get_compact(struct super_block *sb,
 			     struct scoutfs_alloc *alloc,
 			     struct scoutfs_block_writer *wri,
 			     struct scoutfs_btree_root *root,
-			     u64 rid,
-			     struct scoutfs_srch_compact_input *scin)
+			     u64 rid, struct scoutfs_srch_compact *sc)
 {
-	struct scoutfs_srch_compact_input busy_scin = {{{0,}}};
 	struct scoutfs_srch_file sfl;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_spbm busy;
@@ -1033,22 +1084,26 @@ int scoutfs_srch_get_compact(struct super_block *sb,
 	int order;
 	int type;
 	int ret;
+	int err;
 	int i;
 
-	/* build up a bitmap of file files already being compacted */
+	/*
+	 * Search for pending or busy items.  If we find a pending item
+	 * we move it to busy and return it.  We build up a bitmap of
+	 * input files which are in busy items.
+	 */
 	scoutfs_spbm_init(&busy);
-	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, 0, 0);
+	for (init_srch_key(&key, SCOUTFS_SRCH_PENDING_TYPE, 0, 0);  ;
+	     scoutfs_key_inc(&key)) {
 
-	for (;;) {
-		/* _BUSY_ is last type, _next won't see other types */
+		/* _PENDING_ and _BUSY_ are last, _next won't see other types */
 		ret = scoutfs_btree_next(sb, root, &key, &iref);
 		if (ret == -ENOENT)
 			break;
 		if (ret == 0) {
-			if (iref.val_len == sizeof(busy_scin)) {
+			if (iref.val_len == sizeof(*sc)) {
 				key = *iref.key;
-				scoutfs_key_inc(&key);
-				memcpy(&busy_scin, iref.val, iref.val_len);
+				memcpy(sc, iref.val, iref.val_len);
 			} else {
 				ret = -EIO;
 			}
@@ -1057,24 +1112,53 @@ int scoutfs_srch_get_compact(struct super_block *sb,
 		if (ret < 0)
 			goto out;
 
-		for (i = 0; i < busy_scin.nr; i++) {
-			ret = scoutfs_spbm_set(&busy,
-				le64_to_cpu(busy_scin.sfl[i].ref.blkno));
-			if (ret < 0)
-				goto out;
+		/* record all the busy input files */
+		if (key.sk_type == SCOUTFS_SRCH_BUSY_TYPE) {
+			for (i = 0; i < sc->nr; i++) {
+				ret = scoutfs_spbm_set(&busy,
+					le64_to_cpu(sc->in[i].sfl.ref.blkno));
+				if (ret < 0)
+					goto out;
+			}
+			continue;
 		}
+
+		/* or move the first pending to busy and return it */
+		init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid,
+			      le64_to_cpu(sc->id));
+		ret = scoutfs_btree_insert(sb, alloc, wri, root, &key,
+					   sc, sizeof(*sc));
+		if (ret < 0)
+			goto out;
+
+		init_srch_key(&key, SCOUTFS_SRCH_PENDING_TYPE,
+			      le64_to_cpu(sc->id), 0);
+		ret = scoutfs_btree_delete(sb, alloc, wri, root, &key);
+		if (ret < 0) {
+			init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid,
+				      le64_to_cpu(sc->id));
+			err = scoutfs_btree_delete(sb, alloc, wri, root, &key);
+			BUG_ON(err); /* XXX both pending and busy :/ */
+			goto out;
+		}
+
+		/* found one */
+		ret = 0;
+		goto out;
 	}
+
+	/* no pending, look for sufficient files to start a new compaction */
+	memset(sc, 0, sizeof(struct scoutfs_srch_compact));
 
 	/* first look for unsorted log files */
 	type = SCOUTFS_SRCH_LOG_TYPE;
 	init_srch_key(&key, type, 0, 0);
 
-	scin->nr = 0;
 	for (;;scoutfs_key_inc(&key)) {
 		ret = scoutfs_btree_next(sb, root, &key, &iref);
 		if (ret == -ENOENT) {
 			ret = 0;
-			scin->nr = 0;
+			sc->nr = 0;
 			goto out;
 		}
 
@@ -1096,7 +1180,7 @@ int scoutfs_srch_get_compact(struct super_block *sb,
 
 		/* see if we ran out of log files or files entirely */
 		if (key.sk_type != type) {
-			scin->nr = 0;
+			sc->nr = 0;
 			if (key.sk_type == SCOUTFS_SRCH_BLOCKS_TYPE) {
 				type = SCOUTFS_SRCH_BLOCKS_TYPE;
 			} else {
@@ -1111,33 +1195,35 @@ int scoutfs_srch_get_compact(struct super_block *sb,
 				SCOUTFS_SRCH_COMPACT_ORDER;
 			if (order != cur_order) {
 				cur_order = order;
-				scin->nr = 0;
+				sc->nr = 0;
 			}
 		}
 
-		scin->sfl[scin->nr++] = sfl;
-		if (scin->nr == SCOUTFS_SRCH_COMPACT_NR)
+		sc->in[sc->nr++].sfl = sfl;
+		if (sc->nr == SCOUTFS_SRCH_COMPACT_NR)
 			break;
 
 		scoutfs_key_inc(&key);
 	}
 
 	if (type == SCOUTFS_SRCH_LOG_TYPE)
-		scin->flags = SCOUTFS_SRCH_COMPACT_FLAG_LOG;
+		sc->flags = SCOUTFS_SRCH_COMPACT_FLAG_LOG;
+	else
+		sc->flags = SCOUTFS_SRCH_COMPACT_FLAG_SORTED;
 
 	/* record that our client has a compaction in process */
-	scin->id = scin->sfl[0].ref.blkno;
-	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid, le64_to_cpu(scin->id));
+	sc->id = sc->in[0].sfl.ref.blkno;
+
+	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid, le64_to_cpu(sc->id));
 	ret = scoutfs_btree_insert(sb, alloc, wri, root, &key,
-				   scin, sizeof(*scin));
+				   sc, sizeof(*sc));
 out:
 	scoutfs_spbm_destroy(&busy);
 	if (ret < 0)
-		scin->nr = 0;
-	if (scin->nr < SCOUTFS_SRCH_COMPACT_NR)
-		memset(&scin->sfl[scin->nr], 0,
-		       (SCOUTFS_SRCH_COMPACT_NR - scin->nr) *
-		       sizeof(scin->sfl[0]));
+		sc->nr = 0;
+	if (sc->nr < SCOUTFS_SRCH_COMPACT_NR)
+		memset(&sc->in[sc->nr], 0,
+		       (SCOUTFS_SRCH_COMPACT_NR - sc->nr) * sizeof(sc->in[0]));
 	return ret;
 }
 
@@ -1150,88 +1236,129 @@ int scoutfs_srch_update_compact(struct super_block *sb,
 				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
-				struct scoutfs_srch_compact_input *scin)
+				struct scoutfs_srch_compact *sc)
 {
 	struct scoutfs_key key;
 
-	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid, le64_to_cpu(scin->id));
+	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid, le64_to_cpu(sc->id));
 	return scoutfs_btree_update(sb, alloc, wri, root, &key,
-				    scin, sizeof(*scin));
+				    sc, sizeof(struct scoutfs_srch_compact));
 }
 
-static int mod_srch_items(struct super_block *sb,
-			  struct scoutfs_alloc *alloc,
-			  struct scoutfs_block_writer *wri,
-			  struct scoutfs_btree_root *root, u8 scom_flags,
-			  bool ins, struct scoutfs_srch_file *sfls, int nr)
+static void init_file_key(struct scoutfs_key *key, int type,
+			  struct scoutfs_srch_file *sfl)
+{
+	if (type == SCOUTFS_SRCH_LOG_TYPE)
+		init_srch_key(key, type, le64_to_cpu(sfl->ref.blkno), 0);
+	else
+		init_srch_key(key, type, le64_to_cpu(sfl->blocks),
+			      le64_to_cpu(sfl->ref.blkno));
+}
+
+/*
+ * A compaction has completed so we remove the input file reference
+ * items and add the output file, if it has contents.  If this returns
+ * an error then the file items were not changed.
+ */
+static int commit_files(struct super_block *sb, struct scoutfs_alloc *alloc,
+			struct scoutfs_block_writer *wri,
+			struct scoutfs_btree_root *root,
+			struct scoutfs_srch_compact *sc)
 {
 	struct scoutfs_srch_file *sfl;
 	struct scoutfs_key key;
-	int ret = 0;
 	int type;
+	int ret;
+	int err;
 	int i;
 
-	if (nr <= 0)
-		return 0;
-
-	if (scom_flags & SCOUTFS_SRCH_COMPACT_FLAG_LOG)
+	if (sc->flags & SCOUTFS_SRCH_COMPACT_FLAG_LOG)
 		type = SCOUTFS_SRCH_LOG_TYPE;
 	else
 		type = SCOUTFS_SRCH_BLOCKS_TYPE;
 
-	for (i = 0; i < nr; i++) {
-		sfl = &sfls[i];
-
-		/* don't bother inserting empty files */
-		if (ins && sfl->entries == 0)
-			continue;
-
-		if (type == SCOUTFS_SRCH_LOG_TYPE)
-			init_srch_key(&key, type,
-				      le64_to_cpu(sfl->ref.blkno), 0);
-		else
-			init_srch_key(&key, type,
-				      le64_to_cpu(sfl->blocks),
-				      le64_to_cpu(sfl->ref.blkno));
-
-		if (ins)
-			ret = scoutfs_btree_insert(sb, alloc, wri, root, &key,
-						   sfl, sizeof(*sfl));
-		else
-			ret = scoutfs_btree_delete(sb, alloc, wri, root, &key);
+	if (sc->out.blocks != 0) {
+		sfl = &sc->out;
+		init_file_key(&key, SCOUTFS_SRCH_BLOCKS_TYPE, sfl);
+		ret = scoutfs_btree_insert(sb, alloc, wri, root, &key,
+					   sfl, sizeof(*sfl));
 		if (ret < 0)
-			break;
+			goto out;
 	}
 
+	for (i = 0; i < sc->nr; i++) {
+		sfl = &sc->in[i].sfl;
+		init_file_key(&key, type, sfl);
+
+		ret = scoutfs_btree_delete(sb, alloc, wri, root, &key);
+		if (ret < 0) {
+			while (--i >= 0) {
+				sfl = &sc->in[i].sfl;
+				init_file_key(&key, type, sfl);
+
+				err = scoutfs_btree_insert(sb, alloc, wri,
+							   root, &key,
+							   sfl, sizeof(*sfl));
+				BUG_ON(err); /* lost srch file */
+			}
+
+			if (sc->out.blocks != 0) {
+				sfl = &sc->out;
+				init_file_key(&key, SCOUTFS_SRCH_BLOCKS_TYPE,
+					      sfl);
+				err = scoutfs_btree_delete(sb, alloc, wri,
+							   root, &key);
+				BUG_ON(err); /* duplicate srch files data */
+			}
+			goto out;
+		}
+	}
+
+	ret = 0;
+out:
 	return ret;
 }
 
 /*
  * Running in the server: commit the result of a compaction.  Given the
- * response id, find the input files in the compact's busy item.  Remove
- * the input files, add the new sorted file, and remove the busy item.
- * We give the caller the allocator trees to merge if we return success.
+ * response id, find the compaction's busy item.  The busy item is
+ * returned to a pending item or is advanced depending on the result.
+ * If the compaction completed then we replace the input files with the
+ * output files and transition the compaction to delete the input files.
+ * Once the input files are deleted we can remove the compaction item.
  */
 int scoutfs_srch_commit_compact(struct super_block *sb,
 				struct scoutfs_alloc *alloc,
 				struct scoutfs_block_writer *wri,
 				struct scoutfs_btree_root *root, u64 rid,
-				struct scoutfs_srch_compact_result *scres,
+				struct scoutfs_srch_compact *res,
 				struct scoutfs_alloc_list_head *av,
 				struct scoutfs_alloc_list_head *fr)
 {
-	struct scoutfs_srch_compact_input scin;
+	struct scoutfs_srch_compact *pending = NULL;
+	struct scoutfs_srch_compact *busy;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key key;
 	int ret;
+	int err;
+	int i;
+
+	/* only free allocators when we finish deleting */
+	memset(av, 0, sizeof(struct scoutfs_alloc_list_head));
+	memset(fr, 0, sizeof(struct scoutfs_alloc_list_head));
+
+	busy = kzalloc(sizeof(struct scoutfs_srch_compact), GFP_NOFS);
+	if (busy == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	/* find the record of our compaction */
-	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid,
-		      le64_to_cpu(scres->id));
+	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid, le64_to_cpu(res->id));
 	ret = scoutfs_btree_lookup(sb, root, &key, &iref);
 	if (ret == 0) {
-		if (iref.val_len == sizeof(scin))
-			memcpy(&scin, iref.val, iref.val_len);
+		if (iref.val_len == sizeof(struct scoutfs_srch_compact))
+			memcpy(busy, iref.val, iref.val_len);
 		else
 			ret = -EIO;
 		scoutfs_btree_put_iref(&iref);
@@ -1239,27 +1366,68 @@ int scoutfs_srch_commit_compact(struct super_block *sb,
 	if (ret < 0) /* XXX leaks allocators */
 		goto out;
 
-	if (!(scres->flags & SCOUTFS_SRCH_COMPACT_FLAG_ERROR)) {
-		/* delete old items and insert new file items */
-		ret = mod_srch_items(sb, alloc, wri, root, scin.flags, false,
-				     scin.sfl, scin.nr) ?:
-		      mod_srch_items(sb, alloc, wri, root, 0, true,
-				     &scres->sfl, 1);
-		if (ret < 0)
-			goto out;
-
-		*av = scres->meta_avail;
-		*fr = scres->meta_freed;
-	} else {
-		/* reclaim input allocators on error */
-		*av = scin.meta_avail;
-		*fr = scin.meta_freed;
+	/* restore busy to pending if the operation failed */
+	if (res->flags & SCOUTFS_SRCH_COMPACT_FLAG_ERROR) {
+		pending = busy;
+		ret = 0;
+		goto update;
 	}
 
-	/* delete the record of our compaction */
+	/* store result as pending if it isn't done */
+	if (!(res->flags & SCOUTFS_SRCH_COMPACT_FLAG_DONE)) {
+		pending = res;
+		ret = 0;
+		goto update;
+	}
+
+	/* update file references if we finished compaction (!deleting) */
+	if (!(res->flags & SCOUTFS_SRCH_COMPACT_FLAG_DELETE)) {
+		ret = commit_files(sb, alloc, wri, root, res);
+		if (ret < 0) {
+			/* XXX we can't commit, shutdown? */
+			goto out;
+		}
+
+		/* transition flags for deleting input files */
+		for (i = 0; i < res->nr; i++) {
+			res->in[i].blk = 0;
+			res->in[i].pos = 0;
+		}
+		res->flags &= ~(SCOUTFS_SRCH_COMPACT_FLAG_DONE |
+			        SCOUTFS_SRCH_COMPACT_FLAG_LOG |
+			        SCOUTFS_SRCH_COMPACT_FLAG_SORTED);
+		res->flags |= SCOUTFS_SRCH_COMPACT_FLAG_DELETE;
+		pending = res;
+		ret = 0;
+		goto update;
+	}
+
+	/* ok, finished deleting, reclaim allocs and delete busy */
+	*av = res->meta_avail;
+	*fr = res->meta_freed;
+	pending = NULL;
+	ret = 0;
+update:
+	if (pending) {
+		init_srch_key(&key, SCOUTFS_SRCH_PENDING_TYPE,
+			      le64_to_cpu(pending->id), 0);
+		ret = scoutfs_btree_insert(sb, alloc, wri, root, &key,
+					   pending, sizeof(*pending));
+		if (ret < 0)
+			goto out;
+	}
+
+	init_srch_key(&key, SCOUTFS_SRCH_BUSY_TYPE, rid, le64_to_cpu(res->id));
 	ret = scoutfs_btree_delete(sb, alloc, wri, root, &key);
+	if (ret < 0 && pending) {
+		init_srch_key(&key, SCOUTFS_SRCH_PENDING_TYPE,
+			      le64_to_cpu(pending->id), 0);
+		err = scoutfs_btree_delete(sb, alloc, wri, root, &key);
+		BUG_ON(err); /* both busy and pending present */
+	}
 out:
 	WARN_ON_ONCE(ret < 0); /* XXX inconsistency */
+	kfree(busy);
 	return ret;
 }
 
@@ -1274,7 +1442,7 @@ int scoutfs_srch_cancel_compact(struct super_block *sb,
 				struct scoutfs_alloc_list_head *av,
 				struct scoutfs_alloc_list_head *fr)
 {
-	struct scoutfs_srch_compact_input scin;
+	struct scoutfs_srch_compact *sc;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key key;
 	struct scoutfs_key last;
@@ -1287,23 +1455,34 @@ int scoutfs_srch_cancel_compact(struct super_block *sb,
 	if (ret == 0) {
 		if (scoutfs_key_compare(iref.key, &last) > 0) {
 			ret = -ENOENT;
-		} else if (iref.val_len != sizeof(scin)) {
+		} else if (iref.val_len != sizeof(*sc)) {
 			ret = -EIO;
 		} else {
 			key = *iref.key;
-			memcpy(&scin, iref.val, iref.val_len);
+			sc = iref.val;
+			*av = sc->meta_avail;
+			*fr = sc->meta_freed;
 		}
 		scoutfs_btree_put_iref(&iref);
 	}
 	if (ret < 0)
 		goto out;
 
-	*av = scin.meta_avail;
-	*fr = scin.meta_freed;
-
 	ret = scoutfs_btree_delete(sb, alloc, wri, root, &key);
 out:
 	return ret;
+}
+
+/*
+ * We're done with an operation when we have sufficient dirty blocks or
+ * run out of avail or freed allocator space.
+ */
+static bool should_commit(struct super_block *sb, struct scoutfs_alloc *alloc,
+			  struct scoutfs_block_writer *wri)
+{
+	return (scoutfs_block_writer_dirty_bytes(sb, wri) >=
+		SRCH_COMPACT_DIRTY_LIMIT_BYTES) ||
+		scoutfs_alloc_meta_lo_thresh(sb, alloc);
 }
 
 struct tourn_node {
@@ -1345,6 +1524,7 @@ static int kway_merge(struct super_block *sb,
 	struct tourn_node *tn;
 	int nr_parents;
 	int nr_nodes;
+	int empty = 0;
 	int ret = 0;
 	u64 blk;
 	int ind;
@@ -1370,29 +1550,29 @@ static int kway_merge(struct super_block *sb,
 		tn = &leaves[i];
 		tn->ind = i;
 		ret = kway_next(sb, &tn->sre, args[i]);
-		if (ret < 0)
+		if (ret == 0) {
+			tourn_update(tnodes, &leaves[i]);
+		} else if (ret == -ENOENT) {
+			memset(&tn->sre, 0xff, sizeof(tn->sre));
+			empty++;
+		} else {
 			goto out;
+		}
 	}
 
-	/* prepare parents.. not optimal, but not a big deal either */
-	for (i = 0; i < nr; i += 2)
-		tourn_update(tnodes, &leaves[i]);
-
-	blk = 0;
-	while (nr > 0) {
+	/* always append new blocks */
+	blk = le64_to_cpu(sfl->blocks);
+	while (empty < nr) {
 		if (bl == NULL) {
 			if (atomic_read(&srinf->shutdown)) {
 				ret = -ESHUTDOWN;
 				goto out;
 			}
 
-			/* check dirty limit before each block creation */
-			if (scoutfs_block_writer_dirty_bytes(sb, wri) >=
-			    SRCH_COMPACT_DIRTY_LIMIT_BYTES) {
-				scoutfs_inc_counter(sb, srch_compact_flush);
-				ret = scoutfs_block_writer_write(sb, wri);
-				if (ret < 0)
-					goto out;
+			/* check for committing before dirtying blocks */
+			if (should_commit(sb, alloc, wri)) {
+				ret = 0;
+				goto out;
 			}
 
 			ret = get_file_block(sb, alloc, wri, sfl,
@@ -1446,7 +1626,7 @@ static int kway_merge(struct super_block *sb,
 		if (ret == -ENOENT) {
 			/* this index is done */
 			memset(&tn->sre, 0xff, sizeof(tn->sre));
-			nr--;
+			empty++;
 			ret = 0;
 		} else if (ret < 0) {
 			goto out;
@@ -1524,37 +1704,43 @@ static void swap_page_sre(void *A, void *B, int size)
  * the input log files entries are encoded so we can allocate quite a
  * bit more memory in pages than the files took in blocks on disk (~2x
  * typically, ~10x worst case).
+ *
+ * Because we read and sort all the input files we must perform the full
+ * compaction in one operation.  The server must have given us a
+ * sufficiently large avail/freed lists, otherwise we'll return ENOSPC.
  */
 static int compact_logs(struct super_block *sb,
 			struct scoutfs_alloc *alloc,
 			struct scoutfs_block_writer *wri,
-			struct scoutfs_srch_file *sfl_out,
-			struct scoutfs_srch_file *sfls, int nr_sfls)
+			struct scoutfs_srch_compact *sc)
 {
 	DECLARE_SRCH_INFO(sb, srinf);
-	struct scoutfs_srch_file *sfl_end = sfls + nr_sfls;
-	struct scoutfs_srch_file *sfl = &sfls[0];
 	struct scoutfs_srch_block *srb = NULL;
 	struct scoutfs_srch_entry *sre;
 	struct scoutfs_srch_entry prev;
 	struct scoutfs_block *bl = NULL;
+	struct scoutfs_srch_file *sfl;
 	struct page *page = NULL;
 	struct page *tmp;
 	void **args = NULL;
 	int nr_pages = 0;
 	LIST_HEAD(pages);
+	int sfl_ind;
 	u64 blk = 0;
 	int pos = 0;
 	int ret;
 	int i;
 
-	if (WARN_ON_ONCE(nr_sfls <= 1))
-		return -EINVAL;
+	if (sc->nr <= 1) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	memset(&prev, 0, sizeof(prev));
 
 	/* decode all the log file's block's entries into pages */
-	while (sfl < sfl_end) {
+	for (sfl_ind = 0, sfl = &sc->in[0].sfl; sfl_ind < sc->nr; ) {
+
 		if (bl == NULL) {
 			/* only check on each new input block */
 			if (atomic_read(&srinf->shutdown)) {
@@ -1604,7 +1790,8 @@ static int compact_logs(struct super_block *sb,
 			pos = 0;
 			if (++blk == le64_to_cpu(sfl->blocks)) {
 				blk = 0;
-				sfl++;
+				sfl_ind++;
+				sfl = &sc->in[sfl_ind].sfl;
 			}
 		}
 
@@ -1642,8 +1829,22 @@ static int compact_logs(struct super_block *sb,
 
 	}
 
-	ret = kway_merge(sb, alloc, wri, sfl_out, kway_next_page, args,
+	ret = kway_merge(sb, alloc, wri, &sc->out, kway_next_page, args,
 			 nr_pages);
+	if (ret < 0)
+		goto out;
+
+	/* make sure we finished all the pages */
+	list_for_each_entry(page, &pages, list) {
+		sre = page_priv_sre(page);
+		if (page->private < SRES_PER_PAGE && sre->ino != 0) {
+			ret = -ENOSPC;
+			goto out;
+		}
+	}
+
+	sc->flags |= SCOUTFS_SRCH_COMPACT_FLAG_DONE;
+	ret = 0;
 out:
 	scoutfs_block_put(sb, bl);
 	vfree(args);
@@ -1660,6 +1861,7 @@ struct kway_file_reader {
 	struct scoutfs_block *bl;
 	struct scoutfs_srch_entry prev;
 	u64 blk;
+	u32 skip;
 	u32 pos;
 };
 
@@ -1670,7 +1872,7 @@ static int kway_next_file_reader(struct super_block *sb,
 	struct scoutfs_srch_block *srb;
 	int ret;
 
-	if (rdr->sfl == NULL)
+	if (rdr->blk == le64_to_cpu(rdr->sfl->blocks))
 		return -ENOENT;
 
 	if (rdr->bl == NULL) {
@@ -1678,30 +1880,37 @@ static int kway_next_file_reader(struct super_block *sb,
 				     &rdr->bl);
 		if (ret < 0)
 			goto out;
+
 		memset(&rdr->prev, 0, sizeof(rdr->prev));
-		rdr->pos = 0;
 	}
 	srb = rdr->bl->data;
 
-	if (rdr->pos > SCOUTFS_SRCH_BLOCK_SAFE_BYTES) {
+	if (rdr->pos > SCOUTFS_SRCH_BLOCK_SAFE_BYTES ||
+	    rdr->skip > SCOUTFS_SRCH_BLOCK_SAFE_BYTES ||
+	    rdr->skip >= le32_to_cpu(srb->entry_bytes)) {
 		/* XXX inconsistency */
 		return -EIO;
 	}
 
-	ret = decode_entry(srb->entries + rdr->pos, sre_ret, &rdr->prev);
-	if (ret <= 0) {
-		/* XXX inconsistency */
-		return -EIO;
-	}
+	/* decode entry, possibly skipping start of the block */
+	do {
+		ret = decode_entry(srb->entries + rdr->pos, sre_ret,
+				   &rdr->prev);
+		if (ret <= 0) {
+			/* XXX inconsistency */
+			return -EIO;
+		}
 
-	rdr->prev = *sre_ret;
-	rdr->pos += ret;
+		rdr->prev = *sre_ret;
+		rdr->pos += ret;
+	} while (rdr->pos <= rdr->skip);
+	rdr->skip = 0;
 
 	if (rdr->pos >= le32_to_cpu(srb->entry_bytes)) {
+		rdr->pos = 0;
 		scoutfs_block_put(sb, rdr->bl);
 		rdr->bl = NULL;
-		if (++rdr->blk == le64_to_cpu(rdr->sfl->blocks))
-			rdr->sfl = NULL;
+		rdr->blk++;
 	}
 
 	ret = 0;
@@ -1717,16 +1926,18 @@ out:
 static int compact_sorted(struct super_block *sb,
 			  struct scoutfs_alloc *alloc,
 			  struct scoutfs_block_writer *wri,
-			  struct scoutfs_srch_file *sfl_out,
-			  struct scoutfs_srch_file *sfls, int nr)
+			  struct scoutfs_srch_compact *sc)
 {
 	struct kway_file_reader *rdrs = NULL;
 	void **args = NULL;
 	int ret;
+	int nr;
 	int i;
 
-	if (WARN_ON_ONCE(nr <= 1))
+	if (WARN_ON_ONCE(sc->nr <= 1))
 		return -EINVAL;
+
+	nr = sc->nr;
 
 	/* allocate args array for k-way merge */
 	rdrs = kmalloc_array(nr, sizeof(rdrs[0]), __GFP_ZERO | GFP_NOFS);
@@ -1737,12 +1948,29 @@ static int compact_sorted(struct super_block *sb,
 	}
 
 	for (i = 0; i < nr; i++) {
-		rdrs[i].sfl = &sfls[i];
+		if (le64_to_cpu(sc->in[i].blk) >
+		    le64_to_cpu(sc->in[i].sfl.blocks)) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		rdrs[i].sfl = &sc->in[i].sfl;
+		rdrs[i].blk = le64_to_cpu(sc->in[i].blk);
+		rdrs[i].skip = le64_to_cpu(sc->in[i].pos);
 		args[i] = &rdrs[i];
 	}
 
-	ret = kway_merge(sb, alloc, wri, sfl_out, kway_next_file_reader,
+	ret = kway_merge(sb, alloc, wri, &sc->out, kway_next_file_reader,
 			 args, nr);
+
+	sc->flags |= SCOUTFS_SRCH_COMPACT_FLAG_DONE;
+	for (i = 0; i < nr; i++) {
+		sc->in[i].blk = cpu_to_le64(rdrs[i].blk);
+		sc->in[i].pos = cpu_to_le64(rdrs[i].pos);
+
+		if (rdrs[i].blk < le64_to_cpu(sc->in[i].sfl.blocks))
+			sc->flags &= ~SCOUTFS_SRCH_COMPACT_FLAG_DONE;
+	}
 out:
 	for (i = 0; rdrs && i < nr; i++)
 		scoutfs_block_put(sb, rdrs[i].bl);
@@ -1753,92 +1981,111 @@ out:
 }
 
 /*
- * Perform a depth-first walk of the file's parent blocks, freeing all
- * the blocks that were allocated to the file.  This is working with a
- * read-only file in the block cache that can also be currently read by
- * searchers.  If we return an error then the server is going to clean
- * up our entire operation, partial state doesn't matter.
+ * Delete a file that has been compacted and is no longer referenced by
+ * items in the srch_root.  The server protects the input file from
+ * other compactions while we're working, but other readers could be
+ * still trying to read it while searching.
+ *
+ * We don't modify the blocks to avoid the cost of allocating and
+ * freeing dirty parent metadata blocks, and we want to avoid triggering
+ * stale reads in racing readers.   We free blocks from leaf parents
+ * upwards and from left to right.  Once we've freed a block we never
+ * visit it again.  We store our walk position in each file's compact
+ * input so that it can be stored in pending items as progress is made
+ * over multiple operations.
  */
-static int free_file(struct super_block *sb,
-		     struct scoutfs_alloc *alloc,
-		     struct scoutfs_block_writer *wri,
-		     struct scoutfs_srch_file *sfl)
+static int delete_file(struct super_block *sb, struct scoutfs_alloc *alloc,
+		       struct scoutfs_block_writer *wri,
+		       struct scoutfs_srch_compact_input *in)
 {
-	struct scoutfs_block **bls = NULL;
+	struct scoutfs_block *bl = NULL;
 	struct scoutfs_srch_parent *srp;
-	struct scoutfs_srch_ref *ref;
-	unsigned int *inds = NULL;
 	u64 blkno;
-	u8 height;
+	u64 blk;
+	u64 inc;
 	int level;
 	int ret;
 	int i;
 
-	if (sfl->ref.blkno == 0)
-		return 0;
+	blk = le64_to_cpu(in->blk);
+	level = max(le64_to_cpu(in->pos), 1ULL);
 
-	height = height_for_blk(le64_to_cpu(sfl->blocks) - 1);
-	if (height == 1)
-		goto free_root;
-
-	bls = kmalloc_array(height, sizeof(bls[0]), __GFP_ZERO | GFP_NOFS);
-	inds = kmalloc_array(height, sizeof(inds[0]), __GFP_ZERO | GFP_NOFS);
-	if (!bls || !inds) {
-		ret = -ENOMEM;
+	if (level > in->sfl.height) {
+		ret = 0;
 		goto out;
 	}
 
-	ref = &sfl->ref;
-	level = height - 1;
-	while (level < height) {
-		if (bls[level] == NULL) {
-			ret = read_srch_block(sb, wri, level, ref, &bls[level]);
+	for (; level < in->sfl.height; level++) {
+
+		for (inc = 1, i = 2; i <= level; i++)
+			inc *= SCOUTFS_SRCH_PARENT_REFS;
+
+		while (blk < le64_to_cpu(in->sfl.blocks)) {
+
+			ret = read_path_block(sb, wri, &in->sfl, blk, level,
+					      &bl);
 			if (ret < 0)
 				goto out;
-		}
-		srp = bls[level]->data;
+			srp = bl->data;
 
-		/* find a parent to descend to, remembering where we were */
-		ref = NULL;
-		for (i = inds[level]; level >= 2 &&
-		     i < SCOUTFS_SRCH_PARENT_REFS; i++) {
-			if (srp->refs[i].blkno) {
-				inds[level] = i + 1;
-				ref = &srp->refs[i];
-				level--;
-				break;
+			for (i = calc_ref_ind(blk, level);
+			     i < SCOUTFS_SRCH_PARENT_REFS &&
+				blk < le64_to_cpu(in->sfl.blocks);
+			     i++, blk += inc) {
+
+				blkno = le64_to_cpu(srp->refs[i].blkno);
+				if (!blkno)
+					continue;
+
+				if (should_commit(sb, alloc, wri)) {
+					ret = 0;
+					goto out;
+				}
+
+				ret = scoutfs_free_meta(sb, alloc, wri, blkno);
+				if (ret < 0)
+					goto out;
 			}
+
+			scoutfs_block_put(sb, bl);
+			bl = NULL;
 		}
-		if (ref)
-			continue;
+		blk = 0;
+	}
 
-		/* free all our referenced blocks */
-		for (i = 0; i < SCOUTFS_SRCH_PARENT_REFS; i++) {
-			blkno = le64_to_cpu(srp->refs[i].blkno);
-			if (blkno == 0)
-				continue;
-
-			ret = scoutfs_free_meta(sb, alloc, wri, blkno);
-			if (ret < 0)
-				goto out;
-			scoutfs_inc_counter(sb, srch_compact_free_block);
-		}
-
-		scoutfs_block_put(sb, bls[level]);
-		bls[level] = NULL;
+	if (level == in->sfl.height) {
+		ret = scoutfs_free_meta(sb, alloc, wri,
+					le64_to_cpu(in->sfl.ref.blkno));
+		if (ret < 0)
+			goto out;
 		level++;
 	}
 
-free_root:
-	ret = scoutfs_free_meta(sb, alloc, wri, le64_to_cpu(sfl->ref.blkno));
-	if (ret < 0)
-		goto out;
-
+	ret = 0;
 out:
-	for (i = 0; bls && i < height; i++)
-		scoutfs_block_put(sb, bls[i]);
-	kfree(bls);
-	kfree(inds);
+	in->blk = cpu_to_le64(blk);
+	in->pos = cpu_to_le64(level);
+
+	scoutfs_block_put(sb, bl);
+	return ret;
+}
+
+static int delete_files(struct super_block *sb, struct scoutfs_alloc *alloc,
+		       struct scoutfs_block_writer *wri,
+		       struct scoutfs_srch_compact *sc)
+{
+	int ret;
+	int i;
+
+	for (i = 0; i < sc->nr; i++) {
+		ret = delete_file(sb, alloc, wri, &sc->in[i]);
+		if (ret < 0 ||
+		    (le64_to_cpu(sc->in[i].pos) <= sc->in[i].sfl.height))
+			break;
+	}
+	if (i == sc->nr)
+		sc->flags |= SCOUTFS_SRCH_COMPACT_FLAG_DONE;
+
 	return ret;
 }
 
@@ -1867,47 +2114,50 @@ static void scoutfs_srch_compact_worker(struct work_struct *work)
 {
 	struct srch_info *srinf = container_of(work, struct srch_info,
 					       compact_dwork.work);
+	struct scoutfs_srch_compact *sc = NULL;
 	struct super_block *sb = srinf->sb;
-	struct scoutfs_alloc alloc;
-	struct scoutfs_srch_compact_result scres;
-	struct scoutfs_srch_compact_input scin;
 	struct scoutfs_block_writer wri;
+	struct scoutfs_alloc alloc;
 	unsigned long delay;
 	int ret;
-	int i;
+
+	sc = kmalloc(sizeof(struct scoutfs_srch_compact), GFP_NOFS);
+	if (sc == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	scoutfs_block_writer_init(sb, &wri);
-	memset(&scres, 0, sizeof(scres));
 
-	ret = scoutfs_client_srch_get_compact(sb, &scin);
-	if (ret < 0 || scin.nr == 0)
+	ret = scoutfs_client_srch_get_compact(sb, sc);
+	if (ret < 0 || sc->nr == 0)
 		goto out;
 
-	scoutfs_alloc_init(&alloc, &scin.meta_avail, &scin.meta_freed);
+	scoutfs_alloc_init(&alloc, &sc->meta_avail, &sc->meta_freed);
 
-	if (scin.flags & SCOUTFS_SRCH_COMPACT_FLAG_LOG)
-		ret = compact_logs(sb, &alloc, &wri, &scres.sfl,
-				   scin.sfl, scin.nr);
-	else
-		ret = compact_sorted(sb, &alloc, &wri, &scres.sfl,
-				     scin.sfl, scin.nr);
+	if (sc->flags & SCOUTFS_SRCH_COMPACT_FLAG_LOG) {
+		ret = compact_logs(sb, &alloc, &wri, sc);
+
+	} else if (sc->flags & SCOUTFS_SRCH_COMPACT_FLAG_SORTED) {
+		ret = compact_sorted(sb, &alloc, &wri, sc);
+
+	} else if (sc->flags & SCOUTFS_SRCH_COMPACT_FLAG_DELETE) {
+		ret = delete_files(sb, &alloc, &wri, sc);
+
+	} else {
+		ret = -EINVAL;
+	}
 	if (ret < 0)
 		goto commit;
 
-	for (i = 0; i < scin.nr; i++) {
-		ret = free_file(sb, &alloc, &wri, &scin.sfl[i]);
-		if (ret < 0)
-			goto commit;
-	}
-
 	ret = scoutfs_block_writer_write(sb, &wri);
 commit:
-	scres.meta_avail = alloc.avail;
-	scres.meta_freed = alloc.freed;
-	scres.id = scin.id;
-	scres.flags = ret < 0 ? SCOUTFS_SRCH_COMPACT_FLAG_ERROR : 0;
+	/* the server won't use our partial compact if _ERROR is set */
+	sc->meta_avail = alloc.avail;
+	sc->meta_freed = alloc.freed;
+	sc->flags |= ret < 0 ? SCOUTFS_SRCH_COMPACT_FLAG_ERROR : 0;
 
-	ret = scoutfs_client_srch_commit_compact(sb, &scres);
+	ret = scoutfs_client_srch_commit_compact(sb, sc);
 out:
 	/* our allocators and files should be stable */
 	WARN_ON_ONCE(ret == -ESTALE);
@@ -1917,6 +2167,8 @@ out:
 		delay = ret == 0 ? 0 : msecs_to_jiffies(SRCH_COMPACT_DELAY_MS);
 		queue_delayed_work(srinf->workq, &srinf->compact_dwork, delay);
 	}
+
+	kfree(sc);
 }
 
 void scoutfs_srch_destroy(struct super_block *sb)

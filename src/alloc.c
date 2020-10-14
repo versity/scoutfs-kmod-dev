@@ -1121,15 +1121,15 @@ int scoutfs_alloc_foreach(struct super_block *sb,
 	struct scoutfs_btree_ref stale_refs[2] = {{0,}};
 	struct scoutfs_btree_ref refs[2] = {{0,}};
 	struct scoutfs_super_block *super = NULL;
-	struct scoutfs_srch_compact_input *scin;
+	struct scoutfs_srch_compact *sc;
 	struct scoutfs_log_trees_val ltv;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key key;
 	int ret;
 
 	super = kmalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
-	scin = kmalloc(sizeof(struct scoutfs_srch_compact_input), GFP_NOFS);
-	if (!super || !scin) {
+	sc = kmalloc(sizeof(struct scoutfs_srch_compact), GFP_NOFS);
+	if (!super || !sc) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -1200,17 +1200,17 @@ retry:
 	/* srch compaction allocators */
 	memset(&key, 0, sizeof(key));
 	key.sk_zone = SCOUTFS_SRCH_ZONE;
-	key.sk_type = SCOUTFS_SRCH_BUSY_TYPE;
+	key.sk_type = SCOUTFS_SRCH_PENDING_TYPE;
 
 	for (;;) {
-		/* _BUSY_ is last type, _next won't see other types */
+		/* _PENDING_ and _BUSY_ are last, _next won't see other types */
 		ret = scoutfs_btree_next(sb, &super->srch_root, &key, &iref);
 		if (ret == -ENOENT)
 			break;
 		if (ret == 0) {
-			if (iref.val_len == sizeof(scin)) {
+			if (iref.val_len == sizeof(*sc)) {
 				key = *iref.key;
-				memcpy(scin, iref.val, iref.val_len);
+				memcpy(sc, iref.val, iref.val_len);
 			} else {
 				ret = -EIO;
 			}
@@ -1220,11 +1220,11 @@ retry:
 			goto out;
 
 		ret = cb(sb, arg, SCOUTFS_ALLOC_OWNER_SRCH,
-			 le64_to_cpu(scin->id), true, true,
-			 le64_to_cpu(scin->meta_avail.total_nr)) ?:
+			 le64_to_cpu(sc->id), true, true,
+			 le64_to_cpu(sc->meta_avail.total_nr)) ?:
 		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_SRCH,
-			 le64_to_cpu(scin->id), true, false,
-			 le64_to_cpu(scin->meta_freed.total_nr));
+			 le64_to_cpu(sc->id), true, false,
+			 le64_to_cpu(sc->meta_freed.total_nr));
 		if (ret < 0)
 			goto out;
 
@@ -1244,6 +1244,6 @@ out:
 	}
 
 	kfree(super);
-	kfree(scin);
+	kfree(sc);
 	return ret;
 }

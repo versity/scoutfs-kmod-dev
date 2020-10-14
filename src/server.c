@@ -925,15 +925,17 @@ static int server_srch_get_compact(struct super_block *sb,
 	u64 rid = scoutfs_net_client_rid(conn);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_srch_compact_input scin;
-	u64 blocks;
+	struct scoutfs_srch_compact *sc = NULL;
 	int ret;
-	int i;
-
-	memset(&scin, 0, sizeof(scin));
 
 	if (arg_len != 0) {
 		ret = -EINVAL;
+		goto out;
+	}
+
+	sc = kzalloc(sizeof(struct scoutfs_srch_compact), GFP_NOFS);
+	if (sc == NULL) {
+		ret = -ENOMEM;
 		goto out;
 	}
 
@@ -943,37 +945,37 @@ static int server_srch_get_compact(struct super_block *sb,
 
 	mutex_lock(&server->srch_mutex);
 	ret = scoutfs_srch_get_compact(sb, &server->alloc, &server->wri,
-				       &super->srch_root, rid, &scin);
+				       &super->srch_root, rid, sc);
 	mutex_unlock(&server->srch_mutex);
-	if (ret == 0 && scin.nr == 0)
+	if (ret == 0 && sc->nr == 0)
 		ret = -ENOENT;
 	if (ret < 0)
 		goto apply;
 
-	/* provide ~3x input blocks to allocate, write+delete+cow */
-	blocks = 0;
-	for (i = 0; i < scin.nr; i++)
-		blocks += le64_to_cpu(scin.sfl[i].blocks);
-	blocks *= 3;
 	mutex_lock(&server->alloc_mutex);
 	ret = scoutfs_alloc_fill_list(sb, &server->alloc, &server->wri,
-				      &scin.meta_avail, server->meta_avail,
-				      blocks, blocks);
+				      &sc->meta_avail, server->meta_avail,
+				      SCOUTFS_SERVER_META_FILL_LO,
+				      SCOUTFS_SERVER_META_FILL_TARGET) ?:
+	      scoutfs_alloc_splice_list(sb, &server->alloc, &server->wri,
+					server->other_freed, &sc->meta_freed);
 	mutex_unlock(&server->alloc_mutex);
 	if (ret < 0)
 		goto apply;
 
 	mutex_lock(&server->srch_mutex);
 	ret = scoutfs_srch_update_compact(sb, &server->alloc, &server->wri,
-					  &super->srch_root, rid, &scin);
+					  &super->srch_root, rid, sc);
 	mutex_unlock(&server->srch_mutex);
 
 apply:
 	ret = scoutfs_server_apply_commit(sb, ret);
 	WARN_ON_ONCE(ret < 0 && ret != -ENOENT); /* XXX leaked busy item */
 out:
-	return scoutfs_net_response(sb, conn, cmd, id, ret,
-				    &scin, sizeof(scin));
+	ret = scoutfs_net_response(sb, conn, cmd, id, ret,
+				   sc, sizeof(struct scoutfs_srch_compact));
+	kfree(sc);
+	return ret;
 }
 
 /*
@@ -990,16 +992,16 @@ static int server_srch_commit_compact(struct super_block *sb,
 	u64 rid = scoutfs_net_client_rid(conn);
 	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_super_block *super = &sbi->super;
-	struct scoutfs_srch_compact_result *scres;
+	struct scoutfs_srch_compact *sc;
 	struct scoutfs_alloc_list_head av;
 	struct scoutfs_alloc_list_head fr;
 	int ret;
 
-	scres = arg;
-	if (arg_len != sizeof(*scres)) {
+	if (arg_len != sizeof(struct scoutfs_srch_compact)) {
 		ret = -EINVAL;
 		goto out;
 	}
+	sc = arg;
 
 	ret = scoutfs_server_hold_commit(sb);
 	if (ret)
@@ -1007,12 +1009,13 @@ static int server_srch_commit_compact(struct super_block *sb,
 
 	mutex_lock(&server->srch_mutex);
 	ret = scoutfs_srch_commit_compact(sb, &server->alloc, &server->wri,
-					  &super->srch_root, rid, scres,
+					  &super->srch_root, rid, sc,
 					  &av, &fr);
 	mutex_unlock(&server->srch_mutex);
 	if (ret < 0) /* XXX very bad, leaks allocators */
 		goto apply;
 
+	/* reclaim allocators if they were set by _srch_commit_ */
 	mutex_lock(&server->alloc_mutex);
 	ret = scoutfs_alloc_splice_list(sb, &server->alloc, &server->wri,
 					server->other_freed, &av) ?:

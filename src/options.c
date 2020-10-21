@@ -16,6 +16,7 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/debugfs.h>
+#include <linux/namei.h>
 
 #include <linux/parser.h>
 #include <linux/inet.h>
@@ -28,6 +29,7 @@
 
 static const match_table_t tokens = {
 	{Opt_server_addr, "server_addr=%s"},
+	{Opt_metadev_path, "metadev_path=%s"},
 	{Opt_err, NULL}
 };
 
@@ -81,6 +83,52 @@ static int parse_ipv4(struct super_block *sb, char *str,
 	return 0;
 }
 
+static int parse_bdev_path(struct super_block *sb, substring_t *substr,
+			      char **bdev_path_ret)
+{
+	char *bdev_path;
+	struct inode *bdev_inode;
+	struct path path;
+	bool got_path = false;
+	int ret;
+
+	bdev_path = match_strdup(substr);
+	if (!bdev_path) {
+		scoutfs_err(sb, "bdev string dup failed");
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = kern_path(bdev_path, LOOKUP_FOLLOW, &path);
+	if (ret) {
+		scoutfs_err(sb, "path %s not found for bdev: error %d",
+			    bdev_path, ret);
+		goto out;
+	}
+	got_path = true;
+
+	bdev_inode = d_inode(path.dentry);
+	if (!S_ISBLK(bdev_inode->i_mode)) {
+		scoutfs_err(sb, "path %s for bdev is not a block device",
+			    bdev_path);
+		ret = -ENOTBLK;
+		goto out;
+	}
+
+out:
+	if (got_path) {
+		path_put(&path);
+	}
+
+	if (ret < 0) {
+		kfree(bdev_path);
+	} else {
+		*bdev_path_ret = bdev_path;
+	}
+
+	return ret;
+}
+
 int scoutfs_parse_options(struct super_block *sb, char *options,
 			  struct mount_options *parsed)
 {
@@ -106,11 +154,23 @@ int scoutfs_parse_options(struct super_block *sb, char *options,
 			if (ret < 0)
 				return ret;
 			break;
+		case Opt_metadev_path:
+
+			ret = parse_bdev_path(sb, &args[0],
+						 &parsed->metadev_path);
+			if (ret < 0)
+				return ret;
+			break;
 		default:
 			scoutfs_err(sb, "Unknown or malformed option, \"%s\"",
 				    p);
 			break;
 		}
+	}
+
+	if (!parsed->metadev_path) {
+		scoutfs_err(sb, "Required mount option \"metadev_path\" not found");
+		return -EINVAL;
 	}
 
 	return 0;

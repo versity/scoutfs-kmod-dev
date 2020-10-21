@@ -177,6 +177,7 @@ static int scoutfs_show_options(struct seq_file *seq, struct dentry *root)
 	struct mount_options *opts = &SCOUTFS_SB(sb)->opts;
 
 	seq_printf(seq, ",server_addr="SIN_FMT, SIN_ARG(&opts->server_addr));
+	seq_printf(seq, ",metadev_path=%s", opts->metadev_path);
 
 	return 0;
 }
@@ -203,6 +204,20 @@ static int scoutfs_sync_fs(struct super_block *sb, int wait)
 	scoutfs_inc_counter(sb, trans_commit_sync_fs);
 
 	return scoutfs_trans_sync(sb, wait);
+}
+
+/*
+ * Data dev is closed by generic code, but we have to explicitly close the meta
+ * dev.
+ */
+static void scoutfs_metadev_close(struct super_block *sb)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	if (sbi->meta_bdev) {
+		blkdev_put(sbi->meta_bdev, SCOUTFS_META_BDEV_MODE);
+		sbi->meta_bdev = NULL;
+	}
 }
 
 /*
@@ -247,6 +262,9 @@ static void scoutfs_put_super(struct super_block *sb)
 	debugfs_remove(sbi->debug_root);
 	scoutfs_destroy_counters(sb);
 	scoutfs_destroy_sysfs(sb);
+	scoutfs_metadev_close(sb);
+
+	kfree(sbi->opts.metadev_path);
 	kfree(sbi);
 
 	sb->s_fs_info = NULL;
@@ -271,18 +289,21 @@ static const struct super_operations scoutfs_super_ops = {
 int scoutfs_write_super(struct super_block *sb,
 			struct scoutfs_super_block *super)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
 	le64_add_cpu(&super->hdr.seq, 1);
 
-	return scoutfs_block_write_sm(sb, SCOUTFS_SUPER_BLKNO, &super->hdr,
+	return scoutfs_block_write_sm(sb, sbi->meta_bdev, SCOUTFS_SUPER_BLKNO,
+				      &super->hdr,
 				      sizeof(struct scoutfs_super_block));
 }
 
 /*
- * Read the super block.  If it's valid store it in the caller's super
- * struct.
+ * Read super, specifying bdev.
  */
-int scoutfs_read_super(struct super_block *sb,
-		       struct scoutfs_super_block *super_res)
+static int scoutfs_read_super_from_bdev(struct super_block *sb,
+					struct block_device *bdev,
+					struct scoutfs_super_block *super_res)
 {
 	struct scoutfs_super_block *super;
 	__le32 calc;
@@ -293,9 +314,8 @@ int scoutfs_read_super(struct super_block *sb,
 	if (!super)
 		return -ENOMEM;
 
-	ret = scoutfs_block_read_sm(sb, SCOUTFS_SUPER_BLKNO, &super->hdr,
-				    sizeof(struct scoutfs_super_block),
-				    &calc);
+	ret = scoutfs_block_read_sm(sb, bdev, SCOUTFS_SUPER_BLKNO, &super->hdr,
+				    sizeof(struct scoutfs_super_block), &calc);
 	if (ret < 0)
 		goto out;
 
@@ -357,15 +377,6 @@ int scoutfs_read_super(struct super_block *sb,
 		goto out;
 	}
 
-	blkno = (le64_to_cpu(super->last_meta_blkno) + 1) <<
-		SCOUTFS_BLOCK_SM_LG_SHIFT;
-	if (le64_to_cpu(super->first_data_blkno) < blkno) {
-		scoutfs_err(sb, "super block first data blkno %llu is within last meta blkno %llu",
-			le64_to_cpu(super->first_data_blkno), blkno);
-		ret = -EINVAL;
-		goto out;
-	}
-
 	if (le64_to_cpu(super->first_data_blkno) >
 	    le64_to_cpu(super->last_data_blkno)) {
 		scoutfs_err(sb, "super block first data blkno %llu is greater than last data blkno %llu",
@@ -384,11 +395,23 @@ int scoutfs_read_super(struct super_block *sb,
 		goto out;
 	}
 
-	*super_res = *super;
-	ret = 0;
 out:
+	if (ret == 0)
+		*super_res = *super;
 	kfree(super);
+
 	return ret;
+}
+
+/*
+ * Read the super block from meta dev.
+ */
+int scoutfs_read_super(struct super_block *sb,
+		       struct scoutfs_super_block *super_res)
+{
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+
+	return scoutfs_read_super_from_bdev(sb, sbi->meta_bdev, super_res);
 }
 
 /*
@@ -427,10 +450,66 @@ static int assign_random_id(struct scoutfs_sb_info *sbi)
 	return 0;
 }
 
+/*
+ * Ensure superblock copies in metadata and data block devices are valid, and
+ * fill in in-memory superblock if so.
+ */
+static int scoutfs_read_supers(struct super_block *sb)
+{
+	struct scoutfs_super_block *meta_super = NULL;
+	struct scoutfs_super_block *data_super = NULL;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
+	int ret = 0;
+
+	meta_super = kmalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
+	data_super = kmalloc(sizeof(struct scoutfs_super_block), GFP_NOFS);
+	if (!meta_super || !data_super) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = scoutfs_read_super_from_bdev(sb, sbi->meta_bdev, meta_super);
+	if (ret < 0) {
+		scoutfs_err(sb, "could not get meta_super: error %d", ret);
+		goto out;
+	}
+
+	ret = scoutfs_read_super_from_bdev(sb, sb->s_bdev, data_super);
+	if (ret < 0) {
+		scoutfs_err(sb, "could not get data_super: error %d", ret);
+		goto out;
+	}
+
+	if (!SCOUTFS_IS_META_BDEV(meta_super)) {
+		scoutfs_err(sb, "meta_super META flag not set");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (SCOUTFS_IS_META_BDEV(data_super)) {
+		scoutfs_err(sb, "data_super META flag set");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (memcmp(meta_super->uuid, data_super->uuid, SCOUTFS_UUID_BYTES)) {
+		scoutfs_err(sb, "superblock UUID mismatch");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	sbi->super = *meta_super;
+out:
+	kfree(meta_super);
+	kfree(data_super);
+	return ret;
+}
+
 static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct scoutfs_sb_info *sbi;
 	struct mount_options opts;
+	struct block_device *meta_bdev;
 	struct inode *inode;
 	int ret;
 
@@ -476,7 +555,24 @@ static int scoutfs_fill_super(struct super_block *sb, void *data, int silent)
 		goto out;
 	}
 
-	ret = scoutfs_read_super(sb, &SCOUTFS_SB(sb)->super) ?:
+	meta_bdev =
+		blkdev_get_by_path(sbi->opts.metadev_path,
+				   SCOUTFS_META_BDEV_MODE, sb);
+	if (IS_ERR(meta_bdev)) {
+		scoutfs_err(sb, "could not open metadev: error %ld",
+			    PTR_ERR(meta_bdev));
+		ret = PTR_ERR(meta_bdev);
+		goto out;
+	}
+	sbi->meta_bdev = meta_bdev;
+	ret = set_blocksize(sbi->meta_bdev, SCOUTFS_BLOCK_SM_SIZE);
+	if (ret != 0) {
+		scoutfs_err(sb, "failed to set metadev blocksize, returned %d",
+			    ret);
+		goto out;
+	}
+
+	ret = scoutfs_read_supers(sb) ?:
 	      scoutfs_debugfs_setup(sb) ?:
 	      scoutfs_setup_sysfs(sb) ?:
 	      scoutfs_setup_counters(sb) ?:

@@ -112,12 +112,13 @@ static ktime_t random_to(u32 lo, u32 hi)
 /*
  * The caller is about to read all the quorum blocks.  We invalidate any
  * cached blocks and issue one large contiguous read to repopulate the
- * cache.  The caller then uses normal sb_bread to read each block.  I'm
+ * cache.  The caller then uses normal __bread to read each block.  I'm
  * not a huge fan of the plug but I couldn't get the individual
  * readahead requests merged without it.
  */
 static void readahead_quorum_blocks(struct super_block *sb)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct buffer_head *bh;
 	struct blk_plug plug;
 	int i;
@@ -125,7 +126,8 @@ static void readahead_quorum_blocks(struct super_block *sb)
 	blk_start_plug(&plug);
 
 	for (i = 0; i < SCOUTFS_QUORUM_BLOCKS; i++) {
-		bh = sb_getblk(sb, SCOUTFS_QUORUM_BLKNO + i);
+		bh = __getblk(sbi->meta_bdev, SCOUTFS_QUORUM_BLKNO + i,
+			     SCOUTFS_BLOCK_SM_SIZE);
 		if (!bh)
 			continue;
 
@@ -215,6 +217,7 @@ static bool stale_quorum_block(struct scoutfs_quorum_block *a,
 static int read_quorum_blocks(struct super_block *sb, struct list_head *blocks)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_quorum_block *blk;
 	struct quorum_block_head *qbh;
 	struct quorum_block_head *tmp;
@@ -227,7 +230,8 @@ static int read_quorum_blocks(struct super_block *sb, struct list_head *blocks)
 
 	for (i = 0; i < SCOUTFS_QUORUM_BLOCKS; i++) {
 		brelse(bh);
-		bh = sb_bread(sb, SCOUTFS_QUORUM_BLKNO + i);
+		bh = __bread(sbi->meta_bdev, SCOUTFS_QUORUM_BLKNO + i,
+			     SCOUTFS_BLOCK_SM_SIZE);
 		if (!bh) {
 			scoutfs_inc_counter(sb, quorum_read_block_error);
 			ret = -EIO;
@@ -291,6 +295,7 @@ static int write_quorum_block(struct super_block *sb,
 			      struct scoutfs_quorum_block *our_blk)
 {
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct scoutfs_quorum_block *blk;
 	struct buffer_head *bh = NULL;
 	size_t size;
@@ -299,8 +304,9 @@ static int write_quorum_block(struct super_block *sb,
 	BUILD_BUG_ON(sizeof(struct scoutfs_quorum_block) >
 		     SCOUTFS_BLOCK_SM_SIZE);
 
-	bh = sb_getblk(sb, SCOUTFS_QUORUM_BLKNO +
-			   prandom_u32_max(SCOUTFS_QUORUM_BLOCKS));
+	bh = __getblk(sbi->meta_bdev, SCOUTFS_QUORUM_BLKNO +
+		      prandom_u32_max(SCOUTFS_QUORUM_BLOCKS),
+		      SCOUTFS_BLOCK_SM_SIZE);
 	if (bh == NULL) {
 		ret = -EIO;
 		goto out;

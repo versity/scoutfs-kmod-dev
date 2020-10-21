@@ -386,6 +386,7 @@ static void block_bio_end_io(struct bio *bio, int err)
 static int block_submit_bio(struct super_block *sb, struct block_private *bp,
 			    int rw)
 {
+	struct scoutfs_sb_info *sbi = SCOUTFS_SB(sb);
 	struct bio *bio = NULL;
 	struct blk_plug plug;
 	struct page *page;
@@ -414,7 +415,7 @@ static int block_submit_bio(struct super_block *sb, struct block_private *bp,
 			}
 
 			bio->bi_sector = sector + (off >> 9);
-			bio->bi_bdev = sb->s_bdev;
+			bio->bi_bdev = sbi->meta_bdev;
 			bio->bi_end_io = block_bio_end_io;
 			bio->bi_private = bp;
 
@@ -864,7 +865,7 @@ static void sm_block_bio_end_io(struct bio *bio, int err)
  * only layer that sees the full block buffer so we pass the calculated
  * crc to the caller for them to check in their context.
  */
-static int sm_block_io(struct super_block *sb, int rw, u64 blkno,
+static int sm_block_io(struct block_device *bdev, int rw, u64 blkno,
 		       struct scoutfs_block_header *hdr, size_t len,
 		       __le32 *blk_crc)
 {
@@ -902,7 +903,7 @@ static int sm_block_io(struct super_block *sb, int rw, u64 blkno,
 	}
 
 	bio->bi_sector = blkno << (SCOUTFS_BLOCK_SM_SHIFT - 9);
-	bio->bi_bdev = sb->s_bdev;
+	bio->bi_bdev = bdev;
 	bio->bi_end_io = sm_block_bio_end_io;
 	bio->bi_private = &sbc;
 	bio_add_page(bio, page, SCOUTFS_BLOCK_SM_SIZE, 0);
@@ -925,17 +926,19 @@ out:
 	return ret;
 }
 
-int scoutfs_block_read_sm(struct super_block *sb, u64 blkno,
+int scoutfs_block_read_sm(struct super_block *sb,
+			  struct block_device *bdev, u64 blkno,
 			  struct scoutfs_block_header *hdr, size_t len,
 			  __le32 *blk_crc)
 {
-	return sm_block_io(sb, READ, blkno, hdr, len, blk_crc);
+	return sm_block_io(bdev, READ, blkno, hdr, len, blk_crc);
 }
 
-int scoutfs_block_write_sm(struct super_block *sb, u64 blkno,
+int scoutfs_block_write_sm(struct super_block *sb,
+			   struct block_device *bdev, u64 blkno,
 			   struct scoutfs_block_header *hdr, size_t len)
 {
-	return sm_block_io(sb, WRITE, blkno, hdr, len, NULL);
+	return sm_block_io(bdev, WRITE, blkno, hdr, len, NULL);
 }
 
 int scoutfs_block_setup(struct super_block *sb)

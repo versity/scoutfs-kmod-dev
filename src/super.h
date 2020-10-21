@@ -36,6 +36,8 @@ struct scoutfs_sb_info {
 
 	struct scoutfs_super_block super;
 
+	struct block_device *meta_bdev;
+
 	spinlock_t next_ino_lock;
 
 	struct data_info *data_info;
@@ -93,6 +95,13 @@ static inline bool SCOUTFS_HAS_SBI(struct super_block *sb)
 {
 	return (sb != NULL) && (SCOUTFS_SB(sb) != NULL);
 }
+
+static inline bool SCOUTFS_IS_META_BDEV(struct scoutfs_super_block *super_block)
+{
+	return !!(super_block->flags & SCOUTFS_FLAG_IS_META_BDEV);
+}
+
+#define SCOUTFS_META_BDEV_MODE (FMODE_READ | FMODE_WRITE | FMODE_EXCL)
 
 /*
  * A small string embedded in messages that's used to identify a

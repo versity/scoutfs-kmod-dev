@@ -61,6 +61,12 @@
 #define SCOUTFS_QUORUM_BLKNO	((256ULL * 1024) >> SCOUTFS_BLOCK_SM_SHIFT)
 #define SCOUTFS_QUORUM_BLOCKS	((256ULL * 1024) >> SCOUTFS_BLOCK_SM_SHIFT)
 
+/*
+ * Start data on the data device aligned as well.
+ */
+#define SCOUTFS_DATA_DEV_START_BLKNO ((256ULL * 1024) >> SCOUTFS_BLOCK_SM_SHIFT)
+
+
 #define SCOUTFS_UNIQUE_NAME_MAX_BYTES	64 /* includes null */
 
 /*
@@ -585,10 +591,13 @@ struct scoutfs_quorum_block {
 	((SCOUTFS_BLOCK_SM_SIZE - sizeof(struct scoutfs_quorum_block)) /  \
 		sizeof(struct scoutfs_quorum_log))
 
+#define SCOUTFS_FLAG_IS_META_BDEV 0x01
+
 struct scoutfs_super_block {
 	struct scoutfs_block_header hdr;
 	__le64 id;
 	__le64 format_hash;
+	__le64 flags;
 	__u8 uuid[SCOUTFS_UUID_BYTES];
 	__le64 next_ino;
 	__le64 next_trans_seq;

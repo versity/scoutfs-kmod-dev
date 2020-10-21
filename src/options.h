@@ -7,11 +7,13 @@
 
 enum {
 	Opt_server_addr,
+	Opt_metadev_path,
 	Opt_err,
 };
 
 struct mount_options {
 	struct sockaddr_in server_addr;
+	char *metadev_path;
 };
 
 int scoutfs_parse_options(struct super_block *sb, char *options,

@@ -515,37 +515,6 @@ struct scoutfs_bloom_block {
 #define SCOUTFS_FREE_EXTENT_BLKNO_TYPE	1
 #define SCOUTFS_FREE_EXTENT_LEN_TYPE	2
 
-/*
- * The extents that map blocks in a fixed-size logical region of a file
- * are packed and stored in item values.  The packed extents are
- * contiguous so the starting logical block is implicit from the length
- * of previous extents.  Sparse regions are represented by 0 flags and
- * blkno.  The blkno of a packed extent is encoded as the zigzag (lsb is
- * sign bit) difference from the last blkno of the previous extent.
- * This guarantees that non-sparse extents must have a blkno delta of at
- * least -1/1.  High zero byte aren't stored.
- */
-struct scoutfs_packed_extent {
-	__le16 count;
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-	__u8 diff_bytes:4,
-	     flags:3,
-	     final:1;
-#elif defined(__BIG_ENDIAN_BITFIELD)
-	__u8 final:1,
-	     flags:3,
-	     diff_bytes:4;
-#else
-#error "no {BIG,LITTLE}_ENDIAN_BITFIELD defined?"
-#endif
-	__u8 le_blkno_diff[0];
-} __packed;
-
-#define SCOUTFS_PACKEXT_BLOCKS	     (8 * 1024 * 1024 / SCOUTFS_BLOCK_SM_SIZE)
-#define SCOUTFS_PACKEXT_BASE_SHIFT   (ilog2(SCOUTFS_PACKEXT_BLOCKS))
-#define SCOUTFS_PACKEXT_BASE_MASK    (~((__u64)SCOUTFS_PACKEXT_BLOCKS - 1))
-#define SCOUTFS_PACKEXT_MAX_BYTES    SCOUTFS_MAX_VAL_SIZE
-
 /* file data extents have start and len in key */
 struct scoutfs_data_extent_val {
 	__le64 blkno;

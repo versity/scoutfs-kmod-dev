@@ -78,6 +78,7 @@ static inline void scoutfs_key_set_zeros(struct scoutfs_key *key)
 	key->_sk_second = 0;
 	key->_sk_third = 0;
 	key->_sk_fourth = 0;
+	memset(key->__pad, 0, sizeof(key->__pad));
 }
 
 static inline bool scoutfs_key_is_zeros(struct scoutfs_key *key)
@@ -104,6 +105,7 @@ static inline void scoutfs_key_set_ones(struct scoutfs_key *key)
 	key->_sk_second = cpu_to_le64(U64_MAX);
 	key->_sk_third = cpu_to_le64(U64_MAX);
 	key->_sk_fourth = U8_MAX;
+	memset(key->__pad, 0, sizeof(key->__pad));
 }
 
 /*

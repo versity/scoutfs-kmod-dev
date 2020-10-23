@@ -11,6 +11,7 @@
  * General Public License for more details.
  */
 #include <linux/kernel.h>
+#include <linux/string.h>
 
 #include "format.h"
 #include "avl.h"
@@ -274,6 +275,7 @@ void scoutfs_avl_insert(struct scoutfs_avl_root *root,
 	node->left = 0;
 	node->right = 0;
 	set_height(root, node);
+	memset(node->__pad, 0, sizeof(node->__pad));
 
 	if (parent == NULL) {
 		root->node = node_off(root, node);

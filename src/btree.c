@@ -1003,6 +1003,7 @@ static bool bad_avl_node_off(__le16 node_off, int nr)
  *  - values don't overlap each other
  *  - last_free_offset is in fact last free region
  *  - call after leaf modification
+ *  - padding is zero
  */
 static void verify_btree_block(struct super_block *sb,
 			       struct scoutfs_btree_block *bt, int level,
@@ -1017,6 +1018,7 @@ static void verify_btree_block(struct super_block *sb,
 	int end_off;
 	int tot = 0;
 	int i = 0;
+	int j = 0;
 	int nr;
 
 	if (bt->level != level) {
@@ -1053,6 +1055,10 @@ static void verify_btree_block(struct super_block *sb,
 		    bad_avl_node_off(item->node.right, nr)) {
 			reason = "item node off";
 			goto out;
+		}
+
+		for (j = 0; j < sizeof(item->__pad); j++) {
+			WARN_ON_ONCE(item->__pad[j] != 0);
 		}
 
 		if (scoutfs_key_compare(&item->key, start) < 0 ||

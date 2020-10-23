@@ -369,6 +369,7 @@ static int submit_send(struct super_block *sb,
 	msend->nh.cmd = cmd;
 	msend->nh.flags = flags;
 	msend->nh.error = net_err;
+	memset(msend->nh.__pad, 0, sizeof(msend->nh.__pad));
 	msend->nh.data_len = cpu_to_le16(data_len);
 	if (data_len)
 		memcpy(msend->nh.data, data, data_len);

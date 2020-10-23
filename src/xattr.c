@@ -573,6 +573,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 			id = si->next_xattr_id++;
 		xat->name_len = name_len;
 		xat->val_len = cpu_to_le16(size);
+		memset(xat->__pad, 0, sizeof(xat->__pad));
 		memcpy(xat->name, name, name_len);
 		memcpy(&xat->name[xat->name_len], value, size);
 	}

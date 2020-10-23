@@ -102,6 +102,7 @@ static inline void scoutfs_addr_from_sin(struct scoutfs_inet_addr *addr,
 {
 	addr->addr = be32_to_le32(sin->sin_addr.s_addr);
 	addr->port = be16_to_le16(sin->sin_port);
+	memset(addr->__pad, 0, sizeof(addr->__pad));
 }
 
 struct scoutfs_net_connection *

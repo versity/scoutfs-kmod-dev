@@ -719,10 +719,13 @@ static void store_inode(struct scoutfs_inode *cinode, struct inode *inode)
 	cinode->rdev = cpu_to_le32(inode->i_rdev);
 	cinode->atime.sec = cpu_to_le64(inode->i_atime.tv_sec);
 	cinode->atime.nsec = cpu_to_le32(inode->i_atime.tv_nsec);
+	memset(cinode->atime.__pad, 0, sizeof(cinode->atime.__pad));
 	cinode->ctime.sec = cpu_to_le64(inode->i_ctime.tv_sec);
 	cinode->ctime.nsec = cpu_to_le32(inode->i_ctime.tv_nsec);
+	memset(cinode->ctime.__pad, 0, sizeof(cinode->ctime.__pad));
 	cinode->mtime.sec = cpu_to_le64(inode->i_mtime.tv_sec);
 	cinode->mtime.nsec = cpu_to_le32(inode->i_mtime.tv_nsec);
+	memset(cinode->mtime.__pad, 0, sizeof(cinode->mtime.__pad));
 
 	cinode->meta_seq = cpu_to_le64(scoutfs_inode_meta_seq(inode));
 	cinode->data_seq = cpu_to_le64(scoutfs_inode_data_seq(inode));

@@ -72,12 +72,6 @@ struct scoutfs_timespec {
 	__u8 __pad[4];
 };
 
-struct scoutfs_betimespec {
-	__be64 sec;
-	__be32 nsec;
-	__u8 __pad[4];
-};
-
 /* XXX ipv6 */
 struct scoutfs_inet_addr {
 	__le32 addr;

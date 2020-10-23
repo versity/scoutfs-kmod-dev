@@ -140,7 +140,12 @@ off_item(struct scoutfs_btree_block *bt, __le16 off)
 	return (void *)bt + le16_to_cpu(off);
 }
 
-static struct scoutfs_btree_item *last_item(struct scoutfs_btree_block *bt)
+
+/*
+ * The item at the end of the item array.  This is *not* the item in the
+ * block with the greatest key.
+ */
+static struct scoutfs_btree_item *end_item(struct scoutfs_btree_block *bt)
 {
 	BUG_ON(bt->nr_items == 0);
 
@@ -181,6 +186,11 @@ static struct scoutfs_btree_item *node_item(struct scoutfs_avl_node *node)
 	if (node == NULL)
 		return NULL;
 	return container_of(node, struct scoutfs_btree_item, node);
+}
+
+static struct scoutfs_btree_item *last_item(struct scoutfs_btree_block *bt)
+{
+	return node_item(scoutfs_avl_last(&bt->item_root));
 }
 
 static struct scoutfs_btree_item *prev_item(struct scoutfs_btree_block *bt,
@@ -543,7 +553,7 @@ static void create_item(struct scoutfs_btree_block *bt,
 	le16_add_cpu(&bt->mid_free_len,
 		     -(u16)sizeof(struct scoutfs_btree_item));
 	le16_add_cpu(&bt->nr_items, 1);
-	item = last_item(bt);
+	item = end_item(bt);
 
 	item->key = *key;
 
@@ -568,14 +578,14 @@ static void delete_item(struct scoutfs_btree_block *bt,
 			struct scoutfs_btree_item *item,
 			struct scoutfs_btree_item **use_after)
 {
-	struct scoutfs_btree_item *last;
+	struct scoutfs_btree_item *end;
 	unsigned int val_off;
 	unsigned int val_len;
 
 	/* save some values before we delete the item */
 	val_off = le16_to_cpu(item->val_off);
 	val_len = le16_to_cpu(item->val_len);
-	last = last_item(bt);
+	end = end_item(bt);
 
 	/* delete the item */
 	scoutfs_avl_delete(&bt->item_root, &item->node);
@@ -585,18 +595,18 @@ static void delete_item(struct scoutfs_btree_block *bt,
 	le16_add_cpu(&bt->total_item_bytes, -item_bytes(item));
 
 	/* move the final item into the deleted space */
-	if (last != item) {
-		item->key = last->key;
-		item->val_off = last->val_off;
-		item->val_len = last->val_len;
-		if (last->val_len)
-			set_val_owner(bt, le16_to_cpu(last->val_off),
-				      val_bytes(le16_to_cpu(last->val_len)),
+	if (end != item) {
+		item->key = end->key;
+		item->val_off = end->val_off;
+		item->val_len = end->val_len;
+		if (end->val_len)
+			set_val_owner(bt, le16_to_cpu(end->val_off),
+				      val_bytes(le16_to_cpu(end->val_len)),
 				      ptr_off(bt, item));
-		leaf_item_hash_change(bt, &last->key, ptr_off(bt, item),
-				      ptr_off(bt, last));
-		scoutfs_avl_relocate(&bt->item_root, &item->node,&last->node);
-		if (use_after && *use_after == last)
+		leaf_item_hash_change(bt, &end->key, ptr_off(bt, item),
+				      ptr_off(bt, end));
+		scoutfs_avl_relocate(&bt->item_root, &item->node,&end->node);
+		if (use_after && *use_after == end)
 			*use_after = item;
 	}
 

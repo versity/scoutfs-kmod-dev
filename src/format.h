@@ -595,11 +595,9 @@ struct scoutfs_super_block {
 	__le64 total_meta_blocks;	/* both static and dynamic */
 	__le64 first_meta_blkno;	/* first dynamically allocated */
 	__le64 last_meta_blkno;
-	__le64 free_meta_blocks;
 	__le64 total_data_blocks;
 	__le64 first_data_blkno;
 	__le64 last_data_blkno;
-	__le64 free_data_blocks;
 	__le64 quorum_fenced_term;
 	__le64 quorum_server_term;
 	__le64 unmount_barrier;

@@ -920,7 +920,7 @@ int scoutfs_srch_search_xattrs(struct super_block *sb,
 	struct scoutfs_srch_entry start;
 	struct scoutfs_srch_entry end;
 	struct scoutfs_srch_entry final;
-	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_log_trees lt;
 	struct scoutfs_srch_file sfl;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key key;
@@ -992,10 +992,10 @@ retry:
 		if (ret == -ENOENT)
 			break;
 		if (ret == 0) {
-			if (iref.val_len == sizeof(ltv)) {
+			if (iref.val_len == sizeof(lt)) {
 				key = *iref.key;
 				scoutfs_key_inc(&key);
-				memcpy(&ltv, iref.val, iref.val_len);
+				memcpy(&lt, iref.val, iref.val_len);
 			} else {
 				ret = -EIO;
 			}
@@ -1004,7 +1004,7 @@ retry:
 		if (ret < 0)
 			goto out;
 
-		ret = search_file(sb, SCOUTFS_SRCH_LOG_TYPE, &ltv.srch_file,
+		ret = search_file(sb, SCOUTFS_SRCH_LOG_TYPE, &lt.srch_file,
 				  sroot, &start, &end, limit);
 		if (ret < 0)
 			goto out;

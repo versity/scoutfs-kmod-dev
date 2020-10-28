@@ -135,7 +135,7 @@ int scoutfs_forest_next_hint(struct super_block *sb, struct scoutfs_key *key,
 	DECLARE_STALE_TRACKING_SUPER_REFS(prev_refs, refs);
 	struct scoutfs_net_roots roots;
 	struct scoutfs_btree_root item_root;
-	struct scoutfs_log_trees_val *ltv;
+	struct scoutfs_log_trees *lt;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key found;
 	struct scoutfs_key ltk;
@@ -175,11 +175,11 @@ retry:
 			if (ret < 0)
 				goto out;
 
-			if (iref.val_len == sizeof(*ltv)) {
+			if (iref.val_len == sizeof(*lt)) {
 				ltk = *iref.key;
 				scoutfs_key_inc(&ltk);
-				ltv = iref.val;
-				item_root = ltv->item_root;
+				lt = iref.val;
+				item_root = lt->item_root;
 			} else {
 				ret = -EIO;
 			}
@@ -267,7 +267,7 @@ int scoutfs_forest_read_items(struct super_block *sb,
 		.cb = cb,
 		.cb_arg = arg,
 	};
-	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_log_trees lt;
 	struct scoutfs_net_roots roots;
 	struct scoutfs_bloom_block *bb;
 	struct forest_bloom_nrs bloom;
@@ -305,9 +305,9 @@ retry:
 	for (;; scoutfs_key_inc(&ltk)) {
 		ret = scoutfs_btree_next(sb, &roots.logs_root, &ltk, &iref);
 		if (ret == 0) {
-			if (iref.val_len == sizeof(ltv)) {
+			if (iref.val_len == sizeof(lt)) {
 				ltk = *iref.key;
-				memcpy(&ltv, iref.val, sizeof(ltv));
+				memcpy(&lt, iref.val, sizeof(lt));
 			} else {
 				ret = -EIO;
 			}
@@ -319,10 +319,10 @@ retry:
 			goto out; /* including stale */
 		}
 
-		if (ltv.bloom_ref.blkno == 0)
+		if (lt.bloom_ref.blkno == 0)
 			continue;
 
-		bl = read_bloom_ref(sb, &ltv.bloom_ref);
+		bl = read_bloom_ref(sb, &lt.bloom_ref);
 		if (IS_ERR(bl)) {
 			ret = PTR_ERR(bl);
 			goto out;
@@ -344,7 +344,7 @@ retry:
 
 		scoutfs_inc_counter(sb, forest_bloom_pass);
 
-		ret = scoutfs_btree_read_items(sb, &ltv.item_root, key, start,
+		ret = scoutfs_btree_read_items(sb, &lt.item_root, key, start,
 					       end, forest_read_items, &rid);
 		if (ret < 0)
 			goto out;

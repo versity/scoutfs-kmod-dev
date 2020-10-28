@@ -397,7 +397,6 @@ static int server_get_log_trees(struct super_block *sb,
 	u64 rid = scoutfs_net_client_rid(conn);
 	DECLARE_SERVER_INFO(sb, server);
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_log_trees_val ltv;
 	struct scoutfs_log_trees lt;
 	struct scoutfs_key key;
 	int ret;
@@ -419,9 +418,9 @@ static int server_get_log_trees(struct super_block *sb,
 	if (ret < 0 && ret != -ENOENT)
 		goto unlock;
 	if (ret == 0) {
-		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
+		if (iref.val_len == sizeof(struct scoutfs_log_trees)) {
 			key = *iref.key;
-			memcpy(&ltv, iref.val, iref.val_len);
+			memcpy(&lt, iref.val, iref.val_len);
 			if (le64_to_cpu(key.sklt_rid) != rid)
 				ret = -ENOENT;
 		} else {
@@ -436,20 +435,22 @@ static int server_get_log_trees(struct super_block *sb,
 	if (ret == -ENOENT) {
 		key.sklt_rid = cpu_to_le64(rid);
 		key.sklt_nr = cpu_to_le64(1);
-		memset(&ltv, 0, sizeof(ltv));
+		memset(&lt, 0, sizeof(lt));
+		lt.rid = key.sklt_rid;
+		lt.nr = key.sklt_nr;
 	}
 
 	/* return freed to server for emptying, refill avail  */
 	mutex_lock(&server->alloc_mutex);
 	ret = scoutfs_alloc_splice_list(sb, &server->alloc, &server->wri,
 					server->other_freed,
-					&ltv.meta_freed) ?:
-	      alloc_move_empty(sb, &super->data_alloc, &ltv.data_freed) ?:
+					&lt.meta_freed) ?:
+	      alloc_move_empty(sb, &super->data_alloc, &lt.data_freed) ?:
 	      scoutfs_alloc_fill_list(sb, &server->alloc, &server->wri,
-				      &ltv.meta_avail, server->meta_avail,
+				      &lt.meta_avail, server->meta_avail,
 				      SCOUTFS_SERVER_META_FILL_LO,
 				      SCOUTFS_SERVER_META_FILL_TARGET) ?:
-	      alloc_move_refill(sb, &ltv.data_avail, &super->data_alloc,
+	      alloc_move_refill(sb, &lt.data_avail, &super->data_alloc,
 				SCOUTFS_SERVER_DATA_FILL_LO,
 				SCOUTFS_SERVER_DATA_FILL_TARGET);
 	mutex_unlock(&server->alloc_mutex);
@@ -458,23 +459,11 @@ static int server_get_log_trees(struct super_block *sb,
 
 	/* update client's log tree's item */
 	ret = scoutfs_btree_force(sb, &server->alloc, &server->wri,
-				  &super->logs_root, &key, &ltv, sizeof(ltv));
+				  &super->logs_root, &key, &lt, sizeof(lt));
 unlock:
 	mutex_unlock(&server->logs_mutex);
 
 	ret = scoutfs_server_apply_commit(sb, ret);
-	if (ret == 0) {
-		lt.meta_avail = ltv.meta_avail;
-		lt.meta_freed = ltv.meta_freed;
-		lt.item_root = ltv.item_root;
-		lt.bloom_ref = ltv.bloom_ref;
-		lt.data_avail = ltv.data_avail;
-		lt.data_freed = ltv.data_freed;
-		lt.srch_file = ltv.srch_file;
-		lt.rid = key.sklt_rid;
-		lt.nr = key.sklt_nr;
-	}
-
 out:
 	WARN_ON_ONCE(ret < 0);
 	return scoutfs_net_response(sb, conn, cmd, id, ret, &lt, sizeof(lt));
@@ -493,8 +482,7 @@ static int server_commit_log_trees(struct super_block *sb,
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_SERVER_INFO(sb, server);
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_log_trees_val ltv;
-	struct scoutfs_log_trees *lt;
+	struct scoutfs_log_trees lt;
 	struct scoutfs_key key;
 	int ret;
 
@@ -502,7 +490,9 @@ static int server_commit_log_trees(struct super_block *sb,
 		ret = -EINVAL;
 		goto out;
 	}
-	lt = arg;
+
+	/* don't modify the caller's log_trees */
+	memcpy(&lt, arg, sizeof(struct scoutfs_log_trees));
 
 	ret = scoutfs_server_hold_commit(sb);
 	if (ret < 0) {
@@ -513,46 +503,28 @@ static int server_commit_log_trees(struct super_block *sb,
 	mutex_lock(&server->logs_mutex);
 
 	/* find the client's existing item */
-	scoutfs_key_init_log_trees(&key, le64_to_cpu(lt->rid),
-				   le64_to_cpu(lt->nr));
+	scoutfs_key_init_log_trees(&key, le64_to_cpu(lt.rid),
+				   le64_to_cpu(lt.nr));
 	ret = scoutfs_btree_lookup(sb, &super->logs_root, &key, &iref);
-	if (ret < 0 && ret != -ENOENT) {
+	if (ret < 0) {
 		scoutfs_err(sb, "server error finding client logs: %d", ret);
 		goto unlock;
 	}
-	if (ret == 0) {
-		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
-			memcpy(&ltv, iref.val, iref.val_len);
-		} else {
-			ret = -EIO;
-			scoutfs_err(sb, "server error, invalid log item: %d",
-				    ret);
-		}
+	if (ret == 0)
 		scoutfs_btree_put_iref(&iref);
-		if (ret < 0)
-			goto unlock;
-	}
 
 	/* try to rotate the srch log when big enough */
 	mutex_lock(&server->srch_mutex);
 	ret = scoutfs_srch_rotate_log(sb, &server->alloc, &server->wri,
-				      &super->srch_root, &lt->srch_file);
+				      &super->srch_root, &lt.srch_file);
 	mutex_unlock(&server->srch_mutex);
 	if (ret < 0) {
 		scoutfs_err(sb, "server error, rotating srch log: %d", ret);
 		goto unlock;
 	}
 
-	ltv.meta_avail = lt->meta_avail;
-	ltv.meta_freed = lt->meta_freed;
-	ltv.data_avail = lt->data_avail;
-	ltv.data_freed = lt->data_freed;
-	ltv.item_root = lt->item_root;
-	ltv.bloom_ref = lt->bloom_ref;
-	ltv.srch_file = lt->srch_file;
-
 	ret = scoutfs_btree_update(sb, &server->alloc, &server->wri,
-				   &super->logs_root, &key, &ltv, sizeof(ltv));
+				   &super->logs_root, &key, &lt, sizeof(lt));
 	if (ret < 0)
 		scoutfs_err(sb, "server error updating client logs: %d", ret);
 
@@ -613,7 +585,7 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	struct scoutfs_super_block *super = &SCOUTFS_SB(sb)->super;
 	DECLARE_SERVER_INFO(sb, server);
 	SCOUTFS_BTREE_ITEM_REF(iref);
-	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_log_trees lt;
 	struct scoutfs_key key;
 	int ret;
 	int err;
@@ -624,9 +596,9 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	scoutfs_key_init_log_trees(&key, rid, 0);
 	ret = scoutfs_btree_next(sb, &super->logs_root, &key, &iref);
 	if (ret == 0) {
-		if (iref.val_len == sizeof(struct scoutfs_log_trees_val)) {
+		if (iref.val_len == sizeof(struct scoutfs_log_trees)) {
 			key = *iref.key;
-			memcpy(&ltv, iref.val, iref.val_len);
+			memcpy(&lt, iref.val, iref.val_len);
 			if (le64_to_cpu(key.sklt_rid) != rid)
 				ret = -ENOENT;
 		} else {
@@ -648,16 +620,16 @@ static int reclaim_log_trees(struct super_block *sb, u64 rid)
 	mutex_lock(&server->alloc_mutex);
 	ret = scoutfs_alloc_splice_list(sb, &server->alloc, &server->wri,
 					server->other_freed,
-					&ltv.meta_freed) ?:
+					&lt.meta_freed) ?:
 	      scoutfs_alloc_splice_list(sb, &server->alloc, &server->wri,
 					server->other_freed,
-					&ltv.meta_avail) ?:
-	      alloc_move_empty(sb, &super->data_alloc, &ltv.data_avail) ?:
-	      alloc_move_empty(sb, &super->data_alloc, &ltv.data_freed);
+					&lt.meta_avail) ?:
+	      alloc_move_empty(sb, &super->data_alloc, &lt.data_avail) ?:
+	      alloc_move_empty(sb, &super->data_alloc, &lt.data_freed);
 	mutex_unlock(&server->alloc_mutex);
 
 	err = scoutfs_btree_update(sb, &server->alloc, &server->wri,
-				  &super->logs_root, &key, &ltv, sizeof(ltv));
+				  &super->logs_root, &key, &lt, sizeof(lt));
 	BUG_ON(err != 0); /* alloc and log item roots out of sync */
 
 out:

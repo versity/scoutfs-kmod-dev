@@ -430,16 +430,6 @@ struct scoutfs_log_trees {
 	__le64 nr;
 };
 
-struct scoutfs_log_trees_val {
-	struct scoutfs_alloc_list_head meta_avail;
-	struct scoutfs_alloc_list_head meta_freed;
-	struct scoutfs_btree_root item_root;
-	struct scoutfs_btree_ref bloom_ref;
-	struct scoutfs_alloc_root data_avail;
-	struct scoutfs_alloc_root data_freed;
-	struct scoutfs_srch_file srch_file;
-};
-
 struct scoutfs_log_item_value {
 	__le64 vers;
 	__u8 flags;

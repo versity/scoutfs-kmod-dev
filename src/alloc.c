@@ -1122,7 +1122,7 @@ int scoutfs_alloc_foreach(struct super_block *sb,
 	struct scoutfs_btree_ref refs[2] = {{0,}};
 	struct scoutfs_super_block *super = NULL;
 	struct scoutfs_srch_compact *sc;
-	struct scoutfs_log_trees_val ltv;
+	struct scoutfs_log_trees lt;
 	SCOUTFS_BTREE_ITEM_REF(iref);
 	struct scoutfs_key key;
 	int ret;
@@ -1169,9 +1169,9 @@ retry:
 		if (ret < 0)
 			goto out;
 
-		if (iref.val_len == sizeof(ltv)) {
+		if (iref.val_len == sizeof(lt)) {
 			key = *iref.key;
-			memcpy(&ltv, iref.val, sizeof(ltv));
+			memcpy(&lt, iref.val, sizeof(lt));
 		} else {
 			ret = -EIO;
 		}
@@ -1181,16 +1181,16 @@ retry:
 
 		ret = cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
 			 le64_to_cpu(key.sklt_rid), true, true,
-			 le64_to_cpu(ltv.meta_avail.total_nr)) ?:
+			 le64_to_cpu(lt.meta_avail.total_nr)) ?:
 		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
 			 le64_to_cpu(key.sklt_rid), true, false,
-			 le64_to_cpu(ltv.meta_freed.total_nr)) ?:
+			 le64_to_cpu(lt.meta_freed.total_nr)) ?:
 		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
 			 le64_to_cpu(key.sklt_rid), false, true,
-			 le64_to_cpu(ltv.data_avail.total_len)) ?:
+			 le64_to_cpu(lt.data_avail.total_len)) ?:
 		      cb(sb, arg, SCOUTFS_ALLOC_OWNER_MOUNT,
 			 le64_to_cpu(key.sklt_rid), false, false,
-			 le64_to_cpu(ltv.data_freed.total_len));
+			 le64_to_cpu(lt.data_freed.total_len));
 		if (ret < 0)
 			goto out;
 

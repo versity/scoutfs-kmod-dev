@@ -23,6 +23,10 @@ int scoutfs_forest_read_items(struct super_block *sb,
 			      scoutfs_forest_item_cb cb, void *arg);
 int scoutfs_forest_set_bloom_bits(struct super_block *sb,
 				  struct scoutfs_lock *lock);
+void scoutfs_forest_set_max_vers(struct super_block *sb, u64 max_vers);
+int scoutfs_forest_get_max_vers(struct super_block *sb,
+				struct scoutfs_super_block *super,
+				u64 *vers);
 int scoutfs_forest_insert_list(struct super_block *sb,
 			       struct scoutfs_btree_item_list *lst);
 int scoutfs_forest_srch_add(struct super_block *sb, u64 hash, u64 ino, u64 id);

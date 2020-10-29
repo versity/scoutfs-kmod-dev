@@ -37,6 +37,7 @@
 #include "trans.h"
 #include "srch.h"
 #include "alloc.h"
+#include "forest.h"
 
 /*
  * Every active mount can act as the server that listens on a net
@@ -1523,6 +1524,7 @@ static void scoutfs_server_worker(struct work_struct *work)
 	DECLARE_WAIT_QUEUE_HEAD(waitq);
 	struct sockaddr_in sin;
 	LIST_HEAD(conn_list);
+	u64 max_vers;
 	int ret;
 	int err;
 
@@ -1580,7 +1582,14 @@ static void scoutfs_server_worker(struct work_struct *work)
 	    le64_to_cpu(server->meta_avail->total_len))
 		swap(server->meta_avail, server->meta_freed);
 
-	ret = scoutfs_lock_server_setup(sb, &server->alloc, &server->wri);
+	ret = scoutfs_forest_get_max_vers(sb, super, &max_vers);
+	if (ret) {
+		scoutfs_err(sb, "server couldn't find max item vers: %d", ret);
+		goto shutdown;
+	}
+
+	ret = scoutfs_lock_server_setup(sb, &server->alloc, &server->wri,
+					max_vers);
 	if (ret)
 		goto shutdown;
 

@@ -426,6 +426,7 @@ struct scoutfs_log_trees {
 	struct scoutfs_alloc_root data_avail;
 	struct scoutfs_alloc_root data_freed;
 	struct scoutfs_srch_file srch_file;
+	__le64 max_item_vers;
 	__le64 rid;
 	__le64 nr;
 };

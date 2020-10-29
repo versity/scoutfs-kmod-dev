@@ -2108,6 +2108,7 @@ int scoutfs_item_write_dirty(struct super_block *sb)
 	struct page *page;
 	LIST_HEAD(pages);
 	LIST_HEAD(pos);
+	u64 max_vers = 0;
 	int val_len;
 	int bytes;
 	int off;
@@ -2172,6 +2173,7 @@ int scoutfs_item_write_dirty(struct super_block *sb)
 			val_len = sizeof(item->liv) + item->val_len;
 			bytes = offsetof(struct scoutfs_btree_item_list,
 					 val[val_len]);
+			max_vers = max(max_vers, le64_to_cpu(item->liv.vers));
 
 			if (off + bytes > PAGE_SIZE) {
 				page = second;
@@ -2200,6 +2202,9 @@ int scoutfs_item_write_dirty(struct super_block *sb)
 
 		read_unlock(&pg->rwlock);
 	}
+
+	/* store max item vers in forest's log_trees */
+	scoutfs_forest_set_max_vers(sb, max_vers);
 
 	/* write all the dirty items into log btree blocks */
 	ret = scoutfs_forest_insert_list(sb, first);

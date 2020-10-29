@@ -481,6 +481,65 @@ out:
 	return ret;
 }
 
+/*
+ * The caller is commiting items in the transaction and has found the
+ * greatest item version amongst them.  We store it in the log_trees root
+ * to send to the server.
+ */
+void scoutfs_forest_set_max_vers(struct super_block *sb, u64 max_vers)
+{
+	DECLARE_FOREST_INFO(sb, finf);
+
+	finf->our_log.max_item_vers = cpu_to_le64(max_vers);
+}
+
+/*
+ * The server is calling during setup to find the greatest item version
+ * amongst all the log tree roots.  They have the authoritative current
+ * super.
+ *
+ * Item versions are only used to compare items in log trees, not in the
+ * main fs tree.  All we have to do is find the greatest version amongst
+ * the log_trees so that new locks will have a write_version greater
+ * than all the items in the log_trees.
+ */
+int scoutfs_forest_get_max_vers(struct super_block *sb,
+				struct scoutfs_super_block *super,
+				u64 *vers)
+{
+	struct scoutfs_log_trees *lt;
+	SCOUTFS_BTREE_ITEM_REF(iref);
+	struct scoutfs_key ltk;
+	int ret;
+
+	scoutfs_key_init_log_trees(&ltk, 0, 0);
+	*vers = 0;
+
+	for (;; scoutfs_key_inc(&ltk)) {
+		ret = scoutfs_btree_next(sb, &super->logs_root, &ltk, &iref);
+		if (ret == 0) {
+			if (iref.val_len == sizeof(struct scoutfs_log_trees)) {
+				ltk = *iref.key;
+				lt = iref.val;
+				*vers = max(*vers,
+					    le64_to_cpu(lt->max_item_vers));
+			} else {
+				ret = -EIO;
+			}
+			scoutfs_btree_put_iref(&iref);
+		}
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				break;
+			goto out;
+		}
+	}
+
+	ret = 0;
+out:
+	return ret;
+}
+
 int scoutfs_forest_insert_list(struct super_block *sb,
 			       struct scoutfs_btree_item_list *lst)
 {
@@ -532,9 +591,11 @@ void scoutfs_forest_init_btrees(struct super_block *sb,
 	memset(&finf->our_log, 0, sizeof(finf->our_log));
 	finf->our_log.item_root = lt->item_root;
 	finf->our_log.bloom_ref = lt->bloom_ref;
+	finf->our_log.max_item_vers = lt->max_item_vers;
 	finf->our_log.rid = lt->rid;
 	finf->our_log.nr = lt->nr;
 	finf->srch_file = lt->srch_file;
+
 	WARN_ON_ONCE(finf->srch_bl); /* commiting should have put the block */
 	finf->srch_bl = NULL;
 
@@ -560,6 +621,7 @@ void scoutfs_forest_get_btrees(struct super_block *sb,
 	lt->item_root = finf->our_log.item_root;
 	lt->bloom_ref = finf->our_log.bloom_ref;
 	lt->srch_file = finf->srch_file;
+	lt->max_item_vers = finf->our_log.max_item_vers;
 
 	scoutfs_block_put(sb, finf->srch_bl);
 	finf->srch_bl = NULL;

@@ -901,6 +901,7 @@ int scoutfs_lock_recover_request(struct super_block *sb, u64 net_id,
 	for (i = 0; lock && i < SCOUTFS_NET_LOCK_MAX_RECOVER_NR; i++) {
 
 		nlr->locks[i].key = lock->start;
+		nlr->locks[i].write_version = cpu_to_le64(lock->write_version);
 		nlr->locks[i].old_mode = lock->mode;
 		nlr->locks[i].new_mode = lock->mode;
 

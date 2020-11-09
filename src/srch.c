@@ -356,7 +356,7 @@ static int read_path_block(struct super_block *sb,
  * allocate new blocks, or return errors for missing blocks (files are
  * never sparse, this won't happen).
  */
-enum {
+enum gfb_flags {
 	GFB_INSERT = (1 << 0),
 	GFB_DIRTY = (1 << 1),
 };
@@ -364,7 +364,7 @@ static int get_file_block(struct super_block *sb,
 			  struct scoutfs_alloc *alloc,
 			  struct scoutfs_block_writer *wri,
 			  struct scoutfs_srch_file *sfl,
-			  int gfb, u64 blk, struct scoutfs_block **bl_ret)
+			  int flags, u64 blk, struct scoutfs_block **bl_ret)
 {
 	struct scoutfs_block *parent = NULL;
 	struct scoutfs_block_header *hdr;
@@ -382,7 +382,7 @@ static int get_file_block(struct super_block *sb,
 	/* see if we need to grow to insert a new largest blk */
 	hei = height_for_blk(blk);
 	while (sfl->height < hei) {
-		if (!(gfb & GFB_INSERT)) {
+		if (!(flags & GFB_INSERT)) {
 			ret = -ENOENT;
 			goto out;
 		}
@@ -419,8 +419,8 @@ static int get_file_block(struct super_block *sb,
 	level = sfl->height;
 	ref = &sfl->ref;
 	while (level--) {
-		/* searchin an unused part of the tree */
-		if (!ref->blkno && !(gfb & GFB_INSERT)) {
+		/* searching an unused part of the tree */
+		if (!ref->blkno && !(flags & GFB_INSERT)) {
 			ret = -ENOENT;
 			goto out;
 		}
@@ -433,7 +433,7 @@ static int get_file_block(struct super_block *sb,
 		}
 
 		/* allocate a new block if we need it */
-		if (!ref->blkno || ((gfb & GFB_DIRTY) &&
+		if (!ref->blkno || ((flags & GFB_DIRTY) &&
 				    !scoutfs_block_writer_is_dirty(sb, bl))) {
 			ret = scoutfs_alloc_meta(sb, alloc, wri, &blkno);
 			if (ret < 0)
@@ -504,7 +504,7 @@ out:
 	}
 
 	/* record that we successfully grew the file */
-	if (ret == 0 && (gfb & GFB_INSERT) && blk >= le64_to_cpu(sfl->blocks))
+	if (ret == 0 && (flags & GFB_INSERT) && blk >= le64_to_cpu(sfl->blocks))
 		sfl->blocks = cpu_to_le64(blk + 1);
 
 	*bl_ret = bl;

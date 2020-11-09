@@ -78,7 +78,7 @@ struct scoutfs_ioctl_walk_inodes {
 	__u8 _pad[11]; /* padded to align walk_inodes_entry total size */
 };
 
-enum {
+enum scoutfs_ino_walk_seq_type {
 	SCOUTFS_IOC_WALK_INODES_META_SEQ = 0,
 	SCOUTFS_IOC_WALK_INODES_DATA_SEQ,
 	SCOUTFS_IOC_WALK_INODES_UNKNOWN,

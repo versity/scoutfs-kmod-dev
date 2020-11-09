@@ -5,7 +5,7 @@
 #include <linux/in.h>
 #include "format.h"
 
-enum {
+enum scoutfs_mount_options {
 	Opt_server_addr,
 	Opt_metadev_path,
 	Opt_err,

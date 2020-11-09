@@ -118,12 +118,6 @@ struct server_lock_node {
 	struct list_head invalidated;
 };
 
-enum {
-	CLE_GRANTED,
-	CLE_REQUESTED,
-	CLE_INVALIDATED,
-};
-
 /*
  * Interactions with the client are tracked with these little mode
  * wrappers.

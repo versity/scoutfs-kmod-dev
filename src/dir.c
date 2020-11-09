@@ -78,7 +78,7 @@ static unsigned int mode_to_type(umode_t mode)
 #undef S_SHIFT
 }
 
-static unsigned int dentry_type(unsigned int type)
+static unsigned int dentry_type(enum scoutfs_dentry_type type)
 {
 	static unsigned char types[] = {
 		[SCOUTFS_DT_FIFO]	= DT_FIFO,
@@ -988,12 +988,12 @@ static void init_symlink_key(struct scoutfs_key *key, u64 ino, u8 nr)
  * The target name can be null for deletion when val isn't used.  Size
  * still has to be provided to determine the number of items.
  */
-enum {
+enum symlink_ops {
 	SYM_CREATE = 0,
 	SYM_LOOKUP,
 	SYM_DELETE,
 };
-static int symlink_item_ops(struct super_block *sb, int op, u64 ino,
+static int symlink_item_ops(struct super_block *sb, enum symlink_ops op, u64 ino,
 			    struct scoutfs_lock *lock, const char *target,
 			    size_t size)
 {

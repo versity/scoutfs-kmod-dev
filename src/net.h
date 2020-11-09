@@ -76,7 +76,7 @@ struct scoutfs_net_connection {
 	void *info;
 };
 
-enum {
+enum conn_flags {
 	CONN_FL_valid_greeting = (1UL << 0), /* other commands can proceed */
 	CONN_FL_established =	 (1UL << 1), /* added sends queue send work */
 	CONN_FL_shutting_down =	 (1UL << 2), /* shutdown work was queued */

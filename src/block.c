@@ -58,7 +58,7 @@ struct block_info {
 #define DECLARE_BLOCK_INFO(sb, name) \
 	struct block_info *name = SCOUTFS_SB(sb)->block_info
 
-enum {
+enum block_status_bits {
 	BLOCK_BIT_UPTODATE = 0,	/* contents consistent with media */
 	BLOCK_BIT_NEW,		/* newly allocated, contents undefined */
 	BLOCK_BIT_DIRTY,	/* dirty, writer will write */

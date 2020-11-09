@@ -715,7 +715,7 @@ static void move_page_items(struct super_block *sb,
 	}
 }
 
-enum {
+enum page_intersection_type {
 	PGI_DISJOINT,
 	PGI_INSIDE,
 	PGI_START_OLAP,

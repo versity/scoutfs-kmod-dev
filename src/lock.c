@@ -94,17 +94,17 @@ struct lock_info {
 #define DECLARE_LOCK_INFO(sb, name) \
 	struct lock_info *name = SCOUTFS_SB(sb)->lock_info
 
-static bool lock_mode_invalid(int mode)
+static bool lock_mode_invalid(enum scoutfs_lock_mode mode)
 {
 	return (unsigned)mode >= SCOUTFS_LOCK_INVALID;
 }
 
-static bool lock_mode_can_read(int mode)
+static bool lock_mode_can_read(enum scoutfs_lock_mode mode)
 {
 	return mode == SCOUTFS_LOCK_READ || mode == SCOUTFS_LOCK_WRITE;
 }
 
-static bool lock_mode_can_write(int mode)
+static bool lock_mode_can_write(enum scoutfs_lock_mode mode)
 {
 	return mode == SCOUTFS_LOCK_WRITE || mode == SCOUTFS_LOCK_WRITE_ONLY;
 }
@@ -147,7 +147,7 @@ static void invalidate_inode(struct super_block *sb, u64 ino)
  * leave cached items behind in the case of invalidating to a read lock.
  */
 static int lock_invalidate(struct super_block *sb, struct scoutfs_lock *lock,
-			   int prev, int mode)
+			   enum scoutfs_lock_mode prev, enum scoutfs_lock_mode mode)
 {
 	struct scoutfs_lock_coverage *cov;
 	struct scoutfs_lock_coverage *tmp;
@@ -270,13 +270,13 @@ static struct scoutfs_lock *lock_alloc(struct super_block *sb,
 	return lock;
 }
 
-static void lock_inc_count(unsigned int *counts, int mode)
+static void lock_inc_count(unsigned int *counts, enum scoutfs_lock_mode mode)
 {
 	BUG_ON(mode < 0 || mode >= SCOUTFS_LOCK_NR_MODES);
 	counts[mode]++;
 }
 
-static void lock_dec_count(unsigned int *counts, int mode)
+static void lock_dec_count(unsigned int *counts, enum scoutfs_lock_mode mode)
 {
 	BUG_ON(mode < 0 || mode >= SCOUTFS_LOCK_NR_MODES);
 	counts[mode]--;
@@ -288,7 +288,7 @@ static void lock_dec_count(unsigned int *counts, int mode)
  */
 static bool lock_counts_match(int granted, unsigned int *counts)
 {
-	int mode;
+	enum scoutfs_lock_mode mode;
 
 	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
 		if (counts[mode] && !lock_modes_match(granted, mode))
@@ -305,7 +305,7 @@ static bool lock_counts_match(int granted, unsigned int *counts)
  */
 static bool lock_count_match_exists(int desired, unsigned int *counts)
 {
-	int mode;
+	enum scoutfs_lock_mode mode;
 
 	for (mode = 0; mode < SCOUTFS_LOCK_NR_MODES; mode++) {
 		if (counts[mode] && lock_modes_match(desired, mode))
@@ -321,7 +321,7 @@ static bool lock_count_match_exists(int desired, unsigned int *counts)
  */
 static bool lock_idle(struct scoutfs_lock *lock)
 {
-	int mode;
+	enum scoutfs_lock_mode mode;
 
 	if (lock->request_pending || lock->invalidate_pending)
 		return false;
@@ -922,7 +922,7 @@ int scoutfs_lock_recover_request(struct super_block *sb, u64 net_id,
 }
 
 static bool lock_wait_cond(struct super_block *sb, struct scoutfs_lock *lock,
-			   int mode)
+			   enum scoutfs_lock_mode mode)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 	bool wake;
@@ -956,7 +956,7 @@ static bool lock_flags_invalid(int flags)
  * won't process our request until it receives our invalidation
  * response.
  */
-static int lock_key_range(struct super_block *sb, int mode, int flags,
+static int lock_key_range(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 			  struct scoutfs_key *start, struct scoutfs_key *end,
 			  struct scoutfs_lock **ret_lock)
 {
@@ -1064,7 +1064,7 @@ out_unlock:
 	return ret;
 }
 
-int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
+int scoutfs_lock_ino(struct super_block *sb, enum scoutfs_lock_mode mode, int flags, u64 ino,
 		     struct scoutfs_lock **ret_lock)
 {
 	struct scoutfs_key start;
@@ -1089,7 +1089,7 @@ int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
  * is incremented as new locks are acquired and then indicates that an
  * old inode with a smaller refresh_gen needs to be refreshed.
  */
-int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_inode(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 		       struct inode *inode, struct scoutfs_lock **lock)
 {
 	int ret;
@@ -1152,7 +1152,7 @@ static void swap_arg(void *A, void *B, int size)
  *
  * (pretty great collision with d_lock() here)
  */
-int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_inodes(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 			struct inode *a, struct scoutfs_lock **a_lock,
 			struct inode *b, struct scoutfs_lock **b_lock,
 			struct inode *c, struct scoutfs_lock **c_lock,
@@ -1200,7 +1200,7 @@ int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
 /*
  * The rename lock is magical because it's global.
  */
-int scoutfs_lock_rename(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_rename(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 			struct scoutfs_lock **lock)
 {
 	struct scoutfs_key key = {
@@ -1247,7 +1247,7 @@ void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
  * Lock the given index item.  We use the index masks to calculate the
  * start and end key values that are covered by the lock.
  */
-int scoutfs_lock_inode_index(struct super_block *sb, int mode,
+int scoutfs_lock_inode_index(struct super_block *sb, enum scoutfs_lock_mode mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock)
 {
@@ -1270,7 +1270,7 @@ int scoutfs_lock_inode_index(struct super_block *sb, int mode,
  * able to.  Maybe we have a bunch free and they're trying to allocate
  * and are getting ENOSPC.
  */
-int scoutfs_lock_rid(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_rid(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 		     u64 rid, struct scoutfs_lock **lock)
 {
 	struct scoutfs_key start;
@@ -1291,7 +1291,7 @@ int scoutfs_lock_rid(struct super_block *sb, int mode, int flags,
  * As we unlock we always extend the grace period to give the caller
  * another pass at the lock before its invalidated.
  */
-void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock, int mode)
+void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock, enum scoutfs_lock_mode mode)
 {
 	DECLARE_LOCK_INFO(sb, linfo);
 
@@ -1384,7 +1384,7 @@ void scoutfs_lock_del_coverage(struct super_block *sb,
  * the mode and keys from changing.
  */
 bool scoutfs_lock_protected(struct scoutfs_lock *lock, struct scoutfs_key *key,
-			    int mode)
+			    enum scoutfs_lock_mode mode)
 {
 	signed char lock_mode = ACCESS_ONCE(lock->mode);
 
@@ -1587,7 +1587,7 @@ void scoutfs_lock_destroy(struct super_block *sb)
 	DECLARE_LOCK_INFO(sb, linfo);
 	struct scoutfs_lock *lock;
 	struct rb_node *node;
-	int mode;
+	enum scoutfs_lock_mode mode;
 
 	if (!linfo)
 		return;

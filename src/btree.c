@@ -76,7 +76,7 @@
  */
 
 /* btree walking has a bunch of behavioural bit flags */
-enum {
+enum btree_walk_flags {
 	 BTW_NEXT	= (1 <<  0), /* return >= key */
 	 BTW_PREV	= (1 <<  1), /* return <= key */
 	 BTW_DIRTY	= (1 <<  2), /* cow stable blocks */

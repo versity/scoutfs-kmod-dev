@@ -100,7 +100,7 @@ do {								\
 } while (0)
 
 /* listening and their accepting sockets have a fixed locking order */
-enum {
+enum spin_lock_subtype {
 	CONN_LOCK_LISTENER,
 	CONN_LOCK_ACCEPTED,
 };

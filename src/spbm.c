@@ -47,9 +47,9 @@ bool scoutfs_spbm_empty(struct scoutfs_spbm *spbm)
 	return RB_EMPTY_ROOT(&spbm->root);
 }
 
-enum {
+enum spbm_flags {
 	/* if a node isn't found then return an allocated new node */
-	SPBM_FIND_ALLOC = 0x1,
+	SPBM_FIND_ALLOC = (1 << 0),
 };
 static struct spbm_node *find_node(struct scoutfs_spbm *spbm, u64 index,
 				   int flags)

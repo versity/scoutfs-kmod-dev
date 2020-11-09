@@ -699,7 +699,7 @@ struct scoutfs_dirent {
 /* getdents returns next pos with an entry, no entry at (f_pos)~0 */
 #define SCOUTFS_DIRENT_LAST_POS (U64_MAX - 1)
 
-enum {
+enum scoutfs_dentry_type {
 	SCOUTFS_DT_FIFO = 0,
 	SCOUTFS_DT_CHR,
 	SCOUTFS_DT_DIR,
@@ -797,7 +797,7 @@ struct scoutfs_net_header {
 #define SCOUTFS_NET_FLAG_RESPONSE	(1 << 0)
 #define SCOUTFS_NET_FLAGS_UNKNOWN	(U8_MAX << 1)
 
-enum {
+enum scoutfs_net_cmd {
 	SCOUTFS_NET_CMD_GREETING = 0,
 	SCOUTFS_NET_CMD_ALLOC_INODES,
 	SCOUTFS_NET_CMD_GET_LOG_TREES,
@@ -827,7 +827,7 @@ enum {
 
 #undef EXPAND_NET_ERRNO
 #define EXPAND_NET_ERRNO(which) SCOUTFS_NET_ERR_##which,
-enum {
+enum scoutfs_net_errors {
 	SCOUTFS_NET_ERR_NONE = 0,
 	EXPAND_EACH_NET_ERRNO
 	SCOUTFS_NET_ERR_UNKNOWN,
@@ -875,7 +875,7 @@ struct scoutfs_net_lock_recover {
 	 sizeof(struct scoutfs_net_lock))
 
 /* some enums for tracing */
-enum {
+enum scoutfs_lock_trace {
 	SLT_CLIENT,
 	SLT_SERVER,
 	SLT_GRANT,
@@ -919,7 +919,7 @@ struct scoutfs_fid {
 /*
  * Identifiers for sources of corruption that can generate messages.
  */
-enum {
+enum scoutfs_corruption_sources {
 	SC_DIRENT_NAME_LEN = 0,
 	SC_DIRENT_BACKREF_NAME_LEN,
 	SC_DIRENT_READDIR_NAME_LEN,

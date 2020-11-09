@@ -40,7 +40,7 @@ struct scoutfs_lock {
 	spinlock_t cov_list_lock;
 	struct list_head cov_list;
 
-	int mode;
+	enum scoutfs_lock_mode mode;
 	unsigned int waiters[SCOUTFS_LOCK_NR_MODES];
 	unsigned int users[SCOUTFS_LOCK_NR_MODES];
 
@@ -63,27 +63,27 @@ int scoutfs_lock_invalidate_request(struct super_block *sb, u64 net_id,
 int scoutfs_lock_recover_request(struct super_block *sb, u64 net_id,
 				 struct scoutfs_key *key);
 
-int scoutfs_lock_inode(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_inode(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 		       struct inode *inode, struct scoutfs_lock **ret_lock);
-int scoutfs_lock_ino(struct super_block *sb, int mode, int flags, u64 ino,
+int scoutfs_lock_ino(struct super_block *sb, enum scoutfs_lock_mode mode, int flags, u64 ino,
 		     struct scoutfs_lock **ret_lock);
 void scoutfs_lock_get_index_item_range(u8 type, u64 major, u64 ino,
 				       struct scoutfs_key *start,
 				       struct scoutfs_key *end);
-int scoutfs_lock_inode_index(struct super_block *sb, int mode,
+int scoutfs_lock_inode_index(struct super_block *sb, enum scoutfs_lock_mode mode,
 			     u8 type, u64 major, u64 ino,
 			     struct scoutfs_lock **ret_lock);
-int scoutfs_lock_inodes(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_inodes(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 			struct inode *a, struct scoutfs_lock **a_lock,
 			struct inode *b, struct scoutfs_lock **b_lock,
 			struct inode *c, struct scoutfs_lock **c_lock,
 			struct inode *d, struct scoutfs_lock **D_lock);
-int scoutfs_lock_rename(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_rename(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 			struct scoutfs_lock **lock);
-int scoutfs_lock_rid(struct super_block *sb, int mode, int flags,
+int scoutfs_lock_rid(struct super_block *sb, enum scoutfs_lock_mode mode, int flags,
 		     u64 rid, struct scoutfs_lock **lock);
 void scoutfs_unlock(struct super_block *sb, struct scoutfs_lock *lock,
-		    int level);
+		    enum scoutfs_lock_mode mode);
 
 void scoutfs_lock_init_coverage(struct scoutfs_lock_coverage *cov);
 void scoutfs_lock_add_coverage(struct super_block *sb,
@@ -94,7 +94,7 @@ bool scoutfs_lock_is_covered(struct super_block *sb,
 void scoutfs_lock_del_coverage(struct super_block *sb,
 			       struct scoutfs_lock_coverage *cov);
 bool scoutfs_lock_protected(struct scoutfs_lock *lock, struct scoutfs_key *key,
-			    int mode);
+			    enum scoutfs_lock_mode mode);
 
 void scoutfs_free_unused_locks(struct super_block *sb, unsigned long nr);
 

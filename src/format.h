@@ -905,7 +905,7 @@ enum {
  *
  * The null mode provides no access and is used to destroy locks.
  */
-enum {
+enum scoutfs_lock_mode {
 	SCOUTFS_LOCK_NULL = 0,
 	SCOUTFS_LOCK_READ,
 	SCOUTFS_LOCK_WRITE,

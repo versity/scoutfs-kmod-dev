@@ -376,7 +376,7 @@ static bool acquired_hold(struct super_block *sb,
 		goto out;
 	}
 
-	if (scoutfs_alloc_meta_lo_thresh(sb, &tri->alloc)) {
+	if (scoutfs_alloc_meta_low(sb, &tri->alloc, 8)) {
 		scoutfs_inc_counter(sb, trans_commit_meta_alloc_low);
 		queue_trans_work(sbi);
 		goto out;

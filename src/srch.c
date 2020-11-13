@@ -1482,7 +1482,7 @@ static bool should_commit(struct super_block *sb, struct scoutfs_alloc *alloc,
 {
 	return (scoutfs_block_writer_dirty_bytes(sb, wri) >=
 		SRCH_COMPACT_DIRTY_LIMIT_BYTES) ||
-		scoutfs_alloc_meta_lo_thresh(sb, alloc);
+		scoutfs_alloc_meta_low(sb, alloc, 8);
 }
 
 struct tourn_node {

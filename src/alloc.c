@@ -1085,27 +1085,17 @@ out:
 }
 
 /*
- * Returns true if we're running low on avail blocks or running out of
- * space for freed blocks.
- *
- * On the avail side, we're avoiding spurious enospc as our avail block
- * runs low.  If we commit it can be refilled by the server.
- *
- * On the freed side, we're avoiding getting errors in frees where they
- * can't be recovered from.  This is mostly in freeing cowed blocks in
- * the data allocator btree which is related to its height.
- *
- * And both of these need to be mindful of multiple tasks entering the
- * transaction.
+ * Returns true if meta avail and free don't have room for the given
+ * number of alloctions or frees.
  */
-bool scoutfs_alloc_meta_lo_thresh(struct super_block *sb,
-				  struct scoutfs_alloc *alloc)
+bool scoutfs_alloc_meta_low(struct super_block *sb,
+			    struct scoutfs_alloc *alloc, u32 nr)
 {
 	bool lo;
 
 	spin_lock(&alloc->lock);
-	lo = le32_to_cpu(alloc->avail.first_nr) < 8 ||
-	     list_block_space(alloc->freed.first_nr) < 8;
+	lo = le32_to_cpu(alloc->avail.first_nr) < nr ||
+	     list_block_space(alloc->freed.first_nr) < nr;
 	spin_unlock(&alloc->lock);
 
 	return lo;

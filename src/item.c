@@ -2042,18 +2042,11 @@ int scoutfs_item_delete_force(struct super_block *sb, struct scoutfs_key *key,
 	return item_delete(sb, key, lock, SCOUTFS_LOCK_WRITE_ONLY, true);
 }
 
-/*
- * Give a rough idea of the number of bytes that would need to be
- * written to commit the current dirty items.  Reporting the total item
- * dirty bytes wouldn't be accurate because they're written into btree
- * pages.  The number of dirty pages holding the dirty items is
- * comparable.  This could probably use some tuning.
- */
-u64 scoutfs_item_dirty_bytes(struct super_block *sb)
+u64 scoutfs_item_dirty_pages(struct super_block *sb)
 {
 	DECLARE_ITEM_CACHE_INFO(sb, cinf);
 
-	return (u64)atomic_read(&cinf->dirty_pages) << PAGE_SHIFT;
+	return (u64)atomic_read(&cinf->dirty_pages);
 }
 
 static int cmp_pg_start(void *priv, struct list_head *A, struct list_head *B)

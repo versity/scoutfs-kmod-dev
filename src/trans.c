@@ -170,7 +170,7 @@ void scoutfs_trans_write_func(struct work_struct *work)
 			scoutfs_block_writer_dirty_bytes(sb, &tri->wri));
 
 	if (!scoutfs_block_writer_has_dirty(sb, &tri->wri) &&
-	    !scoutfs_item_dirty_bytes(sb)) {
+	    !scoutfs_item_dirty_pages(sb)) {
 		if (sbi->trans_deadline_expired) {
 			/*
 			 * If we're not writing data then we only advance the
@@ -369,14 +369,30 @@ static bool acquired_hold(struct super_block *sb,
 	items = tri->reserved_items + cnt->items;
 	vals = tri->reserved_vals + cnt->vals;
 
-	/* XXX arbitrarily limit to 8 meg transactions */
-	if (scoutfs_item_dirty_bytes(sb) >= (8 * 1024 * 1024)) {
+	/*
+	 * In theory each dirty item page could be straddling two full
+	 * blocks, requiring 4 allocations for each item cache page.
+	 * That's much too conservative, typically many dirty item cache
+	 * pages that are near each other all land in one block.  This
+	 * rough estimate is still so far beyond what typically happens
+	 * that it accounts for having to dirty parent blocks and
+	 * whatever dirtying is done during the transaction hold.
+	 */
+	if (scoutfs_alloc_meta_low(sb, &tri->alloc,
+				   scoutfs_item_dirty_pages(sb) * 2)) {
 		scoutfs_inc_counter(sb, trans_commit_dirty_meta_full);
 		queue_trans_work(sbi);
 		goto out;
 	}
 
-	if (scoutfs_alloc_meta_low(sb, &tri->alloc, 8)) {
+	/*
+	 * Extent modifications can use meta allocators without creating
+	 * dirty items so we have to check the meta alloc specifically.
+	 * The size of the client's avail and freed roots are bound so
+	 * we're unlikely to need very many block allocations per
+	 * transaction hold.  XXX This should be more precisely tuned.
+	 */
+	if (scoutfs_alloc_meta_low(sb, &tri->alloc, 16)) {
 		scoutfs_inc_counter(sb, trans_commit_meta_alloc_low);
 		queue_trans_work(sbi);
 		goto out;

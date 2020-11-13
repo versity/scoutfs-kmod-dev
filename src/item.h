@@ -24,7 +24,7 @@ int scoutfs_item_delete_force(struct super_block *sb,
 				struct scoutfs_key *key,
 				struct scoutfs_lock *lock);
 
-u64 scoutfs_item_dirty_bytes(struct super_block *sb);
+u64 scoutfs_item_dirty_pages(struct super_block *sb);
 int scoutfs_item_write_dirty(struct super_block *sb);
 int scoutfs_item_write_done(struct super_block *sb);
 bool scoutfs_item_range_cached(struct super_block *sb,

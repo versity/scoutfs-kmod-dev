@@ -41,11 +41,15 @@
 /*
  * Fill client alloc roots to the target when they fall below the lo
  * threshold.
+ *
+ * We're giving the client the most available meta blocks we can so that
+ * it has the freedom to build large transactions before worrying that
+ * it might run out of meta allocs during commits.
  */
 #define SCOUTFS_SERVER_META_FILL_TARGET \
-	(256ULL * 1024 * 1024 >> SCOUTFS_BLOCK_LG_SHIFT)
+	SCOUTFS_ALLOC_LIST_MAX_BLOCKS
 #define SCOUTFS_SERVER_META_FILL_LO \
-	(64ULL * 1024 * 1024 >> SCOUTFS_BLOCK_LG_SHIFT)
+	(SCOUTFS_ALLOC_LIST_MAX_BLOCKS / 2)
 #define SCOUTFS_SERVER_DATA_FILL_TARGET \
 	(4ULL * 1024 * 1024 * 1024 >> SCOUTFS_BLOCK_SM_SHIFT)
 #define SCOUTFS_SERVER_DATA_FILL_LO \

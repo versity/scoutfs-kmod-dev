@@ -1474,15 +1474,15 @@ out:
 }
 
 /*
- * We're done with an operation when we have sufficient dirty blocks or
- * run out of avail or freed allocator space.
+ * We should commit our progress when we have sufficient dirty blocks or
+ * don't have enough metadata alloc space for our caller's operations.
  */
 static bool should_commit(struct super_block *sb, struct scoutfs_alloc *alloc,
-			  struct scoutfs_block_writer *wri)
+			  struct scoutfs_block_writer *wri, u32 nr)
 {
 	return (scoutfs_block_writer_dirty_bytes(sb, wri) >=
 		SRCH_COMPACT_DIRTY_LIMIT_BYTES) ||
-		scoutfs_alloc_meta_low(sb, alloc, 8);
+		scoutfs_alloc_meta_low(sb, alloc, nr);
 }
 
 struct tourn_node {
@@ -1569,8 +1569,8 @@ static int kway_merge(struct super_block *sb,
 				goto out;
 			}
 
-			/* check for committing before dirtying blocks */
-			if (should_commit(sb, alloc, wri)) {
+			/* could grow and dirty to a leaf */
+			if (should_commit(sb, alloc, wri, sfl->height + 1)) {
 				ret = 0;
 				goto out;
 			}
@@ -2037,7 +2037,8 @@ static int delete_file(struct super_block *sb, struct scoutfs_alloc *alloc,
 				if (!blkno)
 					continue;
 
-				if (should_commit(sb, alloc, wri)) {
+				/* free below, then final root block */
+				if (should_commit(sb, alloc, wri, 2)) {
 					ret = 0;
 					goto out;
 				}

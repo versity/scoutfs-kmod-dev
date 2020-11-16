@@ -964,8 +964,8 @@ retry:
 			} else {
 				ret = -EIO;
 			}
+			scoutfs_btree_put_iref(&iref);
 		}
-		scoutfs_btree_put_iref(&iref);
 		if (ret < 0) {
 			if (ret == -ENOENT) {
 				if (key.sk_type == SCOUTFS_SRCH_BLOCKS_TYPE) {
@@ -999,8 +999,8 @@ retry:
 			} else {
 				ret = -EIO;
 			}
+			scoutfs_btree_put_iref(&iref);
 		}
-		scoutfs_btree_put_iref(&iref);
 		if (ret < 0)
 			goto out;
 

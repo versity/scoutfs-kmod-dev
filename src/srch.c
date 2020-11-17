@@ -758,34 +758,45 @@ static int search_sorted_file(struct super_block *sb,
 	struct scoutfs_block *bl = NULL;
 	int ret = 0;
 	int pos = 0;
-	u64 left;
-	u64 right;
+	s64 left;
+	s64 right;
+	u64 first;
 	u64 blk;
 
-	/* binary search for the block that contains the start */
-	blk = 0;
+	if (sfl->blocks == 0)
+		return 0;
+
+	/* binary search for first block in the range */
+	first = U64_MAX;
 	left = 0;
 	right = le64_to_cpu(sfl->blocks) - 1;
-	while (left != right) {
+	while (left <= right) {
 		blk = (left + right) >> 1;
 
-		scoutfs_block_put(sb, bl);
 		ret = get_file_block(sb, NULL, NULL, sfl, 0, blk, &bl);
 		if (ret < 0)
 			goto out;
 		srb = bl->data;
 
-		if (sre_cmp(start, &srb->first) < 0)
-			right = --blk;
-		else if (sre_cmp(start, &srb->last) > 0)
-			left = ++blk;
-		else
-			break;
+		if (sre_cmp(end, &srb->first) < 0) {
+			right = blk - 1;
+		} else if (sre_cmp(start, &srb->last) > 0) {
+			left = blk + 1;
+		} else {
+			first = min(blk, first);
+			right = blk - 1;
+		}
+
+		scoutfs_block_put(sb, bl);
+		bl = NULL;
 	}
 
-	/* blk is the result of the search */
-	scoutfs_block_put(sb, bl);
-	bl = NULL;
+	/* no blocks in range */
+	if (first == U64_MAX) {
+		ret = 0;
+		goto out;
+	}
+	blk = first;
 
 	/* stream entries until end or we're past the full tracking rb_root */
 	for (;;) {

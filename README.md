@@ -62,17 +62,17 @@ help on the mailing list.**
 The requirements for running scoutfs on a small cluster are:
 
  1. One or more nodes running x86-64 CentOS/RHEL 7.4 (or 7.3)
- 2. Access to a single shared block device
+ 2. Access to two shared block devices
  3. IPv4 connectivity between the nodes
 
 The steps for getting scoutfs mounted and operational are:
 
  1. Get the kernel module running on the nodes
- 2. Make a new filesystem on the device with the userspace utilities
- 3. Mount the device on all the nodes
+ 2. Make a new filesystem on the devices with the userspace utilities
+ 3. Mount the devices on all the nodes
 
-In this example we run all of these commands on three nodes.  The block
-device name is the same on all the nodes.
+In this example we run all of these commands on three nodes.  The names
+of the block devices are the same on all the nodes.
 
 1. Get the Kernel Module and Userspace Binaries
 
@@ -103,7 +103,7 @@ device name is the same on all the nodes.
    quorum for the system to function.
 
    ```shell
-   scoutfs mkfs -Q 2 /dev/shared_block_device
+   scoutfs mkfs -Q 2 /dev/meta_dev /dev/data_dev
    ```
 
 3. Mount the Filesystem
@@ -114,7 +114,7 @@ device name is the same on all the nodes.
 
    ```shell
    mkdir /mnt/scoutfs
-   mount -t scoutfs -o server_addr=$NODE_ADDR /dev/shared_block_device /mnt/scoutfs
+   mount -t scoutfs -o server_addr=$NODE_ADDR,metadev_path=/dev/meta_dev /dev/data_dev /mnt/scoutfs
    ```
 
 4. For Kicks, Observe the Metadata Change Index

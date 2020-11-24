@@ -182,6 +182,16 @@ static int scoutfs_show_options(struct seq_file *seq, struct dentry *root)
 	return 0;
 }
 
+static ssize_t metadev_path_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	struct super_block *sb = SCOUTFS_SYSFS_ATTRS_SB(kobj);
+	struct mount_options *opts = &SCOUTFS_SB(sb)->opts;
+
+	return snprintf(buf, PAGE_SIZE, "%s", opts->metadev_path);
+}
+SCOUTFS_ATTR_RO(metadev_path);
+
 static ssize_t server_addr_show(struct kobject *kobj,
 			      struct kobj_attribute *attr, char *buf)
 {
@@ -194,6 +204,7 @@ static ssize_t server_addr_show(struct kobject *kobj,
 SCOUTFS_ATTR_RO(server_addr);
 
 static struct attribute *mount_options_attrs[] = {
+	SCOUTFS_ATTR_PTR(metadev_path),
 	SCOUTFS_ATTR_PTR(server_addr),
 	NULL,
 };

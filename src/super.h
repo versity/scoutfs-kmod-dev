@@ -98,7 +98,7 @@ static inline bool SCOUTFS_HAS_SBI(struct super_block *sb)
 
 static inline bool SCOUTFS_IS_META_BDEV(struct scoutfs_super_block *super_block)
 {
-	return !!(super_block->flags & SCOUTFS_FLAG_IS_META_BDEV);
+	return !!(le64_to_cpu(super_block->flags) & SCOUTFS_FLAG_IS_META_BDEV);
 }
 
 #define SCOUTFS_META_BDEV_MODE (FMODE_READ | FMODE_WRITE | FMODE_EXCL)

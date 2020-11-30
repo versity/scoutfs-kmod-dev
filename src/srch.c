@@ -1528,15 +1528,18 @@ static int kway_merge(struct super_block *sb,
 {
 	DECLARE_SRCH_INFO(sb, srinf);
 	struct scoutfs_srch_block *srb = NULL;
+	struct scoutfs_srch_entry last_tail;
 	struct scoutfs_block *bl = NULL;
 	struct tourn_node *tnodes;
 	struct tourn_node *leaves;
 	struct tourn_node *root;
 	struct tourn_node *tn;
+	int last_bytes = 0;
 	int nr_parents;
 	int nr_nodes;
 	int empty = 0;
 	int ret = 0;
+	int diff;
 	u64 blk;
 	int ind;
 	int i;
@@ -1594,7 +1597,9 @@ static int kway_merge(struct super_block *sb,
 			scoutfs_inc_counter(sb, srch_compact_dirty_block);
 		}
 
-		if (sre_cmp(&root->sre, &sfl->last) != 0) {
+		if (sre_cmp(&root->sre, &srb->last) != 0) {
+			last_bytes = le32_to_cpu(srb->entry_bytes);
+			last_tail = srb->last;
 			ret = encode_entry(srb->entries +
 					   le32_to_cpu(srb->entry_bytes),
 					   &root->sre, &srb->tail);
@@ -1627,6 +1632,31 @@ static int kway_merge(struct super_block *sb,
 			scoutfs_inc_counter(sb, srch_compact_entry);
 
 		} else {
+			/*
+			 * Duplicate entries indicate deletion so we
+			 * undo the previously encoded entry and ignore
+			 * this entry.  This only happens within each
+			 * block.  Deletions can span block boundaries
+			 * and will be filtered out by search and
+			 * hopefully removed in future compactions.
+			 */
+			diff = le32_to_cpu(srb->entry_bytes) - last_bytes;
+			if (diff) {
+				memset(srb->entries + last_bytes, 0, diff);
+				if (srb->entry_bytes == 0) {
+					/* last_tail will be 0 */
+					if (blk == 0)
+						sfl->first = last_tail;
+					srb->first = last_tail;
+				}
+				le32_add_cpu(&srb->entry_nr, -1);
+				srb->entry_bytes = cpu_to_le32(last_bytes);
+				srb->last = last_tail;
+				srb->tail = last_tail;
+				sfl->last = last_tail;
+				le64_add_cpu(&sfl->entries, -1);
+			}
+
 			scoutfs_inc_counter(sb, srch_compact_removed_entry);
 		}
 

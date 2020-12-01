@@ -616,18 +616,39 @@ out:
 }
 
 /*
+ * The caller is dropping an ino/id because the tracking rbtree is full.
+ * This loses information so we can't return any entries at or after the
+ * one that we dropped.  Update end to the entry before the dropped
+ * entry if it's less than the current end.
+ */
+static void set_end_before(struct scoutfs_srch_entry *end, u64 ino, u64 id)
+{
+	struct scoutfs_srch_entry sre;
+
+	sre.hash = end->hash;
+	sre.ino = cpu_to_le64(ino);
+	sre.id = cpu_to_le64(id);
+	sre_dec(&sre);
+	if (sre_cmp(&sre, end) < 0)
+		*end = sre;
+}
+
+/*
  * Track an inode and id of an xattr hash that we found while searching.
  * We'll return inos from the nodes in order to userspace when we're
  * done searching.  The first time we see the entry we track it, the
- * second time must be a deletion so we remove it
+ * second time must be a deletion so we remove it.
  *
- * We track the size of the pool of tracked inodes here.  Once its full
- * we're still able to replace greater inodes with earlier ones.  We do
- * that work here because we can minimize the number of traversals and
- * comparisons that the caller would otherwise have to make.
+ * We count the number of tracked entries here.  Once we hit the limit
+ * we drop entries which are greater than what's tracked.  If we track
+ * new entries which are within the set then we drop the last entry.
+ * When we drop entries we have to trim the range of entries that we'll
+ * return because we've lost data.  The caller will perform the search
+ * again from that point, giving them another window of tracked entries
+ * to fill from that entry.
  */
 static int track_found(struct scoutfs_srch_rb_root *sroot, u64 ino, u64 id,
-		       unsigned long limit)
+		       unsigned long limit, struct scoutfs_srch_entry *end)
 {
 	struct rb_node **node = &sroot->root.rb_node;
 	struct rb_node *parent = NULL;
@@ -656,8 +677,10 @@ static int track_found(struct scoutfs_srch_rb_root *sroot, u64 ino, u64 id,
 	}
 
 	/* can't track greater while we're at the limit */
-	if (sroot->nr >= limit && cmp > 0 && parent == sroot->last)
-		return -ENOSPC;
+	if (sroot->nr >= limit && cmp > 0 && parent == sroot->last) {
+		set_end_before(end, ino, id);
+		return 0;
+	}
 
 	snode = kzalloc(sizeof(*snode), GFP_NOFS);
 	if (!snode)
@@ -679,6 +702,7 @@ static int track_found(struct scoutfs_srch_rb_root *sroot, u64 ino, u64 id,
 		snode = container_of(sroot->last, struct scoutfs_srch_rb_node,
 				     node);
 		sroot->last = rb_prev(sroot->last);
+		set_end_before(end, snode->ino, snode->id);
 		rb_erase(&snode->node, &sroot->root);
 		kfree(snode);
 		sroot->nr--;
@@ -741,17 +765,9 @@ static int search_log_file(struct super_block *sb,
 				continue;
 
 			ret = track_found(sroot, le64_to_cpu(sre.ino),
-					  le64_to_cpu(sre.id), limit);
-			if (ret < 0) {
-				/* have to keep searching */
-				if (ret == -ENOSPC) {
-					if (sre_cmp(&sre, end) < 0)
-						*end = sre;
-					ret = 0;
-				} else {
-					break;
-				}
-			}
+					  le64_to_cpu(sre.id), limit, end);
+			if (ret < 0)
+				break;
 		}
 	}
 
@@ -861,17 +877,9 @@ static int search_sorted_file(struct super_block *sb,
 			break;
 
 		ret = track_found(sroot, le64_to_cpu(sre.ino),
-				  le64_to_cpu(sre.id), limit);
-		if (ret < 0) {
-			if (ret == -ENOSPC) {
-				ret = 0;
-				/* done when we're past full rb_root */
-				if (sre_cmp(&sre, end) < 0)
-					*end = sre;
-				break;
-			}
+				  le64_to_cpu(sre.id), limit, end);
+		if (ret < 0)
 			goto out;
-		}
 
 		if (pos >= le32_to_cpu(srb->entry_bytes)) {
 			scoutfs_block_put(sb, bl);

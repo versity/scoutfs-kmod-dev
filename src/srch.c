@@ -1548,14 +1548,18 @@ static void tourn_update(struct tourn_node *tnodes, struct tourn_node *tn)
 	}
 }
 
-typedef int (*kway_next_func_t)(struct super_block *sb,
-				struct scoutfs_srch_entry *sre_ret, void *arg);
+/* return the entry at the current position, can return enoent if done */
+typedef int (*kway_get_t)(struct super_block *sb,
+			  struct scoutfs_srch_entry *sre_ret, void *arg);
+/* only called after _get returns 0, advances to next entry for _get */
+typedef void (*kway_advance_t)(struct super_block *sb, void *arg);
 
 static int kway_merge(struct super_block *sb,
 		      struct scoutfs_alloc *alloc,
 		      struct scoutfs_block_writer *wri,
 		      struct scoutfs_srch_file *sfl,
-		      kway_next_func_t kway_next, void **args, int nr)
+		      kway_get_t kway_get, kway_advance_t kway_adv,
+		      void **args, int nr)
 {
 	DECLARE_SRCH_INFO(sb, srinf);
 	struct scoutfs_srch_block *srb = NULL;
@@ -1594,11 +1598,10 @@ static int kway_merge(struct super_block *sb,
 	for (i = 0; i < nr; i++) {
 		tn = &leaves[i];
 		tn->ind = i;
-		ret = kway_next(sb, &tn->sre, args[i]);
+		ret = kway_get(sb, &tn->sre, args[i]);
 		if (ret == 0) {
 			tourn_update(tnodes, &leaves[i]);
 		} else if (ret == -ENOENT) {
-			memset(&tn->sre, 0xff, sizeof(tn->sre));
 			empty++;
 		} else {
 			goto out;
@@ -1694,7 +1697,8 @@ static int kway_merge(struct super_block *sb,
 		/* get the next */
 		ind = root->ind;
 		tn = &leaves[ind];
-		ret = kway_next(sb, &tn->sre, args[ind]);
+		kway_adv(sb, args[ind]);
+		ret = kway_get(sb, &tn->sre, args[ind]);
 		if (ret == -ENOENT) {
 			/* this index is done */
 			memset(&tn->sre, 0xff, sizeof(tn->sre));
@@ -1738,8 +1742,8 @@ static struct scoutfs_srch_entry *page_priv_sre(struct page *page)
 	return (struct scoutfs_srch_entry *)page_address(page) + page->private;
 }
 
-static int kway_next_page(struct super_block *sb,
-			  struct scoutfs_srch_entry *sre_ret, void *arg)
+static int kway_get_page(struct super_block *sb,
+			 struct scoutfs_srch_entry *sre_ret, void *arg)
 {
 	struct page *page = arg;
 	struct scoutfs_srch_entry *sre = page_priv_sre(page);
@@ -1748,8 +1752,14 @@ static int kway_next_page(struct super_block *sb,
 		return -ENOENT;
 
 	*sre_ret = *sre;
-	page->private++;
 	return 0;
+}
+
+static void kway_adv_page(struct super_block *sb, void *arg)
+{
+	struct page *page = arg;
+
+	page->private++;
 }
 
 static int cmp_page_sre(const void *A, const void *B)
@@ -1901,8 +1911,8 @@ static int compact_logs(struct super_block *sb,
 
 	}
 
-	ret = kway_merge(sb, alloc, wri, &sc->out, kway_next_page, args,
-			 nr_pages);
+	ret = kway_merge(sb, alloc, wri, &sc->out, kway_get_page, kway_adv_page,
+			 args, nr_pages);
 	if (ret < 0)
 		goto out;
 
@@ -1932,13 +1942,15 @@ struct kway_file_reader {
 	struct scoutfs_srch_file *sfl;
 	struct scoutfs_block *bl;
 	struct scoutfs_srch_entry prev;
+	struct scoutfs_srch_entry decoded_sre;
 	u64 blk;
 	u32 skip;
 	u32 pos;
+	int decoded_bytes;
 };
 
-static int kway_next_file_reader(struct super_block *sb,
-				 struct scoutfs_srch_entry *sre_ret, void *arg)
+static int kway_get_reader(struct super_block *sb,
+			   struct scoutfs_srch_entry *sre_ret, void *arg)
 {
 	struct kway_file_reader *rdr = arg;
 	struct scoutfs_srch_block *srb;
@@ -1951,43 +1963,63 @@ static int kway_next_file_reader(struct super_block *sb,
 		ret = get_file_block(sb, NULL, NULL, rdr->sfl, 0, rdr->blk,
 				     &rdr->bl);
 		if (ret < 0)
-			goto out;
+			return ret;
 
 		memset(&rdr->prev, 0, sizeof(rdr->prev));
 	}
 	srb = rdr->bl->data;
 
 	if (rdr->pos > SCOUTFS_SRCH_BLOCK_SAFE_BYTES ||
-	    rdr->skip > SCOUTFS_SRCH_BLOCK_SAFE_BYTES ||
+	    rdr->skip >= SCOUTFS_SRCH_BLOCK_SAFE_BYTES ||
 	    rdr->skip >= le32_to_cpu(srb->entry_bytes)) {
 		/* XXX inconsistency */
 		return -EIO;
 	}
 
 	/* decode entry, possibly skipping start of the block */
-	do {
-		ret = decode_entry(srb->entries + rdr->pos, sre_ret,
-				   &rdr->prev);
+	while (rdr->decoded_bytes == 0 || rdr->pos < rdr->skip) {
+		ret = decode_entry(srb->entries + rdr->pos,
+				   &rdr->decoded_sre, &rdr->prev);
 		if (ret <= 0) {
 			/* XXX inconsistency */
 			return -EIO;
 		}
 
-		rdr->prev = *sre_ret;
-		rdr->pos += ret;
-	} while (rdr->pos <= rdr->skip);
-	rdr->skip = 0;
+		rdr->decoded_bytes = ret;
 
+		if (rdr->pos < rdr->skip) {
+			rdr->prev = rdr->decoded_sre;
+			rdr->pos += ret;
+			if (rdr->pos >= rdr->skip)
+				rdr->skip = 0;
+			rdr->decoded_bytes = 0;
+		}
+	}
+
+	*sre_ret = rdr->decoded_sre;
+	return 0;
+}
+
+static void kway_adv_reader(struct super_block *sb, void *arg)
+{
+	struct kway_file_reader *rdr = arg;
+	struct scoutfs_srch_block *srb;
+
+	/* _get must have set */
+	BUG_ON(rdr->bl == NULL);
+	BUG_ON(rdr->decoded_bytes == 0);
+
+	rdr->prev = rdr->decoded_sre;
+	rdr->pos += rdr->decoded_bytes;
+	rdr->decoded_bytes = 0;
+
+	srb = rdr->bl->data;
 	if (rdr->pos >= le32_to_cpu(srb->entry_bytes)) {
 		rdr->pos = 0;
 		scoutfs_block_put(sb, rdr->bl);
 		rdr->bl = NULL;
 		rdr->blk++;
 	}
-
-	ret = 0;
-out:
-	return ret;
 }
 
 /*
@@ -2032,8 +2064,8 @@ static int compact_sorted(struct super_block *sb,
 		args[i] = &rdrs[i];
 	}
 
-	ret = kway_merge(sb, alloc, wri, &sc->out, kway_next_file_reader,
-			 args, nr);
+	ret = kway_merge(sb, alloc, wri, &sc->out, kway_get_reader,
+			 kway_adv_reader, args, nr);
 
 	sc->flags |= SCOUTFS_SRCH_COMPACT_FLAG_DONE;
 	for (i = 0; i < nr; i++) {

@@ -1054,6 +1054,7 @@ retry:
 	/* keep searching if we didn't find any entries in the limit */
 	if (sroot->nr == 0 && sre_cmp(&end, &final) < 0) {
 		start = end;
+		sre_inc(&start);
 		scoutfs_inc_counter(sb, srch_search_retry_empty);
 		goto retry;
 	}

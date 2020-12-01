@@ -94,6 +94,28 @@ static int sre_cmp(const struct scoutfs_srch_entry *a,
 	       scoutfs_cmp_u64s(le64_to_cpu(a->id), le64_to_cpu(b->id));
 }
 
+static void sre_inc(struct scoutfs_srch_entry *sre)
+{
+	le64_add_cpu(&sre->id, 1);
+	if (sre->id != 0)
+		return;
+	le64_add_cpu(&sre->ino, 1);
+	if (sre->ino != 0)
+		return;
+	le64_add_cpu(&sre->hash, 1);
+}
+
+static void sre_dec(struct scoutfs_srch_entry *sre)
+{
+	le64_add_cpu(&sre->id, -1);
+	if (sre->id != cpu_to_le64(U64_MAX))
+		return;
+	le64_add_cpu(&sre->ino, -1);
+	if (sre->ino != cpu_to_le64(U64_MAX))
+		return;
+	le64_add_cpu(&sre->hash, -1);
+}
+
 /*
  * srch items are first grouped by type and we have log files, sorted
  * files, and busy compactions.

@@ -14,4 +14,12 @@ ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		       struct scoutfs_lock *lock);
 
+struct scoutfs_xattr_prefix_tags {
+	unsigned long hide:1,
+		      srch:1;
+};
+
+int scoutfs_xattr_parse_tags(const char *name, unsigned int name_len,
+			     struct scoutfs_xattr_prefix_tags *tgs);
+
 #endif

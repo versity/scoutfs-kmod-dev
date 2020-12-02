@@ -836,8 +836,10 @@ static long scoutfs_ioc_search_xattrs(struct file *file, unsigned long arg)
 		ret = -EFAULT;
 	else
 		ret = 0;
-out:
+
 	scoutfs_srch_destroy_rb_root(&sroot);
+
+out:
 	kfree(name);
 	return ret ?: total;
 }

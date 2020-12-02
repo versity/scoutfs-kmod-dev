@@ -94,21 +94,17 @@ static int unknown_prefix(const char *name)
 	       strncmp(name, SCOUTFS_XATTR_PREFIX, SCOUTFS_XATTR_PREFIX_LEN);
 }
 
-struct prefix_tags {
-	unsigned long hide:1,
-		      srch:1;
-};
 
 #define HIDE_TAG	"hide."
 #define SRCH_TAG	"srch."
 #define TAG_LEN		(sizeof(HIDE_TAG) - 1)
 
-static int parse_tags(const char *name, unsigned int name_len,
-		      struct prefix_tags *tgs)
+int scoutfs_xattr_parse_tags(const char *name, unsigned int name_len,
+			     struct scoutfs_xattr_prefix_tags *tgs)
 {
 	bool found;
 
-	memset(tgs, 0, sizeof(struct prefix_tags));
+	memset(tgs, 0, sizeof(struct scoutfs_xattr_prefix_tags));
 
 	if ((name_len < (SCOUTFS_XATTR_PREFIX_LEN + TAG_LEN + 1)) ||
 	    strncmp(name, SCOUTFS_XATTR_PREFIX, SCOUTFS_XATTR_PREFIX_LEN))
@@ -490,11 +486,11 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	const u64 ino = scoutfs_ino(inode);
+	struct scoutfs_xattr_prefix_tags tgs;
 	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_lock *lck = NULL;
 	size_t name_len = strlen(name);
 	struct scoutfs_key key;
-	struct prefix_tags tgs;
 	bool undo_srch = false;
 	LIST_HEAD(ind_locks);
 	u8 found_parts;
@@ -520,7 +516,7 @@ static int scoutfs_xattr_set(struct dentry *dentry, const char *name,
 	if (unknown_prefix(name))
 		return -EOPNOTSUPP;
 
-	if (parse_tags(name, name_len, &tgs) != 0)
+	if (scoutfs_xattr_parse_tags(name, name_len, &tgs) != 0)
 		return -EINVAL;
 
 	if ((tgs.hide || tgs.srch) && !capable(CAP_SYS_ADMIN))
@@ -659,10 +655,10 @@ ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 {
 	struct scoutfs_inode_info *si = SCOUTFS_I(inode);
 	struct super_block *sb = inode->i_sb;
+	struct scoutfs_xattr_prefix_tags tgs;
 	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_lock *lck = NULL;
 	struct scoutfs_key key;
-	struct prefix_tags tgs;
 	unsigned int bytes;
 	ssize_t total = 0;
 	u32 name_hash = 0;
@@ -698,8 +694,8 @@ ssize_t scoutfs_list_xattrs(struct inode *inode, char *buffer,
 			break;
 		}
 
-		is_hidden = parse_tags(xat->name, xat->name_len, &tgs) == 0 &&
-			    tgs.hide;
+		is_hidden = scoutfs_xattr_parse_tags(xat->name, xat->name_len,
+						     &tgs) == 0 && tgs.hide;
 
 		if (show_hidden == is_hidden) {
 			if (size) {
@@ -751,10 +747,10 @@ ssize_t scoutfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		       struct scoutfs_lock *lock)
 {
+	struct scoutfs_xattr_prefix_tags tgs;
 	struct scoutfs_xattr *xat = NULL;
 	struct scoutfs_key last;
 	struct scoutfs_key key;
-	struct prefix_tags tgs;
 	bool release = false;
 	unsigned int bytes;
 	u64 hash;
@@ -781,7 +777,8 @@ int scoutfs_xattr_drop(struct super_block *sb, u64 ino,
 		}
 
 		if (key.skx_part != 0 ||
-		    parse_tags(xat->name, xat->name_len, &tgs) != 0)
+		    scoutfs_xattr_parse_tags(xat->name, xat->name_len,
+					     &tgs) != 0)
 			memset(&tgs, 0, sizeof(tgs));
 
 		ret = scoutfs_hold_trans(sb, SIC_EXACT(2, 0));

@@ -767,6 +767,7 @@ static long scoutfs_ioc_search_xattrs(struct file *file, unsigned long arg)
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct scoutfs_ioctl_search_xattrs __user *usx = (void __user *)arg;
 	struct scoutfs_ioctl_search_xattrs sx;
+	struct scoutfs_xattr_prefix_tags tgs;
 	struct scoutfs_srch_rb_root sroot;
 	struct scoutfs_srch_rb_node *snode;
 	u64 __user *uinos;
@@ -811,6 +812,12 @@ static long scoutfs_ioc_search_xattrs(struct file *file, unsigned long arg)
 
 	if (copy_from_user(name, (void __user *)sx.name_ptr, sx.name_bytes)) {
 		ret = -EFAULT;
+		goto out;
+	}
+
+	if (scoutfs_xattr_parse_tags(name, sx.name_bytes, &tgs) < 0 ||
+	    !tgs.srch) {
+		ret = -EINVAL;
 		goto out;
 	}
 

@@ -773,6 +773,7 @@ static long scoutfs_ioc_search_xattrs(struct file *file, unsigned long arg)
 	struct rb_node *node;
 	char *name = NULL;
 	bool done = false;
+	u64 prev_ino = 0;
 	u64 total = 0;
 	int ret;
 
@@ -819,11 +820,17 @@ static long scoutfs_ioc_search_xattrs(struct file *file, unsigned long arg)
 	if (ret < 0)
 		goto out;
 
+	prev_ino = 0;
 	scoutfs_srch_foreach_rb_node(snode, node, &sroot) {
+		if (prev_ino == snode->ino)
+			continue;
+
 		if (put_user(snode->ino, uinos + total)) {
 			ret = -EFAULT;
 			break;
 		}
+		prev_ino = snode->ino;
+
 		if (++total == sx.nr_inodes)
 			break;
 	}

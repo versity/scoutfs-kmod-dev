@@ -1,3 +1,5 @@
+Development for ScoutFS has moved to [https://github.com/versity/scoutfs](https://github.com/versity/scoutfs)
+
 # Introduction
 
 scoutfs is a clustered in-kernel Linux filesystem designed and built

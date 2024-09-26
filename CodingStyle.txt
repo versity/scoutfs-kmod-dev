@@ -1,0 +1,82 @@
+
+We try to maintain a consistent coding style across the project.  It's
+admitedly arbitrary and starts with and is based on upstream's
+Documentation/CodingStyle.  Conventions are added here as they come up
+during review.  We'll demonstrate each sylistic preference with a diff
+snippet.
+
+== Try to make one exit point for reasonably long functions
+
+{
+-	void *a;
+-	void *b;
++	void *a = NULL;
++	void *b = NULL;
++	int ret;
+
+	a = kalloc();
+-	if (!a)
+-		return 1;
++	if (!a) {
++		ret = 1;
++		goto out;
++	}
+
+	b = kalloc();
+	if (!b) {
+-		kfree(a);
+-		return 2;
++		ret = 2;
++		goto out;
+	}
+
+-	return 3
++	ret = 3;
++out:
++	kfree(a);
++	kfree(b);
++	return ret;
+}
+
+The idea is to initialize all state at the top of the function,
+modifying it throughout, and clean it all up at the end.  Having one
+exit point also gives us a place to add tracing of function exit.
+
+== Multiple declarations on a line
+
+-	int i, j;
++	int i;
++	int j;
+
+Declare function variables one per line.  The verbose declarations
+create pressure to think about excessive stack use or over-long
+functions, makes initializers clear, and leaves room for comments.
+
+== Balance braces
+
+-	if (IS_ERR(super_block))
++	if (IS_ERR(super_block)) {
+		return PTR_ERR(super_block);
+-	else {
++	} else {
+		*super_res = *super_block;
+		kfree(super_block);
+		return 0;
+	}
+
+*nervous twitch*
+
+== Cute variable defintion waterfalls
+
++	struct block_device *meta_bdev;
+	struct scoutfs_sb_info *sbi;
+	struct mount_options opts;
+-	struct block_device *meta_bdev;
+	struct inode *inode;
+
+This isn't strictly necessary, but it's nice to try and make a pretty
+descending length of variable distributions.  It often has the
+accidental  effect of sorting definitions by decreasing complexity.  I
+tend to group types when the name lengths are pretty close, even if
+they're not strictly sorted, so that all the ints, u64s, keys, etc, are
+all together.
